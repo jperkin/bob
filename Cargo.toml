@@ -1,8 +1,10 @@
 [package]
 name = "bob"
 version = "0.1.0"
+authors = ["Jonathan Perkin <jonathan@perkin.org.uk>"]
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+description = "Bob is a builder.  He builds packages."
+license = "ISC"
 
 [dependencies]
+clap = { version = "4.0", features = ["derive"] }
