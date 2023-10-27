@@ -8,3 +8,7 @@ license = "ISC"
 
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }
+dirs = "5.0.1"
+serde = "1.0.189"
+serde_derive = "1.0.189"
+toml = "0.8.4"
