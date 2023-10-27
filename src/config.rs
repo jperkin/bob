@@ -15,9 +15,9 @@
  */
 
 /*
- * The Config module is responsible for taking an optional configuration file
- * and command line arguments, and producing a configuration object that merges
- * the two for the rest of the program to use.
+ * The Config module is responsible for reading a mandatory configuration file,
+ * parsing command line arguments related to configuration, and producing a
+ * Config struct that combines the two for the rest of the program to use.
  */
 
 use crate::Args;
@@ -28,26 +28,21 @@ use std::path::PathBuf;
 extern crate dirs;
 extern crate toml;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct Config {
+    file: ConfigFile,
     filename: PathBuf,
     verbose: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct ConfigFile {
     verbose: Option<bool>,
 }
 
 impl Config {
     pub fn load(args: &Args) -> Result<Config, std::io::Error> {
-        /*
-         * Initialise a Config struct with default values.
-         */
-        let mut config = Config {
-            filename: PathBuf::new(),
-            verbose: false,
-        };
+        let mut config: Config = Default::default();
 
         /*
          * Load user-supplied configuration file, or the default location based
@@ -59,6 +54,7 @@ impl Config {
             dirs::config_dir().unwrap().join("bob.toml")
         };
 
+        /* A configuration file is mandatory. */
         if !config.filename.exists() {
             eprintln!(
                 "ERROR: Configuration file {} does not exist",
@@ -70,13 +66,14 @@ impl Config {
         /*
          * Read configuration file and parse directly into new ConfigFile.
          */
-        let cfgfile: ConfigFile =
+        config.file =
             toml::from_str(&fs::read_to_string(&config.filename)?).unwrap();
 
         /*
-         * Set Config variables, preferring command line options.
+         * Set any top-level Config variables that can be set either via the
+         * command line or configuration file, preferring command line options.
          */
-        config.verbose = args.verbose || cfgfile.verbose.unwrap_or(false);
+        config.verbose = args.verbose || config.file.verbose.unwrap_or(false);
 
         Ok(config)
     }
