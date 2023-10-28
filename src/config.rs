@@ -66,8 +66,21 @@ impl Config {
         /*
          * Read configuration file and parse directly into new ConfigFile.
          */
-        config.file =
-            toml::from_str(&fs::read_to_string(&config.filename)?).unwrap();
+        let cfgstr = &fs::read_to_string(&config.filename)?;
+        config.file = match toml::from_str(cfgstr) {
+            Ok(config) => config,
+            Err(e) => {
+                eprintln!("ERROR: Unable to parse configuration file!");
+                eprintln!(" file: {}", config.filename.display());
+                eprintln!("  err: {}", e.message());
+                eprintln!(
+                    "   at: {} (offset {:?})",
+                    &cfgstr[e.span().unwrap()],
+                    e.span().unwrap()
+                );
+                std::process::exit(1);
+            }
+        };
 
         /*
          * Set any top-level Config variables that can be set either via the
