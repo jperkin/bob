@@ -15,6 +15,9 @@
  */
 
 mod config;
+mod sandbox;
+
+use crate::sandbox::Sandbox;
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -30,6 +33,27 @@ pub struct Args {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let cfg = config::Config::load(&args)?;
+    let config = config::Config::load(&args)?;
+    let sandbox = Sandbox::new(config.sandbox());
+
+    match config.mounts() {
+        Some(mnts) => sandbox.mount(mnts)?,
+        _ => {}
+    }
+
+    match config.pkgpaths() {
+        Some(pkgs) => {
+            for p in pkgs {
+                println!("build {}/{}", config.pkgsrc().display(), p);
+            }
+        }
+        _ => {}
+    }
+
+    match config.mounts() {
+        Some(mnts) => sandbox.unmount(mnts)?,
+        _ => {}
+    }
+
     Ok(())
 }

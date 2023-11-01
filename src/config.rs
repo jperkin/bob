@@ -36,8 +36,19 @@ pub struct Config {
 }
 
 #[derive(Debug, Default, Deserialize)]
-pub struct ConfigFile {
+struct ConfigFile {
+    mounts: Option<Vec<Mount>>,
+    pkgpaths: Option<Vec<String>>,
+    pkgsrc: PathBuf,
+    sandbox: PathBuf,
     verbose: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct Mount {
+    dir: PathBuf,
+    fs: String,
+    opts: Option<String>,
 }
 
 impl Config {
@@ -89,5 +100,35 @@ impl Config {
         config.verbose = args.verbose || config.file.verbose.unwrap_or(false);
 
         Ok(config)
+    }
+
+    pub fn mounts(&self) -> &Option<Vec<Mount>> {
+        &self.file.mounts
+    }
+
+    pub fn pkgpaths(&self) -> &Option<Vec<String>> {
+        &self.file.pkgpaths
+    }
+
+    pub fn pkgsrc(&self) -> &PathBuf {
+        &self.file.pkgsrc
+    }
+
+    pub fn sandbox(&self) -> &PathBuf {
+        &self.file.sandbox
+    }
+}
+
+impl Mount {
+    pub fn dir(&self) -> &PathBuf {
+        &self.dir
+    }
+
+    pub fn fs(&self) -> &String {
+        &self.fs
+    }
+
+    pub fn opts(&self) -> &Option<String> {
+        &self.opts
     }
 }
