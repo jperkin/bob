@@ -3,7 +3,7 @@ name = "bob"
 version = "0.1.0"
 authors = ["Jonathan Perkin <jonathan@perkin.org.uk>"]
 edition = "2021"
-description = "Bob is a builder.  He builds packages."
+description = "Bob builds pkgsrc packages.  Can we build it?  Yes we can!"
 license = "ISC"
 
 [dependencies]
