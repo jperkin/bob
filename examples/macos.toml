@@ -1,0 +1,41 @@
+#
+# Example configuration file for macOS.
+#
+
+#
+# General configuration variables.
+#
+[options]
+verbose = true
+
+#
+# Variables that configure pkgsrc, where it is, what packages to build, etc.
+#
+[pkgsrc]
+basedir = "/usr/pkgsrc"
+pkgpaths = [
+	"pkgtools/digest",
+	"sysutils/coreutils",
+]
+
+#
+# The sandbox section defines where sandboxes should be created, how many to
+# create, and how file systems and ancilliary data should be created.
+#
+[sandbox]
+basedir = "/Volumes/data/chroot"
+count = 1
+mounts = [
+	{ fs = "dev",  dest = "/dev" },
+	{ fs = "tmp",  dest = "/tmp", opts = "-e -s 384m" },
+	{ fs = "tmp",  dest = "/var", opts = "-e -s 512m" },
+	# Read-only system mounts.
+	{ fs = "bind", dest = "/Library", opts = "-r" },
+	{ fs = "bind", dest = "/System",  opts = "-r" },
+	{ fs = "bind", dest = "/bin",     opts = "-r" },
+	{ fs = "bind", dest = "/etc",     opts = "-r", src = "/private/etc" },
+	{ fs = "bind", dest = "/sbin",    opts = "-r" },
+	{ fs = "bind", dest = "/usr",     opts = "-r" },
+	# Read-write system mounts.
+	{ fs = "bind", dest = "/private/var/spool/postfix" },
+]

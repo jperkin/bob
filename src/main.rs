@@ -15,45 +15,95 @@
  */
 
 mod config;
+mod mount;
 mod sandbox;
 
+use crate::config::Config;
 use crate::sandbox::Sandbox;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-#[derive(Parser, Debug)]
+#[derive(Debug, Parser)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
+    /// Use the specified configuration file instead of the default path
     #[arg(short, long)]
     config: Option<PathBuf>,
+
+    /// Enable verbose output
     #[arg(short, long)]
     verbose: bool,
+
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Debug, Subcommand)]
+enum Cmd {
+    /// Build all packages as defined by the configuration file
+    Build,
+    /// Create and destroy build sandboxes
+    Sandbox {
+        #[command(subcommand)]
+        cmd: SandboxCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SandboxCmd {
+    /// Create all sandboxes
+    Create,
+    /// Destroy all sandboxes
+    Destroy,
+    /// List currently created sandboxes
+    List,
+}
+
+fn build_package(config: &Config, pkg: &String) {
+    println!("Building {}/{}", config.pkgsrc().display(), pkg);
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let config = config::Config::load(&args)?;
-    let sandbox = Sandbox::new(config.sandbox());
+    let config = Config::load(&args)?;
 
-    match config.mounts() {
-        Some(mnts) => sandbox.mount(mnts)?,
-        _ => {}
-    }
-
-    match config.pkgpaths() {
-        Some(pkgs) => {
-            for p in pkgs {
-                println!("build {}/{}", config.pkgsrc().display(), p);
+    match args.cmd {
+        Cmd::Build => {
+            if let Some(pkgs) = config.pkgpaths() {
+                for p in pkgs {
+                    build_package(&config, p);
+                }
             }
         }
-        _ => {}
-    }
-
-    match config.mounts() {
-        Some(mnts) => sandbox.unmount(mnts)?,
-        _ => {}
-    }
+        Cmd::Sandbox {
+            cmd: SandboxCmd::Create,
+        } => {
+            if let Some(s) = &config.sandbox() {
+                if config.verbose() {
+                    println!("Creating sandboxes");
+                }
+                s.create_all()?;
+            }
+        }
+        Cmd::Sandbox {
+            cmd: SandboxCmd::Destroy,
+        } => {
+            if let Some(s) = &config.sandbox() {
+                if config.verbose() {
+                    println!("Destroying sandboxes");
+                }
+                s.destroy_all()?;
+            }
+        }
+        Cmd::Sandbox {
+            cmd: SandboxCmd::List,
+        } => {
+            if let Some(s) = &config.sandbox() {
+                s.list_all();
+            }
+        }
+    };
 
     Ok(())
 }

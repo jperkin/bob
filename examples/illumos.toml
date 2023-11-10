@@ -1,0 +1,35 @@
+#
+# Example configuration file for illumos.
+#
+
+#
+# General configuration variables.
+#
+[options]
+verbose = true
+
+#
+# Variables that configure pkgsrc, where it is, what packages to build, etc.
+#
+[pkgsrc]
+basedir = "/usr/pkgsrc"
+pkgpaths = [
+	"pkgtools/digest",
+	"sysutils/coreutils",
+]
+
+#
+# The sandbox section defines where sandboxes should be created, how many to
+# create, and how file systems and ancilliary data should be created.
+#
+[sandbox]
+basedir = "/chroot"
+count = 1
+mounts = [
+	{ fs = "bind",  dest = "/dev" },
+	{ fs = "tmp",  dest = "/tmp", opts = "-o size=1024k" },
+	{ fs = "tmp",  dest = "/var/tmp" },
+	{ fs = "bind", dest = "/lib" },
+	{ fs = "bind", dest = "/sbin" },
+	{ fs = "bind", dest = "/usr" },
+]

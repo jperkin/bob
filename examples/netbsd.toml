@@ -1,0 +1,47 @@
+#
+# Example configuration file for NetBSD.
+#
+
+#
+# General configuration variables.
+#
+[options]
+verbose = true
+
+#
+# Variables that configure pkgsrc, where it is, what packages to build, etc.
+#
+[pkgsrc]
+basedir = "/usr/pkgsrc"
+pkgpaths = [
+	"pkgtools/digest",
+	"sysutils/coreutils",
+]
+
+#
+# The sandbox section defines where sandboxes should be created, how many to
+# create, and how file systems and ancilliary data should be created.
+#
+[sandbox]
+basedir = "/data/chroot"
+count = 1
+mounts = [
+	{ fs = "dev",  dest = "/dev" },
+	{ fs = "tmp",  dest = "/tmp", opts = "-s 1024k" },
+	{ fs = "tmp",  dest = "/var/tmp" },
+	# These are taken verbatim from mksandbox, still correct?
+	{ fs = "bind", dest = "/bin" },
+	{ fs = "bind", dest = "/sbin" },
+	{ fs = "bind", dest = "/libexec" },
+	{ fs = "bind", dest = "/lib" },
+	{ fs = "bind", dest = "/usr/X11R7" },
+	{ fs = "bind", dest = "/usr/bin" },
+	{ fs = "bind", dest = "/usr/games" },
+	{ fs = "bind", dest = "/usr/include" },
+	{ fs = "bind", dest = "/usr/lib" },
+	{ fs = "bind", dest = "/usr/libdata" },
+	{ fs = "bind", dest = "/usr/libexec" },
+	{ fs = "bind", dest = "/usr/share" },
+	{ fs = "bind", dest = "/usr/sbin" },
+	{ fs = "bind", dest = "/var/mail" },
+]

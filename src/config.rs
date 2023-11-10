@@ -21,34 +21,49 @@
  */
 
 use crate::Args;
+use crate::Sandbox;
 use serde_derive::Deserialize;
 use std::fs;
 use std::path::PathBuf;
+use std::process::exit;
 
 extern crate dirs;
 extern crate toml;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct Config {
     file: ConfigFile,
     filename: PathBuf,
+    ///
+    /// Variables that can be set either through the configuration file or the
+    /// command line, with the latter taking preference.
+    ///
     verbose: bool,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 struct ConfigFile {
-    mounts: Option<Vec<Mount>>,
-    pkgpaths: Option<Vec<String>>,
-    pkgsrc: PathBuf,
-    sandbox: PathBuf,
+    options: Option<Options>,
+    pkgsrc: Pkgsrc,
+    sandbox: Option<Sandbox>,
+}
+
+///
+/// General configuration variables.
+///
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Options {
+    /// Enable verbose output.
     verbose: Option<bool>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-pub struct Mount {
-    dir: PathBuf,
-    fs: String,
-    opts: Option<String>,
+///
+/// pkgsrc-related configuration variables.
+///
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Pkgsrc {
+    basedir: PathBuf,
+    pkgpaths: Option<Vec<String>>,
 }
 
 impl Config {
@@ -60,7 +75,7 @@ impl Config {
          * on the `dirs` module.
          */
         config.filename = if args.config.is_some() {
-            PathBuf::from(args.config.clone().unwrap())
+            args.config.clone().unwrap()
         } else {
             dirs::config_dir().unwrap().join("bob.toml")
         };
@@ -71,7 +86,7 @@ impl Config {
                 "ERROR: Configuration file {} does not exist",
                 config.filename.display()
             );
-            std::process::exit(1);
+            exit(1);
         }
 
         /*
@@ -89,7 +104,7 @@ impl Config {
                     &cfgstr[e.span().unwrap()],
                     e.span().unwrap()
                 );
-                std::process::exit(1);
+                exit(1);
             }
         };
 
@@ -97,38 +112,28 @@ impl Config {
          * Set any top-level Config variables that can be set either via the
          * command line or configuration file, preferring command line options.
          */
-        config.verbose = args.verbose || config.file.verbose.unwrap_or(false);
+        if args.verbose {
+            config.verbose = true
+        } else if let Some(v) = &config.file.options {
+            config.verbose = v.verbose.unwrap_or(false);
+        }
 
         Ok(config)
     }
 
-    pub fn mounts(&self) -> &Option<Vec<Mount>> {
-        &self.file.mounts
-    }
-
     pub fn pkgpaths(&self) -> &Option<Vec<String>> {
-        &self.file.pkgpaths
+        &self.file.pkgsrc.pkgpaths
     }
 
     pub fn pkgsrc(&self) -> &PathBuf {
-        &self.file.pkgsrc
+        &self.file.pkgsrc.basedir
     }
 
-    pub fn sandbox(&self) -> &PathBuf {
+    pub fn sandbox(&self) -> &Option<Sandbox> {
         &self.file.sandbox
     }
-}
 
-impl Mount {
-    pub fn dir(&self) -> &PathBuf {
-        &self.dir
-    }
-
-    pub fn fs(&self) -> &String {
-        &self.fs
-    }
-
-    pub fn opts(&self) -> &Option<String> {
-        &self.opts
+    pub fn verbose(&self) -> bool {
+        self.verbose
     }
 }
