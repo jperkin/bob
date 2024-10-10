@@ -20,17 +20,18 @@
  * Config struct that combines the two for the rest of the program to use.
  */
 
-use crate::Args;
-use crate::Sandbox;
-use serde_derive::Deserialize;
+use crate::{Args, Sandbox};
+use pkgsrc::PkgPath;
+use serde::Deserialize;
 use std::fs;
+
 use std::path::PathBuf;
 use std::process::exit;
 
 extern crate dirs;
 extern crate toml;
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default)]
 pub struct Config {
     file: ConfigFile,
     filename: PathBuf,
@@ -63,7 +64,7 @@ pub struct Options {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Pkgsrc {
     basedir: PathBuf,
-    pkgpaths: Option<Vec<String>>,
+    pkgpaths: Option<Vec<PkgPath>>,
 }
 
 impl Config {
@@ -121,7 +122,7 @@ impl Config {
         Ok(config)
     }
 
-    pub fn pkgpaths(&self) -> &Option<Vec<String>> {
+    pub fn pkgpaths(&self) -> &Option<Vec<PkgPath>> {
         &self.file.pkgsrc.pkgpaths
     }
 

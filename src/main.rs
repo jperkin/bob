@@ -17,12 +17,15 @@
 mod config;
 mod mount;
 mod sandbox;
+mod scan;
 
 use crate::config::Config;
 use crate::sandbox::Sandbox;
-
+use crate::scan::Scan;
 use clap::{Parser, Subcommand};
+use pkgsrc::PkgPath;
 use std::path::PathBuf;
+use std::str;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about, long_about = None)]
@@ -60,8 +63,12 @@ enum SandboxCmd {
     List,
 }
 
-fn build_package(config: &Config, pkg: &String) {
-    println!("Building {}/{}", config.pkgsrc().display(), pkg);
+fn build_package(config: &Config, pkgpath: &PkgPath) {
+    println!(
+        "Building {}/{}",
+        config.pkgsrc().display(),
+        pkgpath.as_path().display()
+    );
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -70,10 +77,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match args.cmd {
         Cmd::Build => {
+            let mut scan = Scan::new(config.pkgsrc());
             if let Some(pkgs) = config.pkgpaths() {
                 for p in pkgs {
-                    build_package(&config, p);
+                    scan.add(p);
                 }
+            }
+            scan.start()?;
+            for pkgpath in scan.resolve()? {
+                build_package(&config, pkgpath);
             }
         }
         Cmd::Sandbox {

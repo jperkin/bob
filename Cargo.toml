@@ -7,8 +7,11 @@ description = "Utility for building pkgsrc packages"
 license = "ISC"
 
 [dependencies]
-clap = { version = "4.0", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"] }
+daggy = "*"
 dirs = "5.0.1"
-serde = "1.0.189"
-serde_derive = "1.0.189"
-toml = "0.8.4"
+petgraph = "0.6.5"
+pkgsrc = { version = "0.3.0", features = ["serde"] }
+serde = "1.0.210"
+serde_derive = "1.0.210"
+toml = "0.8.19"
