@@ -77,7 +77,7 @@ impl Config {
         config.filename = if args.config.is_some() {
             args.config.clone().unwrap()
         } else {
-            dirs::config_dir().unwrap().join("bob.toml")
+            dirs::config_dir().unwrap().join("pkgtool.toml")
         };
 
         /* A configuration file is mandatory. */

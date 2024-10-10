@@ -1,9 +1,9 @@
 [package]
-name = "bob"
-version = "0.1.0"
+name = "pkgtool"
+version = "0.0.1"
 authors = ["Jonathan Perkin <jonathan@perkin.org.uk>"]
 edition = "2021"
-description = "Bob builds pkgsrc packages.  Can we build it?  Yes we can!"
+description = "Utility for building pkgsrc packages"
 license = "ISC"
 
 [dependencies]
