@@ -13,6 +13,7 @@ verbose = true
 #
 [pkgsrc]
 basedir = "/usr/pkgsrc"
+make = "/opt/pkg/bin/bmake"
 pkgpaths = [
 	"pkgtools/digest",
 	"sysutils/coreutils",

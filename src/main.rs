@@ -77,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match args.cmd {
         Cmd::Build => {
-            let mut scan = Scan::new(config.pkgsrc());
+            let mut scan = Scan::new(config.pkgsrc(), config.make());
             if let Some(pkgs) = config.pkgpaths() {
                 for p in pkgs {
                     scan.add(p);

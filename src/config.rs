@@ -64,6 +64,7 @@ pub struct Options {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Pkgsrc {
     basedir: PathBuf,
+    make: PathBuf,
     pkgpaths: Option<Vec<PkgPath>>,
 }
 
@@ -120,6 +121,10 @@ impl Config {
         }
 
         Ok(config)
+    }
+
+    pub fn make(&self) -> &PathBuf {
+        &self.file.pkgsrc.make
     }
 
     pub fn pkgpaths(&self) -> &Option<Vec<PkgPath>> {

@@ -167,6 +167,10 @@ pub struct Scan {
     /// Location of pkgsrc
     pkgsrc: PathBuf,
     /**
+     * Path to `make` or `bmake` executable.
+     */
+    make: PathBuf,
+    /**
      * Incoming queue of PKGPATH to process.
      */
     incoming: HashSet<PkgPath>,
@@ -179,9 +183,10 @@ pub struct Scan {
 }
 
 impl Scan {
-    pub fn new(path: &Path) -> Scan {
+    pub fn new(path: &Path, make: &Path) -> Scan {
         Scan {
             pkgsrc: path.to_path_buf(),
+            make: make.to_path_buf(),
             ..Default::default()
         }
     }
@@ -226,7 +231,7 @@ impl Scan {
                 /*
                  * Get PKGNAME and _ALL_DEPENDS from "pbulk-index" output.
                  */
-                let cmd = Command::new("/opt/pkg/bin/bmake")
+                let cmd = Command::new(&self.make)
                     .current_dir(self.pkgsrc.join(pkgpath.as_path()))
                     .arg("pbulk-index")
                     .output()?;
