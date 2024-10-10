@@ -18,6 +18,7 @@
  * Scan a set of pkgsrc package paths to calculate a full dependency tree
  * of builds to perform.
  */
+use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressStyle};
 use pkgsrc::PkgName;
 use pkgsrc::{Depend, DependError};
 use pkgsrc::{PkgPath, PkgPathError};
@@ -27,6 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
 use std::string::FromUtf8Error;
+use std::time::Instant;
 
 use petgraph::algo::toposort;
 use petgraph::graphmap::DiGraphMap;
@@ -189,6 +191,18 @@ impl Scan {
     }
 
     pub fn start(&mut self) -> Result<()> {
+        let started = Instant::now();
+        let style =
+            ProgressStyle::with_template("{prefix:>12} [{bar:57}] {pos}/{len} [{msg}]")
+                .unwrap()
+                .progress_chars("=> ");
+        let progress = ProgressBar::new(0)
+            .with_prefix("Scanning")
+            .with_style(style);
+
+        // If the number of packages overflows a u64 then we have a problem!
+        progress.inc_length(self.incoming.len().try_into().unwrap());
+
         /*
          * Continuously iterate over incoming queue, moving to done once
          * processed, and adding any dependencies to incoming to be processed
@@ -202,8 +216,10 @@ impl Scan {
              */
             let mut add_to_incoming: Vec<PkgPath> = vec![];
             for pkgpath in self.incoming.drain() {
+                progress.set_message(format!("{}", pkgpath.as_path().display()));
                 /* Already in done?  Nothing to do. */
                 if self.done.contains_key(&pkgpath) {
+                    progress.inc(1);
                     continue;
                 }
 
@@ -279,6 +295,7 @@ impl Scan {
                         self.done.insert(pkgpath.clone(), vec![scanpkg]);
                     }
                 }
+                progress.inc(1);
             }
 
             /*
@@ -286,9 +303,12 @@ impl Scan {
              * add them now.  If incoming is still empty afterwards then we
              * are done.
              */
+            add_to_incoming.sort();
+            add_to_incoming.dedup();
             for pkgpath in add_to_incoming {
                 if !self.done.contains_key(&pkgpath) {
                     self.incoming.insert(pkgpath);
+                    progress.inc_length(1);
                 }
             }
             if self.incoming.is_empty() {
@@ -296,6 +316,14 @@ impl Scan {
             }
         }
 
+        progress.finish_and_clear();
+
+        if progress.length() > Some(0) {
+            println!("Scanned {} packages in {}",
+                HumanCount(progress.length().unwrap()),
+                HumanDuration(started.elapsed()),
+            );
+        }
         Ok(())
     }
 
