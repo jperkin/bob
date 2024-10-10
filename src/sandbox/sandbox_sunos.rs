@@ -58,11 +58,41 @@ impl Sandbox {
         &self,
         _src: &Path,
         _dest: &Path,
-        _opts: &Vec<&str>,
+        _opts: &[&str],
     ) -> mount::Result<Output> {
         Err(mount::MountError::Unsupported(
             "Use bind mounts for /dev".to_string(),
         ))
+    }
+
+    pub fn mount_fdfs(
+        &self,
+        _src: &Path,
+        dest: &Path,
+        opts: &Vec<&str>,
+    ) -> mount::Result<Output> {
+        fs::create_dir_all(dest)?;
+        match Command::new("/sbin/mount")
+            .arg("-F")
+            .arg("fd")
+            .args(opts)
+            .arg("fd")
+            .arg(dest)
+            .output()
+        {
+            Ok(s) => {
+                if s.status.success() {
+                    Ok(s)
+                } else {
+                    fs::remove_dir(dest)?;
+                    Err(mount::MountError::Process(s))
+                }
+            }
+            Err(e) => {
+                fs::remove_dir(dest)?;
+                Err(mount::MountError::Io(e))
+            }
+        }
     }
 
     pub fn mount_nfs(
@@ -77,6 +107,36 @@ impl Sandbox {
             .arg("nfs")
             .args(opts)
             .arg(src)
+            .arg(dest)
+            .output()
+        {
+            Ok(s) => {
+                if s.status.success() {
+                    Ok(s)
+                } else {
+                    fs::remove_dir(dest)?;
+                    Err(mount::MountError::Process(s))
+                }
+            }
+            Err(e) => {
+                fs::remove_dir(dest)?;
+                Err(mount::MountError::Io(e))
+            }
+        }
+    }
+
+    pub fn mount_procfs(
+        &self,
+        _src: &Path,
+        dest: &Path,
+        opts: &Vec<&str>,
+    ) -> mount::Result<Output> {
+        fs::create_dir_all(dest)?;
+        match Command::new("/sbin/mount")
+            .arg("-F")
+            .arg("proc")
+            .args(opts)
+            .arg("/proc")
             .arg(dest)
             .output()
         {
@@ -157,7 +217,15 @@ impl Sandbox {
         self.unmount_common(dest)
     }
 
+    pub fn unmount_fdfs(&self, dest: &Path) -> mount::Result<()> {
+        self.unmount_common(dest)
+    }
+
     pub fn unmount_nfs(&self, dest: &Path) -> mount::Result<()> {
+        self.unmount_common(dest)
+    }
+
+    pub fn unmount_procfs(&self, dest: &Path) -> mount::Result<()> {
         self.unmount_common(dest)
     }
 

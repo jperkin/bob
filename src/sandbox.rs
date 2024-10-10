@@ -255,8 +255,14 @@ impl Sandbox {
                     Ok(mount::FSType::Dev) => {
                         self.mount_devfs(mntsrc, &mntdest, &mntopts)
                     }
+                    Ok(mount::FSType::Fd) => {
+                        self.mount_fdfs(mntsrc, &mntdest, &mntopts)
+                    }
                     Ok(mount::FSType::Nfs) => {
                         self.mount_nfs(mntsrc, &mntdest, &mntopts)
+                    }
+                    Ok(mount::FSType::Proc) => {
+                        self.mount_procfs(mntsrc, &mntdest, &mntopts)
                     }
                     Ok(mount::FSType::Tmp) => {
                         self.mount_tmpfs(mntsrc, &mntdest, &mntopts)
@@ -288,7 +294,9 @@ impl Sandbox {
                 let status = match m.fstype() {
                     Ok(mount::FSType::Bind) => self.unmount_bindfs(&mntdest),
                     Ok(mount::FSType::Dev) => self.unmount_devfs(&mntdest),
+                    Ok(mount::FSType::Fd) => self.unmount_fdfs(&mntdest),
                     Ok(mount::FSType::Nfs) => self.unmount_nfs(&mntdest),
+                    Ok(mount::FSType::Proc) => self.unmount_procfs(&mntdest),
                     Ok(mount::FSType::Tmp) => self.unmount_tmpfs(&mntdest),
                     _ => {
                         Err(mount::MountError::Unsupported(m.fs().to_string()))

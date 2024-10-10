@@ -83,6 +83,17 @@ impl Sandbox {
         }
     }
 
+    pub fn mount_fdfs(
+        &self,
+        _src: &Path,
+        _dest: &Path,
+        _opts: &[&str],
+    ) -> mount::Result<Output> {
+        Err(mount::MountError::Unsupported(
+            "fd mounts are not supported on macOS".to_string(),
+        ))
+    }
+
     pub fn mount_nfs(
         &self,
         src: &Path,
@@ -109,6 +120,17 @@ impl Sandbox {
                 Err(mount::MountError::Io(e))
             }
         }
+    }
+
+    pub fn mount_procfs(
+        &self,
+        _src: &Path,
+        _dest: &Path,
+        _opts: &[&str],
+    ) -> mount::Result<Output> {
+        Err(mount::MountError::Unsupported(
+            "fd mounts are not supported on macOS".to_string(),
+        ))
     }
 
     pub fn mount_tmpfs(
@@ -175,7 +197,17 @@ impl Sandbox {
         self.unmount_common(dest)
     }
 
+    /* Not actually supported but try to unmount it anyway. */
+    pub fn unmount_fdfs(&self, dest: &Path) -> mount::Result<()> {
+        self.unmount_common(dest)
+    }
+
     pub fn unmount_nfs(&self, dest: &Path) -> mount::Result<()> {
+        self.unmount_common(dest)
+    }
+
+    /* Not actually supported but try to unmount it anyway. */
+    pub fn unmount_procfs(&self, dest: &Path) -> mount::Result<()> {
         self.unmount_common(dest)
     }
 

@@ -37,7 +37,9 @@ pub struct Mount {
 pub enum FSType {
     Bind,
     Dev,
+    Fd,
     Nfs,
+    Proc,
     Tmp,
 }
 
@@ -48,7 +50,9 @@ impl FromStr for FSType {
         match fs {
             "bind" => Ok(FSType::Bind),
             "dev" => Ok(FSType::Dev),
+            "fd" => Ok(FSType::Fd),
             "nfs" => Ok(FSType::Nfs),
+            "proc" => Ok(FSType::Proc),
             "tmp" => Ok(FSType::Tmp),
             /*
              * Aliases for mount types across different systems.
