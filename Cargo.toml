@@ -13,7 +13,6 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
-daggy = "*"
 dirs = "5.0.1"
 petgraph = "0.6.5"
 pkgsrc = { version = "0.3.0", features = ["serde"] }
