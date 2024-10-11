@@ -85,6 +85,34 @@ impl Sandbox {
         }
     }
 
+    pub fn mount_fdfs(
+        &self,
+        src: &Path,
+        dest: &Path,
+        opts: &Vec<&str>,
+    ) -> mount::Result<Output> {
+        fs::create_dir_all(dest)?;
+        match Command::new("/sbin/mount_fdesc")
+            .args(opts)
+            .arg("fdesc")
+            .arg(dest)
+            .output()
+        {
+            Ok(s) => {
+                if s.status.success() {
+                    Ok(s)
+                } else {
+                    fs::remove_dir(dest)?;
+                    Err(mount::MountError::Process(s))
+                }
+            }
+            Err(e) => {
+                fs::remove_dir(dest)?;
+                Err(mount::MountError::Io(e))
+            }
+        }
+    }
+
     pub fn mount_nfs(
         &self,
         src: &Path,
@@ -95,6 +123,34 @@ impl Sandbox {
         match Command::new("/sbin/mount_nfs")
             .args(opts)
             .arg(src)
+            .arg(dest)
+            .output()
+        {
+            Ok(s) => {
+                if s.status.success() {
+                    Ok(s)
+                } else {
+                    fs::remove_dir(dest)?;
+                    Err(mount::MountError::Process(s))
+                }
+            }
+            Err(e) => {
+                fs::remove_dir(dest)?;
+                Err(mount::MountError::Io(e))
+            }
+        }
+    }
+
+    pub fn mount_procfs(
+        &self,
+        src: &Path,
+        dest: &Path,
+        opts: &Vec<&str>,
+    ) -> mount::Result<Output> {
+        fs::create_dir_all(dest)?;
+        match Command::new("/sbin/mount_fdesc")
+            .args(opts)
+            .arg("/proc")
             .arg(dest)
             .output()
         {
@@ -174,7 +230,15 @@ impl Sandbox {
         Ok(())
     }
 
+    pub fn unmount_fdfs(&self, dest: &Path) -> mount::Result<()> {
+        self.unmount_common(dest)
+    }
+
     pub fn unmount_nfs(&self, dest: &Path) -> mount::Result<()> {
+        self.unmount_common(dest)
+    }
+
+    pub fn unmount_procfs(&self, dest: &Path) -> mount::Result<()> {
         self.unmount_common(dest)
     }
 

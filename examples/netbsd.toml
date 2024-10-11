@@ -28,6 +28,7 @@ basedir = "/data/chroot"
 count = 1
 mounts = [
 	{ fs = "dev",  dest = "/dev" },
+	{ fs = "proc", dest = "/proc" },
 	{ fs = "tmp",  dest = "/tmp", opts = "-s 1024k" },
 	{ fs = "tmp",  dest = "/var/tmp" },
 	# These are taken verbatim from mksandbox, still correct?
