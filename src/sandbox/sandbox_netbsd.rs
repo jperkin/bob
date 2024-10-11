@@ -148,7 +148,7 @@ impl Sandbox {
         opts: &Vec<&str>,
     ) -> mount::Result<Output> {
         fs::create_dir_all(dest)?;
-        match Command::new("/sbin/mount_fdesc")
+        match Command::new("/sbin/mount_procfs")
             .args(opts)
             .arg("/proc")
             .arg(dest)
