@@ -87,7 +87,7 @@ impl Sandbox {
 
     pub fn mount_fdfs(
         &self,
-        src: &Path,
+        _src: &Path,
         dest: &Path,
         opts: &Vec<&str>,
     ) -> mount::Result<Output> {
@@ -143,7 +143,7 @@ impl Sandbox {
 
     pub fn mount_procfs(
         &self,
-        src: &Path,
+        _src: &Path,
         dest: &Path,
         opts: &Vec<&str>,
     ) -> mount::Result<Output> {
