@@ -623,6 +623,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkgbob"
+version = "0.0.3"
+dependencies = [
+ "clap",
+ "dirs",
+ "indicatif",
+ "petgraph",
+ "pkgsrc",
+ "serde",
+ "serde_derive",
+ "toml",
+]
+
+[[package]]
 name = "pkgsrc"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -642,20 +656,6 @@ dependencies = [
  "sha2",
  "tar",
  "thiserror",
-]
-
-[[package]]
-name = "pkgtool"
-version = "0.0.2"
-dependencies = [
- "clap",
- "dirs",
- "indicatif",
- "petgraph",
- "pkgsrc",
- "serde",
- "serde_derive",
- "toml",
 ]
 
 [[package]]

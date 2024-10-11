@@ -1,7 +1,7 @@
-# pkgtool
+# Bob - A Package Builder
 
-The goal of pkgtool is to become a simple but powerful, complete, and
-user-friendly utility for building pkgsrc packages.
+Bob's goal is to become a simple but powerful, complete, and user-friendly
+utility for building pkgsrc packages.
 
 ## Design Goals
 
@@ -36,7 +36,7 @@ their own drawbacks:
  * A separate tool such as `pkgin` needs to be used to upgrade the system using
    the resulting packages.
 
-pkgtool aims to combine these methods into a best-of-both approach:
+Bob aims to combine these methods into a best-of-both approach:
 
  * Automatically set up build sandboxes, hiding away all of the complexity
    involved trying to support multiple operating systems.
