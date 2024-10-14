@@ -6,6 +6,7 @@
 # General configuration variables.
 #
 [options]
+scan_threads = 4
 verbose = true
 
 #

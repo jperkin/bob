@@ -54,6 +54,7 @@ struct ConfigFile {
 ///
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Options {
+    scan_threads: Option<usize>,
     /// Enable verbose output.
     verbose: Option<bool>,
 }
@@ -121,6 +122,14 @@ impl Config {
         }
 
         Ok(config)
+    }
+
+    pub fn scan_threads(&self) -> usize {
+        if let Some(opts) = &self.file.options {
+            opts.scan_threads.unwrap_or(1)
+        } else {
+            1
+        }
     }
 
     pub fn make(&self) -> &PathBuf {

@@ -22,12 +22,14 @@ use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressStyle};
 use pkgsrc::PkgName;
 use pkgsrc::{Depend, DependError};
 use pkgsrc::{PkgPath, PkgPathError};
+use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
 use std::string::FromUtf8Error;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use petgraph::algo::toposort;
@@ -146,19 +148,21 @@ impl fmt::Display for ScanError {
 
 /**
  * [`ScanPackage`] contains the output from `bmake pbulk-index` for a single
- * `PKGPATH`.
+ * `PKGNAME`.
  *
- * Note that the output may contain multiple entries in the case of
- * `MULTI_VERSION` support, so any parser should verify whether `pkgname` has
- * already been set and create a new entry.
+ * The output of `bmake pbulk-index` may contain multiple [`ScanPackage`]
+ * entries if the package supports `MULTI_VERSION`.
  *
  * For now the only fields we are interested in are `PKGNAME` and
  * `ALL_DEPENDS`.
  */
-#[derive(Debug, Hash, PartialEq)]
-struct ScanPackage {
+#[derive(Clone, Debug, Hash, PartialEq)]
+pub struct ScanPackage {
+    /// PKGPATH
     pkgpath: PkgPath,
+    /// PKGNAME
     pkgname: PkgName,
+    /// ALL_DEPENDS
     depends: Vec<Depend>,
 }
 
@@ -170,6 +174,10 @@ pub struct Scan {
      * Path to `make` or `bmake` executable.
      */
     make: PathBuf,
+    /**
+     * Number of parallel make threads to execute.
+     */
+    threads: usize,
     /**
      * Incoming queue of PKGPATH to process.
      */
@@ -183,10 +191,11 @@ pub struct Scan {
 }
 
 impl Scan {
-    pub fn new(path: &Path, make: &Path) -> Scan {
+    pub fn new(path: &Path, make: &Path, threads: usize) -> Scan {
         Scan {
             pkgsrc: path.to_path_buf(),
             make: make.to_path_buf(),
+            threads,
             ..Default::default()
         }
     }
@@ -197,13 +206,19 @@ impl Scan {
 
     pub fn start(&mut self) -> Result<()> {
         let started = Instant::now();
-        let style =
-            ProgressStyle::with_template("{prefix:>12} [{bar:57}] {pos}/{len} [{msg}]")
-                .unwrap()
-                .progress_chars("=> ");
+        let style = ProgressStyle::with_template(
+            "{prefix:>12} [{bar:57}] {pos}/{len} [{wide_msg}]",
+        )
+        .unwrap()
+        .progress_chars("=> ");
         let progress = ProgressBar::new(0)
             .with_prefix("Scanning")
             .with_style(style);
+
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(self.threads)
+            .build_global()
+            .unwrap();
 
         // If the number of packages overflows a u64 then we have a problem!
         progress.inc_length(self.incoming.len().try_into().unwrap());
@@ -215,121 +230,152 @@ impl Scan {
          */
         loop {
             /*
-             * As we are borrowing from incoming, keep track of any new
-             * PKGPATH that need to be added to it separately, then add them
-             * (if necessary) once incoming has been drained.
+             * Store the PKGPATHs that are currently being processed in a
+             * HashSet for a nice progress bar status.
              */
-            let mut add_to_incoming: Vec<PkgPath> = vec![];
-            for pkgpath in self.incoming.drain() {
-                progress.set_message(format!("{}", pkgpath.as_path().display()));
-                /* Already in done?  Nothing to do. */
-                if self.done.contains_key(&pkgpath) {
-                    progress.inc(1);
-                    continue;
-                }
+            let curpaths: Arc<Mutex<HashSet<String>>> =
+                Arc::new(Mutex::new(HashSet::new()));
+
+            /*
+             * Convert the incoming HashSet into a Vec for parallel processing.
+             */
+            let mut parpaths: Vec<(PkgPath, Result<Vec<ScanPackage>>)> = vec![];
+            for pkgpath in &self.incoming {
+                parpaths.push((pkgpath.clone(), Ok(vec![])));
+            }
+
+            parpaths.par_iter_mut().for_each(|pkg| {
+                let (pkgpath, result) = pkg;
+                let pathname = pkgpath.as_path().to_string_lossy().to_string();
+                let curpaths = Arc::clone(&curpaths);
 
                 /*
-                 * Get PKGNAME and _ALL_DEPENDS from "pbulk-index" output.
+                 * Add PKGPATH to the progress bar, perform the scan and save
+                 * the result, remove PKGPATH from the progress bar, before
+                 * finally updating the progress counter.
                  */
-                let cmd = Command::new(&self.make)
-                    .current_dir(self.pkgsrc.join(pkgpath.as_path()))
-                    .arg("pbulk-index")
-                    .output()?;
-                let output = String::from_utf8(cmd.stdout)?;
-
-                let mut pkgname: Option<PkgName> = None;
-                let mut depends: Vec<Depend> = vec![];
-                for line in output.lines() {
-                    let v: Vec<&str> = line.splitn(2, '=').collect();
-                    if v.len() != 2 {
-                        return Err(ScanError::ParseLine(line.to_string()));
-                    }
-                    let key = ScanVariable::from_str(v[0])?;
-                    match key {
-                        ScanVariable::PkgName => {
-                            /*
-                             * With MULTI_VERSION we will see multiple PKGNAME
-                             * entries combined in the same pbulk-index output,
-                             * so if we've already set PKGNAME then insert the
-                             * current entry and start a new one.
-                             */
-                            if let Some(p) = pkgname {
-                                let scanpkg = ScanPackage {
-                                    pkgname: p,
-                                    depends,
-                                    pkgpath: pkgpath.clone(),
-                                };
-                                if let Some(entry) = self.done.get_mut(&pkgpath)
-                                {
-                                    entry.push(scanpkg);
-                                } else {
-                                    self.done
-                                        .insert(pkgpath.clone(), vec![scanpkg]);
-                                }
-                            }
-                            pkgname = Some(PkgName::new(v[1]));
-                            depends = vec![];
-                        }
-                        ScanVariable::AllDepends => {
-                            for p in v[1].split(' ').filter(|s| !s.is_empty()) {
-                                /*
-                                 * If the DEPENDS path hasn't been seen yet, add
-                                 * it to incoming.
-                                 */
-                                let dep = Depend::new(p)?;
-                                if !&self.done.contains_key(dep.pkgpath()) {
-                                    add_to_incoming.push(dep.pkgpath().clone());
-                                }
-                                depends.push(dep);
-                            }
-                        }
-                        /* Currently we ignore all other fields. */
-                        _ => {}
-                    }
+                {
+                    let mut curpaths = curpaths.lock().unwrap();
+                    curpaths.insert(pathname.clone());
+                    let msg: String =
+                        curpaths.iter().cloned().collect::<Vec<_>>().join(", ");
+                    progress.set_message(msg);
                 }
-
-                if let Some(p) = pkgname {
-                    let scanpkg = ScanPackage {
-                        pkgname: p,
-                        depends,
-                        pkgpath: pkgpath.clone(),
-                    };
-                    if let Some(entry) = self.done.get_mut(&pkgpath) {
-                        entry.push(scanpkg);
-                    } else {
-                        self.done.insert(pkgpath.clone(), vec![scanpkg]);
-                    }
-                }
+                *result = self.scan_pkgpath(pkgpath);
                 progress.inc(1);
+                {
+                    let mut curpaths = curpaths.lock().unwrap();
+                    curpaths.remove(&pathname);
+                    let msg: String =
+                        curpaths.iter().cloned().collect::<Vec<_>>().join(", ");
+                    progress.set_message(msg);
+                }
+            });
+
+            /*
+             * Look through the results we just processed for any new PKGPATH
+             * entries in DEPENDS that we have not seen before (neither in
+             * done nor incoming).
+             */
+            let mut new_incoming: HashSet<PkgPath> = HashSet::new();
+            for (pkgpath, scanpkgs) in parpaths.drain(..) {
+                let scanpkgs = scanpkgs?;
+                self.done.insert(pkgpath.clone(), scanpkgs.clone());
+                for pkg in scanpkgs {
+                    for dep in pkg.depends {
+                        if !self.done.contains_key(dep.pkgpath())
+                            && !self.incoming.contains(dep.pkgpath())
+                            && new_incoming.insert(dep.pkgpath().clone())
+                        {
+                            progress.inc_length(1);
+                        }
+                    }
+                }
             }
 
             /*
-             * Incoming has been drained.  If there are new PKGPATH to process
-             * add them now.  If incoming is still empty afterwards then we
-             * are done.
+             * We're finished with the current incoming, replace it with the
+             * new incoming list.  If it is empty then we've already processed
+             * all known PKGPATHs and are done.
              */
-            add_to_incoming.sort();
-            add_to_incoming.dedup();
-            for pkgpath in add_to_incoming {
-                if !self.done.contains_key(&pkgpath) {
-                    self.incoming.insert(pkgpath);
-                    progress.inc_length(1);
-                }
-            }
+            self.incoming = new_incoming;
             if self.incoming.is_empty() {
                 break;
             }
         }
 
         progress.finish_and_clear();
-
         if progress.length() > Some(0) {
-            println!("Scanned {} packages in {}",
+            println!(
+                "Scanned {} packages in {}",
                 HumanCount(progress.length().unwrap()),
                 HumanDuration(started.elapsed()),
             );
         }
+
         Ok(())
+    }
+
+    /**
+     * Scan a single PKGPATH, returning a [`Vec`] of [`ScanPackage`] results,
+     * as multi-version packages may return multiple results.
+     *
+     * Return [`ScanError`] for any failures.
+     */
+    pub fn scan_pkgpath(&self, pkgpath: &PkgPath) -> Result<Vec<ScanPackage>> {
+        let mut result: Vec<ScanPackage> = vec![];
+        let mut pkgname: Option<PkgName> = None;
+        let mut depends: Vec<Depend> = vec![];
+        let cmd = Command::new(&self.make)
+            .current_dir(self.pkgsrc.join(pkgpath.as_path()))
+            .arg("pbulk-index")
+            .output()?;
+        let output = String::from_utf8(cmd.stdout)?;
+        for line in output.lines() {
+            let v: Vec<&str> = line.splitn(2, '=').collect();
+            if v.len() != 2 {
+                return Err(ScanError::ParseLine(line.to_string()));
+            }
+            let key = ScanVariable::from_str(v[0])?;
+            match key {
+                ScanVariable::PkgName => {
+                    /*
+                     * With MULTI_VERSION we will see multiple PKGNAME
+                     * entries combined in the same pbulk-index output,
+                     * so if we've already set PKGNAME then insert the
+                     * current entry and start a new one.
+                     */
+                    if let Some(p) = pkgname {
+                        let scanpkg = ScanPackage {
+                            pkgname: p,
+                            depends,
+                            pkgpath: pkgpath.clone(),
+                        };
+                        result.push(scanpkg);
+                    }
+                    pkgname = Some(PkgName::new(v[1]));
+                    depends = vec![];
+                }
+                ScanVariable::AllDepends => {
+                    for p in v[1].split(' ').filter(|s| !s.is_empty()) {
+                        depends.push(Depend::new(p)?);
+                    }
+                }
+                /* Currently we ignore all other fields. */
+                _ => {}
+            }
+        }
+
+        if let Some(p) = pkgname {
+            let scanpkg = ScanPackage {
+                pkgname: p,
+                depends,
+                pkgpath: pkgpath.clone(),
+            };
+            result.push(scanpkg);
+        }
+
+        Ok(result)
     }
 
     pub fn resolve(&self) -> Result<Vec<&PkgPath>> {
