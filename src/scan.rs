@@ -18,6 +18,7 @@
  * Scan a set of pkgsrc package paths to calculate a full dependency tree
  * of builds to perform.
  */
+use crate::Sandbox;
 use anyhow::{bail, Context, Result};
 use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressStyle};
 use petgraph::algo::toposort;
@@ -26,8 +27,8 @@ use petgraph::Direction;
 use pkgsrc::{Depend, PkgName, PkgPath};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -108,6 +109,7 @@ pub struct Scan {
      * Number of parallel make threads to execute.
      */
     threads: usize,
+    sandbox: Sandbox,
     /**
      * Incoming queue of PKGPATH to process.
      */
@@ -121,11 +123,17 @@ pub struct Scan {
 }
 
 impl Scan {
-    pub fn new(path: &Path, make: &Path, threads: usize) -> Scan {
+    pub fn new(
+        path: &Path,
+        make: &Path,
+        threads: usize,
+        sandbox: &Sandbox,
+    ) -> Scan {
         Scan {
             pkgsrc: path.to_path_buf(),
             make: make.to_path_buf(),
             threads,
+            sandbox: sandbox.clone(),
             ..Default::default()
         }
     }
@@ -153,6 +161,7 @@ impl Scan {
         // If the number of packages overflows a u64 then we have a problem!
         progress.inc_length(self.incoming.len().try_into().unwrap());
 
+        self.sandbox.create(0)?;
         /*
          * Continuously iterate over incoming queue, moving to done once
          * processed, and adding any dependencies to incoming to be processed
@@ -191,10 +200,9 @@ impl Scan {
                         curpaths.iter().cloned().collect::<Vec<_>>().join(", ");
                     progress.set_message(msg);
                 }
-                *result = self.scan_pkgpath(pkgpath).context(format!(
-                    "Scan failed for {}",
-                    pathname
-                ));
+                *result = self
+                    .scan_pkgpath(&self.sandbox, pkgpath)
+                    .context(format!("Scan failed for {}", pathname));
                 progress.inc(1);
                 {
                     let mut curpaths = curpaths.lock().unwrap();
@@ -236,6 +244,7 @@ impl Scan {
                 break;
             }
         }
+        self.sandbox.destroy(0)?;
 
         progress.finish_and_clear();
         if progress.length() > Some(0) {
@@ -255,22 +264,26 @@ impl Scan {
      */
     pub fn scan_pkgpath(
         &self,
+        sandbox: &Sandbox,
         pkgpath: &PkgPath,
     ) -> anyhow::Result<Vec<ScanPackage>> {
         let mut result: Vec<ScanPackage> = vec![];
         let mut pkgname: Option<PkgName> = None;
         let mut depends: Vec<Depend> = vec![];
         let pkgdir = self.pkgsrc.join(pkgpath.as_path());
-        if !pkgdir.exists() {
-            bail!("Package directory not found");
-        }
-        let cmd = Command::new(&self.make)
-            .current_dir(pkgdir)
-            .arg("pbulk-index")
-            .output()
-            .context("Unable to run pbulk-index")?;
-        let output = String::from_utf8(cmd.stdout)?;
-        for line in output.lines() {
+        let script = format!(
+            "cd {} && {} pbulk-index",
+            pkgdir.display(),
+            &self.make.display()
+        );
+        let mut child = sandbox.execute(0, &script)?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("Unable to read sandbox child process")?;
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            let line = line?;
             let v: Vec<&str> = line.splitn(2, '=').collect();
             if v.len() != 2 {
                 bail!("Invalid output from pbulk-index");
@@ -305,6 +318,9 @@ impl Scan {
             }
         }
 
+        child
+            .wait()
+            .context("Unable to read sandbox child exit status")?;
         if let Some(p) = pkgname {
             let scanpkg = ScanPackage {
                 pkgname: p,

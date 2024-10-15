@@ -78,10 +78,15 @@ fn main() -> Result<()> {
 
     match args.cmd {
         Cmd::Build => {
+            let Some(sandbox) = &config.sandbox() else {
+                eprintln!("ERROR: No sandboxes configured");
+                std::process::exit(1);
+            };
             let mut scan = Scan::new(
                 config.pkgsrc(),
                 config.make(),
                 config.scan_threads(),
+                sandbox,
             );
             if let Some(pkgs) = config.pkgpaths() {
                 for p in pkgs {
