@@ -153,7 +153,9 @@ impl Sandbox {
         let script = script.to_string();
         let mut stdin = child.stdin.take().expect("Failed to open stdin");
         std::thread::spawn(move || {
-            stdin.write_all(script.as_bytes()).expect("Failed to read stdin");
+            stdin
+                .write_all(script.as_bytes())
+                .expect("Failed to read stdin");
         });
         Ok(child)
     }
