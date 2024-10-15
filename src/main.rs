@@ -100,7 +100,7 @@ fn main() -> Result<()> {
                 if config.verbose() {
                     println!("Creating sandboxes");
                 }
-                s.create_all()?;
+                s.create_all(config.build_threads())?;
             }
         }
         Cmd::Sandbox {
@@ -110,14 +110,14 @@ fn main() -> Result<()> {
                 if config.verbose() {
                     println!("Destroying sandboxes");
                 }
-                s.destroy_all()?;
+                s.destroy_all(config.build_threads())?;
             }
         }
         Cmd::Sandbox {
             cmd: SandboxCmd::List,
         } => {
             if let Some(s) = &config.sandbox() {
-                s.list_all();
+                s.list_all(config.build_threads());
             }
         }
     };

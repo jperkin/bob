@@ -47,7 +47,6 @@ pub enum SandboxError {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Sandbox {
     basedir: PathBuf,
-    count: Option<u64>,
     mounts: Option<Vec<mount::Mount>>,
 }
 
@@ -83,16 +82,9 @@ impl fmt::Display for SandboxError {
 
 impl Sandbox {
     ///
-    /// Return configured number of sandboxes.
-    ///
-    pub fn count(&self) -> u64 {
-        self.count.unwrap_or(1)
-    }
-
-    ///
     /// Return full path to a sandbox by id.
     ///
-    pub fn path(&self, id: u64) -> PathBuf {
+    pub fn path(&self, id: usize) -> PathBuf {
         let mut p = PathBuf::from(&self.basedir);
         p.push(id.to_string());
         p
@@ -101,7 +93,7 @@ impl Sandbox {
     ///
     /// Return full path to a specified mount point in a sandbox.
     ///
-    pub fn mountpath(&self, id: u64, mnt: &PathBuf) -> PathBuf {
+    pub fn mountpath(&self, id: usize, mnt: &PathBuf) -> PathBuf {
         /*
          * Note that .push() on a PathBuf will replace the path if
          * it is absolute, so we need to trim any leading "/".
@@ -119,15 +111,15 @@ impl Sandbox {
      * indicate that it has successfully been created.  An empty directory
      * is used as it provides a handy way to guarantee(?) atomicity.
      */
-    fn lockpath(&self, id: u64) -> PathBuf {
+    fn lockpath(&self, id: usize) -> PathBuf {
         let mut p = self.path(id);
         p.push(".created");
         p
     }
-    fn create_lock(&self, id: u64) -> Result<()> {
+    fn create_lock(&self, id: usize) -> Result<()> {
         Ok(fs::create_dir(self.lockpath(id))?)
     }
-    fn delete_lock(&self, id: u64) -> Result<()> {
+    fn delete_lock(&self, id: usize) -> Result<()> {
         let lockdir = self.lockpath(id);
         if lockdir.exists() {
             fs::remove_dir(self.lockpath(id))?
@@ -138,7 +130,7 @@ impl Sandbox {
     ///
     /// Create a single sandbox by id.
     ///
-    pub fn create(&self, id: u64) -> Result<()> {
+    pub fn create(&self, id: usize) -> Result<()> {
         let sandbox = self.path(id);
         if sandbox.exists() {
             return Err(SandboxError::Exists(sandbox));
@@ -151,7 +143,7 @@ impl Sandbox {
     ///
     /// Destroy a single sandbox by id.
     ///
-    pub fn destroy(&self, id: u64) -> Result<()> {
+    pub fn destroy(&self, id: usize) -> Result<()> {
         let sandbox = self.path(id);
         if !sandbox.exists() {
             return Ok(());
@@ -167,8 +159,8 @@ impl Sandbox {
     ///
     /// Create all sandboxes.
     ///
-    pub fn create_all(&self) -> Result<()> {
-        for i in 0..self.count() {
+    pub fn create_all(&self, count: usize) -> Result<()> {
+        for i in 0..count {
             self.create(i)?;
         }
         Ok(())
@@ -177,8 +169,8 @@ impl Sandbox {
     ///
     /// Destroy all sandboxes.
     ///
-    pub fn destroy_all(&self) -> Result<()> {
-        for i in 0..self.count() {
+    pub fn destroy_all(&self, count: usize) -> Result<()> {
+        for i in 0..count {
             self.destroy(i)?;
         }
         Ok(())
@@ -187,8 +179,8 @@ impl Sandbox {
     ///
     /// List all sandboxes.
     ///
-    pub fn list_all(&self) {
-        for i in 0..self.count() {
+    pub fn list_all(&self, count: usize) {
+        for i in 0..count {
             let sandbox = self.path(i);
             if sandbox.exists() {
                 if self.lockpath(i).exists() {
@@ -204,7 +196,7 @@ impl Sandbox {
      * Remove any empty directories from a mount point up to the root of the
      * sandbox.
      */
-    fn remove_empty_dirs(&self, id: u64, mountpoint: &Path) {
+    fn remove_empty_dirs(&self, id: usize, mountpoint: &Path) {
         for p in mountpoint.ancestors() {
             /*
              * Sanity check we are within the chroot.
@@ -233,7 +225,7 @@ impl Sandbox {
     /// point we encounter a problem then the successful mounts are rolled
     /// back and an error returned.
     ///
-    fn mount(&self, id: u64) -> Result<()> {
+    fn mount(&self, id: usize) -> Result<()> {
         if let Some(mounts) = &self.mounts {
             for m in mounts.iter() {
                 /* src is optional, and defaults to dest */
@@ -277,7 +269,7 @@ impl Sandbox {
         Ok(())
     }
 
-    fn unmount(&self, id: u64) -> mount::Result<()> {
+    fn unmount(&self, id: usize) -> mount::Result<()> {
         let mut res: mount::Result<()> = Ok(());
         if let Some(mounts) = &self.mounts {
             for m in mounts.iter().rev() {
