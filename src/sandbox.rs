@@ -30,7 +30,9 @@ use crate::mount;
 use serde_derive::Deserialize;
 use std::fmt;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 
 pub type Result<T> = std::result::Result<T, SandboxError>;
 
@@ -140,6 +142,21 @@ impl Sandbox {
         Ok(())
     }
 
+    pub fn execute(&self, id: usize, script: &str) -> Result<Child> {
+        let mut child = Command::new("/usr/sbin/chroot")
+            .current_dir("/")
+            .arg(self.path(id))
+            .arg("/bin/sh")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()?;
+        let script = script.to_string();
+        let mut stdin = child.stdin.take().expect("Failed to open stdin");
+        std::thread::spawn(move || {
+            stdin.write_all(script.as_bytes()).expect("Failed to read stdin");
+        });
+        Ok(child)
+    }
     ///
     /// Destroy a single sandbox by id.
     ///
