@@ -6,6 +6,7 @@
 # General configuration variables.
 #
 [options]
+build_threads = 4
 scan_threads = 4
 verbose = true
 
@@ -16,17 +17,22 @@ verbose = true
 basedir = "/usr/pkgsrc"
 make = "/usr/bin/make"
 pkgpaths = [
-	"pkgtools/digest",
+	"mail/mutt",
 	"sysutils/coreutils",
 ]
 
 #
-# The sandbox section defines where sandboxes should be created, how many to
-# create, and how file systems and ancilliary data should be created.
+# The sandbox section defines where sandboxes should be created, and how file
+# systems and ancilliary data should be created.
+#
+# The number of sandboxes that will be created is build_threads if set,
+# otherwise 1.
+#
+# During creation the mounts list is processed in order, and when destroying
+# sandboxes it is processed in reverse order.
 #
 [sandbox]
 basedir = "/data/chroot"
-count = 1
 mounts = [
 	{ fs = "dev",  dest = "/dev" },
 	{ fs = "proc", dest = "/proc" },
