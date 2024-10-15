@@ -16,6 +16,7 @@ name = "bob"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = "1.0.89"
 clap = { version = "4.5", features = ["derive"] }
 dirs = "5.0.1"
 indicatif = "0.17.8"
@@ -24,4 +25,5 @@ pkgsrc = { version = "0.3.1", features = ["serde"] }
 rayon = "1.10.0"
 serde = "1.0.210"
 serde_derive = "1.0.210"
+thiserror = "1.0.64"
 toml = "0.8.19"

@@ -18,25 +18,19 @@
  * Scan a set of pkgsrc package paths to calculate a full dependency tree
  * of builds to perform.
  */
+use anyhow::{bail, Context, Result};
 use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressStyle};
-use pkgsrc::PkgName;
-use pkgsrc::{Depend, DependError};
-use pkgsrc::{PkgPath, PkgPathError};
-use rayon::prelude::*;
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fmt;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::str::FromStr;
-use std::string::FromUtf8Error;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
-
 use petgraph::algo::toposort;
 use petgraph::graphmap::DiGraphMap;
 use petgraph::Direction;
-
-pub type Result<T> = std::result::Result<T, ScanError>;
+use pkgsrc::{Depend, PkgName, PkgPath};
+use rayon::prelude::*;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 ///
 /// ScanVariable contains all possible keys printed by "bmake pbulk-index",
@@ -60,9 +54,9 @@ pub enum ScanVariable {
 }
 
 impl FromStr for ScanVariable {
-    type Err = ScanError;
+    type Err = anyhow::Error;
 
-    fn from_str(s: &str) -> Result<Self> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "PKGNAME" => Ok(ScanVariable::PkgName),
             "ALL_DEPENDS" => Ok(ScanVariable::AllDepends),
@@ -77,71 +71,7 @@ impl FromStr for ScanVariable {
             "USERGROUP_PHASE" => Ok(ScanVariable::UserGroupPhase),
             "SCAN_DEPENDS" => Ok(ScanVariable::ScanDepends),
             "MULTI_VERSION" => Ok(ScanVariable::MultiVersion),
-            _ => Err(ScanError::ParseVariable(s.to_string())),
-        }
-    }
-}
-
-///
-/// ScanError enumerates possible scan failures.
-///
-#[derive(Debug)]
-pub enum ScanError {
-    Depend(DependError),
-    Io(std::io::Error),
-    ParseLine(String),
-    ParseVariable(String),
-    PkgPath(PkgPathError),
-    Utf8(FromUtf8Error),
-}
-
-impl std::error::Error for ScanError {}
-
-impl From<std::io::Error> for ScanError {
-    fn from(err: std::io::Error) -> Self {
-        ScanError::Io(err)
-    }
-}
-
-impl From<PkgPathError> for ScanError {
-    fn from(err: PkgPathError) -> Self {
-        ScanError::PkgPath(err)
-    }
-}
-
-impl From<DependError> for ScanError {
-    fn from(err: DependError) -> Self {
-        ScanError::Depend(err)
-    }
-}
-
-impl From<FromUtf8Error> for ScanError {
-    fn from(err: FromUtf8Error) -> Self {
-        ScanError::Utf8(err)
-    }
-}
-
-impl fmt::Display for ScanError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ScanError::Depend(s) => {
-                write!(f, "invalid DEPENDS: {:?}", s)
-            }
-            ScanError::ParseLine(s) => {
-                write!(f, "unable to parse line: {:?}", s)
-            }
-            ScanError::ParseVariable(s) => {
-                write!(f, "unsupported variable: {:?}", s)
-            }
-            ScanError::PkgPath(s) => {
-                write!(f, "invalid PKGPATH: {:?}", s)
-            }
-            ScanError::Io(s) => {
-                write!(f, "I/O error: {:?}", s)
-            }
-            ScanError::Utf8(s) => {
-                write!(f, "UTF8 parse error: {:?}", s)
-            }
+            _ => bail!("Unsupported pbulk-index variable '{}'", s.to_string()),
         }
     }
 }
@@ -204,7 +134,7 @@ impl Scan {
         self.incoming.insert(pkgpath.clone());
     }
 
-    pub fn start(&mut self) -> Result<()> {
+    pub fn start(&mut self) -> anyhow::Result<()> {
         let started = Instant::now();
         let style = ProgressStyle::with_template(
             "{prefix:>12} [{bar:57}] {pos}/{len} [{wide_msg}]",
@@ -261,7 +191,10 @@ impl Scan {
                         curpaths.iter().cloned().collect::<Vec<_>>().join(", ");
                     progress.set_message(msg);
                 }
-                *result = self.scan_pkgpath(pkgpath);
+                *result = self.scan_pkgpath(pkgpath).context(format!(
+                    "Scan failed for {}",
+                    pathname
+                ));
                 progress.inc(1);
                 {
                     let mut curpaths = curpaths.lock().unwrap();
@@ -319,22 +252,28 @@ impl Scan {
     /**
      * Scan a single PKGPATH, returning a [`Vec`] of [`ScanPackage`] results,
      * as multi-version packages may return multiple results.
-     *
-     * Return [`ScanError`] for any failures.
      */
-    pub fn scan_pkgpath(&self, pkgpath: &PkgPath) -> Result<Vec<ScanPackage>> {
+    pub fn scan_pkgpath(
+        &self,
+        pkgpath: &PkgPath,
+    ) -> anyhow::Result<Vec<ScanPackage>> {
         let mut result: Vec<ScanPackage> = vec![];
         let mut pkgname: Option<PkgName> = None;
         let mut depends: Vec<Depend> = vec![];
+        let pkgdir = self.pkgsrc.join(pkgpath.as_path());
+        if !pkgdir.exists() {
+            bail!("Package directory not found");
+        }
         let cmd = Command::new(&self.make)
-            .current_dir(self.pkgsrc.join(pkgpath.as_path()))
+            .current_dir(pkgdir)
             .arg("pbulk-index")
-            .output()?;
+            .output()
+            .context("Unable to run pbulk-index")?;
         let output = String::from_utf8(cmd.stdout)?;
         for line in output.lines() {
             let v: Vec<&str> = line.splitn(2, '=').collect();
             if v.len() != 2 {
-                return Err(ScanError::ParseLine(line.to_string()));
+                bail!("Invalid output from pbulk-index");
             }
             let key = ScanVariable::from_str(v[0])?;
             match key {

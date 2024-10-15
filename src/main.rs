@@ -22,6 +22,7 @@ mod scan;
 use crate::config::Config;
 use crate::sandbox::Sandbox;
 use crate::scan::Scan;
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use pkgsrc::PkgPath;
 use std::path::PathBuf;
@@ -71,13 +72,17 @@ fn build_package(config: &Config, pkgpath: &PkgPath) {
     );
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<()> {
     let args = Args::parse();
     let config = Config::load(&args)?;
 
     match args.cmd {
         Cmd::Build => {
-            let mut scan = Scan::new(config.pkgsrc(), config.make(), config.scan_threads());
+            let mut scan = Scan::new(
+                config.pkgsrc(),
+                config.make(),
+                config.scan_threads(),
+            );
             if let Some(pkgs) = config.pkgpaths() {
                 for p in pkgs {
                     scan.add(p);
