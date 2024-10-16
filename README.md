@@ -3,6 +3,20 @@
 Bob's goal is to become a simple but powerful, complete, and user-friendly
 utility for building pkgsrc packages.
 
+## Status
+
+- [x] Basic app, config files, etc.
+- [x] Sandboxes implemented for illumos, macOS, NetBSD.
+- [.] Threaded scan processes (missing some variables).
+- [.] Scan resolution / DAG (more testing for cyclic deps).
+- [ ] Build processes in sandboxes.
+- [ ] Nice full-screen UI / reports / etc.
+
+Presently you can use `bob` to create sandboxes and perform a multi-threaded
+scan of specified `PKGPATH`s (with a nice progress bar), and it will determine
+the correct order to build the packages in, but does not yet actually build
+them.
+
 ## Design Goals
 
 There are two main methods currently used to update a pkgsrc installation.
@@ -12,7 +26,7 @@ These tools operate directly on the target host, upgrading packages in
 turn.  These are the simplest to set up and use, and so are reasonable
 popular amongst users, but have some major drawbacks:
 
- * Upgrading in place means that if a a build error is encountered, the
+ * Upgrading in place means that if a build error is encountered, the
    system may be left in a degraded state until the issue is fixed.
 
  * Building directly on the system may end up finding tools and libraries on
@@ -27,8 +41,8 @@ and with the appropriate patches mean that builds can be performed in parallel.
 These solve a number of the problems with update-in-place builds, but do have
 their own drawbacks:
 
- * Historically pbulk is notoriously difficult to set up and configure, and
-   any problems can be very hard to diagnose.
+ * Historically pbulk has been notoriously difficult to set up and configure,
+   and any runtime problems can be very hard to diagnose.
 
  * Support for concurrent builds and sandbox configuration is left to external
    patches and the user to configure manually.
