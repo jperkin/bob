@@ -7,8 +7,8 @@ utility for building pkgsrc packages.
 
 - [x] Basic app, config files, etc.
 - [x] Sandboxes implemented for illumos, macOS, NetBSD.
-- [.] Threaded scan processes (missing some variables).
-- [.] Scan resolution / DAG (more testing for cyclic deps).
+- [x] Threaded scan processes (missing some variables).
+- [x] Scan resolution / DAG (about 80% complete).
 - [ ] Build processes in sandboxes.
 - [ ] Nice full-screen UI / reports / etc.
 
