@@ -33,53 +33,30 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, SandboxError>;
 
-#[derive(Debug)]
+/**
+ * An error during a sandbox operation.
+ */
+#[derive(Debug, Error)]
 pub enum SandboxError {
     /// Sandbox already exists
+    #[error("Sandbox already exists: {0}.display()")]
     Exists(PathBuf),
-    /// I/O failure creating or removing sandbox
-    Io(std::io::Error),
-    /// A mount error
-    MountError(mount::MountError),
+    /// Transparent [`std::io::Error`]
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    /// Transparent [`mount::MountError`]
+    #[error(transparent)]
+    MountError(#[from] mount::MountError),
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Sandbox {
     basedir: PathBuf,
     mounts: Option<Vec<mount::Mount>>,
-}
-
-impl From<std::io::Error> for SandboxError {
-    fn from(err: std::io::Error) -> Self {
-        SandboxError::Io(err)
-    }
-}
-
-impl From<mount::MountError> for SandboxError {
-    fn from(err: mount::MountError) -> Self {
-        SandboxError::MountError(err)
-    }
-}
-
-impl std::error::Error for SandboxError {}
-
-impl fmt::Display for SandboxError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SandboxError::Exists(s) => {
-                write!(f, "sandbox already exists: {}", s.display())
-            }
-            SandboxError::Io(s) => {
-                write!(f, "I/O error: {}", s)
-            }
-            SandboxError::MountError(s) => {
-                write!(f, "mount error: {}", s)
-            }
-        }
-    }
 }
 
 impl Sandbox {
