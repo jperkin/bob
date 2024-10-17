@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Jonathan Perkin <jonathan@perkin.org.uk>
+ * Copyright (c) 2024 Jonathan Perkin <jonathan@perkin.org.uk>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -14,14 +14,11 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-/*
- * Sandbox module for illumos.
- */
-use crate::mount;
 use crate::sandbox::Sandbox;
+use anyhow::{bail, Context};
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, ExitStatus};
 
 impl Sandbox {
     pub fn mount_bindfs(
@@ -29,29 +26,19 @@ impl Sandbox {
         src: &Path,
         dest: &Path,
         opts: &Vec<&str>,
-    ) -> mount::Result<Output> {
+    ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
-        match Command::new("/sbin/mount")
-            .arg("-F")
-            .arg("lofs")
-            .args(opts)
-            .arg(src)
-            .arg(dest)
-            .output()
-        {
-            Ok(s) => {
-                if s.status.success() {
-                    Ok(s)
-                } else {
-                    fs::remove_dir(dest)?;
-                    Err(mount::MountError::Process(s))
-                }
-            }
-            Err(e) => {
-                fs::remove_dir(dest)?;
-                Err(mount::MountError::Io(e))
-            }
-        }
+        let cmd = "/sbin/mount";
+        Ok(Some(
+            Command::new(cmd)
+                .arg("-F")
+                .arg("lofs")
+                .args(opts)
+                .arg(src)
+                .arg(dest)
+                .status()
+                .context(format!("Unable to execute {}", cmd))?,
+        ))
     }
 
     pub fn mount_devfs(
@@ -59,10 +46,8 @@ impl Sandbox {
         _src: &Path,
         _dest: &Path,
         _opts: &[&str],
-    ) -> mount::Result<Output> {
-        Err(mount::MountError::Unsupported(
-            "Use bind mounts for /dev".to_string(),
-        ))
+    ) -> anyhow::Result<Option<ExitStatus>> {
+        bail!("Use bind mounts for /dev")
     }
 
     pub fn mount_fdfs(
@@ -70,29 +55,19 @@ impl Sandbox {
         _src: &Path,
         dest: &Path,
         opts: &Vec<&str>,
-    ) -> mount::Result<Output> {
+    ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
-        match Command::new("/sbin/mount")
-            .arg("-F")
-            .arg("fd")
-            .args(opts)
-            .arg("fd")
-            .arg(dest)
-            .output()
-        {
-            Ok(s) => {
-                if s.status.success() {
-                    Ok(s)
-                } else {
-                    fs::remove_dir(dest)?;
-                    Err(mount::MountError::Process(s))
-                }
-            }
-            Err(e) => {
-                fs::remove_dir(dest)?;
-                Err(mount::MountError::Io(e))
-            }
-        }
+        let cmd = "/sbin/mount";
+        Ok(Some(
+            Command::new(cmd)
+                .arg("-F")
+                .arg("fd")
+                .args(opts)
+                .arg("fd")
+                .arg(dest)
+                .status()
+                .context(format!("Unable to execute {}", cmd))?,
+        ))
     }
 
     pub fn mount_nfs(
@@ -100,29 +75,19 @@ impl Sandbox {
         src: &Path,
         dest: &Path,
         opts: &Vec<&str>,
-    ) -> mount::Result<Output> {
+    ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
-        match Command::new("/sbin/mount")
-            .arg("-F")
-            .arg("nfs")
-            .args(opts)
-            .arg(src)
-            .arg(dest)
-            .output()
-        {
-            Ok(s) => {
-                if s.status.success() {
-                    Ok(s)
-                } else {
-                    fs::remove_dir(dest)?;
-                    Err(mount::MountError::Process(s))
-                }
-            }
-            Err(e) => {
-                fs::remove_dir(dest)?;
-                Err(mount::MountError::Io(e))
-            }
-        }
+        let cmd = "/sbin/mount";
+        Ok(Some(
+            Command::new(cmd)
+                .arg("-F")
+                .arg("nfs")
+                .args(opts)
+                .arg(src)
+                .arg(dest)
+                .status()
+                .context(format!("Unable to execute {}", cmd))?,
+        ))
     }
 
     pub fn mount_procfs(
@@ -130,29 +95,19 @@ impl Sandbox {
         _src: &Path,
         dest: &Path,
         opts: &Vec<&str>,
-    ) -> mount::Result<Output> {
+    ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
-        match Command::new("/sbin/mount")
-            .arg("-F")
-            .arg("proc")
-            .args(opts)
-            .arg("/proc")
-            .arg(dest)
-            .output()
-        {
-            Ok(s) => {
-                if s.status.success() {
-                    Ok(s)
-                } else {
-                    fs::remove_dir(dest)?;
-                    Err(mount::MountError::Process(s))
-                }
-            }
-            Err(e) => {
-                fs::remove_dir(dest)?;
-                Err(mount::MountError::Io(e))
-            }
-        }
+        let cmd = "/sbin/mount";
+        Ok(Some(
+            Command::new(cmd)
+                .arg("-F")
+                .arg("proc")
+                .args(opts)
+                .arg("/proc")
+                .arg(dest)
+                .status()
+                .context(format!("Unable to execute {}", cmd))?,
+        ))
     }
 
     pub fn mount_tmpfs(
@@ -160,76 +115,77 @@ impl Sandbox {
         _src: &Path,
         dest: &Path,
         opts: &Vec<&str>,
-    ) -> mount::Result<Output> {
+    ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
-        match Command::new("/sbin/mount")
-            .arg("-F")
-            .arg("tmpfs")
-            .args(opts)
-            .arg("swap")
-            .arg(dest)
-            .output()
-        {
-            Ok(s) => {
-                if s.status.success() {
-                    Ok(s)
-                } else {
-                    fs::remove_dir(dest)?;
-                    Err(mount::MountError::Process(s))
-                }
-            }
-            Err(e) => {
-                fs::remove_dir(dest)?;
-                Err(mount::MountError::Io(e))
-            }
-        }
+        let cmd = "/sbin/mount";
+        Ok(Some(
+            Command::new(cmd)
+                .arg("-F")
+                .arg("tmpfs")
+                .args(opts)
+                .arg("swap")
+                .arg(dest)
+                .status()
+                .context(format!("Unable to execute {}", cmd))?,
+        ))
     }
 
     /*
      * General unmount routine common to file system types that involve
      * mounted file systems.
      */
-    fn unmount_common(&self, dest: &Path) -> mount::Result<()> {
-        /*
-         * First try to simply remove the directory, in case the file
-         * system was manually unmounted or similar.
-         */
-        if fs::remove_dir(dest).is_ok() {
-            return Ok(());
-        }
-        match Command::new("/sbin/umount").arg(dest).output() {
-            Ok(s) => {
-                if s.status.success() {
-                    Ok(())
-                } else {
-                    Err(mount::MountError::Process(s))
-                }
-            }
-            Err(e) => Err(mount::MountError::Io(e)),
-        }
+    fn unmount_common(
+        &self,
+        dest: &Path,
+    ) -> anyhow::Result<Option<ExitStatus>> {
+        let cmd = "/sbin/umount";
+        Ok(Some(
+            Command::new(cmd)
+                .arg(dest)
+                .status()
+                .context(format!("Unable to execute {}", cmd))?,
+        ))
     }
 
-    pub fn unmount_bindfs(&self, dest: &Path) -> mount::Result<()> {
+    pub fn unmount_bindfs(
+        &self,
+        dest: &Path,
+    ) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_devfs(&self, dest: &Path) -> mount::Result<()> {
+    pub fn unmount_devfs(
+        &self,
+        dest: &Path,
+    ) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_fdfs(&self, dest: &Path) -> mount::Result<()> {
+    pub fn unmount_fdfs(
+        &self,
+        dest: &Path,
+    ) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_nfs(&self, dest: &Path) -> mount::Result<()> {
+    pub fn unmount_nfs(
+        &self,
+        dest: &Path,
+    ) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_procfs(&self, dest: &Path) -> mount::Result<()> {
+    pub fn unmount_procfs(
+        &self,
+        dest: &Path,
+    ) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_tmpfs(&self, dest: &Path) -> mount::Result<()> {
+    pub fn unmount_tmpfs(
+        &self,
+        dest: &Path,
+    ) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 }

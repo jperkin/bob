@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Jonathan Perkin <jonathan@perkin.org.uk>
+ * Copyright (c) 2024 Jonathan Perkin <jonathan@perkin.org.uk>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -14,14 +14,11 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-/*
- * Sandbox module for macOS.
- */
-use crate::mount;
 use crate::sandbox::Sandbox;
+use anyhow::{bail, Context};
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, ExitStatus};
 
 impl Sandbox {
     pub fn mount_bindfs(
@@ -29,30 +26,17 @@ impl Sandbox {
         src: &Path,
         dest: &Path,
         opts: &Vec<&str>,
-    ) -> mount::Result<Output> {
+    ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
-        match Command::new("bindfs")
-            .args(opts)
-            .arg(src)
-            .arg(dest)
-            .output()
-        {
-            Ok(s) => {
-                if s.status.success() {
-                    Ok(s)
-                } else {
-                    fs::remove_dir(dest)?;
-                    Err(mount::MountError::Process(s))
-                }
-            }
-            Err(e) => {
-                fs::remove_dir(dest)?;
-                eprintln!(
-                    "Failed to launch bindfs.  Is it installed in $PATH?"
-                );
-                Err(mount::MountError::Io(e))
-            }
-        }
+        let cmd = "bindfs";
+        Ok(Some(
+            Command::new(cmd)
+                .args(opts)
+                .arg(src)
+                .arg(dest)
+                .status()
+                .context(format!("Unable to execute {}", cmd))?,
+        ))
     }
 
     pub fn mount_devfs(
@@ -60,27 +44,17 @@ impl Sandbox {
         _src: &Path,
         dest: &Path,
         opts: &Vec<&str>,
-    ) -> mount::Result<Output> {
+    ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
-        match Command::new("/sbin/mount_devfs")
-            .arg("devfs")
-            .args(opts)
-            .arg(dest)
-            .output()
-        {
-            Ok(s) => {
-                if s.status.success() {
-                    Ok(s)
-                } else {
-                    fs::remove_dir(dest)?;
-                    Err(mount::MountError::Process(s))
-                }
-            }
-            Err(e) => {
-                fs::remove_dir(dest)?;
-                Err(mount::MountError::Io(e))
-            }
-        }
+        let cmd = "/sbin/mount_devfs";
+        Ok(Some(
+            Command::new(cmd)
+                .arg("devfs")
+                .args(opts)
+                .arg(dest)
+                .status()
+                .context(format!("Unable to execute {}", cmd))?,
+        ))
     }
 
     pub fn mount_fdfs(
@@ -88,10 +62,8 @@ impl Sandbox {
         _src: &Path,
         _dest: &Path,
         _opts: &[&str],
-    ) -> mount::Result<Output> {
-        Err(mount::MountError::Unsupported(
-            "fd mounts are not supported on macOS".to_string(),
-        ))
+    ) -> anyhow::Result<Option<ExitStatus>> {
+        bail!("fd mounts are not supported on macOS");
     }
 
     pub fn mount_nfs(
@@ -99,27 +71,17 @@ impl Sandbox {
         src: &Path,
         dest: &Path,
         opts: &Vec<&str>,
-    ) -> mount::Result<Output> {
+    ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
-        match Command::new("/sbin/mount_nfs")
-            .args(opts)
-            .arg(src)
-            .arg(dest)
-            .output()
-        {
-            Ok(s) => {
-                if s.status.success() {
-                    Ok(s)
-                } else {
-                    fs::remove_dir(dest)?;
-                    Err(mount::MountError::Process(s))
-                }
-            }
-            Err(e) => {
-                fs::remove_dir(dest)?;
-                Err(mount::MountError::Io(e))
-            }
-        }
+        let cmd = "/sbin/mount_nfs";
+        Ok(Some(
+            Command::new(cmd)
+                .args(opts)
+                .arg(src)
+                .arg(dest)
+                .status()
+                .context(format!("Unable to execute {}", cmd))?,
+        ))
     }
 
     pub fn mount_procfs(
@@ -127,10 +89,8 @@ impl Sandbox {
         _src: &Path,
         _dest: &Path,
         _opts: &[&str],
-    ) -> mount::Result<Output> {
-        Err(mount::MountError::Unsupported(
-            "fd mounts are not supported on macOS".to_string(),
-        ))
+    ) -> anyhow::Result<Option<ExitStatus>> {
+        bail!("procfs mounts are not supported on macOS");
     }
 
     pub fn mount_tmpfs(
@@ -138,80 +98,82 @@ impl Sandbox {
         _src: &Path,
         dest: &Path,
         opts: &Vec<&str>,
-    ) -> mount::Result<Output> {
+    ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
-        match Command::new("/sbin/mount_tmpfs")
-            .args(opts)
-            .arg(dest)
-            .output()
-        {
-            Ok(s) => {
-                if s.status.success() {
-                    Ok(s)
-                } else {
-                    fs::remove_dir(dest)?;
-                    Err(mount::MountError::Process(s))
-                }
-            }
-            Err(e) => {
-                fs::remove_dir(dest)?;
-                Err(mount::MountError::Io(e))
-            }
-        }
+        let cmd = "/sbin/mount_tmpfs";
+        Ok(Some(
+            Command::new(cmd)
+                .args(opts)
+                .arg(dest)
+                .status()
+                .context(format!("Unable to execute {}", cmd))?,
+        ))
     }
 
     /*
      * General unmount routine common to file system types that involve
      * mounted file systems.
      */
-    fn unmount_common(&self, dest: &Path) -> mount::Result<()> {
-        /*
-         * First try to simply remove the directory, in case the file
-         * system was manually unmounted or similar.
-         */
-        if fs::remove_dir(dest).is_ok() {
-            return Ok(());
-        }
+    fn unmount_common(
+        &self,
+        dest: &Path,
+    ) -> anyhow::Result<Option<ExitStatus>> {
         /*
          * macOS is notorious for not unmounting file systems, even with
          * "diskutil unmount force" in some cases, so for now we just skip
          * straight to "umount -f" which appears to work.
          */
-        match Command::new("/sbin/umount").arg("-f").arg(dest).output() {
-            Ok(s) => {
-                if s.status.success() {
-                    Ok(())
-                } else {
-                    Err(mount::MountError::Process(s))
-                }
-            }
-            Err(e) => Err(mount::MountError::Io(e)),
-        }
+        let cmd = "/sbin/umount";
+        Ok(Some(
+            Command::new(cmd)
+                .arg("-f")
+                .arg(dest)
+                .status()
+                .context(format!("Unable to execute {}", cmd))?,
+        ))
     }
 
-    pub fn unmount_bindfs(&self, dest: &Path) -> mount::Result<()> {
+    pub fn unmount_bindfs(
+        &self,
+        dest: &Path,
+    ) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_devfs(&self, dest: &Path) -> mount::Result<()> {
-        self.unmount_common(dest)
-    }
-
-    /* Not actually supported but try to unmount it anyway. */
-    pub fn unmount_fdfs(&self, dest: &Path) -> mount::Result<()> {
-        self.unmount_common(dest)
-    }
-
-    pub fn unmount_nfs(&self, dest: &Path) -> mount::Result<()> {
+    pub fn unmount_devfs(
+        &self,
+        dest: &Path,
+    ) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
     /* Not actually supported but try to unmount it anyway. */
-    pub fn unmount_procfs(&self, dest: &Path) -> mount::Result<()> {
+    pub fn unmount_fdfs(
+        &self,
+        dest: &Path,
+    ) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_tmpfs(&self, dest: &Path) -> mount::Result<()> {
+    pub fn unmount_nfs(
+        &self,
+        dest: &Path,
+    ) -> anyhow::Result<Option<ExitStatus>> {
+        self.unmount_common(dest)
+    }
+
+    /* Not actually supported but try to unmount it anyway. */
+    pub fn unmount_procfs(
+        &self,
+        dest: &Path,
+    ) -> anyhow::Result<Option<ExitStatus>> {
+        self.unmount_common(dest)
+    }
+
+    pub fn unmount_tmpfs(
+        &self,
+        dest: &Path,
+    ) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 }

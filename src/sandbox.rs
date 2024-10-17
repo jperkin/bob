@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Jonathan Perkin <jonathan@perkin.org.uk>
+ * Copyright (c) 2024 Jonathan Perkin <jonathan@perkin.org.uk>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -27,31 +27,12 @@ mod sandbox_netbsd;
 mod sandbox_sunos;
 
 use crate::mount;
+use anyhow::{bail, Result};
 use serde_derive::Deserialize;
-use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use thiserror::Error;
-
-pub type Result<T> = std::result::Result<T, SandboxError>;
-
-/**
- * An error during a sandbox operation.
- */
-#[derive(Debug, Error)]
-pub enum SandboxError {
-    /// Sandbox already exists
-    #[error("Sandbox already exists: {0}.display()")]
-    Exists(PathBuf),
-    /// Transparent [`std::io::Error`]
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    /// Transparent [`mount::MountError`]
-    #[error(transparent)]
-    MountError(#[from] mount::MountError),
-}
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Sandbox {
@@ -112,7 +93,7 @@ impl Sandbox {
     pub fn create(&self, id: usize) -> Result<()> {
         let sandbox = self.path(id);
         if sandbox.exists() {
-            return Err(SandboxError::Exists(sandbox));
+            bail!("Sandbox already exists: {}", sandbox.display());
         }
         self.mount(id)?;
         self.create_lock(id)?;
@@ -130,16 +111,14 @@ impl Sandbox {
         let script = script.to_string();
         let mut stdin = child.stdin.take().expect("Failed to open stdin");
         std::thread::spawn(move || {
-            stdin
-                .write_all(script.as_bytes())
-                .expect("Failed to read stdin");
+            stdin.write_all(script.as_bytes()).expect("Failed to read stdin");
         });
         Ok(child)
     }
     ///
     /// Destroy a single sandbox by id.
     ///
-    pub fn destroy(&self, id: usize) -> Result<()> {
+    pub fn destroy(&self, id: usize) -> anyhow::Result<()> {
         let sandbox = self.path(id);
         if !sandbox.exists() {
             return Ok(());
@@ -218,8 +197,7 @@ impl Sandbox {
 
     ///
     /// Iterate over the supplied array of mount points in order.  If at any
-    /// point we encounter a problem then the successful mounts are rolled
-    /// back and an error returned.
+    /// point a problem is encountered we immediately bail.
     ///
     fn mount(&self, id: usize) -> Result<()> {
         if let Some(mounts) = &self.mounts {
@@ -236,37 +214,37 @@ impl Sandbox {
                         mntopts.push(opt);
                     }
                 }
-                let status = match m.fstype() {
-                    Ok(mount::FSType::Bind) => {
-                        self.mount_bindfs(mntsrc, &mntdest, &mntopts)
+                let status = match m.fstype()? {
+                    mount::FSType::Bind => {
+                        self.mount_bindfs(mntsrc, &mntdest, &mntopts)?
                     }
-                    Ok(mount::FSType::Dev) => {
-                        self.mount_devfs(mntsrc, &mntdest, &mntopts)
+                    mount::FSType::Dev => {
+                        self.mount_devfs(mntsrc, &mntdest, &mntopts)?
                     }
-                    Ok(mount::FSType::Fd) => {
-                        self.mount_fdfs(mntsrc, &mntdest, &mntopts)
+                    mount::FSType::Fd => {
+                        self.mount_fdfs(mntsrc, &mntdest, &mntopts)?
                     }
-                    Ok(mount::FSType::Nfs) => {
-                        self.mount_nfs(mntsrc, &mntdest, &mntopts)
+                    mount::FSType::Nfs => {
+                        self.mount_nfs(mntsrc, &mntdest, &mntopts)?
                     }
-                    Ok(mount::FSType::Proc) => {
-                        self.mount_procfs(mntsrc, &mntdest, &mntopts)
+                    mount::FSType::Proc => {
+                        self.mount_procfs(mntsrc, &mntdest, &mntopts)?
                     }
-                    Ok(mount::FSType::Tmp) => {
-                        self.mount_tmpfs(mntsrc, &mntdest, &mntopts)
+                    mount::FSType::Tmp => {
+                        self.mount_tmpfs(mntsrc, &mntdest, &mntopts)?
                     }
-                    Err(e) => Err(e),
                 };
-                if let Err(e) = status {
-                    return Err(SandboxError::MountError(e));
+                if let Some(s) = status {
+                    if !s.success() {
+                        bail!("Sandbox creation failed");
+                    }
                 }
             }
         }
         Ok(())
     }
 
-    fn unmount(&self, id: usize) -> mount::Result<()> {
-        let mut res: mount::Result<()> = Ok(());
+    fn unmount(&self, id: usize) -> anyhow::Result<()> {
         if let Some(mounts) = &self.mounts {
             for m in mounts.iter().rev() {
                 let mntdest = self.mountpath(id, m.dest());
@@ -279,29 +257,30 @@ impl Sandbox {
                     self.remove_empty_dirs(id, &mntdest);
                     continue;
                 }
-                let status = match m.fstype() {
-                    Ok(mount::FSType::Bind) => self.unmount_bindfs(&mntdest),
-                    Ok(mount::FSType::Dev) => self.unmount_devfs(&mntdest),
-                    Ok(mount::FSType::Fd) => self.unmount_fdfs(&mntdest),
-                    Ok(mount::FSType::Nfs) => self.unmount_nfs(&mntdest),
-                    Ok(mount::FSType::Proc) => self.unmount_procfs(&mntdest),
-                    Ok(mount::FSType::Tmp) => self.unmount_tmpfs(&mntdest),
-                    _ => {
-                        Err(mount::MountError::Unsupported(m.fs().to_string()))
-                    }
-                };
-                if let Err(e) = status {
-                    eprintln!(
-                        "WARNING: Unable to unmount {}: {}",
-                        &mntdest.display(),
-                        e
-                    );
-                    res = Err(e);
-                } else {
-                    self.remove_empty_dirs(id, &mntdest);
+
+                /*
+                 * Before trying to unmount, try just removing the directory,
+                 * in case it was never mounted in the first place.  Avoids
+                 * errors trying to unmount a file system that isn't mounted.
+                 */
+                if fs::remove_dir(&mntdest).is_ok() {
+                    continue;
                 }
+
+                /*
+                 * Report failures but don't bail.
+                 */
+                match m.fstype()? {
+                    mount::FSType::Bind => self.unmount_bindfs(&mntdest)?,
+                    mount::FSType::Dev => self.unmount_devfs(&mntdest)?,
+                    mount::FSType::Fd => self.unmount_fdfs(&mntdest)?,
+                    mount::FSType::Nfs => self.unmount_nfs(&mntdest)?,
+                    mount::FSType::Proc => self.unmount_procfs(&mntdest)?,
+                    mount::FSType::Tmp => self.unmount_tmpfs(&mntdest)?,
+                };
+                self.remove_empty_dirs(id, &mntdest);
             }
         }
-        res
+        Ok(())
     }
 }

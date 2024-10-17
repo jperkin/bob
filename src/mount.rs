@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Jonathan Perkin <jonathan@perkin.org.uk>
+ * Copyright (c) 2024 Jonathan Perkin <jonathan@perkin.org.uk>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -14,16 +14,10 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-/*
- * Handling for the "mount" argument in a sandbox configuration.
- */
+use anyhow::{bail, Error};
 use serde_derive::Deserialize;
-use std::fmt;
 use std::path::PathBuf;
-use std::process::Output;
 use std::str::FromStr;
-
-pub type Result<T> = std::result::Result<T, MountError>;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Mount {
@@ -44,9 +38,9 @@ pub enum FSType {
 }
 
 impl FromStr for FSType {
-    type Err = MountError;
+    type Err = Error;
 
-    fn from_str(fs: &str) -> Result<Self> {
+    fn from_str(fs: &str) -> Result<Self, Self::Err> {
         match fs {
             "bind" => Ok(FSType::Bind),
             "dev" => Ok(FSType::Dev),
@@ -60,39 +54,7 @@ impl FromStr for FSType {
             "lofs" => Ok(FSType::Bind),
             "loop" => Ok(FSType::Bind),
             "null" => Ok(FSType::Bind),
-            _ => Err(MountError::Unsupported(fs.to_string())),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum MountError {
-    /// I/O failure launching mount program
-    Io(std::io::Error),
-    /// Mount program exited failure with stderr
-    Process(Output),
-    /// Unsupported file system type
-    Unsupported(String),
-}
-
-impl From<std::io::Error> for MountError {
-    fn from(err: std::io::Error) -> Self {
-        MountError::Io(err)
-    }
-}
-
-impl std::error::Error for MountError {}
-
-impl fmt::Display for MountError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            MountError::Process(s) => {
-                write!(f, "mount failed: {:?}", s)
-            }
-            MountError::Unsupported(s) => {
-                write!(f, "unsupported file system type '{}'", s)
-            }
-            MountError::Io(s) => write!(f, "I/O error: {}", s),
+            _ => bail!("Unsupported file system type '{}'", fs),
         }
     }
 }
@@ -106,11 +68,7 @@ impl Mount {
         &self.dest
     }
 
-    pub fn fs(&self) -> &String {
-        &self.fs
-    }
-
-    pub fn fstype(&self) -> Result<FSType> {
+    pub fn fstype(&self) -> Result<FSType, Error> {
         FSType::from_str(&self.fs)
     }
 
