@@ -24,7 +24,7 @@ use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressStyle};
 use petgraph::algo::toposort;
 use petgraph::graphmap::DiGraphMap;
 use petgraph::Direction;
-use pkgsrc::{Depend, PkgName, PkgPath};
+use pkgsrc::{Depend, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -32,70 +32,6 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-
-///
-/// ScanVariable contains all possible keys printed by "bmake pbulk-index",
-/// though for now we are only interested in PKGNAME and ALL_DEPENDS.
-///
-#[derive(Debug)]
-pub enum ScanVariable {
-    PkgName,
-    AllDepends,
-    PkgSkipReason,
-    PkgFailReason,
-    NoBinOnFtp,
-    Restricted,
-    Categories,
-    Maintainer,
-    UseDestdir,
-    BootstrapPkg,
-    UserGroupPhase,
-    ScanDepends,
-    MultiVersion,
-}
-
-impl FromStr for ScanVariable {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "PKGNAME" => Ok(ScanVariable::PkgName),
-            "ALL_DEPENDS" => Ok(ScanVariable::AllDepends),
-            "PKG_SKIP_REASON" => Ok(ScanVariable::PkgSkipReason),
-            "PKG_FAIL_REASON" => Ok(ScanVariable::PkgFailReason),
-            "NO_BIN_ON_FTP" => Ok(ScanVariable::NoBinOnFtp),
-            "RESTRICTED" => Ok(ScanVariable::Restricted),
-            "CATEGORIES" => Ok(ScanVariable::Categories),
-            "MAINTAINER" => Ok(ScanVariable::Maintainer),
-            "USE_DESTDIR" => Ok(ScanVariable::UseDestdir),
-            "BOOTSTRAP_PKG" => Ok(ScanVariable::BootstrapPkg),
-            "USERGROUP_PHASE" => Ok(ScanVariable::UserGroupPhase),
-            "SCAN_DEPENDS" => Ok(ScanVariable::ScanDepends),
-            "MULTI_VERSION" => Ok(ScanVariable::MultiVersion),
-            _ => bail!("Unsupported pbulk-index variable '{}'", s.to_string()),
-        }
-    }
-}
-
-/**
- * [`ScanPackage`] contains the output from `bmake pbulk-index` for a single
- * `PKGNAME`.
- *
- * The output of `bmake pbulk-index` may contain multiple [`ScanPackage`]
- * entries if the package supports `MULTI_VERSION`.
- *
- * For now the only fields we are interested in are `PKGNAME` and
- * `ALL_DEPENDS`.
- */
-#[derive(Clone, Debug, Hash, PartialEq)]
-pub struct ScanPackage {
-    /// PKGPATH
-    pkgpath: PkgPath,
-    /// PKGNAME
-    pkgname: PkgName,
-    /// ALL_DEPENDS
-    depends: Vec<Depend>,
-}
 
 #[derive(Debug, Default)]
 pub struct Scan {
@@ -117,9 +53,9 @@ pub struct Scan {
     /**
      * Completed PKGPATH scans.  With MULTI_VERSION there may be multiple
      * packages produced by a single PKGPATH (e.g. py*-foo), hence why there
-     * is a [`Vec`] of [`ScanPackage`]s.
+     * is a [`Vec`] of [`ScanIndex`]s.
      */
-    done: HashMap<PkgPath, Vec<ScanPackage>>,
+    done: HashMap<PkgPath, Vec<ScanIndex>>,
 }
 
 impl Scan {
@@ -178,7 +114,7 @@ impl Scan {
             /*
              * Convert the incoming HashSet into a Vec for parallel processing.
              */
-            let mut parpaths: Vec<(PkgPath, Result<Vec<ScanPackage>>)> = vec![];
+            let mut parpaths: Vec<(PkgPath, Result<Vec<ScanIndex>>)> = vec![];
             for pkgpath in &self.incoming {
                 parpaths.push((pkgpath.clone(), Ok(vec![])));
             }
@@ -223,7 +159,7 @@ impl Scan {
                 let scanpkgs = scanpkgs?;
                 self.done.insert(pkgpath.clone(), scanpkgs.clone());
                 for pkg in scanpkgs {
-                    for dep in pkg.depends {
+                    for dep in pkg.all_depends {
                         if !self.done.contains_key(dep.pkgpath())
                             && !self.incoming.contains(dep.pkgpath())
                             && new_incoming.insert(dep.pkgpath().clone())
@@ -259,15 +195,14 @@ impl Scan {
     }
 
     /**
-     * Scan a single PKGPATH, returning a [`Vec`] of [`ScanPackage`] results,
+     * Scan a single PKGPATH, returning a [`Vec`] of [`ScanIndex`] results,
      * as multi-version packages may return multiple results.
      */
     pub fn scan_pkgpath(
         &self,
         sandbox: &Sandbox,
         pkgpath: &PkgPath,
-    ) -> anyhow::Result<Vec<ScanPackage>> {
-        let mut result: Vec<ScanPackage> = vec![];
+    ) -> anyhow::Result<Vec<ScanIndex>> {
         let mut pkgname: Option<PkgName> = None;
         let mut depends: Vec<Depend> = vec![];
         let pkgdir = self.pkgsrc.join(pkgpath.as_path());
@@ -282,62 +217,22 @@ impl Scan {
             .take()
             .context("Unable to read sandbox child process")?;
         let reader = BufReader::new(stdout);
-        for line in reader.lines() {
-            let line = line?;
-            let v: Vec<&str> = line.splitn(2, '=').collect();
-            if v.len() != 2 {
-                bail!("Invalid output from pbulk-index");
-            }
-            let key = ScanVariable::from_str(v[0])?;
-            match key {
-                ScanVariable::PkgName => {
-                    /*
-                     * With MULTI_VERSION we will see multiple PKGNAME
-                     * entries combined in the same pbulk-index output,
-                     * so if we've already set PKGNAME then insert the
-                     * current entry and start a new one.
-                     */
-                    if let Some(p) = pkgname {
-                        let scanpkg = ScanPackage {
-                            pkgname: p,
-                            depends,
-                            pkgpath: pkgpath.clone(),
-                        };
-                        result.push(scanpkg);
-                    }
-                    pkgname = Some(PkgName::new(v[1]));
-                    depends = vec![];
-                }
-                ScanVariable::AllDepends => {
-                    for p in v[1].split(' ').filter(|s| !s.is_empty()) {
-                        depends.push(Depend::new(p)?);
-                    }
-                }
-                /* Currently we ignore all other fields. */
-                _ => {}
-            }
+        let mut index = ScanIndex::from_reader(reader)?;
+        /*
+         * Set PKGPATH (PKG_LOCATION) as for some reason pbulk-index doesn't.
+         */
+        for i in 0..index.len() {
+            index[i].pkg_location = Some(pkgpath.clone())
         }
 
-        child
-            .wait()
-            .context("Unable to read sandbox child exit status")?;
-        if let Some(p) = pkgname {
-            let scanpkg = ScanPackage {
-                pkgname: p,
-                depends,
-                pkgpath: pkgpath.clone(),
-            };
-            result.push(scanpkg);
-        }
-
-        Ok(result)
+        Ok(index)
     }
 
     pub fn resolve(&self) -> Result<Vec<&PkgPath>> {
         let mut graph = DiGraphMap::new();
         for (pkgpath, pkgs) in &self.done {
             for pkg in pkgs {
-                for dep in &pkg.depends {
+                for dep in &pkg.all_depends {
                     graph.add_edge(dep.pkgpath(), pkgpath, ());
                 }
             }
