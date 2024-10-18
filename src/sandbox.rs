@@ -37,22 +37,40 @@ use std::process::{Child, Command, Stdio};
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Sandbox {
     basedir: PathBuf,
+    chroot: Option<bool>,
     mounts: Option<Vec<mount::Mount>>,
 }
 
 impl Sandbox {
-    ///
-    /// Return full path to a sandbox by id.
-    ///
+    /**
+     * Create an empty [`Sandbox`].  This isn't as useless as it sounds - by
+     * directing all operations via the sandbox we can do things like call
+     * [`execute`] as a unified interface whether using chroots or not, and
+     * allow testing and development to just run things directly rather than
+     * requiring root access.
+     */
+    pub fn new() -> Sandbox {
+        Sandbox {
+            ..Default::default()
+        }
+    }
+
+    pub fn chrooted(&self) -> bool {
+        self.chroot.unwrap_or(true)
+    }
+
+    /**
+     * Return full path to a sandbox by id.
+     */
     pub fn path(&self, id: usize) -> PathBuf {
         let mut p = PathBuf::from(&self.basedir);
         p.push(id.to_string());
         p
     }
 
-    ///
-    /// Return full path to a specified mount point in a sandbox.
-    ///
+    /**
+     * Return full path to a specified mount point in a sandbox.
+     */
     pub fn mountpath(&self, id: usize, mnt: &PathBuf) -> PathBuf {
         /*
          * Note that .push() on a PathBuf will replace the path if
@@ -87,27 +105,40 @@ impl Sandbox {
         Ok(())
     }
 
-    ///
-    /// Create a single sandbox by id.
-    ///
+    /**
+     * Create a single sandbox by id.
+     */
     pub fn create(&self, id: usize) -> Result<()> {
         let sandbox = self.path(id);
         if sandbox.exists() {
             bail!("Sandbox already exists: {}", sandbox.display());
         }
+        fs::create_dir_all(sandbox)?;
         self.mount(id)?;
         self.create_lock(id)?;
         Ok(())
     }
 
+    /**
+     * Execute the supplied script.  If [`Sandbox`] is fully specified then
+     */
     pub fn execute(&self, id: usize, script: &str) -> Result<Child> {
-        let mut child = Command::new("/usr/sbin/chroot")
-            .current_dir("/")
-            .arg(self.path(id))
-            .arg("/bin/sh")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()?;
+        let mut child = if self.chrooted() {
+            Command::new("/usr/sbin/chroot")
+                .current_dir("/")
+                .arg(self.path(id))
+                .arg("/bin/sh")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()?
+        } else {
+            Command::new("/bin/sh")
+                .current_dir(self.path(id))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()?
+        };
+
         let script = script.to_string();
         let mut stdin = child.stdin.take().expect("Failed to open stdin");
         std::thread::spawn(move || {

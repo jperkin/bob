@@ -78,9 +78,9 @@ fn main() -> Result<()> {
 
     match args.cmd {
         Cmd::Build => {
-            let Some(sandbox) = &config.sandbox() else {
-                eprintln!("ERROR: No sandboxes configured");
-                std::process::exit(1);
+            let sandbox = match config.sandbox() {
+                Some(s) => s.clone(),
+                None => Sandbox::new(),
             };
             let mut scan = Scan::new(
                 config.pkgsrc(),

@@ -19,7 +19,7 @@
  * of builds to perform.
  */
 use crate::Sandbox;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressStyle};
 use petgraph::algo::toposort;
 use petgraph::graphmap::DiGraphMap;
@@ -27,9 +27,8 @@ use petgraph::Direction;
 use pkgsrc::{Depend, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -45,6 +44,9 @@ pub struct Scan {
      * Number of parallel make threads to execute.
      */
     threads: usize,
+    /**
+     * [`Sandbox`] configuration.
+     */
     sandbox: Sandbox,
     /**
      * Incoming queue of PKGPATH to process.
@@ -63,13 +65,13 @@ impl Scan {
         path: &Path,
         make: &Path,
         threads: usize,
-        sandbox: &Sandbox,
+        sandbox: Sandbox,
     ) -> Scan {
         Scan {
             pkgsrc: path.to_path_buf(),
             make: make.to_path_buf(),
             threads,
-            sandbox: sandbox.clone(),
+            sandbox,
             ..Default::default()
         }
     }
@@ -97,7 +99,12 @@ impl Scan {
         // If the number of packages overflows a u64 then we have a problem!
         progress.inc_length(self.incoming.len().try_into().unwrap());
 
+        /*
+         * Only a single sandbox is required, 'make pbulk-index' can safely be
+         * run in parallel inside one sandbox.
+         */
         self.sandbox.create(0)?;
+
         /*
          * Continuously iterate over incoming queue, moving to done once
          * processed, and adding any dependencies to incoming to be processed
@@ -137,7 +144,7 @@ impl Scan {
                     progress.set_message(msg);
                 }
                 *result = self
-                    .scan_pkgpath(&self.sandbox, pkgpath)
+                    .scan_pkgpath(pkgpath)
                     .context(format!("Scan failed for {}", pathname));
                 progress.inc(1);
                 {
@@ -180,6 +187,7 @@ impl Scan {
                 break;
             }
         }
+
         self.sandbox.destroy(0)?;
 
         progress.finish_and_clear();
@@ -200,7 +208,6 @@ impl Scan {
      */
     pub fn scan_pkgpath(
         &self,
-        sandbox: &Sandbox,
         pkgpath: &PkgPath,
     ) -> anyhow::Result<Vec<ScanIndex>> {
         let mut pkgname: Option<PkgName> = None;
@@ -211,7 +218,7 @@ impl Scan {
             pkgdir.display(),
             &self.make.display()
         );
-        let mut child = sandbox.execute(0, &script)?;
+        let mut child = self.sandbox.execute(0, &script)?;
         let stdout = child
             .stdout
             .take()
