@@ -221,8 +221,8 @@ impl Scan {
         /*
          * Set PKGPATH (PKG_LOCATION) as for some reason pbulk-index doesn't.
          */
-        for i in 0..index.len() {
-            index[i].pkg_location = Some(pkgpath.clone())
+        for pkg in &mut index {
+            pkg.pkg_location = Some(pkgpath.clone())
         }
 
         Ok(index)
