@@ -50,9 +50,7 @@ impl Sandbox {
      * requiring root access.
      */
     pub fn new() -> Sandbox {
-        Sandbox {
-            ..Default::default()
-        }
+        Sandbox { ..Default::default() }
     }
 
     pub fn chrooted(&self) -> bool {

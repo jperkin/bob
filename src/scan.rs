@@ -87,9 +87,8 @@ impl Scan {
         )
         .unwrap()
         .progress_chars("=> ");
-        let progress = ProgressBar::new(0)
-            .with_prefix("Scanning")
-            .with_style(style);
+        let progress =
+            ProgressBar::new(0).with_prefix("Scanning").with_style(style);
 
         rayon::ThreadPoolBuilder::new()
             .num_threads(self.threads)

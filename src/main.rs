@@ -98,9 +98,7 @@ fn main() -> Result<()> {
                 build_package(&config, pkgpath);
             }
         }
-        Cmd::Sandbox {
-            cmd: SandboxCmd::Create,
-        } => {
+        Cmd::Sandbox { cmd: SandboxCmd::Create } => {
             if let Some(s) = &config.sandbox() {
                 if config.verbose() {
                     println!("Creating sandboxes");
@@ -108,9 +106,7 @@ fn main() -> Result<()> {
                 s.create_all(config.build_threads())?;
             }
         }
-        Cmd::Sandbox {
-            cmd: SandboxCmd::Destroy,
-        } => {
+        Cmd::Sandbox { cmd: SandboxCmd::Destroy } => {
             if let Some(s) = &config.sandbox() {
                 if config.verbose() {
                     println!("Destroying sandboxes");
@@ -118,9 +114,7 @@ fn main() -> Result<()> {
                 s.destroy_all(config.build_threads())?;
             }
         }
-        Cmd::Sandbox {
-            cmd: SandboxCmd::List,
-        } => {
+        Cmd::Sandbox { cmd: SandboxCmd::List } => {
             if let Some(s) = &config.sandbox() {
                 s.list_all(config.build_threads());
             }
