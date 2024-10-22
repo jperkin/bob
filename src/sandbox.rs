@@ -34,6 +34,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
+/**
+ * Sandbox creation and handling.
+ */
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Sandbox {
     basedir: PathBuf,
@@ -48,13 +51,20 @@ impl Sandbox {
      * [`execute`] as a unified interface whether using chroots or not, and
      * allow testing and development to just run things directly rather than
      * requiring root access.
+     *
+     * [`execute`]: Sandbox::execute
      */
     pub fn new() -> Sandbox {
         Sandbox { chroot: Some(false), ..Default::default() }
     }
 
-    pub fn chrooted(&self) -> bool {
-        self.chroot.unwrap_or(true)
+    /**
+     * Return whether sandboxes have been enabled.  This is based on whether
+     * a valid basedir has been passed, and will be disabled for fake sandboxes
+     * used during testing.
+     */
+    pub fn enabled(&self) -> bool {
+        !self.basedir.as_os_str().is_empty()
     }
 
     /**
@@ -117,6 +127,15 @@ impl Sandbox {
         Ok(())
     }
 
+    /*
+     * Internal test for whether chroots have been enabled.  Really the only
+     * use for this is to test a [sandbox] section with mounts that the user
+     * can apply but skip the actual chroot commands via execute().
+     */
+    fn chrooted(&self) -> bool {
+        self.chroot.unwrap_or(true)
+    }
+
     /**
      * Execute the supplied script.  If [`Sandbox`] is fully specified then
      */
@@ -131,7 +150,6 @@ impl Sandbox {
                 .spawn()?
         } else {
             Command::new("/bin/sh")
-                .current_dir(self.path(id))
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .spawn()?

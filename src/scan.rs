@@ -102,7 +102,9 @@ impl Scan {
          * Only a single sandbox is required, 'make pbulk-index' can safely be
          * run in parallel inside one sandbox.
          */
-        self.sandbox.create(0)?;
+        if self.sandbox.enabled() {
+            self.sandbox.create(0)?;
+        }
 
         /*
          * Continuously iterate over incoming queue, moving to done once
@@ -187,7 +189,9 @@ impl Scan {
             }
         }
 
-        self.sandbox.destroy(0)?;
+        if self.sandbox.enabled() {
+            self.sandbox.destroy(0)?;
+        }
 
         progress.finish_and_clear();
         if progress.length() > Some(0) {
