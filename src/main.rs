@@ -53,6 +53,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SandboxCmd,
     },
+    /// Scan packages as defined by the configuration file
+    Scan,
 }
 
 #[derive(Debug, Subcommand)]
@@ -117,6 +119,25 @@ fn main() -> Result<()> {
             if let Some(s) = &config.sandbox() {
                 s.list_all(config.build_threads());
             }
+        }
+        Cmd::Scan => {
+            let sandbox = match config.sandbox() {
+                Some(s) => s.clone(),
+                None => Sandbox::new(),
+            };
+            let mut scan = Scan::new(
+                config.pkgsrc(),
+                config.make(),
+                config.scan_threads(),
+                sandbox.clone(),
+            );
+            if let Some(pkgs) = config.pkgpaths() {
+                for p in pkgs {
+                    scan.add(p);
+                }
+            }
+            scan.start()?;
+            scan.resolve()?;
         }
     };
 
