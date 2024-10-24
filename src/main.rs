@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Jonathan Perkin <jonathan@perkin.org.uk>
+ * Copyright (c) 2024 Jonathan Perkin <jonathan@perkin.org.uk>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -14,17 +14,18 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+mod build;
 mod config;
 mod mount;
 mod sandbox;
 mod scan;
 
+use crate::build::Build;
 use crate::config::Config;
 use crate::sandbox::Sandbox;
 use crate::scan::Scan;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use pkgsrc::PkgPath;
 use std::path::PathBuf;
 use std::str;
 
@@ -64,14 +65,6 @@ enum SandboxCmd {
     List,
 }
 
-fn build_package(config: &Config, pkgpath: &PkgPath) {
-    println!(
-        "Building {}/{}",
-        config.pkgsrc().display(),
-        pkgpath.as_path().display()
-    );
-}
-
 fn main() -> Result<()> {
     let args = Args::parse();
     let config = Config::load(&args)?;
@@ -86,7 +79,7 @@ fn main() -> Result<()> {
                 config.pkgsrc(),
                 config.make(),
                 config.scan_threads(),
-                sandbox,
+                sandbox.clone(),
             );
             if let Some(pkgs) = config.pkgpaths() {
                 for p in pkgs {
@@ -94,9 +87,15 @@ fn main() -> Result<()> {
                 }
             }
             scan.start()?;
-            for pkgpath in scan.resolve()? {
-                build_package(&config, pkgpath);
-            }
+            let scanpkgs = scan.resolve()?;
+            let mut build = Build::new(
+                config.pkgsrc(),
+                config.make(),
+                config.build_threads(),
+                sandbox,
+                scanpkgs.clone(),
+            );
+            build.start()?;
         }
         Cmd::Sandbox { cmd: SandboxCmd::Create } => {
             if let Some(s) = &config.sandbox() {
