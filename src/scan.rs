@@ -14,19 +14,14 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-/*
- * Scan a set of pkgsrc package paths to calculate a full dependency tree
- * of builds to perform.
- */
 use crate::Sandbox;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressStyle};
 use petgraph::algo::toposort;
 use petgraph::graphmap::DiGraphMap;
-use petgraph::Direction;
 use pkgsrc::{Depend, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -34,7 +29,9 @@ use std::time::Instant;
 
 #[derive(Debug, Default)]
 pub struct Scan {
-    /// Location of pkgsrc
+    /**
+     * Location of pkgsrc
+     */
     pkgsrc: PathBuf,
     /**
      * Path to `make` or `bmake` executable.
@@ -58,6 +55,10 @@ pub struct Scan {
      * is a [`Vec`] of [`ScanIndex`]s.
      */
     done: HashMap<PkgPath, Vec<ScanIndex>>,
+    /**
+     * Resolved packages, indexed by PKGNAME.
+     */
+    resolved: HashMap<PkgName, ScanIndex>,
 }
 
 impl Scan {
@@ -92,7 +93,7 @@ impl Scan {
 
         rayon::ThreadPoolBuilder::new()
             .num_threads(self.threads)
-            .build_global()
+            .build()
             .unwrap();
 
         // If the number of packages overflows a u64 then we have a problem!
@@ -213,8 +214,6 @@ impl Scan {
         &self,
         pkgpath: &PkgPath,
     ) -> anyhow::Result<Vec<ScanIndex>> {
-        let mut pkgname: Option<PkgName> = None;
-        let mut depends: Vec<Depend> = vec![];
         let pkgdir = self.pkgsrc.join(pkgpath.as_path());
         let script = format!(
             "cd {} && {} pbulk-index",
@@ -238,65 +237,116 @@ impl Scan {
         Ok(index)
     }
 
-    pub fn resolve(&self) -> Result<Vec<&PkgPath>> {
-        let mut graph = DiGraphMap::new();
-        for (pkgpath, pkgs) in &self.done {
-            for pkg in pkgs {
-                for dep in &pkg.all_depends {
-                    graph.add_edge(dep.pkgpath(), pkgpath, ());
+    /**
+     * Resolve the list of scanned packages, by ensuring all of the [`Depend`]
+     * patterns in `all_depends` match a found package, and that there are no
+     * circular dependencies.  The best match for each is stored in the
+     * `depends` for the package in question.
+     *
+     * Return a reference to a [`HashMap`] which maps the unique `PKGNAME` to
+     * build along with its [`ScanIndex`].  This can then be used to build all
+     * packages.
+     */
+    pub fn resolve(&mut self) -> Result<&HashMap<PkgName, ScanIndex>> {
+        /*
+         * Populate the resolved hash.  This becomes our new working set,
+         * with a flat mapping of PKGNAME -> ScanIndex.
+         *
+         * self.done must no longer be used after this point, as its ScanIndex
+         * entries are out of date (do not have depends set, for example).
+         * Maybe at some point we'll handle lifetimes properly and just have
+         * one canonical index.
+         *
+         * Also create a simple HashSet for looking up known PKGNAME for
+         * matches.
+         */
+        let mut pkgnames: HashSet<PkgName> = HashSet::new();
+        for index in self.done.values() {
+            for pkg in index {
+                pkgnames.insert(pkg.pkgname.clone());
+                self.resolved.insert(pkg.pkgname.clone(), pkg.clone());
+            }
+        }
+
+        /*
+         * Keep a cache of best Depend => PkgName matches we've already seen
+         * as it's likely the same patterns will be used in multiple places.
+         */
+        let mut match_cache: HashMap<Depend, PkgName> = HashMap::new();
+
+        for pkg in self.resolved.values_mut() {
+            for depend in &pkg.all_depends {
+                /*
+                 * Check for cached DEPENDS match first.  If found, use it.
+                 */
+                if let Some(pkgname) = match_cache.get(depend) {
+                    pkg.depends.push(pkgname.clone().clone());
+                    continue;
+                }
+                /*
+                 * Find best DEPENDS match out of all known PKGNAME.
+                 */
+                let mut best: Option<&PkgName> = None;
+                for candidate in &pkgnames {
+                    if depend.pattern().matches(candidate.pkgname()) {
+                        if let Some(current) = best {
+                            best = match depend.pattern().best_match(
+                                current.pkgname(),
+                                candidate.pkgname(),
+                            ) {
+                                Some(m) if m == current.pkgname() => {
+                                    Some(current)
+                                }
+                                Some(m) if m == candidate.pkgname() => {
+                                    Some(candidate)
+                                }
+                                Some(_) => todo!(),
+                                None => None,
+                            };
+                        } else {
+                            best = Some(candidate);
+                        }
+                    }
+                }
+                /*
+                 * If we found a match, save it and add to the cache,
+                 * otherwise error.
+                 *
+                 * TODO: we should batch up errors and continue so that we
+                 * don't have to re-run multiple times to find all errors.
+                 */
+                if let Some(pkgname) = best {
+                    pkg.depends.push(pkgname.clone());
+                    match_cache.insert(depend.clone(), pkgname.clone());
+                } else {
+                    bail!(
+                        "No match found for {} in {}",
+                        depend.pattern().pattern(),
+                        pkg.pkgname.pkgname()
+                    );
                 }
             }
         }
+
         /*
          * Verify that the graph is acyclic.
-         *
-         * TODO: print circular dependencies if found.
          */
-        let sorted = match toposort(&graph, None) {
-            Ok(sort) => sort,
-            Err(_) => {
-                eprintln!("Circular dependencies detected");
-                std::process::exit(1);
+        let mut graph = DiGraphMap::new();
+        for (pkgname, index) in &self.resolved {
+            for dep in &index.depends {
+                graph.add_edge(dep.pkgname(), pkgname.pkgname(), ());
+            }
+        }
+        match toposort(&graph, None) {
+            Ok(_) => {}
+            Err(e) => {
+                /*
+                 * TODO: This does not yet print the full cycle.
+                 */
+                bail!("Circular dependencies detected via {}", e.node_id());
             }
         };
 
-        /*
-         * The graph is sorted, but we also need to calculate levels for each
-         * package so that we can build packages at the same level in parallel
-         * if possible.
-         */
-        let mut pkglevel: HashMap<&PkgPath, usize> = HashMap::new();
-        for &node in &sorted {
-            pkglevel.insert(node, 0);
-        }
-        for &node in &sorted {
-            for dep in graph.neighbors_directed(node, Direction::Incoming) {
-                let new_level = pkglevel[&dep] + 1;
-                pkglevel
-                    .entry(node)
-                    .and_modify(|level| *level = (*level).max(new_level));
-            }
-        }
-
-        /*
-         * Now that the levels have been calculated, use a BTreeMap to store
-         * them ordered by level for processing, one level at a time.
-         *
-         * TODO: Improve algorithm so that packages at higher levels can start
-         * before the current level has finished if all their dependencies have
-         * been satisfied.
-         */
-        let mut pkgtree: BTreeMap<usize, Vec<&PkgPath>> = BTreeMap::new();
-        for (node, &level) in &pkglevel {
-            pkgtree.entry(level).or_default().push(*node);
-        }
-
-        let mut pkgpaths: Vec<&PkgPath> = vec![];
-        for level in pkgtree.values() {
-            for pkg in level {
-                pkgpaths.push(pkg);
-            }
-        }
-        Ok(pkgpaths)
+        Ok(&self.resolved)
     }
 }
