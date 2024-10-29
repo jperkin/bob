@@ -84,7 +84,7 @@ impl Scan {
     pub fn start(&mut self) -> anyhow::Result<()> {
         let started = Instant::now();
         let style = ProgressStyle::with_template(
-            "{prefix:>12} [{bar:57}] {pos}/{len} [{wide_msg}]",
+            "{prefix:>12} [{bar:28}] {pos}/{len} [{wide_msg}]",
         )
         .unwrap()
         .progress_chars("=> ");
