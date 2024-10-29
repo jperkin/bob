@@ -74,7 +74,8 @@ impl PackageBuild {
             self.make.display()
         );
         let mut child = self.sandbox.execute(self.id, &build_script)?;
-        let mut stdout = child.stdout.take().context("Could not read stdout")?;
+        let mut stdout =
+            child.stdout.take().context("Could not read stdout")?;
         let res = child.wait().context("Could not wait for child")?;
         let mut out = String::new();
         stdout.read_to_string(&mut out)?;
@@ -280,7 +281,7 @@ impl Build {
     pub fn start(&mut self) -> anyhow::Result<()> {
         let started = Instant::now();
         let style = ProgressStyle::with_template(
-            "{prefix:>12} [{bar:57}] {pos}/{len} [{wide_msg}]",
+            "{prefix:>12} [{bar:28}] {pos}/{len} [{wide_msg}]",
         )
         .unwrap()
         .progress_chars("=> ");
@@ -337,7 +338,6 @@ impl Build {
             let (client_tx, client_rx) = mpsc::channel::<ChannelCommand>();
             clients.insert(i, client_tx);
             let manager_tx = manager_tx.clone();
-            let progress = progress.clone();
             let thread = std::thread::spawn(move || loop {
                 manager_tx.send(ChannelCommand::ClientReady(i)).unwrap();
 
@@ -352,17 +352,16 @@ impl Build {
                     }
                     ChannelCommand::JobData(pkg) => {
                         let pkgname = pkg.pkginfo.pkgname.clone();
-                        progress.set_message(String::from(pkgname.pkgname()));
                         match pkg.build() {
                             Ok(0) => {
                                 manager_tx
-                                .send(ChannelCommand::JobSuccess(pkgname))
-                                .unwrap();
+                                    .send(ChannelCommand::JobSuccess(pkgname))
+                                    .unwrap();
                             }
                             Ok(_) => {
                                 manager_tx
-                                .send(ChannelCommand::JobFailed(pkgname))
-                                .unwrap();
+                                    .send(ChannelCommand::JobFailed(pkgname))
+                                    .unwrap();
                             }
                             Err(e) => manager_tx
                                 .send(ChannelCommand::JobError((pkgname, e)))
@@ -392,6 +391,15 @@ impl Build {
             let make = Arc::clone(&make);
             let sandbox = sandbox.clone();
             let mut jobs = jobs.clone();
+
+            let update_progress = |f: &HashSet<PkgName>| {
+                let mut inprog: Vec<String> =
+                    f.iter().map(|x| x.pkgname().to_string()).collect();
+                inprog.sort();
+                let msg = inprog.join(", ");
+                progress.set_message(msg);
+            };
+
             for command in manager_rx {
                 match command {
                     ChannelCommand::ClientReady(c) => {
@@ -401,9 +409,11 @@ impl Build {
                                 let pkginfo = jobs.scanpkgs.get(&pkg).unwrap();
                                 jobs.incoming.remove(&pkg);
                                 jobs.running.insert(pkg);
+                                update_progress(&jobs.running);
+                                progress.inc(1);
                                 client
-                                    .send(ChannelCommand::JobData(
-                                        Box::new(PackageBuild {
+                                    .send(ChannelCommand::JobData(Box::new(
+                                        PackageBuild {
                                             id: c,
                                             pkgsrc: pkgsrc.to_path_buf(),
                                             make: make.to_path_buf(),
@@ -429,12 +439,18 @@ impl Build {
                     }
                     ChannelCommand::JobSuccess(pkgname) => {
                         jobs.mark_success(&pkgname);
+                        jobs.running.remove(&pkgname);
+                        update_progress(&jobs.running);
                     }
                     ChannelCommand::JobFailed(pkgname) => {
                         jobs.mark_failure(&pkgname);
+                        jobs.running.remove(&pkgname);
+                        update_progress(&jobs.running);
                     }
                     ChannelCommand::JobError((pkgname, e)) => {
                         jobs.mark_failure(&pkgname);
+                        jobs.running.remove(&pkgname);
+                        update_progress(&jobs.running);
                         /*
                          * TODO: do something about the error.
                          */
@@ -442,6 +458,14 @@ impl Build {
                     }
                     _ => todo!(),
                 }
+            }
+            progress.finish_and_clear();
+            if progress.length() > Some(0) {
+                println!(
+                    "Built {} packages in {}",
+                    HumanCount(progress.length().unwrap()),
+                    HumanDuration(started.elapsed()),
+                );
             }
         });
 
@@ -454,15 +478,6 @@ impl Build {
             for i in 0..self.threads {
                 self.sandbox.destroy(i)?;
             }
-        }
-
-        progress.finish_and_clear();
-        if progress.length() > Some(0) {
-            println!(
-                "Built {} packages in {}",
-                HumanCount(progress.length().unwrap()),
-                HumanDuration(started.elapsed()),
-            );
         }
 
         Ok(())
