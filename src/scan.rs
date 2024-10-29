@@ -220,12 +220,9 @@ impl Scan {
             pkgdir.display(),
             &self.make.display()
         );
-        let mut child = self.sandbox.execute(0, &script)?;
-        let stdout = child
-            .stdout
-            .take()
-            .context("Unable to read sandbox child process")?;
-        let reader = BufReader::new(stdout);
+        let child = self.sandbox.execute(0, &script)?;
+        let output = child.wait_with_output()?;
+        let reader = BufReader::new(&output.stdout[..]);
         let mut index = ScanIndex::from_reader(reader)?;
         /*
          * Set PKGPATH (PKG_LOCATION) as for some reason pbulk-index doesn't.
