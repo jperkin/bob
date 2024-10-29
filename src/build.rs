@@ -15,12 +15,14 @@
  */
 
 use crate::Sandbox;
-use anyhow::bail;
+use anyhow::{bail, Context};
 use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressStyle};
 use pkgsrc::{PkgName, ScanIndex};
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::sync::{mpsc, mpsc::Sender, Arc};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Default)]
 pub struct Build {
@@ -45,6 +47,217 @@ pub struct Build {
      * List of packages to build, as input from Scan::resolve.
      */
     scanpkgs: HashMap<PkgName, ScanIndex>,
+}
+
+#[derive(Debug)]
+struct PackageBuild {
+    id: usize,
+    pkgsrc: PathBuf,
+    make: PathBuf,
+    pkginfo: ScanIndex,
+    sandbox: Sandbox,
+}
+
+impl PackageBuild {
+    fn build(&self) -> anyhow::Result<i32> {
+        let pkgname = self.pkginfo.pkgname.pkgname();
+        let Some(pkgpath) = &self.pkginfo.pkg_location else {
+            bail!("ERROR: Could not get PKGPATH for {}", pkgname);
+        };
+        /*
+         * TODO: actually build stuff ;)
+         */
+        let build_script = format!(
+            "cd {}/{} && {} -v PKGPATH",
+            self.pkgsrc.display(),
+            pkgpath.as_path().display(),
+            self.make.display()
+        );
+        let mut child = self.sandbox.execute(self.id, &build_script)?;
+        let mut stdout = child.stdout.take().context("Could not read stdout")?;
+        let res = child.wait().context("Could not wait for child")?;
+        let mut out = String::new();
+        stdout.read_to_string(&mut out)?;
+        res.code().context("proc failed")
+    }
+}
+
+/**
+ * Commands sent between the manager and clients.
+ */
+#[derive(Debug)]
+enum ChannelCommand {
+    /**
+     * Client (with specified identifier) indicating they are ready for work.
+     */
+    ClientReady(usize),
+    /**
+     * Manager has no work available at the moment, try again later.
+     */
+    ComeBackLater,
+    /**
+     * Manager directing a client to build a specific package.
+     */
+    JobData(Box<PackageBuild>),
+    /**
+     * Client returning a successful package build.
+     */
+    JobSuccess(PkgName),
+    /**
+     * Client returning a failed package build.
+     */
+    JobFailed(PkgName),
+    /**
+     * Client returning an error during the package build.
+     */
+    JobError((PkgName, anyhow::Error)),
+    /**
+     * Manager directing a client to quit.
+     */
+    Quit,
+}
+
+/**
+ * Return the current build job status.
+ */
+#[derive(Debug)]
+enum BuildStatus {
+    /**
+     * The next package ordered by priority is available for building.
+     */
+    Available(PkgName),
+    /**
+     * No packages are currently available for building, i.e. all remaining
+     * packages have at least one dependency that is still unavailable.
+     */
+    NoneAvailable,
+    /**
+     * All package builds have been completed.
+     */
+    Done,
+}
+
+#[derive(Clone, Debug)]
+struct BuildJobs {
+    scanpkgs: HashMap<PkgName, ScanIndex>,
+    incoming: HashMap<PkgName, HashSet<PkgName>>,
+    running: HashSet<PkgName>,
+    done: HashSet<PkgName>,
+    failed: HashSet<PkgName>,
+}
+
+impl BuildJobs {
+    /**
+     * Mark a package as successful and remove it from pending dependencies.
+     */
+    fn mark_success(&mut self, pkgname: &PkgName) {
+        /*
+         * Remove the successful package from the list of dependencies in all
+         * packages it is listed in.  Once a package has no outstanding
+         * dependencies remaining it is ready for building.
+         */
+        for dep in self.incoming.values_mut() {
+            if dep.contains(pkgname) {
+                dep.remove(pkgname);
+            }
+        }
+        /*
+         * The package was already removed from "incoming" when it started
+         * building, so we only need to add it to "done".
+         */
+        self.done.insert(pkgname.clone());
+    }
+
+    /**
+     * Recursively mark a package and its dependents as failed.
+     */
+    fn mark_failure(&mut self, pkgname: &PkgName) {
+        let mut broken: HashSet<PkgName> = HashSet::new();
+        let mut to_check: Vec<PkgName> = vec![];
+        to_check.push(pkgname.clone());
+        /*
+         * Starting with the original failed package, recursively loop through
+         * adding any packages that depend on it, adding them to broken.
+         */
+        loop {
+            /* No packages left to check, we're done. */
+            let Some(badpkg) = to_check.pop() else {
+                break;
+            };
+            /* Already checked this package. */
+            if broken.contains(&badpkg) {
+                continue;
+            }
+            for (pkg, deps) in &self.incoming {
+                if deps.contains(&badpkg) {
+                    to_check.push(pkg.clone());
+                }
+            }
+            broken.insert(badpkg);
+        }
+        /*
+         * We now have a full HashSet of affected packages.  Remove them from
+         * incoming and move to failed.  The original failed package will
+         * already be removed from incoming, we rely on .remove() accepting
+         * this.
+         */
+        for pkg in broken {
+            self.incoming.remove(&pkg);
+            self.failed.insert(pkg);
+        }
+    }
+
+    /**
+     * Get next package status.
+     */
+    fn get_next_build(&self) -> BuildStatus {
+        /*
+         * If incoming is empty then we're done.
+         */
+        if self.incoming.is_empty() {
+            return BuildStatus::Done;
+        }
+
+        /*
+         * Get all packages in incoming that are cleared for building, ordered
+         * by weighting.
+         *
+         * TODO: weighting should be the sum of all transitive dependencies.
+         */
+        let mut pkgs: Vec<(PkgName, usize)> = self
+            .incoming
+            .iter()
+            .filter(|(_, v)| v.is_empty())
+            .map(|(k, _)| {
+                (
+                    k.clone(),
+                    self.scanpkgs
+                        .get(k)
+                        .unwrap()
+                        .pbulk_weight
+                        .clone()
+                        .unwrap_or("100".to_string())
+                        .parse()
+                        .unwrap_or(100),
+                )
+            })
+            .collect();
+
+        /*
+         * If no packages are returned then we're still waiting for
+         * dependencies to finish.  Clients should keep retrying until this
+         * changes.
+         */
+        if pkgs.is_empty() {
+            return BuildStatus::NoneAvailable;
+        }
+
+        /*
+         * Order packages by build weight and return the highest.
+         */
+        pkgs.sort_by_key(|&(_, weight)| std::cmp::Reverse(weight));
+        BuildStatus::Available(pkgs[0].0.clone())
+    }
 }
 
 impl Build {
@@ -74,22 +287,31 @@ impl Build {
         let progress =
             ProgressBar::new(0).with_prefix("Building").with_style(style);
 
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(self.threads)
-            .build()
-            .unwrap();
-
-        let mut status: HashMap<PkgName, HashSet<PkgName>> = HashMap::new();
+        /*
+         * Populate BuildJobs.
+         */
+        let mut incoming: HashMap<PkgName, HashSet<PkgName>> = HashMap::new();
         for (pkgname, index) in &self.scanpkgs {
             let mut deps: HashSet<PkgName> = HashSet::new();
             for dep in &index.depends {
                 deps.insert(dep.clone());
             }
-            status.insert(pkgname.clone(), deps);
+            incoming.insert(pkgname.clone(), deps);
         }
 
         // If the number of packages overflows a u64 then we have a problem!
-        progress.inc_length(status.len().try_into().unwrap());
+        progress.inc_length(incoming.len().try_into().unwrap());
+
+        let running: HashSet<PkgName> = HashSet::new();
+        let done: HashSet<PkgName> = HashSet::new();
+        let failed: HashSet<PkgName> = HashSet::new();
+        let jobs = BuildJobs {
+            scanpkgs: self.scanpkgs.clone(),
+            incoming,
+            running,
+            done,
+            failed,
+        };
 
         if self.sandbox.enabled() {
             for i in 0..self.threads {
@@ -97,46 +319,135 @@ impl Build {
             }
         }
 
-        loop {
-            /*
-             * Get all packages where the DEPENDS HashSet is empty, i.e. they
-             * are cleared for building.
-             */
-            let pkgs: Vec<PkgName> = status
-                .iter()
-                .filter(|(_, v)| v.is_empty())
-                .map(|(k, _)| k.clone())
-                .collect();
-            /*
-             * If no packages are available we're done.
-             *
-             * TODO: enum to distinguish busy from done
-             */
-            if pkgs.is_empty() {
-                assert!(status.is_empty());
-                break;
-            }
+        /*
+         * Configure a mananger channel.  This is used for clients to indicate
+         * to the manager that they are ready for work.
+         */
+        let (manager_tx, manager_rx) = mpsc::channel::<ChannelCommand>();
 
-            for pkg in pkgs {
-                progress.set_message(String::from(pkg.pkgname()));
-                progress.inc(1);
-                self.build_package(&pkg)?;
-                /*
-                 * Remove successful package from all DEPENDS.
-                 *
-                 * TODO: If failure, move all these packages recursively to
-                 * some other list.
-                 */
-                for entry in status.values_mut() {
-                    if entry.contains(&pkg) {
-                        entry.remove(&pkg);
+        /*
+         * Client threads.  Each client has its own channel to the manager,
+         * with the client sending ready status on the manager channel, and
+         * receiving instructions on its private channel.
+         */
+        let mut threads = vec![];
+        let mut clients: HashMap<usize, Sender<ChannelCommand>> =
+            HashMap::new();
+        for i in 0..self.threads {
+            let (client_tx, client_rx) = mpsc::channel::<ChannelCommand>();
+            clients.insert(i, client_tx);
+            let manager_tx = manager_tx.clone();
+            let progress = progress.clone();
+            let thread = std::thread::spawn(move || loop {
+                manager_tx.send(ChannelCommand::ClientReady(i)).unwrap();
+
+                let Ok(msg) = client_rx.recv() else {
+                    break;
+                };
+
+                match msg {
+                    ChannelCommand::ComeBackLater => {
+                        std::thread::sleep(Duration::from_millis(100));
+                        continue;
                     }
+                    ChannelCommand::JobData(pkg) => {
+                        let pkgname = pkg.pkginfo.pkgname.clone();
+                        progress.set_message(String::from(pkgname.pkgname()));
+                        match pkg.build() {
+                            Ok(0) => {
+                                manager_tx
+                                .send(ChannelCommand::JobSuccess(pkgname))
+                                .unwrap();
+                            }
+                            Ok(_) => {
+                                manager_tx
+                                .send(ChannelCommand::JobFailed(pkgname))
+                                .unwrap();
+                            }
+                            Err(e) => manager_tx
+                                .send(ChannelCommand::JobError((pkgname, e)))
+                                .unwrap(),
+                        }
+                        continue;
+                    }
+                    ChannelCommand::Quit => {
+                        break;
+                    }
+                    _ => todo!(),
                 }
-                /*
-                 * Remove this package from the current list.
-                 */
-                status.remove(&pkg);
+            });
+            threads.push(thread);
+        }
+
+        /*
+         * Manager thread.  Read incoming commands from clients and reply
+         * accordingly.
+         */
+        let pkgsrc = Arc::new(self.pkgsrc.clone());
+        let make = Arc::new(self.make.clone());
+        let sandbox = self.sandbox.clone();
+        let manager = std::thread::spawn(move || {
+            let mut clients = clients.clone();
+            let pkgsrc = Arc::clone(&pkgsrc);
+            let make = Arc::clone(&make);
+            let sandbox = sandbox.clone();
+            let mut jobs = jobs.clone();
+            for command in manager_rx {
+                match command {
+                    ChannelCommand::ClientReady(c) => {
+                        let client = clients.get(&c).unwrap();
+                        match jobs.get_next_build() {
+                            BuildStatus::Available(pkg) => {
+                                let pkginfo = jobs.scanpkgs.get(&pkg).unwrap();
+                                jobs.incoming.remove(&pkg);
+                                jobs.running.insert(pkg);
+                                client
+                                    .send(ChannelCommand::JobData(
+                                        Box::new(PackageBuild {
+                                            id: c,
+                                            pkgsrc: pkgsrc.to_path_buf(),
+                                            make: make.to_path_buf(),
+                                            pkginfo: pkginfo.clone(),
+                                            sandbox: sandbox.clone(),
+                                        },
+                                    )))
+                                    .unwrap();
+                            }
+                            BuildStatus::NoneAvailable => {
+                                client
+                                    .send(ChannelCommand::ComeBackLater)
+                                    .unwrap();
+                            }
+                            BuildStatus::Done => {
+                                client.send(ChannelCommand::Quit).unwrap();
+                                clients.remove(&c);
+                                if clients.is_empty() {
+                                    break;
+                                }
+                            }
+                        };
+                    }
+                    ChannelCommand::JobSuccess(pkgname) => {
+                        jobs.mark_success(&pkgname);
+                    }
+                    ChannelCommand::JobFailed(pkgname) => {
+                        jobs.mark_failure(&pkgname);
+                    }
+                    ChannelCommand::JobError((pkgname, e)) => {
+                        jobs.mark_failure(&pkgname);
+                        /*
+                         * TODO: do something about the error.
+                         */
+                        dbg!(&e);
+                    }
+                    _ => todo!(),
+                }
             }
+        });
+
+        threads.push(manager);
+        for thread in threads {
+            thread.join().expect("thread panicked");
         }
 
         if self.sandbox.enabled() {
@@ -154,27 +465,6 @@ impl Build {
             );
         }
 
-        Ok(())
-    }
-
-    fn build_package(&self, pkgname: &PkgName) -> anyhow::Result<()> {
-        let Some(index) = self.scanpkgs.get(pkgname) else {
-            bail!("ERROR: Inconsistency detected in pkgdata");
-        };
-        let Some(pkgpath) = &index.pkg_location else {
-            bail!("ERROR: Could not get PKGPATH for {}", pkgname.pkgname());
-        };
-        let _build_script = format!(
-            "cd {}/{} && {} package",
-            self.pkgsrc.display(),
-            pkgpath.as_path().display(),
-            self.make.display()
-        );
-        /*
-         * TODO: actually build! just fake work for now.
-         */
-        let duration = std::time::Duration::from_millis(100);
-        std::thread::sleep(duration);
         Ok(())
     }
 }
