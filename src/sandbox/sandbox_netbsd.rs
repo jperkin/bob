@@ -105,7 +105,7 @@ impl Sandbox {
         opts: &Vec<&str>,
     ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
-        let cmd = "/sbin/mount_nfs";
+        let cmd = "/sbin/mount_procfs";
         Ok(Some(
             Command::new(cmd)
                 .args(opts)
