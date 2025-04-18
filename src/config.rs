@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Jonathan Perkin <jonathan@perkin.org.uk>
+ * Copyright (c) 2025 Jonathan Perkin <jonathan@perkin.org.uk>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -23,9 +23,9 @@
 use crate::{Args, Sandbox};
 use pkgsrc::PkgPath;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fs;
-
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::exit;
 
 extern crate dirs;
@@ -46,6 +46,9 @@ pub struct Config {
 struct ConfigFile {
     options: Option<Options>,
     pkgsrc: Pkgsrc,
+    // The [scripts] section has special handling.  Parse input into a HashMap
+    // for processing during load.
+    scripts: HashMap<String, String>,
     sandbox: Option<Sandbox>,
 }
 
@@ -113,6 +116,41 @@ impl Config {
         };
 
         /*
+         * Parse scripts section.  "<key>_inline" values are parsed as inline
+         * scripts, while "<key>" values are parsed as a filename to load the
+         * script from (relative to config dir if not absolute).
+         *
+         * If a key is duplicated then issue a warning.  The ordering is
+         * non-deterministic due to using a HashMap.  The toml parser ensures
+         * that a key cannot be specified more than once.
+         */
+        let mut newscripts: HashMap<String, String> = HashMap::new();
+        for (k, v) in &config.file.scripts {
+            let (newk, newv) = if k.ends_with("_inline") {
+                (k.trim_end_matches("_inline").to_string(), v.clone())
+            } else {
+                let spath = Path::new(v);
+                let sfullpath = if spath.is_relative() {
+                    &config.filename.parent().unwrap().join(spath)
+                } else {
+                    spath
+                };
+                (k.clone(), fs::read_to_string(sfullpath)?)
+            };
+            if newscripts.contains_key(&newk) {
+                eprintln!(
+                    "WARNING: Duplicate script key for '{}', using '{}'.",
+                    &newk, &k
+                );
+            }
+            newscripts.insert(newk, newv);
+        }
+        /*
+         * Overwrite scripts map, we're done with the input.
+         */
+        config.file.scripts = newscripts;
+
+        /*
          * Set any top-level Config variables that can be set either via the
          * command line or configuration file, preferring command line options.
          */
@@ -139,6 +177,10 @@ impl Config {
         } else {
             1
         }
+    }
+
+    pub fn script(&self, key: &str) -> Option<&String> {
+        self.file.scripts.get(key)
     }
 
     pub fn make(&self) -> &PathBuf {
