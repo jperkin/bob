@@ -77,12 +77,7 @@ fn main() -> Result<()> {
                 Some(s) => s.clone(),
                 None => Sandbox::new(),
             };
-            let mut scan = Scan::new(
-                config.pkgsrc(),
-                config.make(),
-                config.scan_threads(),
-                sandbox.clone(),
-            );
+            let mut scan = Scan::new(&config, sandbox.clone());
             if let Some(pkgs) = config.pkgpaths() {
                 for p in pkgs {
                     scan.add(p);
@@ -90,13 +85,7 @@ fn main() -> Result<()> {
             }
             scan.start()?;
             let scanpkgs = scan.resolve()?;
-            let mut build = Build::new(
-                config.pkgsrc(),
-                config.make(),
-                config.build_threads(),
-                sandbox,
-                scanpkgs.clone(),
-            );
+            let mut build = Build::new(&config, sandbox, scanpkgs.clone());
             build.start()?;
         }
         Cmd::Sandbox { cmd: SandboxCmd::Create } => {
@@ -125,12 +114,7 @@ fn main() -> Result<()> {
                 Some(s) => s.clone(),
                 None => Sandbox::new(),
             };
-            let mut scan = Scan::new(
-                config.pkgsrc(),
-                config.make(),
-                config.scan_threads(),
-                sandbox.clone(),
-            );
+            let mut scan = Scan::new(&config, sandbox.clone());
             if let Some(pkgs) = config.pkgpaths() {
                 for p in pkgs {
                     scan.add(p);

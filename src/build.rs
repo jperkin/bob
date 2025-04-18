@@ -14,31 +14,22 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-use crate::Sandbox;
+use crate::{Config, Sandbox};
 use anyhow::{bail, Context};
 use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressStyle};
 use pkgsrc::{PkgName, ScanIndex};
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{mpsc, mpsc::Sender, Arc};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Default)]
 pub struct Build {
     /**
-     * Location of pkgsrc
+     * Parsed [`Config`].
      */
-    pkgsrc: PathBuf,
-    /**
-     * Path to `make` or `bmake` executable.
-     */
-    make: PathBuf,
-    /**
-     * Number of parallel make threads to execute (effectively the number
-     * of sandboxes to create).
-     */
-    threads: usize,
+    config: Config,
     /**
      * [`Sandbox`] configuration.
      */
@@ -263,19 +254,11 @@ impl BuildJobs {
 
 impl Build {
     pub fn new(
-        path: &Path,
-        make: &Path,
-        threads: usize,
+        config: &Config,
         sandbox: Sandbox,
         scanpkgs: HashMap<PkgName, ScanIndex>,
     ) -> Build {
-        Build {
-            pkgsrc: path.to_path_buf(),
-            make: make.to_path_buf(),
-            threads,
-            sandbox,
-            scanpkgs,
-        }
+        Build { config: config.clone(), sandbox, scanpkgs }
     }
 
     pub fn start(&mut self) -> anyhow::Result<()> {
@@ -315,7 +298,7 @@ impl Build {
         };
 
         if self.sandbox.enabled() {
-            for i in 0..self.threads {
+            for i in 0..self.config.build_threads() {
                 self.sandbox.create(i)?;
             }
         }
@@ -334,7 +317,7 @@ impl Build {
         let mut threads = vec![];
         let mut clients: HashMap<usize, Sender<ChannelCommand>> =
             HashMap::new();
-        for i in 0..self.threads {
+        for i in 0..self.config.build_threads() {
             let (client_tx, client_rx) = mpsc::channel::<ChannelCommand>();
             clients.insert(i, client_tx);
             let manager_tx = manager_tx.clone();
@@ -382,8 +365,8 @@ impl Build {
          * Manager thread.  Read incoming commands from clients and reply
          * accordingly.
          */
-        let pkgsrc = Arc::new(self.pkgsrc.clone());
-        let make = Arc::new(self.make.clone());
+        let pkgsrc = Arc::new(self.config.pkgsrc().clone());
+        let make = Arc::new(self.config.make().clone());
         let sandbox = self.sandbox.clone();
         let manager = std::thread::spawn(move || {
             let mut clients = clients.clone();
@@ -475,7 +458,7 @@ impl Build {
         }
 
         if self.sandbox.enabled() {
-            for i in 0..self.threads {
+            for i in 0..self.config.build_threads() {
                 self.sandbox.destroy(i)?;
             }
         }

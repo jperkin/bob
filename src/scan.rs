@@ -14,7 +14,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-use crate::Sandbox;
+use crate::{Config, Sandbox};
 use anyhow::{bail, Context, Result};
 use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressStyle};
 use petgraph::algo::toposort;
@@ -23,24 +23,15 @@ use pkgsrc::{Depend, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[derive(Debug, Default)]
 pub struct Scan {
     /**
-     * Location of pkgsrc
+     * Parsed [`Config`].
      */
-    pkgsrc: PathBuf,
-    /**
-     * Path to `make` or `bmake` executable.
-     */
-    make: PathBuf,
-    /**
-     * Number of parallel make threads to execute.
-     */
-    threads: usize,
+    config: Config,
     /**
      * [`Sandbox`] configuration.
      */
@@ -62,19 +53,8 @@ pub struct Scan {
 }
 
 impl Scan {
-    pub fn new(
-        path: &Path,
-        make: &Path,
-        threads: usize,
-        sandbox: Sandbox,
-    ) -> Scan {
-        Scan {
-            pkgsrc: path.to_path_buf(),
-            make: make.to_path_buf(),
-            threads,
-            sandbox,
-            ..Default::default()
-        }
+    pub fn new(config: &Config, sandbox: Sandbox) -> Scan {
+        Scan { config: config.clone(), sandbox, ..Default::default() }
     }
 
     pub fn add(&mut self, pkgpath: &PkgPath) {
@@ -92,7 +72,7 @@ impl Scan {
             ProgressBar::new(0).with_prefix("Scanning").with_style(style);
 
         rayon::ThreadPoolBuilder::new()
-            .num_threads(self.threads)
+            .num_threads(self.config.scan_threads())
             .build()
             .unwrap();
 
@@ -214,11 +194,11 @@ impl Scan {
         &self,
         pkgpath: &PkgPath,
     ) -> anyhow::Result<Vec<ScanIndex>> {
-        let pkgdir = self.pkgsrc.join(pkgpath.as_path());
+        let pkgdir = self.config.pkgsrc().join(pkgpath.as_path());
         let script = format!(
             "cd {} && {} pbulk-index",
             pkgdir.display(),
-            &self.make.display()
+            &self.config.make().display()
         );
         let child = self.sandbox.execute(0, &script)?;
         let output = child.wait_with_output()?;
