@@ -19,9 +19,9 @@ use anyhow::{bail, Context};
 use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressStyle};
 use pkgsrc::{PkgName, ScanIndex};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write;
 use std::io::Read;
-use std::path::PathBuf;
-use std::sync::{mpsc, mpsc::Sender, Arc};
+use std::sync::{mpsc, mpsc::Sender};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Default)]
@@ -43,8 +43,7 @@ pub struct Build {
 #[derive(Debug)]
 struct PackageBuild {
     id: usize,
-    pkgsrc: PathBuf,
-    make: PathBuf,
+    config: Config,
     pkginfo: ScanIndex,
     sandbox: Sandbox,
 }
@@ -53,17 +52,24 @@ impl PackageBuild {
     fn build(&self) -> anyhow::Result<i32> {
         let pkgname = self.pkginfo.pkgname.pkgname();
         let Some(pkgpath) = &self.pkginfo.pkg_location else {
-            bail!("ERROR: Could not get PKGPATH for {}", pkgname);
+            bail!("Could not get PKGPATH for {}", pkgname);
         };
-        /*
-         * TODO: actually build stuff ;)
-         */
-        let build_script = format!(
-            "cd {}/{} && {} -v PKGPATH",
-            self.pkgsrc.display(),
-            pkgpath.as_path().display(),
-            self.make.display()
-        );
+        let envs = vec![
+            ("BOB_BMAKE", format!("{}", self.config.make().display())),
+            ("BOB_PKGPATH", format!("{}", pkgpath.as_path().display())),
+            ("BOB_PKGSRCDIR", format!("{}", self.config.pkgsrc().display())),
+        ];
+        let Some(pkg_build) = &self.config.script("pkg-build") else {
+            bail!("No pkg-build script defined");
+        };
+        let mut build_script = String::new();
+        for (key, val) in &envs {
+            writeln!(build_script, "{}='{}'", key, val)?;
+        }
+        for (key, _) in &envs {
+            writeln!(build_script, "export {}", key)?;
+        }
+        build_script.push_str(pkg_build);
         let mut child = self.sandbox.execute(self.id, &build_script)?;
         let mut stdout =
             child.stdout.take().context("Could not read stdout")?;
@@ -365,13 +371,11 @@ impl Build {
          * Manager thread.  Read incoming commands from clients and reply
          * accordingly.
          */
-        let pkgsrc = Arc::new(self.config.pkgsrc().clone());
-        let make = Arc::new(self.config.make().clone());
+        let config = self.config.clone();
         let sandbox = self.sandbox.clone();
         let manager = std::thread::spawn(move || {
             let mut clients = clients.clone();
-            let pkgsrc = Arc::clone(&pkgsrc);
-            let make = Arc::clone(&make);
+            let config = config.clone();
             let sandbox = sandbox.clone();
             let mut jobs = jobs.clone();
 
@@ -398,8 +402,7 @@ impl Build {
                                     .send(ChannelCommand::JobData(Box::new(
                                         PackageBuild {
                                             id: c,
-                                            pkgsrc: pkgsrc.to_path_buf(),
-                                            make: make.to_path_buf(),
+                                            config: config.clone(),
                                             pkginfo: pkginfo.clone(),
                                             sandbox: sandbox.clone(),
                                         },

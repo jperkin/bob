@@ -22,6 +22,7 @@ use petgraph::graphmap::DiGraphMap;
 use pkgsrc::{Depend, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write;
 use std::io::BufReader;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -194,13 +195,23 @@ impl Scan {
         &self,
         pkgpath: &PkgPath,
     ) -> anyhow::Result<Vec<ScanIndex>> {
-        let pkgdir = self.config.pkgsrc().join(pkgpath.as_path());
-        let script = format!(
-            "cd {} && {} pbulk-index",
-            pkgdir.display(),
-            &self.config.make().display()
-        );
-        let child = self.sandbox.execute(0, &script)?;
+        let envs = vec![
+            ("BOB_BMAKE", format!("{}", self.config.make().display())),
+            ("BOB_PKGPATH", format!("{}", pkgpath.as_path().display())),
+            ("BOB_PKGSRCDIR", format!("{}", self.config.pkgsrc().display())),
+        ];
+        let Some(pkg_scan) = &self.config.script("pkg-scan") else {
+            bail!("No pkg-scan script defined");
+        };
+        let mut scan_script = String::new();
+        for (key, val) in &envs {
+            writeln!(scan_script, "{}='{}'", key, val)?;
+        }
+        for (key, _) in &envs {
+            writeln!(scan_script, "export {}", key)?;
+        }
+        scan_script.push_str(pkg_scan);
+        let child = self.sandbox.execute(0, &scan_script)?;
         let output = child.wait_with_output()?;
         let reader = BufReader::new(&output.stdout[..]);
         let mut index = ScanIndex::from_reader(reader)?;

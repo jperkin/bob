@@ -22,6 +22,16 @@ pkgpaths = [
 ]
 
 #
+# Shell scripts used for different stages.  Keys ending "_inline" will use
+# the specified inline script, otherwise the value is a filename (relative
+# to the directory that the config was loaded from if not absolute) that will
+# be read in.
+#
+[scripts]
+pkg-scan = "pkg-scan"
+pkg-build = "pkg-build"
+
+#
 # The sandbox section defines where sandboxes should be created, and how file
 # systems and ancilliary data should be created.
 #
