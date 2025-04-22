@@ -44,12 +44,12 @@ pkg-build = "pkg-build"
 [sandbox]
 basedir = "/chroot"
 mounts = [
-	{ fs = "bind", dest = "/dev" },
+	{ fs = "lofs", dest = "/dev" },
 	{ fs = "fd",   dest = "/dev/fd" },
 	{ fs = "proc", dest = "/proc" },
 	{ fs = "tmp",  dest = "/tmp", opts = "-o size=1024k" },
 	{ fs = "tmp",  dest = "/var/tmp" },
-	{ fs = "bind", dest = "/lib" },
-	{ fs = "bind", dest = "/sbin" },
-	{ fs = "bind", dest = "/usr" },
+	{ fs = "lofs", dest = "/lib" },
+	{ fs = "lofs", dest = "/sbin" },
+	{ fs = "lofs", dest = "/usr" },
 ]
