@@ -1,0 +1,23 @@
+#
+# Generic configuration file for unsupported systems.  Does not provide an
+# example [sandbox] section as it is highly OS-specific.
+#
+
+#
+# General configuration variables.
+#
+[options]
+build_threads = 4
+scan_threads = 4
+verbose = true
+
+#
+# Variables that configure pkgsrc, where it is, what packages to build, etc.
+#
+[pkgsrc]
+basedir = "/usr/pkgsrc"
+make = "/usr/pkg/bin/bmake"
+pkgpaths = [
+	"mail/mutt",
+	"sysutils/coreutils",
+]

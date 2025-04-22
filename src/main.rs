@@ -16,12 +16,14 @@
 
 mod build;
 mod config;
+mod init;
 mod mount;
 mod sandbox;
 mod scan;
 
 use crate::build::Build;
 use crate::config::Config;
+use crate::init::Init;
 use crate::sandbox::Sandbox;
 use crate::scan::Scan;
 use anyhow::Result;
@@ -48,6 +50,8 @@ pub struct Args {
 enum Cmd {
     /// Build all packages as defined by the configuration file
     Build,
+    /// Create a new configuration area
+    Init { dir: PathBuf },
     /// Create and destroy build sandboxes
     Sandbox {
         #[command(subcommand)]
@@ -69,10 +73,10 @@ enum SandboxCmd {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let config = Config::load(&args)?;
 
     match args.cmd {
         Cmd::Build => {
+            let config = Config::load(&args)?;
             let sandbox = match config.sandbox() {
                 Some(s) => s.clone(),
                 None => Sandbox::new(),
@@ -88,7 +92,11 @@ fn main() -> Result<()> {
             let mut build = Build::new(&config, sandbox, scanpkgs.clone());
             build.start()?;
         }
+        Cmd::Init { dir: ref arg } => {
+            Init::create(arg)?;
+        }
         Cmd::Sandbox { cmd: SandboxCmd::Create } => {
+            let config = Config::load(&args)?;
             if let Some(s) = &config.sandbox() {
                 if config.verbose() {
                     println!("Creating sandboxes");
@@ -97,6 +105,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Sandbox { cmd: SandboxCmd::Destroy } => {
+            let config = Config::load(&args)?;
             if let Some(s) = &config.sandbox() {
                 if config.verbose() {
                     println!("Destroying sandboxes");
@@ -105,11 +114,13 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Sandbox { cmd: SandboxCmd::List } => {
+            let config = Config::load(&args)?;
             if let Some(s) = &config.sandbox() {
                 s.list_all(config.build_threads());
             }
         }
         Cmd::Scan => {
+            let config = Config::load(&args)?;
             let sandbox = match config.sandbox() {
                 Some(s) => s.clone(),
                 None => Sandbox::new(),
