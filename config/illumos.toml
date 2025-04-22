@@ -52,4 +52,5 @@ mounts = [
 	{ fs = "lofs", dest = "/lib" },
 	{ fs = "lofs", dest = "/sbin" },
 	{ fs = "lofs", dest = "/usr" },
+	{ fs = "lofs", dest = "/bin", src = "/usr/bin" },
 ]
