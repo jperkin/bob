@@ -32,7 +32,7 @@ pkg-scan = "pkg-scan"
 pkg-build = "pkg-build"
 
 #
-# The sandbox section defines where sandboxes should be created, and how file
+# The sandboxes section defines where sandboxes should be created, and how file
 # systems and ancilliary data should be created.
 #
 # The number of sandboxes that will be created is build_threads if set,
@@ -41,7 +41,7 @@ pkg-build = "pkg-build"
 # During creation the mounts list is processed in order, and when destroying
 # sandboxes it is processed in reverse order.
 #
-[sandbox]
+[sandboxes]
 basedir = "/data/chroot"
 mounts = [
 	{ fs = "dev",  dest = "/dev" },

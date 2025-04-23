@@ -1,6 +1,6 @@
 #
 # Generic configuration file for unsupported systems.  Does not provide an
-# example [sandbox] section as it is highly OS-specific.
+# example [sandboxes] section as it is highly OS-specific.
 #
 
 #

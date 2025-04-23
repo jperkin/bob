@@ -26,52 +26,49 @@ mod sandbox_netbsd;
 #[cfg(any(target_os = "illumos", target_os = "solaris"))]
 mod sandbox_sunos;
 
-use crate::mount;
+use crate::config::Config;
+use crate::mount::FSType;
 use anyhow::{bail, Result};
-use serde_derive::Deserialize;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 /**
- * Sandbox creation and handling.
+ * [Sandbox] implementation.
  */
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default)]
 pub struct Sandbox {
-    basedir: PathBuf,
-    chroot: Option<bool>,
-    mounts: Option<Vec<mount::Mount>>,
+    config: Config,
 }
 
 impl Sandbox {
     /**
-     * Create an empty [`Sandbox`].  This isn't as useless as it sounds - by
-     * directing all operations via the sandbox we can do things like call
-     * [`execute`] as a unified interface whether using chroots or not, and
-     * allow testing and development to just run things directly rather than
-     * requiring root access.
+     * Create a new [`Sandbox`] instance.  This is used even if sandboxes have
+     * not been enabled, as it provides a consistent interface to run commands
+     * through using [`execute`].  If sandboxes are enabled then commands are
+     * executed via `chroot(8)`, otherwise they are executed directly.
      *
      * [`execute`]: Sandbox::execute
      */
-    pub fn new() -> Sandbox {
-        Sandbox { chroot: Some(false), ..Default::default() }
+    pub fn new(config: &Config) -> Sandbox {
+        Sandbox { config: config.clone() }
     }
 
     /**
      * Return whether sandboxes have been enabled.  This is based on whether
-     * a valid basedir has been passed, and will be disabled for fake sandboxes
-     * used during testing.
+     * a valid [sandboxes] section has been specified in the config file.
      */
     pub fn enabled(&self) -> bool {
-        !self.basedir.as_os_str().is_empty()
+        self.config.sandboxes().is_some()
     }
 
     /**
      * Return full path to a sandbox by id.
      */
-    pub fn path(&self, id: usize) -> PathBuf {
-        let mut p = PathBuf::from(&self.basedir);
+    fn path(&self, id: usize) -> PathBuf {
+        let sandbox = &self.config.sandboxes().as_ref().unwrap();
+        let mut p = PathBuf::from(&sandbox.basedir);
         p.push(id.to_string());
         p
     }
@@ -79,7 +76,7 @@ impl Sandbox {
     /**
      * Return full path to a specified mount point in a sandbox.
      */
-    pub fn mountpath(&self, id: usize, mnt: &PathBuf) -> PathBuf {
+    fn mountpath(&self, id: usize, mnt: &PathBuf) -> PathBuf {
         /*
          * Note that .push() on a PathBuf will replace the path if
          * it is absolute, so we need to trim any leading "/".
@@ -127,20 +124,11 @@ impl Sandbox {
         Ok(())
     }
 
-    /*
-     * Internal test for whether chroots have been enabled.  Really the only
-     * use for this is to test a [sandbox] section with mounts that the user
-     * can apply but skip the actual chroot commands via execute().
-     */
-    fn chrooted(&self) -> bool {
-        self.chroot.unwrap_or(true)
-    }
-
     /**
      * Execute the supplied script.  If [`Sandbox`] is fully specified then
      */
     pub fn execute(&self, id: usize, script: &str) -> Result<Child> {
-        let mut child = if self.chrooted() {
+        let mut child = if self.enabled() {
             Command::new("/usr/sbin/chroot")
                 .current_dir("/")
                 .arg(self.path(id))
@@ -162,9 +150,10 @@ impl Sandbox {
         });
         Ok(child)
     }
-    ///
-    /// Destroy a single sandbox by id.
-    ///
+
+    /**
+     * Destroy a single sandbox by id.
+     */
     pub fn destroy(&self, id: usize) -> anyhow::Result<()> {
         let sandbox = self.path(id);
         if !sandbox.exists() {
@@ -178,9 +167,9 @@ impl Sandbox {
         Ok(())
     }
 
-    ///
-    /// Create all sandboxes.
-    ///
+    /**
+     * Create all sandboxes.
+     */
     pub fn create_all(&self, count: usize) -> Result<()> {
         for i in 0..count {
             self.create(i)?;
@@ -188,9 +177,9 @@ impl Sandbox {
         Ok(())
     }
 
-    ///
-    /// Destroy all sandboxes.
-    ///
+    /**
+     * Destroy all sandboxes.
+     */
     pub fn destroy_all(&self, count: usize) -> Result<()> {
         for i in 0..count {
             self.destroy(i)?;
@@ -198,9 +187,9 @@ impl Sandbox {
         Ok(())
     }
 
-    ///
-    /// List all sandboxes.
-    ///
+    /**
+     * List all sandboxes.
+     */
     pub fn list_all(&self, count: usize) {
         for i in 0..count {
             let sandbox = self.path(i);
@@ -247,44 +236,37 @@ impl Sandbox {
     /// point a problem is encountered we immediately bail.
     ///
     fn mount(&self, id: usize) -> Result<()> {
-        if let Some(mounts) = &self.mounts {
-            for m in mounts.iter() {
-                /* src is optional, and defaults to dest */
-                let mntsrc = match m.src() {
-                    Some(s) => s,
-                    None => m.dest(),
-                };
-                let mntdest = self.mountpath(id, m.dest());
-                let mut mntopts = vec![];
-                if let Some(opts) = m.opts() {
-                    for opt in opts.split(' ').collect::<Vec<&str>>() {
-                        mntopts.push(opt);
-                    }
+        let Some(sandbox) = &self.config.sandboxes() else {
+            bail!("Internal error: trying to mount when sandboxes disabled.");
+        };
+        for m in sandbox.mounts.iter() {
+            /* src is optional, and defaults to dest */
+            let mntsrc = match m.src() {
+                Some(s) => s,
+                None => m.dest(),
+            };
+            let mntdest = self.mountpath(id, m.dest());
+            let mut mntopts = vec![];
+            if let Some(opts) = m.opts() {
+                for opt in opts.split(' ').collect::<Vec<&str>>() {
+                    mntopts.push(opt);
                 }
-                let status = match m.fstype()? {
-                    mount::FSType::Bind => {
-                        self.mount_bindfs(mntsrc, &mntdest, &mntopts)?
-                    }
-                    mount::FSType::Dev => {
-                        self.mount_devfs(mntsrc, &mntdest, &mntopts)?
-                    }
-                    mount::FSType::Fd => {
-                        self.mount_fdfs(mntsrc, &mntdest, &mntopts)?
-                    }
-                    mount::FSType::Nfs => {
-                        self.mount_nfs(mntsrc, &mntdest, &mntopts)?
-                    }
-                    mount::FSType::Proc => {
-                        self.mount_procfs(mntsrc, &mntdest, &mntopts)?
-                    }
-                    mount::FSType::Tmp => {
-                        self.mount_tmpfs(mntsrc, &mntdest, &mntopts)?
-                    }
-                };
-                if let Some(s) = status {
-                    if !s.success() {
-                        bail!("Sandbox creation failed");
-                    }
+            }
+            let status = match m.fstype()? {
+                FSType::Bind => {
+                    self.mount_bindfs(mntsrc, &mntdest, &mntopts)?
+                }
+                FSType::Dev => self.mount_devfs(mntsrc, &mntdest, &mntopts)?,
+                FSType::Fd => self.mount_fdfs(mntsrc, &mntdest, &mntopts)?,
+                FSType::Nfs => self.mount_nfs(mntsrc, &mntdest, &mntopts)?,
+                FSType::Proc => {
+                    self.mount_procfs(mntsrc, &mntdest, &mntopts)?
+                }
+                FSType::Tmp => self.mount_tmpfs(mntsrc, &mntdest, &mntopts)?,
+            };
+            if let Some(s) = status {
+                if !s.success() {
+                    bail!("Sandbox creation failed");
                 }
             }
         }
@@ -292,41 +274,42 @@ impl Sandbox {
     }
 
     fn unmount(&self, id: usize) -> anyhow::Result<()> {
-        if let Some(mounts) = &self.mounts {
-            for m in mounts.iter().rev() {
-                let mntdest = self.mountpath(id, m.dest());
-                /*
-                 * If the mount point itself does not exist then do not try to
-                 * unmount it, but do try to clean up any empty parent
-                 * directories up to the root.
-                 */
-                if !mntdest.exists() {
-                    self.remove_empty_dirs(id, &mntdest);
-                    continue;
-                }
-
-                /*
-                 * Before trying to unmount, try just removing the directory,
-                 * in case it was never mounted in the first place.  Avoids
-                 * errors trying to unmount a file system that isn't mounted.
-                 */
-                if fs::remove_dir(&mntdest).is_ok() {
-                    continue;
-                }
-
-                /*
-                 * Report failures but don't bail.
-                 */
-                match m.fstype()? {
-                    mount::FSType::Bind => self.unmount_bindfs(&mntdest)?,
-                    mount::FSType::Dev => self.unmount_devfs(&mntdest)?,
-                    mount::FSType::Fd => self.unmount_fdfs(&mntdest)?,
-                    mount::FSType::Nfs => self.unmount_nfs(&mntdest)?,
-                    mount::FSType::Proc => self.unmount_procfs(&mntdest)?,
-                    mount::FSType::Tmp => self.unmount_tmpfs(&mntdest)?,
-                };
+        let Some(sandbox) = &self.config.sandboxes() else {
+            bail!("Internal error: trying to unmount when sandboxes disabled.");
+        };
+        for m in sandbox.mounts.iter().rev() {
+            let mntdest = self.mountpath(id, m.dest());
+            /*
+             * If the mount point itself does not exist then do not try to
+             * unmount it, but do try to clean up any empty parent
+             * directories up to the root.
+             */
+            if !mntdest.exists() {
                 self.remove_empty_dirs(id, &mntdest);
+                continue;
             }
+
+            /*
+             * Before trying to unmount, try just removing the directory,
+             * in case it was never mounted in the first place.  Avoids
+             * errors trying to unmount a file system that isn't mounted.
+             */
+            if fs::remove_dir(&mntdest).is_ok() {
+                continue;
+            }
+
+            /*
+             * Report failures but don't bail.
+             */
+            match m.fstype()? {
+                FSType::Bind => self.unmount_bindfs(&mntdest)?,
+                FSType::Dev => self.unmount_devfs(&mntdest)?,
+                FSType::Fd => self.unmount_fdfs(&mntdest)?,
+                FSType::Nfs => self.unmount_nfs(&mntdest)?,
+                FSType::Proc => self.unmount_procfs(&mntdest)?,
+                FSType::Tmp => self.unmount_tmpfs(&mntdest)?,
+            };
+            self.remove_empty_dirs(id, &mntdest);
         }
         Ok(())
     }

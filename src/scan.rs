@@ -54,8 +54,8 @@ pub struct Scan {
 }
 
 impl Scan {
-    pub fn new(config: &Config, sandbox: Sandbox) -> Scan {
-        Scan { config: config.clone(), sandbox, ..Default::default() }
+    pub fn new(config: &Config) -> Scan {
+        Scan { config: config.clone(), ..Default::default() }
     }
 
     pub fn add(&mut self, pkgpath: &PkgPath) {

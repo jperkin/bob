@@ -20,7 +20,8 @@
  * Config struct that combines the two for the rest of the program to use.
  */
 
-use crate::{Args, Sandbox};
+use crate::mount;
+use crate::Args;
 use pkgsrc::PkgPath;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -49,7 +50,7 @@ struct ConfigFile {
     // The [scripts] section has special handling.  Parse input into a HashMap
     // for processing during load.
     scripts: HashMap<String, String>,
-    sandbox: Option<Sandbox>,
+    sandboxes: Option<Sandboxes>,
 }
 
 ///
@@ -71,6 +72,15 @@ pub struct Pkgsrc {
     basedir: PathBuf,
     make: PathBuf,
     pkgpaths: Option<Vec<PkgPath>>,
+}
+
+///
+/// Optional sandboxes section
+///
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Sandboxes {
+    pub basedir: PathBuf,
+    pub mounts: Vec<mount::Mount>,
 }
 
 impl Config {
@@ -195,8 +205,8 @@ impl Config {
         &self.file.pkgsrc.basedir
     }
 
-    pub fn sandbox(&self) -> &Option<Sandbox> {
-        &self.file.sandbox
+    pub fn sandboxes(&self) -> &Option<Sandboxes> {
+        &self.file.sandboxes
     }
 
     pub fn verbose(&self) -> bool {

@@ -261,9 +261,9 @@ impl BuildJobs {
 impl Build {
     pub fn new(
         config: &Config,
-        sandbox: Sandbox,
         scanpkgs: HashMap<PkgName, ScanIndex>,
     ) -> Build {
+        let sandbox = Sandbox::new(config);
         Build { config: config.clone(), sandbox, scanpkgs }
     }
 

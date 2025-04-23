@@ -26,7 +26,7 @@ use crate::config::Config;
 use crate::init::Init;
 use crate::sandbox::Sandbox;
 use crate::scan::Scan;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::str;
@@ -77,11 +77,7 @@ fn main() -> Result<()> {
     match args.cmd {
         Cmd::Build => {
             let config = Config::load(&args)?;
-            let sandbox = match config.sandbox() {
-                Some(s) => s.clone(),
-                None => Sandbox::new(),
-            };
-            let mut scan = Scan::new(&config, sandbox.clone());
+            let mut scan = Scan::new(&config);
             if let Some(pkgs) = config.pkgpaths() {
                 for p in pkgs {
                     scan.add(p);
@@ -89,7 +85,7 @@ fn main() -> Result<()> {
             }
             scan.start()?;
             let scanpkgs = scan.resolve()?;
-            let mut build = Build::new(&config, sandbox, scanpkgs.clone());
+            let mut build = Build::new(&config, scanpkgs.clone());
             build.start()?;
         }
         Cmd::Init { dir: ref arg } => {
@@ -97,35 +93,37 @@ fn main() -> Result<()> {
         }
         Cmd::Sandbox { cmd: SandboxCmd::Create } => {
             let config = Config::load(&args)?;
-            if let Some(s) = &config.sandbox() {
-                if config.verbose() {
-                    println!("Creating sandboxes");
-                }
-                s.create_all(config.build_threads())?;
+            let sandbox = Sandbox::new(&config);
+            if !sandbox.enabled() {
+                bail!("No sandboxes configured");
             }
+            if config.verbose() {
+                println!("Creating sandboxes");
+            }
+            sandbox.create_all(config.build_threads())?;
         }
         Cmd::Sandbox { cmd: SandboxCmd::Destroy } => {
             let config = Config::load(&args)?;
-            if let Some(s) = &config.sandbox() {
-                if config.verbose() {
-                    println!("Destroying sandboxes");
-                }
-                s.destroy_all(config.build_threads())?;
+            let sandbox = Sandbox::new(&config);
+            if !sandbox.enabled() {
+                bail!("No sandboxes configured");
             }
+            if config.verbose() {
+                println!("Destroying sandboxes");
+            }
+            sandbox.destroy_all(config.build_threads())?;
         }
         Cmd::Sandbox { cmd: SandboxCmd::List } => {
             let config = Config::load(&args)?;
-            if let Some(s) = &config.sandbox() {
-                s.list_all(config.build_threads());
+            let sandbox = Sandbox::new(&config);
+            if !sandbox.enabled() {
+                bail!("No sandboxes configured");
             }
+            sandbox.list_all(config.build_threads());
         }
         Cmd::Scan => {
             let config = Config::load(&args)?;
-            let sandbox = match config.sandbox() {
-                Some(s) => s.clone(),
-                None => Sandbox::new(),
-            };
-            let mut scan = Scan::new(&config, sandbox.clone());
+            let mut scan = Scan::new(&config);
             if let Some(pkgs) = config.pkgpaths() {
                 for p in pkgs {
                     scan.add(p);
