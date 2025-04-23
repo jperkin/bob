@@ -17,7 +17,6 @@
 use crate::{Config, Sandbox};
 use anyhow::{bail, Context, Result};
 use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressStyle};
-use petgraph::algo::toposort;
 use petgraph::graphmap::DiGraphMap;
 use pkgsrc::{Depend, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
@@ -326,16 +325,61 @@ impl Scan {
                 graph.add_edge(dep.pkgname(), pkgname.pkgname(), ());
             }
         }
-        match toposort(&graph, None) {
-            Ok(_) => {}
-            Err(e) => {
-                /*
-                 * TODO: This does not yet print the full cycle.
-                 */
-                bail!("Circular dependencies detected via {}", e.node_id());
+        if let Some(cycle) = find_cycle(&graph) {
+            let mut err = "Circular dependencies detected:\n".to_string();
+            for n in cycle.iter().rev() {
+                err.push_str(&format!("\t{}\n", n));
             }
-        };
+            err.push_str(&format!("\t{}", cycle.last().unwrap()));
+            bail!(err);
+        }
 
         Ok(&self.resolved)
     }
+}
+
+pub fn find_cycle<'a>(
+    graph: &'a DiGraphMap<&'a str, ()>,
+) -> Option<Vec<&'a str>> {
+    let mut visited = HashSet::new();
+    let mut in_stack = HashSet::new();
+    let mut stack = Vec::new();
+
+    for node in graph.nodes() {
+        if visited.contains(&node) {
+            continue;
+        }
+        let cycle = dfs(graph, node, &mut visited, &mut stack, &mut in_stack);
+        if cycle.is_some() {
+            return cycle;
+        }
+    }
+    None
+}
+
+fn dfs<'a>(
+    graph: &'a DiGraphMap<&'a str, ()>,
+    node: &'a str,
+    visited: &mut HashSet<&'a str>,
+    stack: &mut Vec<&'a str>,
+    in_stack: &mut HashSet<&'a str>,
+) -> Option<Vec<&'a str>> {
+    visited.insert(node);
+    stack.push(node);
+    in_stack.insert(node);
+    for neighbor in graph.neighbors(node) {
+        if in_stack.contains(neighbor) {
+            if let Some(pos) = stack.iter().position(|&n| n == neighbor) {
+                return Some(stack[pos..].to_vec());
+            }
+        } else if !visited.contains(neighbor) {
+            let cycle = dfs(graph, neighbor, visited, stack, in_stack);
+            if cycle.is_some() {
+                return cycle;
+            }
+        }
+    }
+    stack.pop();
+    in_stack.remove(node);
+    None
 }
