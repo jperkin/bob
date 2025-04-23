@@ -29,5 +29,5 @@ pkgpaths = [
 # be read in.
 #
 [scripts]
-pkg-scan = "pkg-scan"
-pkg-build = "pkg-build"
+pkg-scan = "scripts/pkg-scan"
+pkg-build = "scripts/pkg-build"

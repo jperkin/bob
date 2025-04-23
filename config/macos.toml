@@ -28,8 +28,8 @@ pkgpaths = [
 # be read in.
 #
 [scripts]
-pkg-scan = "pkg-scan"
-pkg-build = "pkg-build"
+pkg-scan = "scripts/pkg-scan"
+pkg-build = "scripts/pkg-build"
 
 #
 # The sandboxes section defines where sandboxes should be created, and how file

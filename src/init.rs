@@ -36,6 +36,9 @@ impl Init {
         if initdir.exists() {
             bail!("{} already exists", initdir.display());
         }
+
+        println!("Initialising new configuration directory:");
+
         let confstr = match env::consts::OS {
             "illumos" => include_str!("../config/illumos.toml"),
             "macos" => include_str!("../config/macos.toml"),
@@ -46,18 +49,21 @@ impl Init {
                 include_str!("../config/generic.toml")
             }
         };
+
         let conffile = initdir.join("config.toml");
         fs::create_dir_all(conffile.parent().unwrap())?;
         fs::write(&conffile, confstr)?;
-        println!("Wrote: {}", conffile.display());
+        println!("\t{}", conffile.display());
+
         for script in Scripts::iter() {
             if let Some(content) = Scripts::get(&script) {
-                let fp = initdir.join(&*script);
+                let fp = initdir.join("scripts").join(&*script);
                 fs::create_dir_all(fp.parent().unwrap())?;
                 fs::write(&fp, content.data)?;
-                println!("Wrote: {}", fp.display());
+                println!("\t{}", fp.display());
             }
         }
+
         Ok(())
     }
 }
