@@ -44,6 +44,7 @@ pkg-build = "pkg-build"
 [sandboxes]
 basedir = "/chroot"
 mounts = [
+	{ fs = "lofs", dest = "/devices" },
 	{ fs = "lofs", dest = "/dev" },
 	{ fs = "fd",   dest = "/dev/fd" },
 	{ fs = "proc", dest = "/proc" },
