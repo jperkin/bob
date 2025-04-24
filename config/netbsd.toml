@@ -63,4 +63,6 @@ mounts = [
 	{ fs = "null", dest = "/usr/share" },
 	{ fs = "null", dest = "/usr/sbin" },
 	{ fs = "null", dest = "/var/mail" },
+	# Directory where this config and support scripts live.
+	{ fs = "null", dest = "@INITDIR@" },
 ]

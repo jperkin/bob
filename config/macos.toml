@@ -56,4 +56,6 @@ mounts = [
 	{ fs = "bind", dest = "/usr",     opts = "-r" },
 	# Read-write system mounts.
 	{ fs = "bind", dest = "/private/var/spool/postfix" },
+	# Directory where this config and support scripts live.
+	{ fs = "bind", dest = "@INITDIR@" },
 ]

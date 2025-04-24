@@ -54,4 +54,6 @@ mounts = [
 	{ fs = "lofs", dest = "/sbin" },
 	{ fs = "lofs", dest = "/usr" },
 	{ fs = "lofs", dest = "/bin", src = "/usr/bin" },
+	# Directory where this config and support scripts live.
+	{ fs = "lofs", dest = "@INITDIR@" },
 ]

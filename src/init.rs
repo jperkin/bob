@@ -37,7 +37,11 @@ impl Init {
             bail!("{} already exists", initdir.display());
         }
 
-        println!("Initialising new configuration directory:");
+        let Some(initdir_str) = initdir.to_str() else {
+            bail!("Sorry, configuration directory must be valid UTF-8");
+        };
+
+        println!("Initialising new configuration directory {}:", initdir_str);
 
         let confstr = match env::consts::OS {
             "illumos" => include_str!("../config/illumos.toml"),
@@ -50,6 +54,7 @@ impl Init {
             }
         };
 
+        let confstr = confstr.replace("@INITDIR@", initdir_str);
         let conffile = initdir.join("config.toml");
         fs::create_dir_all(conffile.parent().unwrap())?;
         fs::write(&conffile, confstr)?;
