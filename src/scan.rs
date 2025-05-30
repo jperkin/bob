@@ -21,7 +21,6 @@ use petgraph::graphmap::DiGraphMap;
 use pkgsrc::{Depend, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Write;
 use std::io::BufReader;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -203,16 +202,7 @@ impl Scan {
         let Some(pkg_scan_path) = &self.config.script("pkg-scan") else {
             bail!("No pkg-scan script defined");
         };
-        let pkg_scan = std::fs::read_to_string(pkg_scan_path)?;
-        let mut scan_script = String::new();
-        for (key, val) in &envs {
-            writeln!(scan_script, "{}='{}'", key, val)?;
-        }
-        for (key, _) in &envs {
-            writeln!(scan_script, "export {}", key)?;
-        }
-        scan_script.push_str(&pkg_scan);
-        let child = self.sandbox.execute(0, &scan_script)?;
+        let child = self.sandbox.execute(0, pkg_scan_path, envs)?;
         let output = child.wait_with_output()?;
         let reader = BufReader::new(&output.stdout[..]);
         let mut index = ScanIndex::from_reader(reader)?;

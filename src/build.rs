@@ -19,7 +19,6 @@ use anyhow::{bail, Context};
 use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressStyle};
 use pkgsrc::{PkgName, ScanIndex};
 use std::collections::{HashMap, HashSet};
-use std::fmt::Write;
 use std::io::Read;
 use std::sync::{mpsc, mpsc::Sender};
 use std::time::{Duration, Instant};
@@ -62,16 +61,7 @@ impl PackageBuild {
         let Some(pkg_build_path) = &self.config.script("pkg-build") else {
             bail!("No pkg-build script defined");
         };
-        let pkg_build = std::fs::read_to_string(pkg_build_path)?;
-        let mut build_script = String::new();
-        for (key, val) in &envs {
-            writeln!(build_script, "{}='{}'", key, val)?;
-        }
-        for (key, _) in &envs {
-            writeln!(build_script, "export {}", key)?;
-        }
-        build_script.push_str(&pkg_build);
-        let mut child = self.sandbox.execute(self.id, &build_script)?;
+        let mut child = self.sandbox.execute(self.id, pkg_build_path, envs)?;
         let mut stdout =
             child.stdout.take().context("Could not read stdout")?;
         let res = child.wait().context("Could not wait for child")?;

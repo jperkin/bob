@@ -30,7 +30,6 @@ use crate::config::Config;
 use crate::mount::FSType;
 use anyhow::{bail, Result};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
@@ -125,29 +124,28 @@ impl Sandbox {
     }
 
     /**
-     * Execute the supplied script.  If [`Sandbox`] is fully specified then
+     * Execute a script file with supplied environment variables.
      */
-    pub fn execute(&self, id: usize, script: &str) -> Result<Child> {
-        let mut child = if self.enabled() {
-            Command::new("/usr/sbin/chroot")
-                .current_dir("/")
-                .arg(self.path(id))
-                .arg("/bin/sh")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .spawn()?
+    pub fn execute(
+        &self,
+        id: usize,
+        script: &Path,
+        envs: Vec<(&str, String)>,
+    ) -> Result<Child> {
+        let child = if self.enabled() {
+            let mut cmd = Command::new("/usr/sbin/chroot");
+            cmd.current_dir("/").arg(self.path(id)).arg(script);
+            for (key, val) in envs {
+                cmd.env(key, val);
+            }
+            cmd.stdout(Stdio::piped()).spawn()?
         } else {
-            Command::new("/bin/sh")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .spawn()?
+            let mut cmd = Command::new(script);
+            for (key, val) in envs {
+                cmd.env(key, val);
+            }
+            cmd.stdout(Stdio::piped()).spawn()?
         };
-
-        let script = script.to_string();
-        let mut stdin = child.stdin.take().expect("Failed to open stdin");
-        std::thread::spawn(move || {
-            stdin.write_all(script.as_bytes()).expect("Failed to read stdin");
-        });
         Ok(child)
     }
 
