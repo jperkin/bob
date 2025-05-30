@@ -18,6 +18,8 @@ use anyhow::bail;
 use rust_embed::RustEmbed;
 use std::env;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 #[derive(Debug, RustEmbed)]
@@ -65,6 +67,12 @@ impl Init {
                 let fp = initdir.join("scripts").join(&*script);
                 fs::create_dir_all(fp.parent().unwrap())?;
                 fs::write(&fp, content.data)?;
+                #[cfg(unix)]
+                {
+                    let mut perms = fs::metadata(&fp)?.permissions();
+                    perms.set_mode(0o755);
+                    fs::set_permissions(&fp, perms)?;
+                }
                 println!("\t{}", fp.display());
             }
         }
