@@ -49,7 +49,7 @@ struct ConfigFile {
     pkgsrc: Pkgsrc,
     // The [scripts] section has special handling.  Parse input into a HashMap
     // for processing during load.
-    scripts: HashMap<String, String>,
+    scripts: HashMap<String, PathBuf>,
     sandboxes: Option<Sandboxes>,
 }
 
@@ -126,34 +126,18 @@ impl Config {
         };
 
         /*
-         * Parse scripts section.  "<key>_inline" values are parsed as inline
-         * scripts, while "<key>" values are parsed as a filename to load the
-         * script from (relative to config dir if not absolute).
-         *
-         * If a key is duplicated then issue a warning.  The ordering is
-         * non-deterministic due to using a HashMap.  The toml parser ensures
-         * that a key cannot be specified more than once.
+         * Parse scripts section.  Script values are parsed as filenames
+         * (relative to config dir if not absolute).
          */
-        let mut newscripts: HashMap<String, String> = HashMap::new();
+        let mut newscripts: HashMap<String, PathBuf> = HashMap::new();
         for (k, v) in &config.file.scripts {
-            let (newk, newv) = if k.ends_with("_inline") {
-                (k.trim_end_matches("_inline").to_string(), v.clone())
+            let spath = Path::new(v);
+            let sfullpath = if spath.is_relative() {
+                config.filename.parent().unwrap().join(spath)
             } else {
-                let spath = Path::new(v);
-                let sfullpath = if spath.is_relative() {
-                    &config.filename.parent().unwrap().join(spath)
-                } else {
-                    spath
-                };
-                (k.clone(), fs::read_to_string(sfullpath)?)
+                spath.to_path_buf()
             };
-            if newscripts.contains_key(&newk) {
-                eprintln!(
-                    "WARNING: Duplicate script key for '{}', using '{}'.",
-                    &newk, &k
-                );
-            }
-            newscripts.insert(newk, newv);
+            newscripts.insert(k.clone(), sfullpath);
         }
         /*
          * Overwrite scripts map, we're done with the input.
@@ -189,7 +173,7 @@ impl Config {
         }
     }
 
-    pub fn script(&self, key: &str) -> Option<&String> {
+    pub fn script(&self, key: &str) -> Option<&PathBuf> {
         self.file.scripts.get(key)
     }
 

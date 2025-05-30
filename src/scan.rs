@@ -200,9 +200,10 @@ impl Scan {
             ("BOB_PKGPATH", format!("{}", pkgpath.as_path().display())),
             ("BOB_PKGSRCDIR", format!("{}", self.config.pkgsrc().display())),
         ];
-        let Some(pkg_scan) = &self.config.script("pkg-scan") else {
+        let Some(pkg_scan_path) = &self.config.script("pkg-scan") else {
             bail!("No pkg-scan script defined");
         };
+        let pkg_scan = std::fs::read_to_string(pkg_scan_path)?;
         let mut scan_script = String::new();
         for (key, val) in &envs {
             writeln!(scan_script, "{}='{}'", key, val)?;
@@ -210,7 +211,7 @@ impl Scan {
         for (key, _) in &envs {
             writeln!(scan_script, "export {}", key)?;
         }
-        scan_script.push_str(pkg_scan);
+        scan_script.push_str(&pkg_scan);
         let child = self.sandbox.execute(0, &scan_script)?;
         let output = child.wait_with_output()?;
         let reader = BufReader::new(&output.stdout[..]);

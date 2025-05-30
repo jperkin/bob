@@ -59,9 +59,10 @@ impl PackageBuild {
             ("BOB_PKGPATH", format!("{}", pkgpath.as_path().display())),
             ("BOB_PKGSRCDIR", format!("{}", self.config.pkgsrc().display())),
         ];
-        let Some(pkg_build) = &self.config.script("pkg-build") else {
+        let Some(pkg_build_path) = &self.config.script("pkg-build") else {
             bail!("No pkg-build script defined");
         };
+        let pkg_build = std::fs::read_to_string(pkg_build_path)?;
         let mut build_script = String::new();
         for (key, val) in &envs {
             writeln!(build_script, "{}='{}'", key, val)?;
@@ -69,7 +70,7 @@ impl PackageBuild {
         for (key, _) in &envs {
             writeln!(build_script, "export {}", key)?;
         }
-        build_script.push_str(pkg_build);
+        build_script.push_str(&pkg_build);
         let mut child = self.sandbox.execute(self.id, &build_script)?;
         let mut stdout =
             child.stdout.take().context("Could not read stdout")?;
