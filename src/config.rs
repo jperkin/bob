@@ -36,10 +36,6 @@ extern crate toml;
 pub struct Config {
     file: ConfigFile,
     filename: PathBuf,
-    ///
-    /// Variables that can be set either through the configuration file or the
-    /// command line, with the latter taking preference.
-    ///
     verbose: bool,
 }
 
@@ -47,21 +43,27 @@ pub struct Config {
 struct ConfigFile {
     options: Option<Options>,
     pkgsrc: Pkgsrc,
-    // The [scripts] section has special handling.  Parse input into a HashMap
-    // for processing during load.
     scripts: HashMap<String, PathBuf>,
     sandboxes: Option<Sandboxes>,
+    build: Option<Build>,
 }
 
-///
-/// General configuration variables.
-///
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Options {
     build_threads: Option<usize>,
     scan_threads: Option<usize>,
-    /// Enable verbose output.
     verbose: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Build {
+    bulklog: Option<PathBuf>,
+    packages: Option<PathBuf>,
+    keep_wrkdir: Option<bool>,
+    keep_prefix: Option<bool>,
+    skip_age_check: Option<bool>,
+    use_destdir: Option<bool>,
+    pkg_info: Option<PathBuf>,
 }
 
 ///
@@ -195,5 +197,49 @@ impl Config {
 
     pub fn verbose(&self) -> bool {
         self.verbose
+    }
+
+    pub fn bulklog(&self) -> Option<&PathBuf> {
+        self.file.build.as_ref().and_then(|b| b.bulklog.as_ref())
+    }
+
+    pub fn packages(&self) -> Option<&PathBuf> {
+        self.file.build.as_ref().and_then(|b| b.packages.as_ref())
+    }
+
+    pub fn keep_wrkdir(&self) -> bool {
+        self.file
+            .build
+            .as_ref()
+            .and_then(|b| b.keep_wrkdir)
+            .unwrap_or(false)
+    }
+
+    pub fn keep_prefix(&self) -> bool {
+        self.file
+            .build
+            .as_ref()
+            .and_then(|b| b.keep_prefix)
+            .unwrap_or(false)
+    }
+
+    pub fn skip_age_check(&self) -> bool {
+        self.file
+            .build
+            .as_ref()
+            .and_then(|b| b.skip_age_check)
+            .unwrap_or(false)
+    }
+
+    pub fn use_destdir(&self) -> bool {
+        self.file
+            .build
+            .as_ref()
+            .and_then(|b| b.use_destdir)
+            .unwrap_or(true)
+    }
+
+    pub fn pkg_info(&self) -> Option<&PathBuf> {
+        self.file.build.as_ref().and_then(|b| b.pkg_info.as_ref())
     }
 }

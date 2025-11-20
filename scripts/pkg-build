@@ -1,3 +1,72 @@
 #!/bin/sh
 
-cd ${BOB_PKGSRCDIR}/${BOB_PKGPATH} && ${BOB_BMAKE} -v PKGPATH
+set -e
+
+: ${BOB_BMAKE:?}
+: ${BOB_PKGPATH:?}
+: ${BOB_PKGSRCDIR:?}
+: ${BOB_PKGNAME:?}
+: ${BOB_BULKLOG:?}
+: ${BOB_PACKAGES:?}
+
+PKGDIR="${BOB_PKGSRCDIR}/${BOB_PKGPATH}"
+LOGDIR="${BOB_BULKLOG}/${BOB_PKGNAME}"
+BATCH=1
+export BATCH
+
+cd "${PKGDIR}"
+
+mkdir -p "${LOGDIR}"
+
+cleanup() {
+    if [ -n "${BOB_KEEP_WRKDIR}" ]; then
+        ${BOB_BMAKE} repackage 2>&1 | tee "${LOGDIR}/work.tar.log" || true
+    fi
+    if [ -n "${BOB_KEEP_PREFIX}" ]; then
+        ${BOB_BMAKE} stage-package-create 2>&1 | tee "${LOGDIR}/prefix.tar.log" || true
+    fi
+    exit 1
+}
+
+trap cleanup INT TERM
+
+${BOB_BMAKE} clean > "${LOGDIR}/clean.log" 2>&1 || cleanup
+
+if [ -n "${BOB_PKG_UP_TO_DATE}" ] && [ -x "${BOB_PKG_UP_TO_DATE}" ]; then
+    if "${BOB_PKG_UP_TO_DATE}" "${BOB_PKGNAME}" > "${LOGDIR}/up-to-date.log" 2>&1; then
+        rm -rf "${LOGDIR}"
+        exit 0
+    fi
+fi
+
+DEPENDS_TARGET=/nonexistent
+export DEPENDS_TARGET
+
+if [ -n "${BOB_USE_DESTDIR}" ]; then
+    USE_DESTDIR=yes
+    export USE_DESTDIR
+fi
+
+${BOB_BMAKE} checksum > "${LOGDIR}/checksum.log" 2>&1 || cleanup
+
+${BOB_BMAKE} configure > "${LOGDIR}/configure.log" 2>&1 || cleanup
+
+${BOB_BMAKE} all > "${LOGDIR}/build.log" 2>&1 || cleanup
+
+${BOB_BMAKE} stage-install > "${LOGDIR}/install.log" 2>&1 || cleanup
+
+${BOB_BMAKE} stage-package-create > "${LOGDIR}/package.log" 2>&1 || cleanup
+
+if [ -n "${BOB_PACKAGES}" ]; then
+    mkdir -p "${BOB_PACKAGES}/All"
+    PKGFILE=$(${BOB_BMAKE} show-var VARNAME=PKGFILE)
+    if [ -f "${PKGFILE}" ]; then
+        cp "${PKGFILE}" "${BOB_PACKAGES}/All/"
+    fi
+fi
+
+${BOB_BMAKE} clean > "${LOGDIR}/clean2.log" 2>&1 || cleanup
+
+rm -rf "${LOGDIR}"
+
+exit 0

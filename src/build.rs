@@ -53,11 +53,55 @@ impl PackageBuild {
         let Some(pkgpath) = &self.pkginfo.pkg_location else {
             bail!("Could not get PKGPATH for {}", pkgname);
         };
-        let envs = vec![
+
+        let bulklog = self
+            .config
+            .bulklog()
+            .map(|p| format!("{}", p.display()))
+            .unwrap_or_else(|| "/tmp/bulklog".to_string());
+
+        let packages = self
+            .config
+            .packages()
+            .map(|p| format!("{}", p.display()))
+            .unwrap_or_else(|| "/tmp/packages".to_string());
+
+        let mut envs = vec![
             ("BOB_BMAKE", format!("{}", self.config.make().display())),
             ("BOB_PKGPATH", format!("{}", pkgpath.as_path().display())),
             ("BOB_PKGSRCDIR", format!("{}", self.config.pkgsrc().display())),
+            ("BOB_PKGNAME", pkgname.to_string()),
+            ("BOB_BULKLOG", bulklog),
+            ("BOB_PACKAGES", packages),
         ];
+
+        if self.config.keep_wrkdir() {
+            envs.push(("BOB_KEEP_WRKDIR", "yes".to_string()));
+        }
+
+        if self.config.keep_prefix() {
+            envs.push(("BOB_KEEP_PREFIX", "yes".to_string()));
+        }
+
+        if self.config.skip_age_check() {
+            envs.push(("BOB_SKIP_AGE_CHECK", "yes".to_string()));
+        }
+
+        if self.config.use_destdir() {
+            envs.push(("BOB_USE_DESTDIR", "yes".to_string()));
+        }
+
+        if let Some(pkg_info) = self.config.pkg_info() {
+            envs.push(("BOB_PKG_INFO", format!("{}", pkg_info.display())));
+        }
+
+        if let Some(pkg_up_to_date) = self.config.script("pkg-up-to-date") {
+            envs.push((
+                "BOB_PKG_UP_TO_DATE",
+                format!("{}", pkg_up_to_date.display()),
+            ));
+        }
+
         let Some(pkg_build_path) = &self.config.script("pkg-build") else {
             bail!("No pkg-build script defined");
         };

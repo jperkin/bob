@@ -1,0 +1,58 @@
+#!/bin/sh
+
+set -e
+
+: ${BOB_BMAKE:?}
+: ${BOB_PKGSRCDIR:?}
+: ${BOB_PACKAGES:?}
+: ${BOB_PKG_INFO:=/usr/sbin/pkg_info}
+
+PKGNAME="$1"
+
+if [ -z "${PKGNAME}" ]; then
+    echo "usage: pkg-up-to-date <pkgname>" >&2
+    exit 1
+fi
+
+PKGFILE="${BOB_PACKAGES}/All/${PKGNAME}.tgz"
+
+if [ ! -f "${PKGFILE}" ]; then
+    exit 1
+fi
+
+PKGPATH=$(${BOB_PKG_INFO} -Q PKGPATH "${PKGFILE}" 2>/dev/null || true)
+
+if [ -z "${PKGPATH}" ]; then
+    exit 1
+fi
+
+PKGDIR="${BOB_PKGSRCDIR}/${PKGPATH}"
+
+if [ ! -d "${PKGDIR}" ]; then
+    exit 1
+fi
+
+cd "${PKGDIR}"
+
+CURRENT_PKGNAME=$(${BOB_BMAKE} show-var VARNAME=PKGNAME 2>/dev/null || true)
+
+if [ "${CURRENT_PKGNAME}" != "${PKGNAME}" ]; then
+    exit 1
+fi
+
+PKG_MTIME=$(stat -c %Y "${PKGFILE}" 2>/dev/null || stat -f %m "${PKGFILE}" 2>/dev/null)
+
+for dep in $(${BOB_PKG_INFO} -qN "${PKGFILE}" 2>/dev/null || true); do
+    DEP_FILE="${BOB_PACKAGES}/All/${dep}.tgz"
+    if [ ! -f "${DEP_FILE}" ]; then
+        exit 1
+    fi
+    if [ -z "${BOB_SKIP_AGE_CHECK}" ]; then
+        DEP_MTIME=$(stat -c %Y "${DEP_FILE}" 2>/dev/null || stat -f %m "${DEP_FILE}" 2>/dev/null)
+        if [ "${DEP_MTIME}" -gt "${PKG_MTIME}" ]; then
+            exit 1
+        fi
+    fi
+done
+
+exit 0

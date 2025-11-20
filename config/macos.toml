@@ -21,14 +21,19 @@ pkgpaths = [
 	"sysutils/coreutils",
 ]
 
-#
-# Shell scripts used for different stages.  Values are filenames (relative
-# to the directory that the config was loaded from if not absolute) that will
-# be read in.
-#
 [scripts]
 pkg-scan = "scripts/pkg-scan"
 pkg-build = "scripts/pkg-build"
+pkg-up-to-date = "scripts/pkg-up-to-date"
+
+[build]
+bulklog = "/Volumes/data/bulklog"
+packages = "/Volumes/data/packages"
+keep_wrkdir = false
+keep_prefix = false
+skip_age_check = false
+use_destdir = true
+pkg_info = "/opt/pkg/sbin/pkg_info"
 
 #
 # The sandboxes section defines where sandboxes should be created, and how file
