@@ -19,6 +19,13 @@
  * basis due to significant differences between them, but the presentation
  * to the user should be uniform.
  */
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "netbsd",
+    target_os = "illumos",
+    target_os = "solaris"
+)))]
+mod sandbox_generic;
 #[cfg(target_os = "macos")]
 mod sandbox_macos;
 #[cfg(target_os = "netbsd")]
