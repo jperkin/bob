@@ -208,35 +208,19 @@ impl Config {
     }
 
     pub fn keep_wrkdir(&self) -> bool {
-        self.file
-            .build
-            .as_ref()
-            .and_then(|b| b.keep_wrkdir)
-            .unwrap_or(false)
+        self.file.build.as_ref().and_then(|b| b.keep_wrkdir).unwrap_or(false)
     }
 
     pub fn keep_prefix(&self) -> bool {
-        self.file
-            .build
-            .as_ref()
-            .and_then(|b| b.keep_prefix)
-            .unwrap_or(false)
+        self.file.build.as_ref().and_then(|b| b.keep_prefix).unwrap_or(false)
     }
 
     pub fn skip_age_check(&self) -> bool {
-        self.file
-            .build
-            .as_ref()
-            .and_then(|b| b.skip_age_check)
-            .unwrap_or(false)
+        self.file.build.as_ref().and_then(|b| b.skip_age_check).unwrap_or(false)
     }
 
     pub fn use_destdir(&self) -> bool {
-        self.file
-            .build
-            .as_ref()
-            .and_then(|b| b.use_destdir)
-            .unwrap_or(true)
+        self.file.build.as_ref().and_then(|b| b.use_destdir).unwrap_or(true)
     }
 
     pub fn pkg_info(&self) -> Option<&PathBuf> {
