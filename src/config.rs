@@ -62,8 +62,12 @@ pub struct Build {
     keep_wrkdir: Option<bool>,
     keep_prefix: Option<bool>,
     skip_age_check: Option<bool>,
-    use_destdir: Option<bool>,
+    use_destdir: Option<String>,
     pkg_info: Option<PathBuf>,
+    unprivileged_user: Option<String>,
+    use_unprivileged_checksum: Option<bool>,
+    tar: Option<PathBuf>,
+    prefix: Option<PathBuf>,
 }
 
 ///
@@ -219,11 +223,31 @@ impl Config {
         self.file.build.as_ref().and_then(|b| b.skip_age_check).unwrap_or(false)
     }
 
-    pub fn use_destdir(&self) -> bool {
-        self.file.build.as_ref().and_then(|b| b.use_destdir).unwrap_or(true)
+    pub fn use_destdir(&self) -> Option<&String> {
+        self.file.build.as_ref().and_then(|b| b.use_destdir.as_ref())
     }
 
     pub fn pkg_info(&self) -> Option<&PathBuf> {
         self.file.build.as_ref().and_then(|b| b.pkg_info.as_ref())
+    }
+
+    pub fn unprivileged_user(&self) -> Option<&String> {
+        self.file.build.as_ref().and_then(|b| b.unprivileged_user.as_ref())
+    }
+
+    pub fn use_unprivileged_checksum(&self) -> bool {
+        self.file
+            .build
+            .as_ref()
+            .and_then(|b| b.use_unprivileged_checksum)
+            .unwrap_or(false)
+    }
+
+    pub fn tar(&self) -> Option<&PathBuf> {
+        self.file.build.as_ref().and_then(|b| b.tar.as_ref())
+    }
+
+    pub fn prefix(&self) -> Option<&PathBuf> {
+        self.file.build.as_ref().and_then(|b| b.prefix.as_ref())
     }
 }

@@ -87,12 +87,28 @@ impl PackageBuild {
             envs.push(("BOB_SKIP_AGE_CHECK", "yes".to_string()));
         }
 
-        if self.config.use_destdir() {
-            envs.push(("BOB_USE_DESTDIR", "yes".to_string()));
+        if let Some(use_destdir) = self.config.use_destdir() {
+            envs.push(("BOB_USE_DESTDIR", use_destdir.clone()));
         }
 
         if let Some(pkg_info) = self.config.pkg_info() {
             envs.push(("BOB_PKG_INFO", format!("{}", pkg_info.display())));
+        }
+
+        if let Some(unprivileged_user) = self.config.unprivileged_user() {
+            envs.push(("BOB_UNPRIVILEGED_USER", unprivileged_user.clone()));
+        }
+
+        if self.config.use_unprivileged_checksum() {
+            envs.push(("BOB_USE_UNPRIVILEGED_CHECKSUM", "yes".to_string()));
+        }
+
+        if let Some(tar) = self.config.tar() {
+            envs.push(("BOB_TAR", format!("{}", tar.display())));
+        }
+
+        if let Some(prefix) = self.config.prefix() {
+            envs.push(("BOB_PREFIX", format!("{}", prefix.display())));
         }
 
         if let Some(pkg_up_to_date) = self.config.script("pkg-up-to-date") {

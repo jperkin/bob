@@ -11,61 +11,101 @@ set -e
 
 PKGDIR="${BOB_PKGSRCDIR}/${BOB_PKGPATH}"
 LOGDIR="${BOB_BULKLOG}/${BOB_PKGNAME}"
-BATCH=1
-export BATCH
 
-cd "${PKGDIR}"
+run_direct() {
+    "$@"
+}
 
-mkdir -p "${LOGDIR}"
+run_su() {
+    su "${BOB_UNPRIVILEGED_USER}" -c '"$@"' make "$@"
+}
+
+run_make() {
+    local run_cmd
+    run_cmd=$1
+    shift
+    ${run_cmd} ${BOB_BMAKE} "$@" \
+        BATCH=1 \
+        DEPENDS_TARGET=/nonexistent \
+        WRKLOG="${LOGDIR}/work.log"
+}
 
 cleanup() {
     if [ -n "${BOB_KEEP_WRKDIR}" ]; then
-        ${BOB_BMAKE} repackage 2>&1 | tee "${LOGDIR}/work.tar.log" || true
+        ${BOB_BMAKE} pbulk-save-wrkdir INTO="${LOGDIR}/wrkdir.tar.gz" TAR="${BOB_TAR}" > "${LOGDIR}/wrkdir-save.log" 2>&1 || true
     fi
-    if [ -n "${BOB_KEEP_PREFIX}" ]; then
-        ${BOB_BMAKE} stage-package-create 2>&1 | tee "${LOGDIR}/prefix.tar.log" || true
+    if [ -n "${BOB_KEEP_PREFIX}" ] && [ -f "${LOGDIR}/install.log" ]; then
+        ${BOB_TAR} -czf "${LOGDIR}/prefix.tar.gz" "${BOB_PREFIX}" > "${LOGDIR}/prefix-save.log" 2>&1 || true
     fi
+    ${BOB_BMAKE} clean > /dev/null 2>&1 || true
     exit 1
 }
 
-trap cleanup INT TERM
+if [ -n "${BOB_UNPRIVILEGED_USER}" ]; then
+    if [ -n "${BOB_USE_UNPRIVILEGED_CHECKSUM}" ]; then
+        run_checksum=run_su
+    else
+        run_checksum=run_direct
+    fi
 
-${BOB_BMAKE} clean > "${LOGDIR}/clean.log" 2>&1 || cleanup
+    if [ "${BOB_USE_DESTDIR}" = "user-destdir" ]; then
+        run_build=run_su
+        run_install=run_su
+    else
+        run_build=run_su
+        run_install=run_direct
+    fi
+
+    if [ $(id -u) -ne 0 ]; then
+        run_checksum=run_direct
+        run_build=run_direct
+        run_install=run_direct
+    fi
+else
+    run_checksum=run_direct
+    run_build=run_direct
+    run_install=run_direct
+fi
 
 if [ -n "${BOB_PKG_UP_TO_DATE}" ] && [ -x "${BOB_PKG_UP_TO_DATE}" ]; then
     if "${BOB_PKG_UP_TO_DATE}" "${BOB_PKGNAME}" > "${LOGDIR}/up-to-date.log" 2>&1; then
-        rm -rf "${LOGDIR}"
         exit 0
     fi
 fi
 
-DEPENDS_TARGET=/nonexistent
-export DEPENDS_TARGET
+cd "${PKGDIR}"
 
-if [ -n "${BOB_USE_DESTDIR}" ]; then
-    USE_DESTDIR=yes
-    export USE_DESTDIR
+mkdir -p "${LOGDIR}"
+rm -f "${LOGDIR}"/*
+
+if [ -n "${BOB_UNPRIVILEGED_USER}" ]; then
+    touch "${LOGDIR}/work.log"
+    chown "${BOB_UNPRIVILEGED_USER}" "${LOGDIR}/work.log"
 fi
 
-${BOB_BMAKE} checksum > "${LOGDIR}/checksum.log" 2>&1 || cleanup
+trap cleanup INT TERM
 
-${BOB_BMAKE} configure > "${LOGDIR}/configure.log" 2>&1 || cleanup
+${BOB_BMAKE} clean > "${LOGDIR}/pre-clean.log" 2>&1
 
-${BOB_BMAKE} all > "${LOGDIR}/build.log" 2>&1 || cleanup
+run_make ${run_checksum} checksum > "${LOGDIR}/checksum.log" 2>&1 || cleanup
 
-${BOB_BMAKE} stage-install > "${LOGDIR}/install.log" 2>&1 || cleanup
+run_make ${run_build} configure > "${LOGDIR}/configure.log" 2>&1 || cleanup
 
-${BOB_BMAKE} stage-package-create > "${LOGDIR}/package.log" 2>&1 || cleanup
+run_make ${run_build} all > "${LOGDIR}/build.log" 2>&1 || cleanup
+
+run_make ${run_install} stage-install > "${LOGDIR}/install.log" 2>&1 || cleanup
+
+run_make run_direct stage-package-create > "${LOGDIR}/package.log" 2>&1 || cleanup
 
 if [ -n "${BOB_PACKAGES}" ]; then
     mkdir -p "${BOB_PACKAGES}/All"
-    PKGFILE=$(${BOB_BMAKE} show-var VARNAME=PKGFILE)
+    PKGFILE=$(run_make run_direct show-var VARNAME=PKGFILE)
     if [ -f "${PKGFILE}" ]; then
         cp "${PKGFILE}" "${BOB_PACKAGES}/All/"
     fi
 fi
 
-${BOB_BMAKE} clean > "${LOGDIR}/clean2.log" 2>&1 || cleanup
+${BOB_BMAKE} clean > "${LOGDIR}/clean.log" 2>&1 || true
 
 rm -rf "${LOGDIR}"
 

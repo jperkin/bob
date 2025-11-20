@@ -32,8 +32,12 @@ packages = "/Volumes/data/packages"
 keep_wrkdir = false
 keep_prefix = false
 skip_age_check = false
-use_destdir = true
+use_destdir = "yes"
 pkg_info = "/opt/pkg/sbin/pkg_info"
+unprivileged_user = "pbulk"
+use_unprivileged_checksum = true
+tar = "/usr/bin/tar"
+prefix = "/opt/pkg"
 
 #
 # The sandboxes section defines where sandboxes should be created, and how file
