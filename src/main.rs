@@ -21,6 +21,7 @@ mod init;
 mod logging;
 mod sandbox;
 mod scan;
+mod tui;
 
 use crate::build::Build;
 use crate::config::Config;

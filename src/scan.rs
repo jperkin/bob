@@ -14,6 +14,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+use crate::tui::MultiProgress;
 use crate::{Config, Sandbox};
 use anyhow::{bail, Context, Result};
 use petgraph::graphmap::DiGraphMap;
@@ -21,7 +22,9 @@ use pkgsrc::{Depend, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tracing::{debug, error, info, trace};
 
 /// Reason why a package was excluded from the build.
@@ -100,7 +103,26 @@ impl Scan {
             "Starting package scan"
         );
 
-        println!("Scanning {} packages...", self.incoming.len());
+        // Set up multi-line progress display using ratatui inline viewport
+        let progress = Arc::new(Mutex::new(
+            MultiProgress::new("Scanning", "Scanned", self.incoming.len(), self.config.scan_threads(), false)
+                .expect("Failed to initialize progress display"),
+        ));
+
+        // Flag to stop the refresh thread
+        let stop_refresh = Arc::new(AtomicBool::new(false));
+
+        // Spawn a thread to periodically refresh the display (for timer updates)
+        let progress_refresh = Arc::clone(&progress);
+        let stop_flag = Arc::clone(&stop_refresh);
+        let refresh_thread = std::thread::spawn(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                if let Ok(mut p) = progress_refresh.lock() {
+                    let _ = p.render();
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
 
         rayon::ThreadPoolBuilder::new()
             .num_threads(self.config.scan_threads())
@@ -114,8 +136,6 @@ impl Scan {
         if self.sandbox.enabled() {
             self.sandbox.create(0)?;
         }
-
-        let completed = Arc::new(Mutex::new(0_usize));
 
         /*
          * Continuously iterate over incoming queue, moving to done once
@@ -131,17 +151,28 @@ impl Scan {
                 parpaths.push((pkgpath.clone(), Ok(vec![])));
             }
 
-            let completed_clone = Arc::clone(&completed);
+            let progress_clone = Arc::clone(&progress);
             parpaths.par_iter_mut().for_each(|pkg| {
                 let (pkgpath, result) = pkg;
                 let pathname = pkgpath.as_path().to_string_lossy().to_string();
+
+                // Get rayon thread index for progress tracking
+                let thread_id = rayon::current_thread_index().unwrap_or(0);
+
+                // Update progress - show current package for this thread
+                if let Ok(mut p) = progress_clone.lock() {
+                    p.state_mut().set_worker_active(thread_id, &pathname);
+                }
 
                 *result = self
                     .scan_pkgpath(pkgpath)
                     .context(format!("Scan failed for {}", pathname));
 
-                let mut count = completed_clone.lock().unwrap();
-                *count += 1;
+                // Update progress - increment completed and mark thread idle
+                if let Ok(mut p) = progress_clone.lock() {
+                    p.state_mut().increment_completed();
+                    p.state_mut().set_worker_idle(thread_id);
+                }
             });
 
             /*
@@ -159,7 +190,10 @@ impl Scan {
                             && !self.incoming.contains(dep.pkgpath())
                             && new_incoming.insert(dep.pkgpath().clone())
                         {
-                            // New dependency found
+                            // Update total count for new dependencies
+                            if let Ok(mut p) = progress.lock() {
+                                p.state_mut().total += 1;
+                            }
                         }
                     }
                 }
@@ -180,8 +214,13 @@ impl Scan {
             self.sandbox.destroy(0)?;
         }
 
-        let final_count = *completed.lock().unwrap();
-        println!("Scanned {} packages", final_count);
+        // Stop the refresh thread and print final summary
+        stop_refresh.store(true, Ordering::Relaxed);
+        let _ = refresh_thread.join();
+
+        if let Ok(mut p) = progress.lock() {
+            let _ = p.finish();
+        }
 
         Ok(())
     }
@@ -220,7 +259,6 @@ impl Scan {
                 stderr = %stderr,
                 "pkg-scan script failed"
             );
-            eprintln!("pkg-scan failed for {}: {}", pkgpath_str, stderr);
         }
 
         let stdout_str = String::from_utf8_lossy(&output.stdout);
@@ -271,8 +309,6 @@ impl Scan {
             done_pkgpaths = self.done.len(),
             "Starting dependency resolution"
         );
-
-        println!("Resolving dependencies...");
 
         /*
          * Populate the resolved hash.  This becomes our new working set,
@@ -449,12 +485,6 @@ impl Scan {
         for pkgname in self.resolved.keys() {
             debug!(pkgname = %pkgname.pkgname(), "Package is buildable");
         }
-
-        println!(
-            "Resolution complete: {} buildable, {} skipped",
-            self.resolved.len(),
-            skipped.len()
-        );
 
         Ok(ScanResult { buildable: self.resolved.clone(), skipped })
     }
