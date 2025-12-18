@@ -14,6 +14,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+use crate::tui::{format_duration, MultiProgress};
 use crate::{Config, Sandbox};
 use anyhow::{bail, Context};
 use glob::Pattern;
@@ -802,21 +803,6 @@ impl BuildJobs {
     }
 }
 
-fn format_duration(d: Duration) -> String {
-    let total_secs = d.as_secs();
-    let hours = total_secs / 3600;
-    let minutes = (total_secs % 3600) / 60;
-    let seconds = total_secs % 60;
-
-    if hours > 0 {
-        format!("{}h{:02}m{:02}s", hours, minutes, seconds)
-    } else if minutes > 0 {
-        format!("{}m{:02}s", minutes, seconds)
-    } else {
-        format!("{}s", seconds)
-    }
-}
-
 impl Build {
     pub fn new(
         config: &Config,
@@ -849,7 +835,27 @@ impl Build {
             "Build::start() called"
         );
 
-        println!("Building {} packages...", self.scanpkgs.len());
+        // Set up multi-line progress display using ratatui inline viewport
+        let progress = Arc::new(Mutex::new(
+            MultiProgress::new("Building", "Built", self.scanpkgs.len(), self.config.build_threads(), true)
+                .expect("Failed to initialize progress display"),
+        ));
+
+        // Flag to stop the refresh thread
+        let stop_refresh = Arc::new(AtomicBool::new(false));
+
+        // Spawn a thread to periodically refresh the display (for timer updates)
+        let progress_refresh = Arc::clone(&progress);
+        let stop_flag = Arc::clone(&stop_refresh);
+        let shutdown_for_refresh = Arc::clone(&shutdown_flag);
+        let refresh_thread = std::thread::spawn(move || {
+            while !stop_flag.load(Ordering::Relaxed) && !shutdown_for_refresh.load(Ordering::SeqCst) {
+                if let Ok(mut p) = progress_refresh.lock() {
+                    let _ = p.render();
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
 
         /*
          * Populate BuildJobs.
@@ -977,6 +983,7 @@ impl Build {
          */
         let config = self.config.clone();
         let sandbox = self.sandbox.clone();
+        let progress_clone = Arc::clone(&progress);
         let shutdown_for_manager = Arc::clone(&shutdown_flag);
         let (results_tx, results_rx) = mpsc::channel::<Vec<BuildResult>>();
         let (interrupted_tx, interrupted_rx) = mpsc::channel::<bool>();
@@ -987,9 +994,16 @@ impl Build {
             let mut jobs = jobs.clone();
             let mut was_interrupted = false;
 
+            // Track which thread is building which package
+            let mut thread_packages: HashMap<usize, PkgName> = HashMap::new();
+
             loop {
                 // Check shutdown flag periodically
                 if shutdown_for_manager.load(Ordering::SeqCst) {
+                    // Suppress all further output
+                    if let Ok(mut p) = progress_clone.lock() {
+                        p.state_mut().suppress();
+                    }
                     // Send shutdown to all remaining clients
                     for (_, client) in clients.drain() {
                         let _ = client.send(ChannelCommand::Shutdown);
@@ -1014,6 +1028,13 @@ impl Build {
                                 jobs.incoming.remove(&pkg);
                                 jobs.running.insert(pkg.clone());
 
+                                // Update thread progress
+                                thread_packages.insert(c, pkg.clone());
+                                if let Ok(mut p) = progress_clone.lock() {
+                                    p.state_mut().set_worker_active(c, pkg.pkgname());
+                                    let _ = p.render_throttled();
+                                }
+
                                 let _ = client
                                     .send(ChannelCommand::JobData(Box::new(
                                         PackageBuild {
@@ -1025,10 +1046,18 @@ impl Build {
                                     )));
                             }
                             BuildStatus::NoneAvailable => {
+                                if let Ok(mut p) = progress_clone.lock() {
+                                    p.state_mut().set_worker_idle(c);
+                                    let _ = p.render_throttled();
+                                }
                                 let _ = client
                                     .send(ChannelCommand::ComeBackLater);
                             }
                             BuildStatus::Done => {
+                                if let Ok(mut p) = progress_clone.lock() {
+                                    p.state_mut().set_worker_idle(c);
+                                    let _ = p.render_throttled();
+                                }
                                 let _ = client.send(ChannelCommand::Quit);
                                 clients.remove(&c);
                                 if clients.is_empty() {
@@ -1046,7 +1075,18 @@ impl Build {
                         jobs.mark_success(&pkgname, duration);
                         jobs.running.remove(&pkgname);
 
-                        println!("Built {} ({})", pkgname.pkgname(), format_duration(duration));
+                        // Find which thread completed and mark idle
+                        if let Ok(mut p) = progress_clone.lock() {
+                            let _ = p.print_status(&format!("       Built {} ({})", pkgname.pkgname(), format_duration(duration)));
+                            p.state_mut().increment_completed();
+                            for (tid, pkg) in &thread_packages {
+                                if pkg == &pkgname {
+                                    p.state_mut().set_worker_idle(*tid);
+                                    break;
+                                }
+                            }
+                            let _ = p.render_throttled();
+                        }
                     }
                     ChannelCommand::JobSkipped(pkgname) => {
                         // Don't report if we're shutting down
@@ -1057,7 +1097,18 @@ impl Build {
                         jobs.mark_skipped(&pkgname);
                         jobs.running.remove(&pkgname);
 
-                        println!("Skipped {} (up-to-date)", pkgname.pkgname());
+                        // Find which thread completed and mark idle
+                        if let Ok(mut p) = progress_clone.lock() {
+                            let _ = p.print_status(&format!("     Skipped {} (up-to-date)", pkgname.pkgname()));
+                            p.state_mut().increment_skipped();
+                            for (tid, pkg) in &thread_packages {
+                                if pkg == &pkgname {
+                                    p.state_mut().set_worker_idle(*tid);
+                                    break;
+                                }
+                            }
+                            let _ = p.render_throttled();
+                        }
                     }
                     ChannelCommand::JobFailed(pkgname, duration) => {
                         // Don't report if we're shutting down
@@ -1068,7 +1119,18 @@ impl Build {
                         jobs.mark_failure(&pkgname, duration);
                         jobs.running.remove(&pkgname);
 
-                        println!("Failed {} ({})", pkgname.pkgname(), format_duration(duration));
+                        // Find which thread failed and mark idle
+                        if let Ok(mut p) = progress_clone.lock() {
+                            let _ = p.print_status(&format!("      Failed {} ({})", pkgname.pkgname(), format_duration(duration)));
+                            p.state_mut().increment_failed();
+                            for (tid, pkg) in &thread_packages {
+                                if pkg == &pkgname {
+                                    p.state_mut().set_worker_idle(*tid);
+                                    break;
+                                }
+                            }
+                            let _ = p.render_throttled();
+                        }
                     }
                     ChannelCommand::JobError((pkgname, duration, e)) => {
                         // Don't report if we're shutting down
@@ -1079,7 +1141,18 @@ impl Build {
                         jobs.mark_failure(&pkgname, duration);
                         jobs.running.remove(&pkgname);
 
-                        eprintln!("Failed {} ({}): {}", pkgname.pkgname(), format_duration(duration), e);
+                        // Find which thread errored and mark idle
+                        if let Ok(mut p) = progress_clone.lock() {
+                            let _ = p.print_status(&format!("      Failed {} ({})", pkgname.pkgname(), format_duration(duration)));
+                            p.state_mut().increment_failed();
+                            for (tid, pkg) in &thread_packages {
+                                if pkg == &pkgname {
+                                    p.state_mut().set_worker_idle(*tid);
+                                    break;
+                                }
+                            }
+                            let _ = p.render_throttled();
+                        }
                         tracing::error!(error = %e, pkgname = %pkgname.pkgname(), "Build error");
                     }
                     _ => {}
@@ -1096,23 +1169,25 @@ impl Build {
             thread.join().expect("thread panicked");
         }
 
+        // Stop the refresh thread
+        stop_refresh.store(true, Ordering::Relaxed);
+        let _ = refresh_thread.join();
+
         // Check if we were interrupted
         let was_interrupted = interrupted_rx.recv().unwrap_or(false);
+
+        // Print appropriate summary
+        if let Ok(mut p) = progress.lock() {
+            if was_interrupted {
+                let _ = p.finish_interrupted();
+            } else {
+                let _ = p.finish();
+            }
+        }
 
         // Collect results from manager
         let results = results_rx.recv().unwrap_or_default();
         let summary = BuildSummary { duration: started.elapsed(), results };
-
-        // Print summary
-        if was_interrupted {
-            println!("\nBuild interrupted!");
-        } else {
-            println!("\nBuild completed in {}", format_duration(summary.duration));
-            println!("Success: {}, Failed: {}, Skipped: {}",
-                summary.success_count(),
-                summary.failed_count(),
-                summary.skipped_count());
-        }
 
         if self.sandbox.enabled() {
             for i in 0..self.config.build_threads() {
