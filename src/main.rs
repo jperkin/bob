@@ -19,6 +19,7 @@ mod build;
 mod config;
 mod init;
 mod logging;
+mod report;
 mod sandbox;
 mod scan;
 mod tui;
@@ -30,7 +31,7 @@ use crate::sandbox::Sandbox;
 use crate::scan::{Scan, SkipReason};
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -54,6 +55,8 @@ pub struct Args {
 enum Cmd {
     /// Build all packages as defined by the configuration file
     Build,
+    /// Generate HTML report from existing bulklog data
+    GenerateReport,
     /// Create a new configuration area
     Init { dir: PathBuf },
     /// Create and destroy build sandboxes
@@ -83,6 +86,54 @@ fn print_summary(summary: &build::BuildSummary) {
     println!("  Failed:    {}", summary.failed_count());
     println!("  Skipped:   {}", summary.skipped_count());
     println!();
+}
+
+/// Scan the bulklog directory to reconstruct build results for report generation.
+fn scan_bulklog_for_report(bulklog: &Path) -> Result<build::BuildSummary> {
+    use std::fs;
+    use std::time::Duration;
+
+    let mut results = Vec::new();
+
+    for entry in fs::read_dir(bulklog)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        // Skip non-directories (report.html, etc.)
+        if !path.is_dir() {
+            continue;
+        }
+
+        let pkg_name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name.to_string(),
+            None => continue,
+        };
+
+        // Check for .failed file to determine failure phase
+        let failed_file = path.join(".failed");
+        let failed_reason = if failed_file.exists() {
+            fs::read_to_string(&failed_file)
+                .ok()
+                .map(|s| format!("Failed in {} phase", s.trim()))
+                .unwrap_or_else(|| "Build failed".to_string())
+        } else {
+            "Build failed (no phase marker)".to_string()
+        };
+
+        // Any directory in bulklog = failed build (successful builds clean up)
+        results.push(build::BuildResult {
+            pkgname: pkgsrc::PkgName::new(&pkg_name),
+            pkgpath: None,
+            outcome: build::BuildOutcome::Failed(failed_reason),
+            duration: Duration::ZERO,
+            log_dir: Some(path),
+        });
+    }
+
+    Ok(build::BuildSummary {
+        duration: Duration::ZERO,
+        results,
+    })
 }
 
 fn main() -> Result<()> {
@@ -174,6 +225,31 @@ fn main() -> Result<()> {
             }
 
             print_summary(&summary);
+
+            // Generate HTML report in bulklog directory
+            println!("Generating reports...");
+            let bulklog = config.bulklog();
+            let report_path = bulklog.join("report.html");
+            if let Err(e) = report::write_html_report(&summary, &report_path) {
+                eprintln!("Warning: Failed to write HTML report: {}", e);
+            } else {
+                println!("HTML report written to: {}", report_path.display());
+            }
+        }
+        Cmd::GenerateReport => {
+            let config = Config::load(&args)?;
+            let bulklog = config.bulklog();
+
+            if !bulklog.exists() {
+                bail!("Bulklog directory does not exist: {}", bulklog.display());
+            }
+
+            println!("Generating reports...");
+            let summary = scan_bulklog_for_report(bulklog)?;
+            let report_path = bulklog.join("report.html");
+
+            report::write_html_report(&summary, &report_path)?;
+            println!("HTML report written to: {}", report_path.display());
         }
         Cmd::Init { dir: ref arg } => {
             Init::create(arg)?;
