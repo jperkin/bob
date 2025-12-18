@@ -15,10 +15,10 @@
  */
 
 use crate::sandbox::Sandbox;
-use anyhow::{bail, Context};
+use anyhow::Context;
 use std::fs;
 use std::path::Path;
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
 
 impl Sandbox {
     pub fn mount_bindfs(
@@ -28,12 +28,15 @@ impl Sandbox {
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
-        let cmd = "/sbin/mount";
+        let cmd = "/bin/mount";
+        // Build mount options: start with "bind", add any user-specified opts
+        let mut mount_opts = vec!["bind"];
+        mount_opts.extend(opts.iter().copied());
+        let opts_str = mount_opts.join(",");
         Ok(Some(
             Command::new(cmd)
-                .arg("-F")
-                .arg("lofs")
-                .args(opts)
+                .arg("-o")
+                .arg(&opts_str)
                 .arg(src)
                 .arg(dest)
                 .status()
@@ -44,10 +47,21 @@ impl Sandbox {
     pub fn mount_devfs(
         &self,
         _src: &Path,
-        _dest: &Path,
-        _opts: &[&str],
+        dest: &Path,
+        opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        bail!("Use bind mounts for /dev")
+        fs::create_dir_all(dest)?;
+        let cmd = "/bin/mount";
+        Ok(Some(
+            Command::new(cmd)
+                .arg("-t")
+                .arg("devtmpfs")
+                .args(opts)
+                .arg("devtmpfs")
+                .arg(dest)
+                .status()
+                .context(format!("Unable to execute {}", cmd))?,
+        ))
     }
 
     pub fn mount_fdfs(
@@ -57,13 +71,16 @@ impl Sandbox {
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
-        let cmd = "/sbin/mount";
+        let cmd = "/bin/mount";
+        // Build mount options: start with "bind", add any user-specified opts
+        let mut mount_opts = vec!["bind"];
+        mount_opts.extend(opts.iter().copied());
+        let opts_str = mount_opts.join(",");
         Ok(Some(
             Command::new(cmd)
-                .arg("-F")
-                .arg("fd")
-                .args(opts)
-                .arg("fd")
+                .arg("-o")
+                .arg(&opts_str)
+                .arg("/dev/fd")
                 .arg(dest)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
@@ -77,10 +94,10 @@ impl Sandbox {
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
-        let cmd = "/sbin/mount";
+        let cmd = "/bin/mount";
         Ok(Some(
             Command::new(cmd)
-                .arg("-F")
+                .arg("-t")
                 .arg("nfs")
                 .args(opts)
                 .arg(src)
@@ -97,13 +114,13 @@ impl Sandbox {
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
-        let cmd = "/sbin/mount";
+        let cmd = "/bin/mount";
         Ok(Some(
             Command::new(cmd)
-                .arg("-F")
+                .arg("-t")
                 .arg("proc")
                 .args(opts)
-                .arg("/proc")
+                .arg("proc")
                 .arg(dest)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
@@ -117,31 +134,40 @@ impl Sandbox {
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
-        let cmd = "/sbin/mount";
+        let cmd = "/bin/mount";
+        let mut args = vec!["-t", "tmpfs"];
+        // Convert opts to mount -o style if they look like size options
+        let mut mount_opts: Vec<String> = vec![];
+        for opt in opts {
+            if opt.starts_with("size=") || opt.starts_with("mode=") {
+                mount_opts.push(opt.to_string());
+            }
+        }
+        if !mount_opts.is_empty() {
+            args.push("-o");
+        }
+        let opts_str = mount_opts.join(",");
         Ok(Some(
             Command::new(cmd)
-                .arg("-F")
+                .args(&args)
+                .arg(if !mount_opts.is_empty() { &opts_str } else { "" })
                 .arg("tmpfs")
-                .args(opts)
-                .arg("swap")
                 .arg(dest)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
     }
 
-    /*
-     * General unmount routine common to file system types that involve
-     * mounted file systems.
-     */
     fn unmount_common(
         &self,
         dest: &Path,
     ) -> anyhow::Result<Option<ExitStatus>> {
-        let cmd = "/sbin/umount";
+        let cmd = "/bin/umount";
         Ok(Some(
             Command::new(cmd)
                 .arg(dest)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
@@ -191,14 +217,15 @@ impl Sandbox {
 
     /// Kill all processes using files within a sandbox path.
     pub fn kill_processes(&self, sandbox: &Path) {
-        // Use fuser -k to kill all processes using files under the sandbox
+        // Use fuser -km to kill all processes using the mount point recursively
         let _ = Command::new("fuser")
             .arg("-k")
-            .arg("-9")
             .arg(sandbox)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
 
         // Give processes a moment to die
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(500));
     }
 }

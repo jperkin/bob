@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Jonathan Perkin <jonathan@perkin.org.uk>
+ * Copyright (c) 2025 Jonathan Perkin <jonathan@perkin.org.uk>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -14,10 +14,10 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+mod action;
 mod build;
 mod config;
 mod init;
-mod mount;
 mod sandbox;
 mod scan;
 
@@ -25,11 +25,13 @@ use crate::build::Build;
 use crate::config::Config;
 use crate::init::Init;
 use crate::sandbox::Sandbox;
-use crate::scan::Scan;
+use crate::scan::{Scan, SkipReason};
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::str;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about, long_about = None)]
@@ -71,22 +73,89 @@ enum SandboxCmd {
     List,
 }
 
+fn print_summary(summary: &build::BuildSummary) {
+    println!();
+    println!("Build Summary");
+    println!("=============");
+    println!("  Succeeded: {}", summary.success_count());
+    println!("  Failed:    {}", summary.failed_count());
+    println!("  Skipped:   {}", summary.skipped_count());
+    println!();
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
     match args.cmd {
         Cmd::Build => {
             let config = Config::load(&args)?;
+
+            // Validate configuration
+            if let Err(errors) = config.validate() {
+                eprintln!("Configuration errors:");
+                for e in &errors {
+                    eprintln!("  - {}", e);
+                }
+                bail!("{} configuration error(s) found", errors.len());
+            }
+
             let mut scan = Scan::new(&config);
             if let Some(pkgs) = config.pkgpaths() {
                 for p in pkgs {
                     scan.add(p);
                 }
             }
+            println!("Scanning packages...");
             scan.start()?;
-            let scanpkgs = scan.resolve()?;
-            let mut build = Build::new(&config, scanpkgs.clone());
-            build.start()?;
+            println!("Resolving dependencies...");
+            let scan_result = scan.resolve()?;
+
+            let mut build = Build::new(&config, scan_result.buildable.clone());
+
+            // Set up Ctrl+C handler for graceful shutdown
+            let shutdown_flag = Arc::new(AtomicBool::new(false));
+            let shutdown_for_handler = Arc::clone(&shutdown_flag);
+            let sandbox_for_handler = Sandbox::new(&config);
+            let build_threads = config.build_threads();
+
+            ctrlc::set_handler(move || {
+                shutdown_for_handler.store(true, Ordering::SeqCst);
+                // Kill processes in sandboxes to stop running builds
+                if sandbox_for_handler.enabled() {
+                    for i in 0..build_threads {
+                        sandbox_for_handler.kill_processes_by_id(i);
+                    }
+                }
+            }).expect("Error setting Ctrl-C handler");
+
+            println!("Building packages...");
+            let mut summary = build.start(Arc::clone(&shutdown_flag))?;
+
+            // Check if we were interrupted
+            if shutdown_flag.load(Ordering::SeqCst) {
+                let sandbox = Sandbox::new(&config);
+                if sandbox.enabled() {
+                    let _ = sandbox.destroy_all(config.build_threads());
+                }
+                std::process::exit(130);
+            }
+
+            // Add pre-skipped packages from scan to summary
+            for pkg in scan_result.skipped {
+                let reason = match pkg.reason {
+                    SkipReason::PkgSkipReason(r) => format!("PKG_SKIP_REASON: {}", r),
+                    SkipReason::PkgFailReason(r) => format!("PKG_FAIL_REASON: {}", r),
+                };
+                summary.results.push(build::BuildResult {
+                    pkgname: pkg.pkgname,
+                    pkgpath: pkg.pkgpath,
+                    outcome: build::BuildOutcome::Skipped(reason),
+                    duration: std::time::Duration::ZERO,
+                    log_dir: None,
+                });
+            }
+
+            print_summary(&summary);
         }
         Cmd::Init { dir: ref arg } => {
             Init::create(arg)?;
@@ -123,14 +192,28 @@ fn main() -> Result<()> {
         }
         Cmd::Scan => {
             let config = Config::load(&args)?;
+            if let Err(errors) = config.validate() {
+                eprintln!("Configuration errors:");
+                for e in &errors {
+                    eprintln!("  - {}", e);
+                }
+                bail!("{} configuration error(s) found", errors.len());
+            }
             let mut scan = Scan::new(&config);
             if let Some(pkgs) = config.pkgpaths() {
                 for p in pkgs {
                     scan.add(p);
                 }
             }
+            println!("Scanning packages...");
             scan.start()?;
-            scan.resolve()?;
+            println!("Resolving dependencies...");
+            let result = scan.resolve()?;
+            println!(
+                "Resolved {} buildable packages, {} skipped",
+                result.buildable.len(),
+                result.skipped.len()
+            );
         }
     };
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Jonathan Perkin <jonathan@perkin.org.uk>
+ * Copyright (c) 2025 Jonathan Perkin <jonathan@perkin.org.uk>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -15,7 +15,7 @@
  */
 
 use crate::sandbox::Sandbox;
-use anyhow::Context;
+use anyhow::{bail, Context};
 use std::fs;
 use std::path::Path;
 use std::process::{Command, ExitStatus};
@@ -25,7 +25,7 @@ impl Sandbox {
         &self,
         src: &Path,
         dest: &Path,
-        opts: &Vec<&str>,
+        opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
         let cmd = "/sbin/mount_null";
@@ -40,33 +40,22 @@ impl Sandbox {
     }
 
     /*
-     * NetBSD does not have a devfs but we provide support for MAKEDEV as a
-     * convenience.
+     * NetBSD does not have a devfs.  Use a 'cmd' action with MAKEDEV instead.
      */
     pub fn mount_devfs(
         &self,
         _src: &Path,
-        dest: &Path,
+        _dest: &Path,
         _opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest)?;
-        fs::copy("/dev/MAKEDEV", dest.join("MAKEDEV"))?;
-        fs::copy("/dev/MAKEDEV.local", dest.join("MAKEDEV.local"))?;
-        let cmd = "./MAKEDEV";
-        Ok(Some(
-            Command::new(cmd)
-                .arg("all")
-                .current_dir(dest)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        bail!("NetBSD does not support 'dev' mounts. Use a 'cmd' action with MAKEDEV instead.")
     }
 
     pub fn mount_fdfs(
         &self,
         _src: &Path,
         dest: &Path,
-        opts: &Vec<&str>,
+        opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
         let cmd = "/sbin/mount_fdesc";
@@ -84,7 +73,7 @@ impl Sandbox {
         &self,
         src: &Path,
         dest: &Path,
-        opts: &Vec<&str>,
+        opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
         let cmd = "/sbin/mount_nfs";
@@ -102,7 +91,7 @@ impl Sandbox {
         &self,
         _src: &Path,
         dest: &Path,
-        opts: &Vec<&str>,
+        opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
         let cmd = "/sbin/mount_procfs";
@@ -120,7 +109,7 @@ impl Sandbox {
         &self,
         _src: &Path,
         dest: &Path,
-        opts: &Vec<&str>,
+        opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
         let cmd = "/sbin/mount_tmpfs";
@@ -160,10 +149,10 @@ impl Sandbox {
 
     pub fn unmount_devfs(
         &self,
-        dest: &Path,
+        _dest: &Path,
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::remove_dir_all(dest)?;
-        Ok(None)
+        // Should never be called since mount_devfs bails
+        bail!("NetBSD does not support 'dev' mounts. Use a 'cmd' action with MAKEDEV instead.")
     }
 
     pub fn unmount_fdfs(
@@ -192,5 +181,31 @@ impl Sandbox {
         dest: &Path,
     ) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
+    }
+
+    /// Kill all processes using files within a sandbox path.
+    pub fn kill_processes(&self, sandbox: &Path) {
+        // Use fstat to find processes and kill them
+        let output = Command::new("fstat")
+            .arg(sandbox)
+            .output();
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            for line in stdout.lines().skip(1) {
+                // fstat output: USER CMD PID FD MOUNT ...
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 3 {
+                    if let Ok(pid) = parts[2].parse::<i32>() {
+                        let _ = Command::new("kill")
+                            .arg("-9")
+                            .arg(pid.to_string())
+                            .status();
+                    }
+                }
+            }
+        }
+
+        // Give processes a moment to die
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
