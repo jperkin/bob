@@ -23,7 +23,10 @@ pkgsrc = {
     },
     prefix = "/usr/pkg",
     tar = "/bin/tar",
-    unprivileged_user = "pbulk",
+    -- It is strongly recommended to set up an unprivileged user to perform
+    -- builds. If you do, ensure that their home directory is created inside
+    -- the sandbox and that work directories are writeable.
+    -- build_user = "builder",
 
     -- Set environment variables for each build. The pkg object allows you to
     -- perform powerful matching against data from the scan to set variables

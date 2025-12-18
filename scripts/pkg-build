@@ -42,7 +42,6 @@ set -e
 : ${bob_pkgsrc:?}
 : ${bob_prefix:?}
 : ${bob_tar:?}
-: ${bob_unprivileged_user:?}
 
 PKGDIR="${bob_pkgsrc}/${pkgdir}"
 LOGDIR="${bob_bulklog}/${pkgname}"
@@ -52,7 +51,7 @@ run_direct() {
 }
 
 run_su() {
-	su "${bob_unprivileged_user}" -c '"$@"' make "$@"
+	su "${bob_build_user}" -c '"$@"' make "$@"
 }
 
 run_make() {
@@ -89,7 +88,7 @@ cleanup() {
     exit 1
 }
 
-if [ $(id -u) -ne 0 ]; then
+if [ -z "${bob_build_user}" ]; then
 	run_checksum=run_direct
 	run_build=run_direct
 	run_install=run_direct
@@ -117,8 +116,8 @@ set -x
 
 # Create work.log and make it writable by the unprivileged user
 touch "${LOGDIR}/work.log"
-if [ $(id -u) -eq 0 ]; then
-    chown "${bob_unprivileged_user}" "${LOGDIR}/work.log"
+if [ -n "${bob_build_user}" ]; then
+    chown "${bob_build_user}" "${LOGDIR}/work.log"
 fi
 
 trap cleanup INT TERM

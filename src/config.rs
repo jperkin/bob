@@ -167,7 +167,7 @@ pub struct Pkgsrc {
     pub report_dir: Option<PathBuf>,
     pub save_wrkdir_patterns: Vec<String>,
     pub tar: PathBuf,
-    pub unprivileged_user: String,
+    pub build_user: Option<String>,
 }
 
 ///
@@ -328,8 +328,8 @@ impl Config {
         &self.file.pkgsrc.tar
     }
 
-    pub fn unprivileged_user(&self) -> &str {
-        &self.file.pkgsrc.unprivileged_user
+    pub fn build_user(&self) -> Option<&str> {
+        self.file.pkgsrc.build_user.as_deref()
     }
 
     /// Get environment variables for a package from the Lua env function/table.
@@ -503,7 +503,7 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
     let pkgtools: String = pkgsrc.get("pkgtools")?;
     let prefix: String = pkgsrc.get("prefix")?;
     let tar: String = pkgsrc.get("tar")?;
-    let unprivileged_user: String = pkgsrc.get("unprivileged_user")?;
+    let build_user: Option<String> = pkgsrc.get::<Option<String>>("build_user")?;
 
     let pkgpaths: Option<Vec<PkgPath>> = match pkgsrc.get::<Value>("pkgpaths")? {
         Value::Nil => None,
@@ -543,7 +543,7 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         report_dir,
         save_wrkdir_patterns,
         tar: PathBuf::from(tar),
-        unprivileged_user,
+        build_user,
     })
 }
 
