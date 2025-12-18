@@ -22,6 +22,7 @@ use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
 use std::sync::{Arc, Mutex};
+use tracing::{debug, error, info, trace};
 
 /// Reason why a package was excluded from the build.
 #[derive(Clone, Debug)]
@@ -78,14 +79,27 @@ pub struct Scan {
 impl Scan {
     pub fn new(config: &Config) -> Scan {
         let sandbox = Sandbox::new(config);
+        debug!(
+            pkgsrc = %config.pkgsrc().display(),
+            make = %config.make().display(),
+            scan_threads = config.scan_threads(),
+            "Created new Scan instance"
+        );
         Scan { config: config.clone(), sandbox, ..Default::default() }
     }
 
     pub fn add(&mut self, pkgpath: &PkgPath) {
+        info!(pkgpath = %pkgpath.as_path().display(), "Adding package to scan queue");
         self.incoming.insert(pkgpath.clone());
     }
 
     pub fn start(&mut self) -> anyhow::Result<()> {
+        info!(
+            incoming_count = self.incoming.len(),
+            sandbox_enabled = self.sandbox.enabled(),
+            "Starting package scan"
+        );
+
         println!("Scanning {} packages...", self.incoming.len());
 
         rayon::ThreadPoolBuilder::new()
@@ -181,6 +195,7 @@ impl Scan {
         pkgpath: &PkgPath,
     ) -> anyhow::Result<Vec<ScanIndex>> {
         let pkgpath_str = pkgpath.as_path().display().to_string();
+        debug!(pkgpath = %pkgpath_str, "Scanning package");
 
         let bmake = self.config.make().display().to_string();
         let pkgsrcdir = self.config.pkgsrc().display().to_string();
@@ -189,22 +204,55 @@ impl Scan {
             pkgsrcdir, pkgpath_str, bmake
         );
 
+        trace!(
+            pkgpath = %pkgpath_str,
+            script = %script,
+            "Executing pkg-scan"
+        );
         let child = self.sandbox.execute_script(0, &script, vec![])?;
         let output = child.wait_with_output()?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            error!(
+                pkgpath = %pkgpath_str,
+                exit_code = ?output.status.code(),
+                stderr = %stderr,
+                "pkg-scan script failed"
+            );
             eprintln!("pkg-scan failed for {}: {}", pkgpath_str, stderr);
         }
 
+        let stdout_str = String::from_utf8_lossy(&output.stdout);
+        trace!(
+            pkgpath = %pkgpath_str,
+            stdout_len = stdout_str.len(),
+            stdout = %stdout_str,
+            "pkg-scan script output"
+        );
+
         let reader = BufReader::new(&output.stdout[..]);
         let mut index = ScanIndex::from_reader(reader)?;
+
+        info!(
+            pkgpath = %pkgpath_str,
+            packages_found = index.len(),
+            "Scan complete for pkgpath"
+        );
 
         /*
          * Set PKGPATH (PKG_LOCATION) as for some reason pbulk-index doesn't.
          */
         for pkg in &mut index {
             pkg.pkg_location = Some(pkgpath.clone());
+            debug!(
+                pkgpath = %pkgpath_str,
+                pkgname = %pkg.pkgname.pkgname(),
+                skip_reason = ?pkg.pkg_skip_reason,
+                fail_reason = ?pkg.pkg_fail_reason,
+                depends_count = pkg.all_depends.len(),
+                "Found package in scan"
+            );
         }
 
         Ok(index)
@@ -219,6 +267,11 @@ impl Scan {
      * Return a [`ScanResult`] containing buildable packages and skipped packages.
      */
     pub fn resolve(&mut self) -> Result<ScanResult> {
+        info!(
+            done_pkgpaths = self.done.len(),
+            "Starting dependency resolution"
+        );
+
         println!("Resolving dependencies...");
 
         /*
@@ -236,11 +289,25 @@ impl Scan {
         let mut pkgnames: HashSet<PkgName> = HashSet::new();
         let mut skipped: Vec<SkippedPackage> = Vec::new();
 
+        // Log what we have in self.done
+        for (pkgpath, index) in &self.done {
+            debug!(
+                pkgpath = %pkgpath.as_path().display(),
+                packages_in_index = index.len(),
+                "Processing done entry"
+            );
+        }
+
         for index in self.done.values() {
             for pkg in index {
                 // Check for skip/fail reasons
                 if let Some(reason) = &pkg.pkg_skip_reason {
                     if !reason.is_empty() {
+                        info!(
+                            pkgname = %pkg.pkgname.pkgname(),
+                            reason = %reason,
+                            "Skipping package due to PKG_SKIP_REASON"
+                        );
                         skipped.push(SkippedPackage {
                             pkgname: pkg.pkgname.clone(),
                             pkgpath: pkg.pkg_location.clone(),
@@ -251,6 +318,11 @@ impl Scan {
                 }
                 if let Some(reason) = &pkg.pkg_fail_reason {
                     if !reason.is_empty() {
+                        info!(
+                            pkgname = %pkg.pkgname.pkgname(),
+                            reason = %reason,
+                            "Skipping package due to PKG_FAIL_REASON"
+                        );
                         skipped.push(SkippedPackage {
                             pkgname: pkg.pkgname.clone(),
                             pkgpath: pkg.pkg_location.clone(),
@@ -260,10 +332,20 @@ impl Scan {
                     }
                 }
 
+                debug!(
+                    pkgname = %pkg.pkgname.pkgname(),
+                    "Adding package to resolved set"
+                );
                 pkgnames.insert(pkg.pkgname.clone());
                 self.resolved.insert(pkg.pkgname.clone(), pkg.clone());
             }
         }
+
+        info!(
+            resolved_count = self.resolved.len(),
+            skipped_count = skipped.len(),
+            "Initial resolution complete"
+        );
 
         if !skipped.is_empty() {
             println!(
@@ -331,12 +413,16 @@ impl Scan {
         }
 
         if !errors.is_empty() {
+            for err in &errors {
+                error!(error = %err, "Unresolved dependency");
+            }
             bail!("Unresolved dependencies:\n  {}", errors.join("\n  "));
         }
 
         /*
          * Verify that the graph is acyclic.
          */
+        debug!(resolved_count = self.resolved.len(), "Checking for circular dependencies");
         let mut graph = DiGraphMap::new();
         for (pkgname, index) in &self.resolved {
             for dep in &index.depends {
@@ -349,7 +435,19 @@ impl Scan {
                 err.push_str(&format!("\t{}\n", n));
             }
             err.push_str(&format!("\t{}", cycle.last().unwrap()));
+            error!(cycle = ?cycle, "Circular dependency detected");
             bail!(err);
+        }
+
+        info!(
+            buildable_count = self.resolved.len(),
+            skipped_count = skipped.len(),
+            "Resolution complete"
+        );
+
+        // Log all buildable packages
+        for pkgname in self.resolved.keys() {
+            debug!(pkgname = %pkgname.pkgname(), "Package is buildable");
         }
 
         println!(
