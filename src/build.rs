@@ -25,6 +25,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, mpsc::Sender, Arc, Mutex};
 use std::time::{Duration, Instant};
+use tracing::{debug, error, info, trace, warn};
 
 /// Format a ScanIndex as pbulk-index output for piping to scripts.
 /// XXX: switch to simply calling display() once pkgsrc-rs is updated.
@@ -286,8 +287,14 @@ enum PackageBuildResult {
 impl PackageBuild {
     fn build(&self) -> anyhow::Result<PackageBuildResult> {
         let pkgname = self.pkginfo.pkgname.pkgname();
+        info!(
+            pkgname = %pkgname,
+            sandbox_id = self.id,
+            "Starting package build"
+        );
 
         let Some(pkgpath) = &self.pkginfo.pkg_location else {
+            error!(pkgname = %pkgname, "Could not get PKGPATH for package");
             bail!("Could not get PKGPATH for {}", pkgname);
         };
 
@@ -322,7 +329,8 @@ impl PackageBuild {
                 }
                 env
             }
-            Err(_e) => {
+            Err(e) => {
+                error!(pkgname = %pkgname, error = %e, "Failed to get env from Lua config");
                 HashMap::new()
             }
         };
@@ -334,11 +342,25 @@ impl PackageBuild {
         }
 
         let Some(pkg_build_path) = &self.config.script("pkg-build") else {
+            error!(pkgname = %pkgname, "No pkg-build script defined");
             bail!("No pkg-build script defined");
         };
 
         // Format ScanIndex as pbulk-index output for stdin
         let stdin_data = format_scan_index(&self.pkginfo);
+
+        debug!(
+            pkgname = %pkgname,
+            script = %pkg_build_path.display(),
+            env_count = envs.len(),
+            "Executing pkg-build script"
+        );
+        trace!(
+            pkgname = %pkgname,
+            envs = ?envs,
+            stdin = %stdin_data,
+            "Build environment variables"
+        );
 
         let child = self.sandbox.execute(self.id, pkg_build_path, envs, Some(&stdin_data))?;
         let output =
@@ -348,13 +370,27 @@ impl PackageBuild {
 
         match exit_code {
             0 => {
+                info!(
+                    pkgname = %pkgname,
+                    "pkg-build completed successfully"
+                );
                 Ok(PackageBuildResult::Success)
             }
             42 => {
+                info!(
+                    pkgname = %pkgname,
+                    "pkg-build skipped (up-to-date)"
+                );
                 Ok(PackageBuildResult::Skipped)
             }
-            _ => {
+            code => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
+                error!(
+                    pkgname = %pkgname,
+                    exit_code = code,
+                    stderr = %stderr,
+                    "pkg-build failed"
+                );
                 if !stderr.is_empty() {
                     eprintln!("pkg-build stderr: {}", stderr);
                 }
@@ -384,6 +420,7 @@ impl PackageBuild {
         let wrkdir = match make.wrkdir() {
             Some(w) => w,
             None => {
+                debug!(pkgname = %pkgname, "Could not determine WRKDIR, skipping file save");
                 return;
             }
         };
@@ -392,11 +429,21 @@ impl PackageBuild {
         let wrkdir_path = make.resolve_path(&wrkdir);
 
         if !wrkdir_path.exists() {
+            debug!(
+                pkgname = %pkgname,
+                wrkdir = %wrkdir_path.display(),
+                "WRKDIR does not exist, skipping file save"
+            );
             return;
         }
 
         let save_dir = bulklog.join(pkgname).join("wrkdir-files");
-        if let Err(_e) = fs::create_dir_all(&save_dir) {
+        if let Err(e) = fs::create_dir_all(&save_dir) {
+            warn!(
+                pkgname = %pkgname,
+                error = %e,
+                "Failed to create wrkdir-files directory"
+            );
             return;
         }
 
@@ -404,7 +451,10 @@ impl PackageBuild {
         let compiled_patterns: Vec<Pattern> = patterns
             .iter()
             .filter_map(|p| {
-                Pattern::new(p).ok()
+                Pattern::new(p).ok().or_else(|| {
+                    warn!(pattern = %p, "Invalid glob pattern");
+                    None
+                })
             })
             .collect();
 
@@ -414,11 +464,21 @@ impl PackageBuild {
 
         // Walk the wrkdir and find matching files
         let mut saved_count = 0;
-        if let Err(_e) = walk_and_save(&wrkdir_path, &wrkdir_path, &save_dir, &compiled_patterns, &mut saved_count) {
+        if let Err(e) = walk_and_save(&wrkdir_path, &wrkdir_path, &save_dir, &compiled_patterns, &mut saved_count) {
+            warn!(
+                pkgname = %pkgname,
+                error = %e,
+                "Error while saving wrkdir files"
+            );
         }
 
         if saved_count > 0 {
-            println!("Saved {} wrkdir files for {} to {}", saved_count, pkgname, save_dir.display());
+            info!(
+                pkgname = %pkgname,
+                count = saved_count,
+                dest = %save_dir.display(),
+                "Saved wrkdir files"
+            );
         }
     }
 
@@ -426,7 +486,7 @@ impl PackageBuild {
     fn run_clean(&self, pkgpath: &PkgPath) {
         let pkgdir = self.config.pkgsrc().join(pkgpath.as_path());
 
-        let _result = if self.sandbox.enabled() {
+        let result = if self.sandbox.enabled() {
             Command::new("/usr/sbin/chroot")
                 .arg(self.sandbox.path(self.id))
                 .arg(self.config.make())
@@ -445,6 +505,10 @@ impl PackageBuild {
                 .stderr(std::process::Stdio::null())
                 .status()
         };
+
+        if let Err(e) = result {
+            debug!(error = %e, "Failed to run bmake clean");
+        }
     }
 }
 
@@ -481,8 +545,19 @@ fn walk_and_save(
                     }
 
                     // Copy the file
-                    if let Err(_e) = fs::copy(&path, &dest_path) {
+                    if let Err(e) = fs::copy(&path, &dest_path) {
+                        warn!(
+                            src = %path.display(),
+                            dest = %dest_path.display(),
+                            error = %e,
+                            "Failed to copy file"
+                        );
                     } else {
+                        debug!(
+                            src = %path.display(),
+                            dest = %dest_path.display(),
+                            "Saved wrkdir file"
+                        );
                         *saved_count += 1;
                     }
                     break; // Don't copy same file multiple times
@@ -748,25 +823,58 @@ impl Build {
         scanpkgs: HashMap<PkgName, ScanIndex>,
     ) -> Build {
         let sandbox = Sandbox::new(config);
+        info!(
+            package_count = scanpkgs.len(),
+            sandbox_enabled = sandbox.enabled(),
+            build_threads = config.build_threads(),
+            "Creating new Build instance"
+        );
+        for (pkgname, index) in &scanpkgs {
+            debug!(
+                pkgname = %pkgname.pkgname(),
+                pkgpath = ?index.pkg_location,
+                depends_count = index.depends.len(),
+                depends = ?index.depends.iter().map(|d| d.pkgname()).collect::<Vec<_>>(),
+                "Package in build queue"
+            );
+        }
         Build { config: config.clone(), sandbox, scanpkgs }
     }
 
     pub fn start(&mut self, shutdown_flag: Arc<AtomicBool>) -> anyhow::Result<BuildSummary> {
         let started = Instant::now();
 
+        info!(
+            package_count = self.scanpkgs.len(),
+            "Build::start() called"
+        );
+
         println!("Building {} packages...", self.scanpkgs.len());
 
         /*
          * Populate BuildJobs.
          */
+        debug!("Populating BuildJobs from scanpkgs");
         let mut incoming: HashMap<PkgName, HashSet<PkgName>> = HashMap::new();
         for (pkgname, index) in &self.scanpkgs {
             let mut deps: HashSet<PkgName> = HashSet::new();
             for dep in &index.depends {
                 deps.insert(dep.clone());
             }
+            trace!(
+                pkgname = %pkgname.pkgname(),
+                deps_count = deps.len(),
+                deps = ?deps.iter().map(|d| d.pkgname()).collect::<Vec<_>>(),
+                "Adding package to incoming build queue"
+            );
             incoming.insert(pkgname.clone(), deps);
         }
+
+        info!(
+            incoming_count = incoming.len(),
+            scanpkgs_count = self.scanpkgs.len(),
+            "BuildJobs populated"
+        );
 
         let running: HashSet<PkgName> = HashSet::new();
         let done: HashSet<PkgName> = HashSet::new();
@@ -872,9 +980,6 @@ impl Build {
         let shutdown_for_manager = Arc::clone(&shutdown_flag);
         let (results_tx, results_rx) = mpsc::channel::<Vec<BuildResult>>();
         let (interrupted_tx, interrupted_rx) = mpsc::channel::<bool>();
-        let completed = Arc::new(Mutex::new(0usize));
-        let skipped = Arc::new(Mutex::new(0usize));
-        let failed_count = Arc::new(Mutex::new(0usize));
         let manager = std::thread::spawn(move || {
             let mut clients = clients.clone();
             let config = config.clone();
@@ -941,9 +1046,6 @@ impl Build {
                         jobs.mark_success(&pkgname, duration);
                         jobs.running.remove(&pkgname);
 
-                        if let Ok(mut count) = completed.lock() {
-                            *count += 1;
-                        }
                         println!("Built {} ({})", pkgname.pkgname(), format_duration(duration));
                     }
                     ChannelCommand::JobSkipped(pkgname) => {
@@ -955,9 +1057,6 @@ impl Build {
                         jobs.mark_skipped(&pkgname);
                         jobs.running.remove(&pkgname);
 
-                        if let Ok(mut count) = skipped.lock() {
-                            *count += 1;
-                        }
                         println!("Skipped {} (up-to-date)", pkgname.pkgname());
                     }
                     ChannelCommand::JobFailed(pkgname, duration) => {
@@ -969,9 +1068,6 @@ impl Build {
                         jobs.mark_failure(&pkgname, duration);
                         jobs.running.remove(&pkgname);
 
-                        if let Ok(mut count) = failed_count.lock() {
-                            *count += 1;
-                        }
                         println!("Failed {} ({})", pkgname.pkgname(), format_duration(duration));
                     }
                     ChannelCommand::JobError((pkgname, duration, e)) => {
@@ -983,10 +1079,8 @@ impl Build {
                         jobs.mark_failure(&pkgname, duration);
                         jobs.running.remove(&pkgname);
 
-                        if let Ok(mut count) = failed_count.lock() {
-                            *count += 1;
-                        }
                         eprintln!("Failed {} ({}): {}", pkgname.pkgname(), format_duration(duration), e);
+                        tracing::error!(error = %e, pkgname = %pkgname.pkgname(), "Build error");
                     }
                     _ => {}
                 }

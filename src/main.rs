@@ -99,6 +99,8 @@ fn main() -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("Cannot determine logs directory"))?;
             logging::init(&logs_dir, config.verbose())?;
 
+            tracing::info!("Build command started");
+
             // Validate configuration
             if let Err(errors) = config.validate() {
                 eprintln!("Configuration errors:");
@@ -118,6 +120,12 @@ fn main() -> Result<()> {
             scan.start()?;
             println!("Resolving dependencies...");
             let scan_result = scan.resolve()?;
+
+            tracing::info!(
+                buildable = scan_result.buildable.len(),
+                skipped = scan_result.skipped.len(),
+                "Scan complete"
+            );
 
             let mut build = Build::new(&config, scan_result.buildable.clone());
 
