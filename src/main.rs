@@ -18,6 +18,7 @@ mod action;
 mod build;
 mod config;
 mod init;
+mod logging;
 mod sandbox;
 mod scan;
 
@@ -89,6 +90,14 @@ fn main() -> Result<()> {
     match args.cmd {
         Cmd::Build => {
             let config = Config::load(&args)?;
+
+            // Initialize logging
+            let logs_dir = config
+                .config_path()
+                .and_then(|p| p.parent())
+                .map(|p| p.join("logs"))
+                .ok_or_else(|| anyhow::anyhow!("Cannot determine logs directory"))?;
+            logging::init(&logs_dir, config.verbose())?;
 
             // Validate configuration
             if let Err(errors) = config.validate() {
