@@ -1,3 +1,164 @@
 #!/bin/sh
+#
+# Script to build a single package.  Based on pbulk's pkg-build.
+#
+# This script receives the ScanIndex entries for the package in question on
+# stdin.
+#
 
-cd ${BOB_PKGSRCDIR}/${BOB_PKGPATH} && ${BOB_BMAKE} -v PKGPATH
+
+#
+# Parse ScanIndex from stdin.
+#
+while read scan_input; do
+	case "${scan_input}" in
+	PKGNAME=*)
+		pkgname=${scan_input#PKGNAME=}
+		;;
+	PKG_LOCATION=*)
+		pkgdir=${scan_input#PKG_LOCATION=}
+		;;
+	DEPENDS=*)
+		dependencies=${scan_input#DEPENDS=}
+		;;
+	MULTI_VERSION=*)
+		MAKE_FLAGS=${scan_input#MULTI_VERSION=}
+		;;
+	BOOTSTRAP_PKG=*)
+		is_bootstrap=${scan_input#BOOTSTRAP_PKG=}
+		;;
+	USERGROUP_PHASE=*)
+		usergroup_phase=${scan_input#USERGROUP_PHASE=}
+	esac
+done
+
+set -e
+
+# Required core variables.
+: ${bob_bulklog:?}
+: ${bob_make:?}
+: ${bob_packages:?}
+: ${bob_pkgtools:?}
+: ${bob_pkgsrc:?}
+: ${bob_prefix:?}
+: ${bob_tar:?}
+: ${bob_unprivileged_user:?}
+
+PKGDIR="${bob_pkgsrc}/${pkgdir}"
+LOGDIR="${bob_bulklog}/${pkgname}"
+
+run_direct() {
+	"$@"
+}
+
+run_su() {
+	su "${bob_unprivileged_user}" -c '"$@"' make "$@"
+}
+
+run_make() {
+	local run_cmd
+	run_cmd=$1
+	shift
+	${run_cmd} ${bob_make} "$@" \
+		BATCH=1 \
+		DEPENDS_TARGET=/nonexistent \
+		${MAKE_FLAGS} \
+		WRKLOG="${LOGDIR}/work.log"
+}
+
+# Write current stage to .stage file for reporting
+set_stage() {
+    echo "$1" > "${LOGDIR}/.stage"
+}
+
+cleanup() {
+    # Record which stage failed
+    if [ -f "${LOGDIR}/.stage" ]; then
+        echo "$(cat ${LOGDIR}/.stage)" > "${LOGDIR}/.failed"
+    fi
+    if [ -n "${KEEP_WRKDIR}" ]; then
+        ${bob_make} pbulk-save-wrkdir INTO="${LOGDIR}/wrkdir.tar.gz" TAR="${bob_tar}" > "${LOGDIR}/wrkdir-save.log" 2>&1 || true
+    fi
+    if [ -n "${KEEP_PREFIX}" ] && [ -f "${LOGDIR}/install.log" ]; then
+        ${bob_tar} -czf "${LOGDIR}/prefix.tar.gz" "${bob_prefix}" > "${LOGDIR}/prefix-save.log" 2>&1 || true
+    fi
+    # Only clean if SKIP_CLEAN is not set (bob sets this to handle cleanup itself)
+    if [ -z "${SKIP_CLEAN}" ]; then
+        ${bob_make} clean > /dev/null 2>&1 || true
+    fi
+    exit 1
+}
+
+if [ $(id -u) -ne 0 ]; then
+	run_checksum=run_direct
+	run_build=run_direct
+	run_install=run_direct
+else
+	run_checksum=run_su
+	run_build=run_su
+	run_install=run_su
+fi
+
+if [ -n "${PKG_UP_TO_DATE}" ] && [ -x "${PKG_UP_TO_DATE}" ]; then
+    mkdir -p "${LOGDIR}"
+    if "${PKG_UP_TO_DATE}" "${pkgname}" ${dependencies} > "${LOGDIR}/up-to-date.log" 2>&1; then
+        rm -rf "${LOGDIR}"
+        exit 42  # Special exit code for "skipped (up-to-date)"
+    fi
+fi
+
+cd "${PKGDIR}"
+
+mkdir -p "${LOGDIR}"
+rm -f "${LOGDIR}"/.stage "${LOGDIR}"/.failed "${LOGDIR}"/.success
+
+exec >${LOGDIR}/pkg-build.log 2>&1
+set -x
+
+# Create work.log and make it writable by the unprivileged user
+touch "${LOGDIR}/work.log"
+if [ $(id -u) -eq 0 ]; then
+    chown "${bob_unprivileged_user}" "${LOGDIR}/work.log"
+fi
+
+trap cleanup INT TERM
+
+set_stage "pre-clean"
+${bob_make} clean > "${LOGDIR}/pre-clean.log" 2>&1
+
+# Install dependencies
+if [ -n "${dependencies}" ]; then
+    set_stage "depends"
+    PKG_PATH="${bob_packages}/All" ${bob_pkgtools}/pkg_add ${dependencies} > "${LOGDIR}/depends.log" 2>&1 || cleanup
+fi
+
+set_stage "checksum"
+run_make ${run_checksum} checksum > "${LOGDIR}/checksum.log" 2>&1 || cleanup
+
+set_stage "configure"
+run_make ${run_build} configure > "${LOGDIR}/configure.log" 2>&1 || cleanup
+
+set_stage "build"
+run_make ${run_build} all > "${LOGDIR}/build.log" 2>&1 || cleanup
+
+set_stage "install"
+run_make ${run_install} stage-install > "${LOGDIR}/install.log" 2>&1 || cleanup
+
+set_stage "package"
+run_make run_direct stage-package-create > "${LOGDIR}/package.log" 2>&1 || cleanup
+
+if [ -n "${bob_packages}" ]; then
+    mkdir -p "${bob_packages}/All"
+    PKGFILE=$(run_make run_direct show-var VARNAME=STAGE_PKGFILE)
+    if [ -f "${PKGFILE}" ]; then
+        cp "${PKGFILE}" "${bob_packages}/All/"
+    fi
+fi
+
+set_stage "clean"
+${bob_make} clean > "${LOGDIR}/clean.log" 2>&1 || true
+
+# Remove bulklog directory on success
+rm -rf "${LOGDIR}"
+
+exit 0

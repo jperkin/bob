@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Jonathan Perkin <jonathan@perkin.org.uk>
+ * Copyright (c) 2025 Jonathan Perkin <jonathan@perkin.org.uk>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -16,12 +16,132 @@
 
 use crate::{Config, Sandbox};
 use anyhow::{bail, Context};
-use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressStyle};
-use pkgsrc::{PkgName, ScanIndex};
+use glob::Pattern;
+use pkgsrc::{PkgName, PkgPath, ScanIndex};
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
-use std::sync::{mpsc, mpsc::Sender};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, mpsc::Sender, Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Format a ScanIndex as pbulk-index output for piping to scripts.
+/// XXX: switch to simply calling display() once pkgsrc-rs is updated.
+fn format_scan_index(idx: &ScanIndex) -> String {
+    let mut out = String::new();
+
+    out.push_str(&format!("PKGNAME={}\n", idx.pkgname.pkgname()));
+
+    if let Some(ref loc) = idx.pkg_location {
+        out.push_str(&format!("PKG_LOCATION={}\n", loc.as_path().display()));
+    }
+
+    if !idx.depends.is_empty() {
+        let deps: Vec<&str> = idx.depends.iter().map(|d| d.pkgname()).collect();
+        out.push_str(&format!("DEPENDS={}\n", deps.join(" ")));
+    }
+
+    if !idx.multi_version.is_empty() {
+        out.push_str(&format!("MULTI_VERSION={}\n", idx.multi_version.join(" ")));
+    }
+
+    if let Some(ref bootstrap) = idx.bootstrap_pkg {
+        out.push_str(&format!("BOOTSTRAP_PKG={}\n", bootstrap));
+    }
+
+    if let Some(ref phase) = idx.usergroup_phase {
+        out.push_str(&format!("USERGROUP_PHASE={}\n", phase));
+    }
+
+    out
+}
+
+/// Outcome of a package build attempt.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub enum BuildOutcome {
+    /// Package built successfully.
+    Success,
+    /// Package build failed with reason.
+    Failed(String),
+    /// Package was skipped with reason (e.g., dependency failed).
+    Skipped(String),
+}
+
+/// Result of building a single package.
+#[derive(Clone, Debug)]
+pub struct BuildResult {
+    /// Package name.
+    pub pkgname: PkgName,
+    /// Package path in pkgsrc.
+    pub pkgpath: Option<PkgPath>,
+    /// Build outcome.
+    pub outcome: BuildOutcome,
+    /// Build duration.
+    pub duration: Duration,
+    /// Path to build logs, if any.
+    pub log_dir: Option<PathBuf>,
+}
+
+/// Summary of the entire build run.
+#[derive(Clone, Debug)]
+pub struct BuildSummary {
+    /// Total duration of the build.
+    pub duration: Duration,
+    /// Individual build results.
+    pub results: Vec<BuildResult>,
+}
+
+impl BuildSummary {
+    /// Count of successfully built packages.
+    pub fn success_count(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|r| matches!(r.outcome, BuildOutcome::Success))
+            .count()
+    }
+
+    /// Count of failed packages.
+    pub fn failed_count(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|r| matches!(r.outcome, BuildOutcome::Failed(_)))
+            .count()
+    }
+
+    /// Count of skipped packages.
+    pub fn skipped_count(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|r| matches!(r.outcome, BuildOutcome::Skipped(_)))
+            .count()
+    }
+
+    /// Get all failed results.
+    pub fn failed(&self) -> Vec<&BuildResult> {
+        self.results
+            .iter()
+            .filter(|r| matches!(r.outcome, BuildOutcome::Failed(_)))
+            .collect()
+    }
+
+    /// Get all successful results.
+    pub fn succeeded(&self) -> Vec<&BuildResult> {
+        self.results
+            .iter()
+            .filter(|r| matches!(r.outcome, BuildOutcome::Success))
+            .collect()
+    }
+
+    /// Get all skipped results.
+    pub fn skipped(&self) -> Vec<&BuildResult> {
+        self.results
+            .iter()
+            .filter(|r| matches!(r.outcome, BuildOutcome::Skipped(_)))
+            .collect()
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct Build {
@@ -47,28 +167,331 @@ struct PackageBuild {
     sandbox: Sandbox,
 }
 
+/// Helper for querying bmake variables with the correct environment.
+struct MakeQuery<'a> {
+    config: &'a Config,
+    sandbox: &'a Sandbox,
+    sandbox_id: usize,
+    pkgpath: &'a PkgPath,
+    env: &'a HashMap<String, String>,
+}
+
+impl<'a> MakeQuery<'a> {
+    fn new(
+        config: &'a Config,
+        sandbox: &'a Sandbox,
+        sandbox_id: usize,
+        pkgpath: &'a PkgPath,
+        env: &'a HashMap<String, String>,
+    ) -> Self {
+        Self {
+            config,
+            sandbox,
+            sandbox_id,
+            pkgpath,
+            env,
+        }
+    }
+
+    /// Query a bmake variable value.
+    fn var(&self, name: &str) -> Option<String> {
+        let pkgdir = self.config.pkgsrc().join(self.pkgpath.as_path());
+
+        let mut cmd = if self.sandbox.enabled() {
+            let mut c = Command::new("/usr/sbin/chroot");
+            c.arg(self.sandbox.path(self.sandbox_id))
+                .arg(self.config.make());
+            c
+        } else {
+            Command::new(self.config.make())
+        };
+
+        cmd.arg("-C")
+            .arg(&pkgdir)
+            .arg("show-var")
+            .arg(format!("VARNAME={}", name));
+
+        // Pass env vars that may affect the variable value
+        for (key, value) in self.env {
+            cmd.env(key, value);
+        }
+
+        let output = cmd.output().ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        if value.is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    }
+
+    /// Query a bmake variable and return as PathBuf.
+    fn var_path(&self, name: &str) -> Option<PathBuf> {
+        self.var(name).map(PathBuf::from)
+    }
+
+    /// Get the WRKDIR for this package.
+    fn wrkdir(&self) -> Option<PathBuf> {
+        self.var_path("WRKDIR")
+    }
+
+    /// Get the WRKSRC for this package.
+    #[allow(dead_code)]
+    fn wrksrc(&self) -> Option<PathBuf> {
+        self.var_path("WRKSRC")
+    }
+
+    /// Get the DESTDIR for this package.
+    #[allow(dead_code)]
+    fn destdir(&self) -> Option<PathBuf> {
+        self.var_path("DESTDIR")
+    }
+
+    /// Get the PREFIX for this package.
+    #[allow(dead_code)]
+    fn prefix(&self) -> Option<PathBuf> {
+        self.var_path("PREFIX")
+    }
+
+    /// Resolve a path to its actual location on the host filesystem.
+    /// If sandboxed, prepends the sandbox root path.
+    fn resolve_path(&self, path: &Path) -> PathBuf {
+        if self.sandbox.enabled() {
+            self.sandbox
+                .path(self.sandbox_id)
+                .join(path.strip_prefix("/").unwrap_or(path))
+        } else {
+            path.to_path_buf()
+        }
+    }
+}
+
+/// Result of a single package build attempt.
+#[derive(Debug)]
+enum PackageBuildResult {
+    /// Build succeeded
+    Success,
+    /// Build failed
+    Failed,
+    /// Package was up-to-date, skipped
+    Skipped,
+}
+
 impl PackageBuild {
-    fn build(&self) -> anyhow::Result<i32> {
+    fn build(&self) -> anyhow::Result<PackageBuildResult> {
         let pkgname = self.pkginfo.pkgname.pkgname();
+
         let Some(pkgpath) = &self.pkginfo.pkg_location else {
             bail!("Could not get PKGPATH for {}", pkgname);
         };
-        let envs = vec![
-            ("BOB_BMAKE", format!("{}", self.config.make().display())),
-            ("BOB_PKGPATH", format!("{}", pkgpath.as_path().display())),
-            ("BOB_PKGSRCDIR", format!("{}", self.config.pkgsrc().display())),
+
+        let bulklog = self.config.bulklog();
+        let packages = self.config.packages();
+
+        // Core environment vars that are always set
+        let mut envs = vec![
+            ("bob_bulklog", format!("{}", bulklog.display())),
+            ("bob_make", format!("{}", self.config.make().display())),
+            ("bob_packages", format!("{}", packages.display())),
+            ("bob_pkgtools", format!("{}", self.config.pkgtools().display())),
+            ("bob_pkgsrc", format!("{}", self.config.pkgsrc().display())),
+            ("bob_prefix", format!("{}", self.config.prefix().display())),
+            ("bob_tar", format!("{}", self.config.tar().display())),
+            ("bob_unprivileged_user", self.config.unprivileged_user().to_string()),
         ];
+
+        // Add script paths
+        if let Some(pkg_up_to_date) = self.config.script("pkg-up-to-date") {
+            envs.push((
+                "PKG_UP_TO_DATE",
+                format!("{}", pkg_up_to_date.display()),
+            ));
+        }
+
+        // Get env vars from Lua config (function or table)
+        let pkg_env = match self.config.get_pkg_env(&self.pkginfo) {
+            Ok(env) => {
+                for (key, value) in &env {
+                    envs.push((Box::leak(key.clone().into_boxed_str()), value.clone()));
+                }
+                env
+            }
+            Err(_e) => {
+                HashMap::new()
+            }
+        };
+
+        // If we have save_wrkdir_patterns, tell the script not to clean so we can save files
+        let patterns = self.config.save_wrkdir_patterns();
+        if !patterns.is_empty() {
+            envs.push(("SKIP_CLEAN", "1".to_string()));
+        }
+
         let Some(pkg_build_path) = &self.config.script("pkg-build") else {
             bail!("No pkg-build script defined");
         };
-        let mut child = self.sandbox.execute(self.id, pkg_build_path, envs)?;
-        let mut stdout =
-            child.stdout.take().context("Could not read stdout")?;
-        let res = child.wait().context("Could not wait for child")?;
-        let mut out = String::new();
-        stdout.read_to_string(&mut out)?;
-        res.code().context("proc failed")
+
+        // Format ScanIndex as pbulk-index output for stdin
+        let stdin_data = format_scan_index(&self.pkginfo);
+
+        let child = self.sandbox.execute(self.id, pkg_build_path, envs, Some(&stdin_data))?;
+        let output =
+            child.wait_with_output().context("Failed to wait for pkg-build")?;
+
+        let exit_code = output.status.code().context("Process terminated by signal")?;
+
+        match exit_code {
+            0 => {
+                Ok(PackageBuildResult::Success)
+            }
+            42 => {
+                Ok(PackageBuildResult::Skipped)
+            }
+            _ => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !stderr.is_empty() {
+                    eprintln!("pkg-build stderr: {}", stderr);
+                }
+
+                // Save wrkdir files matching configured patterns, then clean up
+                if !patterns.is_empty() {
+                    self.save_wrkdir_files(pkgname, pkgpath, bulklog, patterns, &pkg_env);
+                    self.run_clean(pkgpath);
+                }
+                Ok(PackageBuildResult::Failed)
+            }
+        }
     }
+
+    /// Save files matching patterns from WRKDIR to bulklog on build failure.
+    fn save_wrkdir_files(
+        &self,
+        pkgname: &str,
+        pkgpath: &PkgPath,
+        bulklog: &Path,
+        patterns: &[String],
+        pkg_env: &HashMap<String, String>,
+    ) {
+        let make = MakeQuery::new(&self.config, &self.sandbox, self.id, pkgpath, pkg_env);
+
+        // Get WRKDIR
+        let wrkdir = match make.wrkdir() {
+            Some(w) => w,
+            None => {
+                return;
+            }
+        };
+
+        // Resolve to actual filesystem path
+        let wrkdir_path = make.resolve_path(&wrkdir);
+
+        if !wrkdir_path.exists() {
+            return;
+        }
+
+        let save_dir = bulklog.join(pkgname).join("wrkdir-files");
+        if let Err(_e) = fs::create_dir_all(&save_dir) {
+            return;
+        }
+
+        // Compile glob patterns
+        let compiled_patterns: Vec<Pattern> = patterns
+            .iter()
+            .filter_map(|p| {
+                Pattern::new(p).ok()
+            })
+            .collect();
+
+        if compiled_patterns.is_empty() {
+            return;
+        }
+
+        // Walk the wrkdir and find matching files
+        let mut saved_count = 0;
+        if let Err(_e) = walk_and_save(&wrkdir_path, &wrkdir_path, &save_dir, &compiled_patterns, &mut saved_count) {
+        }
+
+        if saved_count > 0 {
+            println!("Saved {} wrkdir files for {} to {}", saved_count, pkgname, save_dir.display());
+        }
+    }
+
+    /// Run bmake clean for a package.
+    fn run_clean(&self, pkgpath: &PkgPath) {
+        let pkgdir = self.config.pkgsrc().join(pkgpath.as_path());
+
+        let _result = if self.sandbox.enabled() {
+            Command::new("/usr/sbin/chroot")
+                .arg(self.sandbox.path(self.id))
+                .arg(self.config.make())
+                .arg("-C")
+                .arg(&pkgdir)
+                .arg("clean")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+        } else {
+            Command::new(self.config.make())
+                .arg("-C")
+                .arg(&pkgdir)
+                .arg("clean")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+        };
+    }
+}
+
+/// Recursively walk a directory and save files matching patterns.
+fn walk_and_save(
+    base: &Path,
+    current: &Path,
+    save_dir: &Path,
+    patterns: &[Pattern],
+    saved_count: &mut usize,
+) -> std::io::Result<()> {
+    if !current.is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            walk_and_save(base, &path, save_dir, patterns, saved_count)?;
+        } else if path.is_file() {
+            // Get relative path from base
+            let rel_path = path.strip_prefix(base).unwrap_or(&path);
+            let rel_str = rel_path.to_string_lossy();
+
+            // Check if any pattern matches
+            for pattern in patterns {
+                if pattern.matches(&rel_str) || pattern.matches(path.file_name().unwrap_or_default().to_string_lossy().as_ref()) {
+                    // Create destination directory
+                    let dest_path = save_dir.join(rel_path);
+                    if let Some(parent) = dest_path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+
+                    // Copy the file
+                    if let Err(_e) = fs::copy(&path, &dest_path) {
+                    } else {
+                        *saved_count += 1;
+                    }
+                    break; // Don't copy same file multiple times
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /**
@@ -89,21 +512,29 @@ enum ChannelCommand {
      */
     JobData(Box<PackageBuild>),
     /**
-     * Client returning a successful package build.
+     * Client returning a successful package build with duration.
      */
-    JobSuccess(PkgName),
+    JobSuccess(PkgName, Duration),
     /**
-     * Client returning a failed package build.
+     * Client returning a failed package build with duration.
      */
-    JobFailed(PkgName),
+    JobFailed(PkgName, Duration),
+    /**
+     * Client returning a skipped package (up-to-date).
+     */
+    JobSkipped(PkgName),
     /**
      * Client returning an error during the package build.
      */
-    JobError((PkgName, anyhow::Error)),
+    JobError((PkgName, Duration, anyhow::Error)),
     /**
      * Manager directing a client to quit.
      */
     Quit,
+    /**
+     * Shutdown signal - workers should stop immediately.
+     */
+    Shutdown,
 }
 
 /**
@@ -133,15 +564,28 @@ struct BuildJobs {
     running: HashSet<PkgName>,
     done: HashSet<PkgName>,
     failed: HashSet<PkgName>,
+    results: Vec<BuildResult>,
+    bulklog: PathBuf,
 }
 
 impl BuildJobs {
     /**
      * Mark a package as successful and remove it from pending dependencies.
      */
-    fn mark_success(&mut self, pkgname: &PkgName) {
+    fn mark_success(&mut self, pkgname: &PkgName, duration: Duration) {
+        self.mark_done(pkgname, BuildOutcome::Success, duration);
+    }
+
+    /**
+     * Mark a package as skipped (up-to-date) and remove it from pending dependencies.
+     */
+    fn mark_skipped(&mut self, pkgname: &PkgName) {
+        self.mark_done(pkgname, BuildOutcome::Skipped("up-to-date".to_string()), Duration::ZERO);
+    }
+
+    fn mark_done(&mut self, pkgname: &PkgName, outcome: BuildOutcome, duration: Duration) {
         /*
-         * Remove the successful package from the list of dependencies in all
+         * Remove the package from the list of dependencies in all
          * packages it is listed in.  Once a package has no outstanding
          * dependencies remaining it is ready for building.
          */
@@ -155,12 +599,23 @@ impl BuildJobs {
          * building, so we only need to add it to "done".
          */
         self.done.insert(pkgname.clone());
+
+        // Record the result
+        let scanpkg = self.scanpkgs.get(pkgname);
+        let log_dir = Some(self.bulklog.join(pkgname.pkgname()));
+        self.results.push(BuildResult {
+            pkgname: pkgname.clone(),
+            pkgpath: scanpkg.and_then(|s| s.pkg_location.clone()),
+            outcome,
+            duration,
+            log_dir,
+        });
     }
 
     /**
      * Recursively mark a package and its dependents as failed.
      */
-    fn mark_failure(&mut self, pkgname: &PkgName) {
+    fn mark_failure(&mut self, pkgname: &PkgName, duration: Duration) {
         let mut broken: HashSet<PkgName> = HashSet::new();
         let mut to_check: Vec<PkgName> = vec![];
         to_check.push(pkgname.clone());
@@ -190,9 +645,32 @@ impl BuildJobs {
          * already be removed from incoming, we rely on .remove() accepting
          * this.
          */
+        let is_original = |p: &PkgName| p == pkgname;
         for pkg in broken {
             self.incoming.remove(&pkg);
-            self.failed.insert(pkg);
+            self.failed.insert(pkg.clone());
+
+            // Record the result
+            let scanpkg = self.scanpkgs.get(&pkg);
+            let log_dir = Some(self.bulklog.join(pkg.pkgname()));
+            let (outcome, dur) = if is_original(&pkg) {
+                (BuildOutcome::Failed("Build failed".to_string()), duration)
+            } else {
+                (
+                    BuildOutcome::Skipped(format!(
+                        "Dependency {} failed",
+                        pkgname.pkgname()
+                    )),
+                    Duration::ZERO,
+                )
+            };
+            self.results.push(BuildResult {
+                pkgname: pkg,
+                pkgpath: scanpkg.and_then(|s| s.pkg_location.clone()),
+                outcome,
+                duration: dur,
+                log_dir,
+            });
         }
     }
 
@@ -249,6 +727,21 @@ impl BuildJobs {
     }
 }
 
+fn format_duration(d: Duration) -> String {
+    let total_secs = d.as_secs();
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let seconds = total_secs % 60;
+
+    if hours > 0 {
+        format!("{}h{:02}m{:02}s", hours, minutes, seconds)
+    } else if minutes > 0 {
+        format!("{}m{:02}s", minutes, seconds)
+    } else {
+        format!("{}s", seconds)
+    }
+}
+
 impl Build {
     pub fn new(
         config: &Config,
@@ -258,15 +751,10 @@ impl Build {
         Build { config: config.clone(), sandbox, scanpkgs }
     }
 
-    pub fn start(&mut self) -> anyhow::Result<()> {
+    pub fn start(&mut self, shutdown_flag: Arc<AtomicBool>) -> anyhow::Result<BuildSummary> {
         let started = Instant::now();
-        let style = ProgressStyle::with_template(
-            "{prefix:>12} [{bar:28}] {pos}/{len} [{wide_msg}]",
-        )
-        .unwrap()
-        .progress_chars("=> ");
-        let progress =
-            ProgressBar::new(0).with_prefix("Building").with_style(style);
+
+        println!("Building {} packages...", self.scanpkgs.len());
 
         /*
          * Populate BuildJobs.
@@ -280,18 +768,19 @@ impl Build {
             incoming.insert(pkgname.clone(), deps);
         }
 
-        // If the number of packages overflows a u64 then we have a problem!
-        progress.inc_length(incoming.len().try_into().unwrap());
-
         let running: HashSet<PkgName> = HashSet::new();
         let done: HashSet<PkgName> = HashSet::new();
         let failed: HashSet<PkgName> = HashSet::new();
+        let results: Vec<BuildResult> = Vec::new();
+        let bulklog = self.config.bulklog().clone();
         let jobs = BuildJobs {
             scanpkgs: self.scanpkgs.clone(),
             incoming,
             running,
             done,
             failed,
+            results,
+            bulklog,
         };
 
         if self.sandbox.enabled() {
@@ -319,7 +808,10 @@ impl Build {
             clients.insert(i, client_tx);
             let manager_tx = manager_tx.clone();
             let thread = std::thread::spawn(move || loop {
-                manager_tx.send(ChannelCommand::ClientReady(i)).unwrap();
+                // Use send() which can fail if receiver is dropped (manager shutdown)
+                if manager_tx.send(ChannelCommand::ClientReady(i)).is_err() {
+                    break;
+                }
 
                 let Ok(msg) = client_rx.recv() else {
                     break;
@@ -332,24 +824,37 @@ impl Build {
                     }
                     ChannelCommand::JobData(pkg) => {
                         let pkgname = pkg.pkginfo.pkgname.clone();
+                        let build_start = Instant::now();
                         match pkg.build() {
-                            Ok(0) => {
-                                manager_tx
-                                    .send(ChannelCommand::JobSuccess(pkgname))
-                                    .unwrap();
+                            Ok(PackageBuildResult::Success) => {
+                                let duration = build_start.elapsed();
+                                let _ = manager_tx
+                                    .send(ChannelCommand::JobSuccess(
+                                        pkgname, duration,
+                                    ));
                             }
-                            Ok(_) => {
-                                manager_tx
-                                    .send(ChannelCommand::JobFailed(pkgname))
-                                    .unwrap();
+                            Ok(PackageBuildResult::Skipped) => {
+                                let _ = manager_tx
+                                    .send(ChannelCommand::JobSkipped(pkgname));
                             }
-                            Err(e) => manager_tx
-                                .send(ChannelCommand::JobError((pkgname, e)))
-                                .unwrap(),
+                            Ok(PackageBuildResult::Failed) => {
+                                let duration = build_start.elapsed();
+                                let _ = manager_tx
+                                    .send(ChannelCommand::JobFailed(
+                                        pkgname, duration,
+                                    ));
+                            }
+                            Err(e) => {
+                                let duration = build_start.elapsed();
+                                let _ = manager_tx
+                                    .send(ChannelCommand::JobError((
+                                        pkgname, duration, e,
+                                    )));
+                            }
                         }
                         continue;
                     }
-                    ChannelCommand::Quit => {
+                    ChannelCommand::Quit | ChannelCommand::Shutdown => {
                         break;
                     }
                     _ => todo!(),
@@ -360,25 +865,41 @@ impl Build {
 
         /*
          * Manager thread.  Read incoming commands from clients and reply
-         * accordingly.
+         * accordingly.  Returns the build results via a channel.
          */
         let config = self.config.clone();
         let sandbox = self.sandbox.clone();
+        let shutdown_for_manager = Arc::clone(&shutdown_flag);
+        let (results_tx, results_rx) = mpsc::channel::<Vec<BuildResult>>();
+        let (interrupted_tx, interrupted_rx) = mpsc::channel::<bool>();
+        let completed = Arc::new(Mutex::new(0usize));
+        let skipped = Arc::new(Mutex::new(0usize));
+        let failed_count = Arc::new(Mutex::new(0usize));
         let manager = std::thread::spawn(move || {
             let mut clients = clients.clone();
             let config = config.clone();
             let sandbox = sandbox.clone();
             let mut jobs = jobs.clone();
+            let mut was_interrupted = false;
 
-            let update_progress = |f: &HashSet<PkgName>| {
-                let mut inprog: Vec<String> =
-                    f.iter().map(|x| x.pkgname().to_string()).collect();
-                inprog.sort();
-                let msg = inprog.join(", ");
-                progress.set_message(msg);
-            };
+            loop {
+                // Check shutdown flag periodically
+                if shutdown_for_manager.load(Ordering::SeqCst) {
+                    // Send shutdown to all remaining clients
+                    for (_, client) in clients.drain() {
+                        let _ = client.send(ChannelCommand::Shutdown);
+                    }
+                    was_interrupted = true;
+                    break;
+                }
 
-            for command in manager_rx {
+                // Use recv_timeout to check shutdown flag periodically
+                let command = match manager_rx.recv_timeout(Duration::from_millis(50)) {
+                    Ok(cmd) => cmd,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
+
                 match command {
                     ChannelCommand::ClientReady(c) => {
                         let client = clients.get(&c).unwrap();
@@ -386,10 +907,9 @@ impl Build {
                             BuildStatus::Available(pkg) => {
                                 let pkginfo = jobs.scanpkgs.get(&pkg).unwrap();
                                 jobs.incoming.remove(&pkg);
-                                jobs.running.insert(pkg);
-                                update_progress(&jobs.running);
-                                progress.inc(1);
-                                client
+                                jobs.running.insert(pkg.clone());
+
+                                let _ = client
                                     .send(ChannelCommand::JobData(Box::new(
                                         PackageBuild {
                                             id: c,
@@ -397,16 +917,14 @@ impl Build {
                                             pkginfo: pkginfo.clone(),
                                             sandbox: sandbox.clone(),
                                         },
-                                    )))
-                                    .unwrap();
+                                    )));
                             }
                             BuildStatus::NoneAvailable => {
-                                client
-                                    .send(ChannelCommand::ComeBackLater)
-                                    .unwrap();
+                                let _ = client
+                                    .send(ChannelCommand::ComeBackLater);
                             }
                             BuildStatus::Done => {
-                                client.send(ChannelCommand::Quit).unwrap();
+                                let _ = client.send(ChannelCommand::Quit);
                                 clients.remove(&c);
                                 if clients.is_empty() {
                                     break;
@@ -414,41 +932,92 @@ impl Build {
                             }
                         };
                     }
-                    ChannelCommand::JobSuccess(pkgname) => {
-                        jobs.mark_success(&pkgname);
+                    ChannelCommand::JobSuccess(pkgname, duration) => {
+                        // Don't report if we're shutting down
+                        if shutdown_for_manager.load(Ordering::SeqCst) {
+                            continue;
+                        }
+
+                        jobs.mark_success(&pkgname, duration);
                         jobs.running.remove(&pkgname);
-                        update_progress(&jobs.running);
+
+                        if let Ok(mut count) = completed.lock() {
+                            *count += 1;
+                        }
+                        println!("Built {} ({})", pkgname.pkgname(), format_duration(duration));
                     }
-                    ChannelCommand::JobFailed(pkgname) => {
-                        jobs.mark_failure(&pkgname);
+                    ChannelCommand::JobSkipped(pkgname) => {
+                        // Don't report if we're shutting down
+                        if shutdown_for_manager.load(Ordering::SeqCst) {
+                            continue;
+                        }
+
+                        jobs.mark_skipped(&pkgname);
                         jobs.running.remove(&pkgname);
-                        update_progress(&jobs.running);
+
+                        if let Ok(mut count) = skipped.lock() {
+                            *count += 1;
+                        }
+                        println!("Skipped {} (up-to-date)", pkgname.pkgname());
                     }
-                    ChannelCommand::JobError((pkgname, e)) => {
-                        jobs.mark_failure(&pkgname);
+                    ChannelCommand::JobFailed(pkgname, duration) => {
+                        // Don't report if we're shutting down
+                        if shutdown_for_manager.load(Ordering::SeqCst) {
+                            continue;
+                        }
+
+                        jobs.mark_failure(&pkgname, duration);
                         jobs.running.remove(&pkgname);
-                        update_progress(&jobs.running);
-                        /*
-                         * TODO: do something about the error.
-                         */
-                        dbg!(&e);
+
+                        if let Ok(mut count) = failed_count.lock() {
+                            *count += 1;
+                        }
+                        println!("Failed {} ({})", pkgname.pkgname(), format_duration(duration));
                     }
-                    _ => todo!(),
+                    ChannelCommand::JobError((pkgname, duration, e)) => {
+                        // Don't report if we're shutting down
+                        if shutdown_for_manager.load(Ordering::SeqCst) {
+                            continue;
+                        }
+
+                        jobs.mark_failure(&pkgname, duration);
+                        jobs.running.remove(&pkgname);
+
+                        if let Ok(mut count) = failed_count.lock() {
+                            *count += 1;
+                        }
+                        eprintln!("Failed {} ({}): {}", pkgname.pkgname(), format_duration(duration), e);
+                    }
+                    _ => {}
                 }
             }
-            progress.finish_and_clear();
-            if progress.length() > Some(0) {
-                println!(
-                    "Built {} packages in {}",
-                    HumanCount(progress.length().unwrap()),
-                    HumanDuration(started.elapsed()),
-                );
-            }
+
+            // Send results and interrupted status back
+            let _ = results_tx.send(jobs.results);
+            let _ = interrupted_tx.send(was_interrupted);
         });
 
         threads.push(manager);
         for thread in threads {
             thread.join().expect("thread panicked");
+        }
+
+        // Check if we were interrupted
+        let was_interrupted = interrupted_rx.recv().unwrap_or(false);
+
+        // Collect results from manager
+        let results = results_rx.recv().unwrap_or_default();
+        let summary = BuildSummary { duration: started.elapsed(), results };
+
+        // Print summary
+        if was_interrupted {
+            println!("\nBuild interrupted!");
+        } else {
+            println!("\nBuild completed in {}", format_duration(summary.duration));
+            println!("Success: {}, Failed: {}, Skipped: {}",
+                summary.success_count(),
+                summary.failed_count(),
+                summary.skipped_count());
         }
 
         if self.sandbox.enabled() {
@@ -457,6 +1026,6 @@ impl Build {
             }
         }
 
-        Ok(())
+        Ok(summary)
     }
 }

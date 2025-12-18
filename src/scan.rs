@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024 Jonathan Perkin <jonathan@perkin.org.uk>
+ * Copyright (c) 2025 Jonathan Perkin <jonathan@perkin.org.uk>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -16,14 +16,38 @@
 
 use crate::{Config, Sandbox};
 use anyhow::{bail, Context, Result};
-use indicatif::{HumanCount, HumanDuration, ProgressBar, ProgressStyle};
 use petgraph::graphmap::DiGraphMap;
 use pkgsrc::{Depend, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+
+/// Reason why a package was excluded from the build.
+#[derive(Clone, Debug)]
+pub enum SkipReason {
+    /// Package has PKG_SKIP_REASON set.
+    PkgSkipReason(String),
+    /// Package has PKG_FAIL_REASON set.
+    PkgFailReason(String),
+}
+
+/// Information about a skipped package.
+#[derive(Clone, Debug)]
+pub struct SkippedPackage {
+    pub pkgname: PkgName,
+    pub pkgpath: Option<PkgPath>,
+    pub reason: SkipReason,
+}
+
+/// Result of scanning and resolving packages.
+#[derive(Clone, Debug, Default)]
+pub struct ScanResult {
+    /// Packages that can be built.
+    pub buildable: HashMap<PkgName, ScanIndex>,
+    /// Packages that were skipped.
+    pub skipped: Vec<SkippedPackage>,
+}
 
 #[derive(Debug, Default)]
 pub struct Scan {
@@ -62,22 +86,12 @@ impl Scan {
     }
 
     pub fn start(&mut self) -> anyhow::Result<()> {
-        let started = Instant::now();
-        let style = ProgressStyle::with_template(
-            "{prefix:>12} [{bar:28}] {pos}/{len} [{wide_msg}]",
-        )
-        .unwrap()
-        .progress_chars("=> ");
-        let progress =
-            ProgressBar::new(0).with_prefix("Scanning").with_style(style);
+        println!("Scanning {} packages...", self.incoming.len());
 
         rayon::ThreadPoolBuilder::new()
             .num_threads(self.config.scan_threads())
             .build()
             .unwrap();
-
-        // If the number of packages overflows a u64 then we have a problem!
-        progress.inc_length(self.incoming.len().try_into().unwrap());
 
         /*
          * Only a single sandbox is required, 'make pbulk-index' can safely be
@@ -87,19 +101,14 @@ impl Scan {
             self.sandbox.create(0)?;
         }
 
+        let completed = Arc::new(Mutex::new(0_usize));
+
         /*
          * Continuously iterate over incoming queue, moving to done once
          * processed, and adding any dependencies to incoming to be processed
          * next.
          */
         loop {
-            /*
-             * Store the PKGPATHs that are currently being processed in a
-             * HashSet for a nice progress bar status.
-             */
-            let curpaths: Arc<Mutex<HashSet<String>>> =
-                Arc::new(Mutex::new(HashSet::new()));
-
             /*
              * Convert the incoming HashSet into a Vec for parallel processing.
              */
@@ -108,34 +117,17 @@ impl Scan {
                 parpaths.push((pkgpath.clone(), Ok(vec![])));
             }
 
+            let completed_clone = Arc::clone(&completed);
             parpaths.par_iter_mut().for_each(|pkg| {
                 let (pkgpath, result) = pkg;
                 let pathname = pkgpath.as_path().to_string_lossy().to_string();
-                let curpaths = Arc::clone(&curpaths);
 
-                /*
-                 * Add PKGPATH to the progress bar, perform the scan and save
-                 * the result, remove PKGPATH from the progress bar, before
-                 * finally updating the progress counter.
-                 */
-                {
-                    let mut curpaths = curpaths.lock().unwrap();
-                    curpaths.insert(pathname.clone());
-                    let msg: String =
-                        curpaths.iter().cloned().collect::<Vec<_>>().join(", ");
-                    progress.set_message(msg);
-                }
                 *result = self
                     .scan_pkgpath(pkgpath)
                     .context(format!("Scan failed for {}", pathname));
-                progress.inc(1);
-                {
-                    let mut curpaths = curpaths.lock().unwrap();
-                    curpaths.remove(&pathname);
-                    let msg: String =
-                        curpaths.iter().cloned().collect::<Vec<_>>().join(", ");
-                    progress.set_message(msg);
-                }
+
+                let mut count = completed_clone.lock().unwrap();
+                *count += 1;
             });
 
             /*
@@ -153,7 +145,7 @@ impl Scan {
                             && !self.incoming.contains(dep.pkgpath())
                             && new_incoming.insert(dep.pkgpath().clone())
                         {
-                            progress.inc_length(1);
+                            // New dependency found
                         }
                     }
                 }
@@ -174,14 +166,8 @@ impl Scan {
             self.sandbox.destroy(0)?;
         }
 
-        progress.finish_and_clear();
-        if progress.length() > Some(0) {
-            println!(
-                "Scanned {} packages in {}",
-                HumanCount(progress.length().unwrap()),
-                HumanDuration(started.elapsed()),
-            );
-        }
+        let final_count = *completed.lock().unwrap();
+        println!("Scanned {} packages", final_count);
 
         Ok(())
     }
@@ -194,23 +180,31 @@ impl Scan {
         &self,
         pkgpath: &PkgPath,
     ) -> anyhow::Result<Vec<ScanIndex>> {
-        let envs = vec![
-            ("BOB_BMAKE", format!("{}", self.config.make().display())),
-            ("BOB_PKGPATH", format!("{}", pkgpath.as_path().display())),
-            ("BOB_PKGSRCDIR", format!("{}", self.config.pkgsrc().display())),
-        ];
-        let Some(pkg_scan_path) = &self.config.script("pkg-scan") else {
-            bail!("No pkg-scan script defined");
-        };
-        let child = self.sandbox.execute(0, pkg_scan_path, envs)?;
+        let pkgpath_str = pkgpath.as_path().display().to_string();
+
+        let bmake = self.config.make().display().to_string();
+        let pkgsrcdir = self.config.pkgsrc().display().to_string();
+        let script = format!(
+            "cd {}/{} && {} pbulk-index\n",
+            pkgsrcdir, pkgpath_str, bmake
+        );
+
+        let child = self.sandbox.execute_script(0, &script, vec![])?;
         let output = child.wait_with_output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("pkg-scan failed for {}: {}", pkgpath_str, stderr);
+        }
+
         let reader = BufReader::new(&output.stdout[..]);
         let mut index = ScanIndex::from_reader(reader)?;
+
         /*
          * Set PKGPATH (PKG_LOCATION) as for some reason pbulk-index doesn't.
          */
         for pkg in &mut index {
-            pkg.pkg_location = Some(pkgpath.clone())
+            pkg.pkg_location = Some(pkgpath.clone());
         }
 
         Ok(index)
@@ -222,11 +216,11 @@ impl Scan {
      * circular dependencies.  The best match for each is stored in the
      * `depends` for the package in question.
      *
-     * Return a reference to a [`HashMap`] which maps the unique `PKGNAME` to
-     * build along with its [`ScanIndex`].  This can then be used to build all
-     * packages.
+     * Return a [`ScanResult`] containing buildable packages and skipped packages.
      */
-    pub fn resolve(&mut self) -> Result<&HashMap<PkgName, ScanIndex>> {
+    pub fn resolve(&mut self) -> Result<ScanResult> {
+        println!("Resolving dependencies...");
+
         /*
          * Populate the resolved hash.  This becomes our new working set,
          * with a flat mapping of PKGNAME -> ScanIndex.
@@ -240,11 +234,42 @@ impl Scan {
          * matches.
          */
         let mut pkgnames: HashSet<PkgName> = HashSet::new();
+        let mut skipped: Vec<SkippedPackage> = Vec::new();
+
         for index in self.done.values() {
             for pkg in index {
+                // Check for skip/fail reasons
+                if let Some(reason) = &pkg.pkg_skip_reason {
+                    if !reason.is_empty() {
+                        skipped.push(SkippedPackage {
+                            pkgname: pkg.pkgname.clone(),
+                            pkgpath: pkg.pkg_location.clone(),
+                            reason: SkipReason::PkgSkipReason(reason.clone()),
+                        });
+                        continue;
+                    }
+                }
+                if let Some(reason) = &pkg.pkg_fail_reason {
+                    if !reason.is_empty() {
+                        skipped.push(SkippedPackage {
+                            pkgname: pkg.pkgname.clone(),
+                            pkgpath: pkg.pkg_location.clone(),
+                            reason: SkipReason::PkgFailReason(reason.clone()),
+                        });
+                        continue;
+                    }
+                }
+
                 pkgnames.insert(pkg.pkgname.clone());
                 self.resolved.insert(pkg.pkgname.clone(), pkg.clone());
             }
+        }
+
+        if !skipped.is_empty() {
+            println!(
+                "Skipping {} packages with PKG_SKIP_REASON or PKG_FAIL_REASON",
+                skipped.len()
+            );
         }
 
         /*
@@ -252,6 +277,7 @@ impl Scan {
          * as it's likely the same patterns will be used in multiple places.
          */
         let mut match_cache: HashMap<Depend, PkgName> = HashMap::new();
+        let mut errors: Vec<String> = Vec::new();
 
         for pkg in self.resolved.values_mut() {
             for depend in &pkg.all_depends {
@@ -289,22 +315,23 @@ impl Scan {
                 }
                 /*
                  * If we found a match, save it and add to the cache,
-                 * otherwise error.
-                 *
-                 * TODO: we should batch up errors and continue so that we
-                 * don't have to re-run multiple times to find all errors.
+                 * otherwise collect the error (batch errors).
                  */
                 if let Some(pkgname) = best {
                     pkg.depends.push(pkgname.clone());
                     match_cache.insert(depend.clone(), pkgname.clone());
                 } else {
-                    bail!(
+                    errors.push(format!(
                         "No match found for {} in {}",
                         depend.pattern().pattern(),
                         pkg.pkgname.pkgname()
-                    );
+                    ));
                 }
             }
+        }
+
+        if !errors.is_empty() {
+            bail!("Unresolved dependencies:\n  {}", errors.join("\n  "));
         }
 
         /*
@@ -325,7 +352,13 @@ impl Scan {
             bail!(err);
         }
 
-        Ok(&self.resolved)
+        println!(
+            "Resolution complete: {} buildable, {} skipped",
+            self.resolved.len(),
+            skipped.len()
+        );
+
+        Ok(ScanResult { buildable: self.resolved.clone(), skipped })
     }
 }
 

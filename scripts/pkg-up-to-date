@@ -1,0 +1,97 @@
+#!/bin/sh
+#
+# Check if a package is up-to-date and doesn't need rebuilding.
+# Exit 0 if up-to-date, exit 1 if rebuild needed.
+#
+# Usage: pkg-up-to-date <pkgname> [dependency ...]
+#
+
+set -e
+
+# Required core variables.
+: ${bob_packages:?}
+: ${bob_pkgtools:?}
+: ${bob_pkgsrc:?}
+
+PKG_INFO="${bob_pkgtools}/pkg_info"
+PKG_ADMIN="${bob_pkgtools}/pkg_admin"
+
+PKGNAME="$1"
+shift
+
+if [ -z "${PKGNAME}" ]; then
+    echo "usage: pkg-up-to-date <pkgname> [dependency ...]" >&2
+    exit 1
+fi
+
+PKGFILE="${bob_packages}/All/${PKGNAME}.tgz"
+
+# Check if package file exists
+if [ ! -f "${PKGFILE}" ]; then
+    exit 1
+fi
+
+# Check if all source files used to build the package still match
+# pkg_info -qb returns: file:digest pairs from BUILD_INFO
+${PKG_INFO} -qb "${PKGFILE}" 2>/dev/null | sed 's/:/ /' | while read file file_id; do
+    [ -z "$file" ] && continue
+
+    # Check file exists
+    if [ ! -e "${bob_pkgsrc}/${file}" ]; then
+        exit 1
+    fi
+
+    case "$file_id" in
+    \$NetBSD*)
+        # CVS ID comparison
+        id=$(sed -e '/[$]NetBSD/!d' -e 's/^.*\([$]NetBSD[^$]*[$]\).*$/\1/;q' "${bob_pkgsrc}/${file}")
+        if [ "$id" != "$file_id" ]; then
+            exit 1
+        fi
+        ;;
+    *)
+        # Hash comparison
+        hash=$(${PKG_ADMIN} digest "${bob_pkgsrc}/${file}" 2>/dev/null)
+        if [ "$hash" != "$file_id" ]; then
+            exit 1
+        fi
+        ;;
+    esac
+done
+
+# If the while loop exited non-zero (subshell), propagate that
+if [ $? -ne 0 ]; then
+    exit 1
+fi
+
+# Check dependencies: all deps must exist and be older than this package
+${PKG_INFO} -qN "${PKGFILE}" 2>/dev/null | while read dep; do
+    # pkg_info prints a trailing newline, ignore that
+    [ -z "${dep}" ] && continue
+
+    # Check if this dependency is in the expected list
+    found=0
+    for dep2 in "$@"; do
+        if [ "$dep" = "$dep2" ]; then
+            found=1
+            break
+        fi
+    done
+
+    if [ $found = 0 ]; then
+        exit 1
+    fi
+
+    # Check dependency package is older than this package
+    dep_pkg="${bob_packages}/All/${dep}.tgz"
+    if [ ! -f "${dep_pkg}" ]; then
+        exit 1
+    fi
+
+    if [ "${dep_pkg}" -nt "${PKGFILE}" ]; then
+        exit 1
+    fi
+done
+
+# Package is up-to-date
+exit 0

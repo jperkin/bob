@@ -46,18 +46,19 @@ impl Init {
         println!("Initialising new configuration directory {}:", initdir_str);
 
         let confstr = match env::consts::OS {
-            "illumos" => include_str!("../config/illumos.toml"),
-            "macos" => include_str!("../config/macos.toml"),
-            "netbsd" => include_str!("../config/netbsd.toml"),
-            "solaris" => include_str!("../config/illumos.toml"),
+            "illumos" => include_str!("../config/illumos.lua"),
+            "linux" => include_str!("../config/linux.lua"),
+            "macos" => include_str!("../config/macos.lua"),
+            "netbsd" => include_str!("../config/netbsd.lua"),
+            "solaris" => include_str!("../config/illumos.lua"),
             os => {
                 eprintln!("WARNING: OS '{}' not explicitly supported, using generic config", os);
-                include_str!("../config/generic.toml")
+                include_str!("../config/generic.lua")
             }
         };
 
         let confstr = confstr.replace("@INITDIR@", initdir_str);
-        let conffile = initdir.join("config.toml");
+        let conffile = initdir.join("config.lua");
         fs::create_dir_all(conffile.parent().unwrap())?;
         fs::write(&conffile, confstr)?;
         println!("\t{}", conffile.display());

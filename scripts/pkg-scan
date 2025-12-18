@@ -1,3 +1,0 @@
-#!/bin/sh
-
-cd ${BOB_PKGSRCDIR}/${BOB_PKGPATH} && ${BOB_BMAKE} pbulk-index
