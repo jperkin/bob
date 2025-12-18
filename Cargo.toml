@@ -27,3 +27,6 @@ pkgsrc = "0.4.0"
 rayon = "1.10.0"
 rust-embed = "8.7.0"
 thiserror = "1.0.64"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
