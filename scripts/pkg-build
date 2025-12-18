@@ -119,6 +119,9 @@ set -x
 touch "${LOGDIR}/work.log"
 if [ $(id -u) -eq 0 ]; then
     chown "${bob_unprivileged_user}" "${LOGDIR}/work.log"
+    builddir=$(run_make run_direct show-var VARNAME=BUILD_DIR)
+    mkdir -p ${builddir}
+    chown "${bob_unprivileged_user}" ${builddir}
 fi
 
 trap cleanup INT TERM
