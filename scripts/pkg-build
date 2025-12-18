@@ -52,7 +52,7 @@ run_direct() {
 }
 
 run_su() {
-	su "${bob_unprivileged_user}" -s /bin/sh -c '"$@"' _ "$@"
+	su "${bob_unprivileged_user}" -c '"$@"' make "$@"
 }
 
 run_make() {
