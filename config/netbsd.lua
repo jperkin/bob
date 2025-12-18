@@ -69,11 +69,13 @@ sandboxes = {
         -- Commands run on the host, so /dev/MAKEDEV refers to the host file.
         { action = "cmd", cwd = "/dev",
           create = "cp /dev/MAKEDEV /dev/MAKEDEV.local . && ./MAKEDEV all",
-          destroy = "rm *" },
+          destroy = "rm -rf *" },
 
         { action = "mount", fs = "proc", dest = "/proc" },
         { action = "mount", fs = "tmp", dest = "/tmp", opts = "-s 1024k" },
         { action = "mount", fs = "tmp", dest = "/var/tmp" },
+
+	{ action = "copy", dest = "/etc" },
 
         -- System directories (read-only for safety)
         { action = "mount", fs = "null", dest = "/bin", opts = "-o ro" },
@@ -90,6 +92,8 @@ sandboxes = {
         { action = "mount", fs = "null", dest = "/usr/share", opts = "-o ro" },
         { action = "mount", fs = "null", dest = "/usr/sbin", opts = "-o ro" },
         { action = "mount", fs = "null", dest = "/var/mail", opts = "-o ro" },
+
+	{ action = "mount", fs = "null", dest = pkgsrc.basedir, opts = "-o ro" },
 
         -- Directory where this config and support scripts live.
         { action = "mount", fs = "null", src = initdir },
