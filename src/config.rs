@@ -79,7 +79,9 @@ impl LuaEnv {
                 // Set all ScanIndex fields
                 pkg_table.set("pkgname", idx.pkgname.pkgname())
                     .map_err(|e| format!("Failed to set pkgname: {}", e))?;
-                pkg_table.set("pkgpath", idx.pkg_location.as_ref().map(|p| p.as_path().display().to_string()).unwrap_or_default())
+                let pkgpath_value = idx.pkg_location.as_ref().map(|p| p.as_path().display().to_string());
+                eprintln!("DEBUG: pkg_location for {} = {:?}", idx.pkgname.pkgname(), pkgpath_value);
+                pkg_table.set("pkgpath", pkgpath_value.clone().unwrap_or_default())
                     .map_err(|e| format!("Failed to set pkgpath: {}", e))?;
                 pkg_table.set("all_depends", idx.all_depends.iter().map(|d| d.pkgpath().as_path().display().to_string()).collect::<Vec<_>>().join(" "))
                     .map_err(|e| format!("Failed to set all_depends: {}", e))?;
