@@ -211,7 +211,6 @@ impl Scan {
                         pkgs
                     }
                     Err(e) => {
-                        eprintln!("{}", e);
                         scan_errors.push(format!("{}", e));
                         if let Ok(mut p) = progress.lock() {
                             p.state_mut().increment_failed();
@@ -271,6 +270,9 @@ impl Scan {
         }
 
         if !scan_errors.is_empty() {
+            for err in &scan_errors {
+                eprintln!("{}", err);
+            }
             bail!("{} package(s) failed to scan", scan_errors.len());
         }
 
