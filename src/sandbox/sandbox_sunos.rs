@@ -194,7 +194,6 @@ impl Sandbox {
         // Use fuser -k to kill all processes using files under the sandbox
         let _ = Command::new("fuser")
             .arg("-k")
-            .arg("-9")
             .arg(sandbox)
             .status();
 
