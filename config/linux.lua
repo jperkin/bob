@@ -22,7 +22,10 @@ pkgsrc = {
     prefix = "/usr/pkg",
     report_dir = initdir .. "/reports",
     tar = "/bin/tar",
-    unprivileged_user = "pbulk",
+    -- It is strongly recommended to set up an unprivileged user to perform
+    -- builds. If you do, ensure that their home directory is created inside
+    -- the sandbox and that work directories are writeable.
+    -- build_user = "builder",
 
     -- On build failure, save files matching these glob patterns from WRKDIR.
     save_wrkdir_patterns = {

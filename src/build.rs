@@ -311,8 +311,11 @@ impl PackageBuild {
             ("bob_pkgsrc", format!("{}", self.config.pkgsrc().display())),
             ("bob_prefix", format!("{}", self.config.prefix().display())),
             ("bob_tar", format!("{}", self.config.tar().display())),
-            ("bob_unprivileged_user", self.config.unprivileged_user().to_string()),
         ];
+
+        if let Some(build_user) = self.config.build_user() {
+            envs.push(("bob_build_user", build_user.to_string()));
+        }
 
         // Add script paths
         if let Some(pkg_up_to_date) = self.config.script("pkg-up-to-date") {

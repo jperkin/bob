@@ -79,9 +79,7 @@ impl LuaEnv {
                 // Set all ScanIndex fields
                 pkg_table.set("pkgname", idx.pkgname.pkgname())
                     .map_err(|e| format!("Failed to set pkgname: {}", e))?;
-                let pkgpath_value = idx.pkg_location.as_ref().map(|p| p.as_path().display().to_string());
-                eprintln!("DEBUG: pkg_location for {} = {:?}", idx.pkgname.pkgname(), pkgpath_value);
-                pkg_table.set("pkgpath", pkgpath_value.clone().unwrap_or_default())
+                pkg_table.set("pkgpath", idx.pkg_location.as_ref().map(|p| p.as_path().display().to_string()).unwrap_or_default())
                     .map_err(|e| format!("Failed to set pkgpath: {}", e))?;
                 pkg_table.set("all_depends", idx.all_depends.iter().map(|d| d.pkgpath().as_path().display().to_string()).collect::<Vec<_>>().join(" "))
                     .map_err(|e| format!("Failed to set all_depends: {}", e))?;
@@ -169,7 +167,7 @@ pub struct Pkgsrc {
     pub report_dir: Option<PathBuf>,
     pub save_wrkdir_patterns: Vec<String>,
     pub tar: PathBuf,
-    pub unprivileged_user: String,
+    pub build_user: Option<String>,
 }
 
 ///
@@ -330,8 +328,8 @@ impl Config {
         &self.file.pkgsrc.tar
     }
 
-    pub fn unprivileged_user(&self) -> &str {
-        &self.file.pkgsrc.unprivileged_user
+    pub fn build_user(&self) -> Option<&str> {
+        self.file.pkgsrc.build_user.as_deref()
     }
 
     /// Get environment variables for a package from the Lua env function/table.
@@ -505,7 +503,7 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
     let pkgtools: String = pkgsrc.get("pkgtools")?;
     let prefix: String = pkgsrc.get("prefix")?;
     let tar: String = pkgsrc.get("tar")?;
-    let unprivileged_user: String = pkgsrc.get("unprivileged_user")?;
+    let build_user: Option<String> = pkgsrc.get::<Option<String>>("build_user")?;
 
     let pkgpaths: Option<Vec<PkgPath>> = match pkgsrc.get::<Value>("pkgpaths")? {
         Value::Nil => None,
@@ -545,7 +543,7 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         report_dir,
         save_wrkdir_patterns,
         tar: PathBuf::from(tar),
-        unprivileged_user,
+        build_user,
     })
 }
 
