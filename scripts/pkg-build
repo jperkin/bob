@@ -42,7 +42,6 @@ run_direct() { "$@"; }
 run_su() { su "${bob_build_user}" -c '"$@"' make "$@"; }
 
 run_make() {
-	local run_cmd
 	run_cmd=$1
 	shift
 	${run_cmd} ${bob_make} "$@" \
