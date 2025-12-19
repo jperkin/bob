@@ -265,6 +265,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "copy_dir"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "543d1dd138ef086e2ff05e3a48cf9da045da2033d16f8538fd76b86cd49b2ca3"
+dependencies = [
+ "walkdir",
+]
+
+[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1019,6 +1028,7 @@ version = "0.0.6"
 dependencies = [
  "anyhow",
  "clap",
+ "copy_dir",
  "crossterm",
  "ctrlc",
  "dirs",

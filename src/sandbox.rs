@@ -441,7 +441,7 @@ impl Sandbox {
                 ActionType::Copy => {
                     let src = src.ok_or_else(|| anyhow::anyhow!("copy action requires src or dest"))?;
                     let dest = dest.ok_or_else(|| anyhow::anyhow!("copy action requires dest"))?;
-                    self.copy_directory(src, &dest)?;
+                    copy_dir::copy_dir(src, &dest)?;
                     None
                 }
                 ActionType::Cmd => {
@@ -655,38 +655,4 @@ impl Sandbox {
         Ok(())
     }
 
-    /// Recursively copy a directory into the sandbox.
-    fn copy_directory(&self, src: &Path, dest: &Path) -> Result<()> {
-        self.copy_dir_recursive(src, dest)
-    }
-
-    /// Recursively copy a directory and its contents, preserving permissions.
-    #[allow(clippy::only_used_in_recursion)]
-    fn copy_dir_recursive(&self, src: &Path, dest: &Path) -> Result<()> {
-        if !src.is_dir() {
-            bail!("Source is not a directory: {}", src.display());
-        }
-        fs::create_dir_all(dest)?;
-        // Copy permissions from source directory
-        let src_meta = fs::metadata(src)?;
-        fs::set_permissions(dest, src_meta.permissions())?;
-
-        for entry in fs::read_dir(src)? {
-            let entry = entry?;
-            let src_path = entry.path();
-            let dest_path = dest.join(entry.file_name());
-            let file_type = entry.file_type()?;
-
-            if file_type.is_dir() {
-                self.copy_dir_recursive(&src_path, &dest_path)?;
-            } else if file_type.is_symlink() {
-                let link_target = fs::read_link(&src_path)?;
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(&link_target, &dest_path)?;
-            } else {
-                fs::copy(&src_path, &dest_path)?;
-            }
-        }
-        Ok(())
-    }
 }
