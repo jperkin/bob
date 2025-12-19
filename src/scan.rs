@@ -103,27 +103,6 @@ impl Scan {
             "Starting package scan"
         );
 
-        // Set up multi-line progress display using ratatui inline viewport
-        let progress = Arc::new(Mutex::new(
-            MultiProgress::new("Scanning", "Scanned", self.incoming.len(), self.config.scan_threads(), false)
-                .expect("Failed to initialize progress display"),
-        ));
-
-        // Flag to stop the refresh thread
-        let stop_refresh = Arc::new(AtomicBool::new(false));
-
-        // Spawn a thread to periodically refresh the display (for timer updates)
-        let progress_refresh = Arc::clone(&progress);
-        let stop_flag = Arc::clone(&stop_refresh);
-        let refresh_thread = std::thread::spawn(move || {
-            while !stop_flag.load(Ordering::Relaxed) {
-                if let Ok(mut p) = progress_refresh.lock() {
-                    let _ = p.render();
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        });
-
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(self.config.scan_threads())
             .build()
@@ -156,6 +135,27 @@ impl Scan {
                 }
             }
         }
+
+        // Set up multi-line progress display using ratatui inline viewport
+        let progress = Arc::new(Mutex::new(
+            MultiProgress::new("Scanning", "Scanned", self.incoming.len(), self.config.scan_threads(), false)
+                .expect("Failed to initialize progress display"),
+        ));
+
+        // Flag to stop the refresh thread
+        let stop_refresh = Arc::new(AtomicBool::new(false));
+
+        // Spawn a thread to periodically refresh the display (for timer updates)
+        let progress_refresh = Arc::clone(&progress);
+        let stop_flag = Arc::clone(&stop_refresh);
+        let refresh_thread = std::thread::spawn(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                if let Ok(mut p) = progress_refresh.lock() {
+                    let _ = p.render();
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
 
         /*
          * Continuously iterate over incoming queue, moving to done once

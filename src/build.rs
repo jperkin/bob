@@ -894,28 +894,6 @@ impl Build {
             "Build::start() called"
         );
 
-        // Set up multi-line progress display using ratatui inline viewport
-        let progress = Arc::new(Mutex::new(
-            MultiProgress::new("Building", "Built", self.scanpkgs.len(), self.config.build_threads(), true)
-                .expect("Failed to initialize progress display"),
-        ));
-
-        // Flag to stop the refresh thread
-        let stop_refresh = Arc::new(AtomicBool::new(false));
-
-        // Spawn a thread to periodically refresh the display (for timer updates)
-        let progress_refresh = Arc::clone(&progress);
-        let stop_flag = Arc::clone(&stop_refresh);
-        let shutdown_for_refresh = Arc::clone(&shutdown_flag);
-        let refresh_thread = std::thread::spawn(move || {
-            while !stop_flag.load(Ordering::Relaxed) && !shutdown_for_refresh.load(Ordering::SeqCst) {
-                if let Ok(mut p) = progress_refresh.lock() {
-                    let _ = p.render();
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        });
-
         /*
          * Populate BuildJobs.
          */
@@ -972,6 +950,28 @@ impl Build {
                 }
             }
         }
+
+        // Set up multi-line progress display using ratatui inline viewport
+        let progress = Arc::new(Mutex::new(
+            MultiProgress::new("Building", "Built", self.scanpkgs.len(), self.config.build_threads(), true)
+                .expect("Failed to initialize progress display"),
+        ));
+
+        // Flag to stop the refresh thread
+        let stop_refresh = Arc::new(AtomicBool::new(false));
+
+        // Spawn a thread to periodically refresh the display (for timer updates)
+        let progress_refresh = Arc::clone(&progress);
+        let stop_flag = Arc::clone(&stop_refresh);
+        let shutdown_for_refresh = Arc::clone(&shutdown_flag);
+        let refresh_thread = std::thread::spawn(move || {
+            while !stop_flag.load(Ordering::Relaxed) && !shutdown_for_refresh.load(Ordering::SeqCst) {
+                if let Ok(mut p) = progress_refresh.lock() {
+                    let _ = p.render();
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
 
         /*
          * Configure a mananger channel.  This is used for clients to indicate
