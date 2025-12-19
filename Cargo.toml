@@ -24,7 +24,6 @@ os_pipe = "1.2"
 crossterm = "0.28"
 ctrlc = "3.4"
 glob = "0.3"
-mlua = { version = "0.10", features = ["lua54", "vendored", "send"] }
 petgraph = "0.6.5"
 pkgsrc = "0.4.0"
 ratatui = "0.29"
@@ -34,3 +33,11 @@ thiserror = "1.0.64"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# Use vendored Lua on platforms where lua-src supports building
+[target.'cfg(not(target_os = "illumos"))'.dependencies]
+mlua = { version = "0.10", features = ["lua54", "vendored", "send"] }
+
+# Use system Lua on illumos (lua-src doesn't support it)
+[target.'cfg(target_os = "illumos")'.dependencies]
+mlua = { version = "0.10", features = ["lua54", "send"] }
