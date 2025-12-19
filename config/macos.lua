@@ -74,6 +74,7 @@ sandboxes = {
         { action = "mount", fs = "dev", dir = "/dev" },
         { action = "mount", fs = "tmp", dir = "/tmp", opts = "-e -s 384m" },
         { action = "mount", fs = "tmp", dir = "/var", opts = "-e -s 512m" },
+        { action = "cmd", create = "chmod 1777 tmp var/tmp" },
 
         -- Read-only system mounts.
         { action = "mount", fs = "bind", dir = "/Library", opts = "-r" },

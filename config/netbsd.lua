@@ -80,6 +80,7 @@ sandboxes = {
         { action = "mount", fs = "proc", dir = "/proc" },
         { action = "mount", fs = "tmp", dir = "/tmp" },
         { action = "mount", fs = "tmp", dir = "/var/tmp" },
+        { action = "cmd", create = "chmod 1777 tmp var/tmp" },
 
         { action = "copy", dir = "/etc" },
 

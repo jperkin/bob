@@ -83,6 +83,7 @@ sandboxes = {
 
         { action = "mount", fs = "tmp", dir = "/tmp", opts = "size=1G" },
         { action = "mount", fs = "tmp", dir = "/var/tmp", opts = "size=1G" },
+        { action = "cmd", create = "chmod 1777 tmp var/tmp" },
 
         { action = "mount", fs = "bind", dir = "/usr/bin", opts = "ro" },
         { action = "mount", fs = "bind", dir = "/usr/sbin", opts = "ro" },
