@@ -135,6 +135,16 @@ impl Scan {
          */
         if self.sandbox.enabled() {
             self.sandbox.create(0)?;
+
+            // Run pre-build script if defined
+            if let Some(pre_build) = self.config.script("pre-build") {
+                debug!("Running pre-build script");
+                let child = self.sandbox.execute(0, pre_build, vec![], None)?;
+                let output = child.wait_with_output().context("Failed to wait for pre-build")?;
+                if !output.status.success() {
+                    error!(exit_code = ?output.status.code(), "pre-build script failed");
+                }
+            }
         }
 
         /*
@@ -211,6 +221,16 @@ impl Scan {
         }
 
         if self.sandbox.enabled() {
+            // Run post-build script if defined
+            if let Some(post_build) = self.config.script("post-build") {
+                debug!("Running post-build script");
+                let child = self.sandbox.execute(0, post_build, vec![], None)?;
+                let output = child.wait_with_output().context("Failed to wait for post-build")?;
+                if !output.status.success() {
+                    error!(exit_code = ?output.status.code(), "post-build script failed");
+                }
+            }
+
             self.sandbox.destroy(0)?;
         }
 

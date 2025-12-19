@@ -3,6 +3,9 @@
 # This script is executed immediately prior to pkg-build, and should perform
 # any sandbox setup work necessary for each build.
 #
+# Note that it is also executed once in each sandbox prior to the scan phase
+# beginning, so that the bootstrap kit contents are available.
+#
 
 # If a bootstrap kit has been defined (required on any OS other than NetBSD)
 # then unpack it.
