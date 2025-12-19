@@ -14,6 +14,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+use crate::status::{self, StatusMessage};
 use crate::tui::{format_duration, MultiProgress};
 use crate::{Config, Sandbox};
 use anyhow::{bail, Context};
@@ -286,7 +287,7 @@ enum PackageBuildResult {
 }
 
 impl PackageBuild {
-    fn build(&self) -> anyhow::Result<PackageBuildResult> {
+    fn build(&self, status_tx: &Sender<ChannelCommand>) -> anyhow::Result<PackageBuildResult> {
         let pkgname = self.pkginfo.pkgname.pkgname();
         info!(
             pkgname = %pkgname,
@@ -352,53 +353,105 @@ impl PackageBuild {
         // Run pre-build script if defined (always runs)
         if let Some(pre_build) = self.config.script("pre-build") {
             debug!(pkgname = %pkgname, "Running pre-build script");
-            let child = self.sandbox.execute(self.id, pre_build, envs.clone(), None)?;
+            let child = self.sandbox.execute(self.id, pre_build, envs.clone(), None, None)?;
             let output = child.wait_with_output().context("Failed to wait for pre-build")?;
             if !output.status.success() {
                 warn!(pkgname = %pkgname, exit_code = ?output.status.code(), "pre-build script failed");
             }
         }
 
-        // Run pkg-build
-        let child = self.sandbox.execute(self.id, pkg_build_script, envs.clone(), Some(&stdin_data))?;
-        let output = child.wait_with_output().context("Failed to wait for pkg-build")?;
-        let exit_code = output.status.code().context("Process terminated by signal")?;
+        // Run pkg-build with status channel
+        let (mut status_reader, status_writer) = status::channel()
+            .context("Failed to create status channel")?;
+        let status_fd = status_writer.fd();
 
-        let result = match exit_code {
-            0 => {
-                info!(
-                    pkgname = %pkgname,
-                    "pkg-build completed successfully"
-                );
-                PackageBuildResult::Success
-            }
-            42 => {
-                info!(
-                    pkgname = %pkgname,
-                    "pkg-build skipped (up-to-date)"
-                );
-                PackageBuildResult::Skipped
-            }
-            code => {
-                error!(
-                    pkgname = %pkgname,
-                    exit_code = code,
-                    "pkg-build failed"
-                );
+        let mut child = self.sandbox.execute(
+            self.id,
+            pkg_build_script,
+            envs.clone(),
+            Some(&stdin_data),
+            Some(status_fd),
+        )?;
 
-                // Save wrkdir files matching configured patterns, then clean up
-                if !patterns.is_empty() {
-                    self.save_wrkdir_files(pkgname, pkgpath, bulklog, patterns, &pkg_env);
-                    self.run_clean(pkgpath);
+        // Close write end in parent so we get EOF when child exits
+        status_writer.close();
+
+        // Track if we received a "skipped" message
+        let mut was_skipped = false;
+
+        // Poll status channel and child process
+        loop {
+            // Read any available status messages
+            for msg in status_reader.read_all() {
+                match msg {
+                    StatusMessage::Stage(stage) => {
+                        let _ = status_tx.send(ChannelCommand::StageUpdate(
+                            self.id,
+                            Some(stage),
+                        ));
+                    }
+                    StatusMessage::Skipped => {
+                        was_skipped = true;
+                    }
                 }
-                PackageBuildResult::Failed
+            }
+
+            // Check if child has exited
+            match child.try_wait() {
+                Ok(Some(_status)) => break,
+                Ok(None) => {
+                    // Still running, sleep briefly
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => {
+                    return Err(e).context("Failed to wait for pkg-build");
+                }
+            }
+        }
+
+        // Clear stage display
+        let _ = status_tx.send(ChannelCommand::StageUpdate(self.id, None));
+
+        // Get final exit status
+        let status = child.wait().context("Failed to get pkg-build exit status")?;
+        let exit_code = status.code().context("Process terminated by signal")?;
+
+        let result = if was_skipped {
+            info!(
+                pkgname = %pkgname,
+                "pkg-build skipped (up-to-date)"
+            );
+            PackageBuildResult::Skipped
+        } else {
+            match exit_code {
+                0 => {
+                    info!(
+                        pkgname = %pkgname,
+                        "pkg-build completed successfully"
+                    );
+                    PackageBuildResult::Success
+                }
+                code => {
+                    error!(
+                        pkgname = %pkgname,
+                        exit_code = code,
+                        "pkg-build failed"
+                    );
+
+                    // Save wrkdir files matching configured patterns, then clean up
+                    if !patterns.is_empty() {
+                        self.save_wrkdir_files(pkgname, pkgpath, bulklog, patterns, &pkg_env);
+                        self.run_clean(pkgpath);
+                    }
+                    PackageBuildResult::Failed
+                }
             }
         };
 
         // Run post-build script if defined (always runs regardless of pkg-build result)
         if let Some(post_build) = self.config.script("post-build") {
             debug!(pkgname = %pkgname, "Running post-build script");
-            let child = self.sandbox.execute(self.id, post_build, envs, None)?;
+            let child = self.sandbox.execute(self.id, post_build, envs, None, None)?;
             let output = child.wait_with_output().context("Failed to wait for post-build")?;
             if !output.status.success() {
                 warn!(pkgname = %pkgname, exit_code = ?output.status.code(), "post-build script failed");
@@ -613,6 +666,10 @@ enum ChannelCommand {
      * Shutdown signal - workers should stop immediately.
      */
     Shutdown,
+    /**
+     * Client reporting a stage update for a build.
+     */
+    StageUpdate(usize, Option<String>),
 }
 
 /**
@@ -941,7 +998,7 @@ impl Build {
                     ChannelCommand::JobData(pkg) => {
                         let pkgname = pkg.pkginfo.pkgname.clone();
                         let build_start = Instant::now();
-                        match pkg.build() {
+                        match pkg.build(&manager_tx) {
                             Ok(PackageBuildResult::Success) => {
                                 let duration = build_start.elapsed();
                                 let _ = manager_tx
@@ -1156,6 +1213,12 @@ impl Build {
                             let _ = p.render_throttled();
                         }
                         tracing::error!(error = %e, pkgname = %pkgname.pkgname(), "Build error");
+                    }
+                    ChannelCommand::StageUpdate(tid, stage) => {
+                        if let Ok(mut p) = progress_clone.lock() {
+                            p.state_mut().set_worker_stage(tid, stage.as_deref());
+                            let _ = p.render_throttled();
+                        }
                     }
                     _ => {}
                 }

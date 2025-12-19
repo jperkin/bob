@@ -15,6 +15,7 @@ set -e
 : ${bob_pkgtools:?}
 : ${bob_pkgsrc:?}
 : ${bob_prefix:?}
+: ${bob_status_fd:?}
 : ${bob_tar:?}
 
 cleanup() {
@@ -65,9 +66,15 @@ run_usergroup() {
 	esac
 }
 
-# Write current stage to .stage file for reporting
+# Write current stage to .stage file and status fd for reporting
 set_stage() {
 	echo "$1" > "${pkglogdir}/.stage"
+	echo "stage:$1" >&${bob_status_fd}
+}
+
+# Send a status message to the master process
+send_status() {
+	echo "$1" >&${bob_status_fd}
 }
 
 #
@@ -111,7 +118,8 @@ if [ -n "${PKG_UP_TO_DATE}" ] && [ -x "${PKG_UP_TO_DATE}" ]; then
     mkdir -p "${pkglogdir}"
     if "${PKG_UP_TO_DATE}" "${pkgname}" ${dependencies} > "${pkglogdir}/up-to-date.log" 2>&1; then
         rm -rf "${pkglogdir}"
-        exit 42  # Special exit code for "skipped (up-to-date)"
+        send_status "skipped"
+        exit 0
     fi
 fi
 

@@ -22,6 +22,7 @@ mod logging;
 mod report;
 mod sandbox;
 mod scan;
+mod status;
 mod tui;
 
 use crate::build::Build;

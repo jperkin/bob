@@ -193,14 +193,16 @@ impl Sandbox {
 
     /**
      * Execute a script file with supplied environment variables and optional
-     * stdin data.
+     * stdin data. If status_fd is provided, it will be passed to the child
+     * process via the bob_status_fd environment variable.
      */
     pub fn execute(
         &self,
         id: usize,
         script: &Path,
-        envs: Vec<(String, String)>,
+        mut envs: Vec<(String, String)>,
         stdin_data: Option<&str>,
+        status_fd: Option<i32>,
     ) -> Result<Child> {
         use std::io::Write;
 
@@ -211,6 +213,10 @@ impl Sandbox {
         } else {
             Command::new(script)
         };
+
+        if let Some(fd) = status_fd {
+            envs.push(("bob_status_fd".to_string(), fd.to_string()));
+        }
 
         for (key, val) in envs {
             cmd.env(key, val);

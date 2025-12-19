@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Debug)]
 pub struct WorkerState {
     pub package: Option<String>,
+    pub stage: Option<String>,
     pub started: Option<Instant>,
 }
 
@@ -38,18 +39,25 @@ impl WorkerState {
     pub fn new() -> Self {
         Self {
             package: None,
+            stage: None,
             started: None,
         }
     }
 
     pub fn set_active(&mut self, package: &str) {
         self.package = Some(package.to_string());
+        self.stage = None;
         self.started = Some(Instant::now());
     }
 
     pub fn set_idle(&mut self) {
         self.package = None;
+        self.stage = None;
         self.started = None;
+    }
+
+    pub fn set_stage(&mut self, stage: Option<&str>) {
+        self.stage = stage.map(|s| s.to_string());
     }
 
     pub fn elapsed(&self) -> Option<Duration> {
@@ -138,6 +146,12 @@ impl ProgressState {
     pub fn set_worker_idle(&mut self, id: usize) {
         if let Some(worker) = self.workers.get_mut(id) {
             worker.set_idle();
+        }
+    }
+
+    pub fn set_worker_stage(&mut self, id: usize, stage: Option<&str>) {
+        if let Some(worker) = self.workers.get_mut(id) {
+            worker.set_stage(stage);
         }
     }
 
@@ -254,7 +268,11 @@ impl MultiProgress {
             let tw = state.timer_width;
             for (i, worker) in state.workers.iter().enumerate() {
                 let text = if let (Some(pkg), Some(elapsed)) = (&worker.package, worker.elapsed()) {
-                    format!("  [{:>2}:{:>tw$} ] {}", i, format_duration_short(elapsed), pkg, tw = tw)
+                    if let Some(stage) = &worker.stage {
+                        format!("  [{:>2}:{:>tw$} ] {} ({})", i, format_duration_short(elapsed), pkg, stage, tw = tw)
+                    } else {
+                        format!("  [{:>2}:{:>tw$} ] {}", i, format_duration_short(elapsed), pkg, tw = tw)
+                    }
                 } else {
                     format!("  [{:>2}:{:>tw$} ]", i, "idle", tw = tw)
                 };
