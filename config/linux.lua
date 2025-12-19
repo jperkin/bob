@@ -1,7 +1,6 @@
 -- Example configuration file for Linux (Lua format).
 
 -- Common variables
-local pkgsrc_dir = "/data/git/pkgsrc"
 local initdir = "@INITDIR@"
 
 -- General configuration variables.
@@ -13,7 +12,7 @@ options = {
 
 -- Variables that configure pkgsrc, where it is, what packages to build, etc.
 pkgsrc = {
-    basedir = pkgsrc_dir,
+    basedir = "/data/pkgsrc",
     bootstrap = initdir .. "/bootstrap.tar.gz",
     bulklog = initdir .. "/bulklog",
     make = "/usr/pkg/bin/bmake",
@@ -101,7 +100,7 @@ sandboxes = {
         { action = "symlink", src = "usr/lib64", dest = "/lib64" },
         { action = "symlink", src = "usr/sbin", dest = "/sbin" },
 
-        { action = "mount", fs = "bind", dir = pkgsrc_dir, opts = "ro" },
+        { action = "mount", fs = "bind", dir = pkgsrc.basedir, opts = "ro" },
 
         -- Bob config directory (contains bulklog, packages, distfiles, scripts)
         { action = "mount", fs = "bind", dir = initdir },

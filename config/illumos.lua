@@ -72,7 +72,7 @@ sandboxes = {
     basedir = "/chroot",
 
     actions = {
-	-- /devices is optional depending on if this is a global zone or not
+        -- /devices is optional depending on if this is a global zone or not
         { action = "mount", fs = "lofs", dir = "/devices", opts = "-o ro", ifexists = true },
         { action = "mount", fs = "lofs", dir = "/dev", opts = "-o ro" },
         { action = "mount", fs = "fd", dir = "/dev/fd" },
@@ -87,6 +87,8 @@ sandboxes = {
         { action = "mount", fs = "lofs", dir = "/usr", opts = "-o ro" },
 
         { action = "symlink", src = "usr/bin", dest = "/bin" },
+
+        { action = "mount", fs = "lofs", dir = pkgsrc.basedir, opts = "-o ro" },
 
         -- Directory where this config and support scripts live.
         { action = "mount", fs = "lofs", dir = initdir },

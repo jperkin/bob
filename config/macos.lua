@@ -12,7 +12,7 @@ options = {
 
 -- Variables that configure pkgsrc, where it is, what packages to build, etc.
 pkgsrc = {
-    basedir = "/usr/pkgsrc",
+    basedir = "/Volumes/data/pkgsrc",
     bootstrap = initdir .. "/bootstrap.tar.gz",
     bulklog = initdir .. "/bulklog",
     make = "/opt/pkg/bin/bmake",
@@ -87,6 +87,8 @@ sandboxes = {
 
         -- Postfix spool needs to be read-write
         { action = "mount", fs = "bind", dir = "/private/var/spool/postfix" },
+
+        { action = "mount", fs = "bind", dir = pkgsrc.basedir, opts = "-r" },
 
         -- Directory where this config and support scripts live.
         { action = "mount", fs = "bind", dir = initdir },
