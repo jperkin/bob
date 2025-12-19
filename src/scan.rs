@@ -124,10 +124,10 @@ impl Scan {
             }
         });
 
-        rayon::ThreadPoolBuilder::new()
+        let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(self.config.scan_threads())
             .build()
-            .unwrap();
+            .context("Failed to build scan thread pool")?;
 
         /*
          * Only a single sandbox is required, 'make pbulk-index' can safely be
@@ -165,27 +165,29 @@ impl Scan {
             }
 
             let progress_clone = Arc::clone(&progress);
-            parpaths.par_iter_mut().for_each(|pkg| {
-                let (pkgpath, result) = pkg;
-                let pathname = pkgpath.as_path().to_string_lossy().to_string();
+            pool.install(|| {
+                parpaths.par_iter_mut().for_each(|pkg| {
+                    let (pkgpath, result) = pkg;
+                    let pathname = pkgpath.as_path().to_string_lossy().to_string();
 
-                // Get rayon thread index for progress tracking
-                let thread_id = rayon::current_thread_index().unwrap_or(0);
+                    // Get rayon thread index for progress tracking
+                    let thread_id = rayon::current_thread_index().unwrap_or(0);
 
-                // Update progress - show current package for this thread
-                if let Ok(mut p) = progress_clone.lock() {
-                    p.state_mut().set_worker_active(thread_id, &pathname);
-                }
+                    // Update progress - show current package for this thread
+                    if let Ok(mut p) = progress_clone.lock() {
+                        p.state_mut().set_worker_active(thread_id, &pathname);
+                    }
 
-                *result = self
-                    .scan_pkgpath(pkgpath)
-                    .context(format!("Scan failed for {}", pathname));
+                    *result = self
+                        .scan_pkgpath(pkgpath)
+                        .context(format!("Scan failed for {}", pathname));
 
-                // Update progress - increment completed and mark thread idle
-                if let Ok(mut p) = progress_clone.lock() {
-                    p.state_mut().increment_completed();
-                    p.state_mut().set_worker_idle(thread_id);
-                }
+                    // Update progress - increment completed and mark thread idle
+                    if let Ok(mut p) = progress_clone.lock() {
+                        p.state_mut().increment_completed();
+                        p.state_mut().set_worker_idle(thread_id);
+                    }
+                });
             });
 
             /*
