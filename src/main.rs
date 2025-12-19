@@ -109,10 +109,10 @@ fn scan_bulklog_for_report(bulklog: &Path) -> Result<build::BuildSummary> {
             None => continue,
         };
 
-        // Check for .failed file to determine failure phase
-        let failed_file = path.join(".failed");
-        let failed_reason = if failed_file.exists() {
-            fs::read_to_string(&failed_file)
+        // Check for .stage file to determine failure phase
+        let stage_file = path.join(".stage");
+        let failed_reason = if stage_file.exists() {
+            fs::read_to_string(&stage_file)
                 .ok()
                 .map(|s| format!("Failed in {} phase", s.trim()))
                 .unwrap_or_else(|| "Build failed".to_string())

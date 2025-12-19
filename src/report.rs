@@ -72,10 +72,10 @@ fn count_broken_packages(summary: &BuildSummary) -> HashMap<String, usize> {
     counts
 }
 
-/// Read the failed phase from the .failed file in the log directory.
+/// Read the failed phase from the .stage file in the log directory.
 fn read_failed_phase(log_dir: &Path) -> Option<String> {
-    let failed_file = log_dir.join(".failed");
-    fs::read_to_string(failed_file).ok().map(|s| s.trim().to_string())
+    let stage_file = log_dir.join(".stage");
+    fs::read_to_string(stage_file).ok().map(|s| s.trim().to_string())
 }
 
 /// Generate an HTML build report.
