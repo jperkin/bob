@@ -341,6 +341,26 @@ impl Config {
         self.lua_env.get_env(idx)
     }
 
+    /// Return environment variables for script execution.
+    pub fn script_env(&self) -> Vec<(&'static str, String)> {
+        let mut envs = vec![
+            ("bob_bulklog", format!("{}", self.bulklog().display())),
+            ("bob_make", format!("{}", self.make().display())),
+            ("bob_packages", format!("{}", self.packages().display())),
+            ("bob_pkgtools", format!("{}", self.pkgtools().display())),
+            ("bob_pkgsrc", format!("{}", self.pkgsrc().display())),
+            ("bob_prefix", format!("{}", self.prefix().display())),
+            ("bob_tar", format!("{}", self.tar().display())),
+        ];
+        if let Some(build_user) = self.build_user() {
+            envs.push(("bob_build_user", build_user.to_string()));
+        }
+        if let Some(bootstrap) = self.bootstrap() {
+            envs.push(("bob_bootstrap", format!("{}", bootstrap.display())));
+        }
+        envs
+    }
+
     /// Validate the configuration, checking that required paths and files exist.
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors: Vec<String> = Vec::new();

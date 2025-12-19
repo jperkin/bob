@@ -133,16 +133,19 @@ impl Scan {
          * Only a single sandbox is required, 'make pbulk-index' can safely be
          * run in parallel inside one sandbox.
          */
+        let script_envs = self.config.script_env();
+
         if self.sandbox.enabled() {
             self.sandbox.create(0)?;
 
             // Run pre-build script if defined
             if let Some(pre_build) = self.config.script("pre-build") {
                 debug!("Running pre-build script");
-                let child = self.sandbox.execute(0, pre_build, vec![], None)?;
+                let child = self.sandbox.execute(0, pre_build, script_envs.clone(), None)?;
                 let output = child.wait_with_output().context("Failed to wait for pre-build")?;
                 if !output.status.success() {
-                    error!(exit_code = ?output.status.code(), "pre-build script failed");
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    error!(exit_code = ?output.status.code(), stderr = %stderr, "pre-build script failed");
                 }
             }
         }
@@ -224,10 +227,11 @@ impl Scan {
             // Run post-build script if defined
             if let Some(post_build) = self.config.script("post-build") {
                 debug!("Running post-build script");
-                let child = self.sandbox.execute(0, post_build, vec![], None)?;
+                let child = self.sandbox.execute(0, post_build, script_envs, None)?;
                 let output = child.wait_with_output().context("Failed to wait for post-build")?;
                 if !output.status.success() {
-                    error!(exit_code = ?output.status.code(), "post-build script failed");
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    error!(exit_code = ?output.status.code(), stderr = %stderr, "post-build script failed");
                 }
             }
 
