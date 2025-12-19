@@ -342,21 +342,21 @@ impl Config {
     }
 
     /// Return environment variables for script execution.
-    pub fn script_env(&self) -> Vec<(&'static str, String)> {
+    pub fn script_env(&self) -> Vec<(String, String)> {
         let mut envs = vec![
-            ("bob_bulklog", format!("{}", self.bulklog().display())),
-            ("bob_make", format!("{}", self.make().display())),
-            ("bob_packages", format!("{}", self.packages().display())),
-            ("bob_pkgtools", format!("{}", self.pkgtools().display())),
-            ("bob_pkgsrc", format!("{}", self.pkgsrc().display())),
-            ("bob_prefix", format!("{}", self.prefix().display())),
-            ("bob_tar", format!("{}", self.tar().display())),
+            ("bob_bulklog".to_string(), format!("{}", self.bulklog().display())),
+            ("bob_make".to_string(), format!("{}", self.make().display())),
+            ("bob_packages".to_string(), format!("{}", self.packages().display())),
+            ("bob_pkgtools".to_string(), format!("{}", self.pkgtools().display())),
+            ("bob_pkgsrc".to_string(), format!("{}", self.pkgsrc().display())),
+            ("bob_prefix".to_string(), format!("{}", self.prefix().display())),
+            ("bob_tar".to_string(), format!("{}", self.tar().display())),
         ];
         if let Some(build_user) = self.build_user() {
-            envs.push(("bob_build_user", build_user.to_string()));
+            envs.push(("bob_build_user".to_string(), build_user.to_string()));
         }
         if let Some(bootstrap) = self.bootstrap() {
-            envs.push(("bob_bootstrap", format!("{}", bootstrap.display())));
+            envs.push(("bob_bootstrap".to_string(), format!("{}", bootstrap.display())));
         }
         envs
     }

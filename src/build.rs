@@ -306,17 +306,14 @@ impl PackageBuild {
 
         // Add script paths
         if let Some(path) = self.config.script("pkg-up-to-date") {
-            envs.push((
-                "PKG_UP_TO_DATE",
-                format!("{}", path.display()),
-            ));
+            envs.push(("PKG_UP_TO_DATE".to_string(), format!("{}", path.display())));
         }
 
         // Get env vars from Lua config (function or table)
         let pkg_env = match self.config.get_pkg_env(&self.pkginfo) {
             Ok(env) => {
                 for (key, value) in &env {
-                    envs.push((Box::leak(key.clone().into_boxed_str()), value.clone()));
+                    envs.push((key.clone(), value.clone()));
                 }
                 env
             }
@@ -329,7 +326,7 @@ impl PackageBuild {
         // If we have save_wrkdir_patterns, tell the script not to clean so we can save files
         let patterns = self.config.save_wrkdir_patterns();
         if !patterns.is_empty() {
-            envs.push(("SKIP_CLEAN", "1".to_string()));
+            envs.push(("SKIP_CLEAN".to_string(), "1".to_string()));
         }
 
         let Some(pkg_build_script) = self.config.script("pkg-build") else {
