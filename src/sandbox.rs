@@ -438,6 +438,9 @@ impl Sandbox {
                     let fs_type = action.fs_type()?;
                     let src = src.ok_or_else(|| anyhow::anyhow!("mount action requires src or dest"))?;
                     let dest = dest.ok_or_else(|| anyhow::anyhow!("mount action requires dest"))?;
+                    if action.ifexists() && !src.exists() {
+                        continue;
+                    }
                     match fs_type {
                         FSType::Bind => self.mount_bindfs(src, &dest, &opts)?,
                         FSType::Dev => self.mount_devfs(src, &dest, &opts)?,
@@ -576,6 +579,14 @@ impl Sandbox {
                     // For mount actions, we need to unmount
                     let Some(mntdest) = dest else { continue };
                     let fs_type = action.fs_type()?;
+
+                    // If ifexists was set and src doesn't exist, the mount was skipped
+                    let src = action.src().or(action.dest());
+                    if let Some(src) = src {
+                        if action.ifexists() && !src.exists() {
+                            continue;
+                        }
+                    }
 
                     /*
                      * If the mount point itself does not exist then do not try to

@@ -41,6 +41,8 @@ pub struct Action {
     destroy: Option<String>,
     /// Working directory for commands, relative to sandbox root (for "cmd" action)
     cwd: Option<PathBuf>,
+    /// Only perform mount if source exists on host (default: false)
+    ifexists: bool,
 }
 
 /// The type of action to perform.
@@ -125,6 +127,7 @@ impl Action {
             create: t.get("create").ok(),
             destroy: t.get("destroy").ok(),
             cwd: t.get::<Option<String>>("cwd")?.map(PathBuf::from),
+            ifexists: t.get("ifexists").unwrap_or(false),
         })
     }
 
@@ -161,6 +164,10 @@ impl Action {
 
     pub fn cwd(&self) -> Option<&PathBuf> {
         self.cwd.as_ref()
+    }
+
+    pub fn ifexists(&self) -> bool {
+        self.ifexists
     }
 
     /// Validate the action configuration.

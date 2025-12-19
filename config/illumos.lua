@@ -72,7 +72,8 @@ sandboxes = {
     basedir = "/chroot",
 
     actions = {
-        { action = "mount", fs = "lofs", dir = "/devices", opts = "-o ro" },
+	-- /devices is optional depending on if this is a global zone or not
+        { action = "mount", fs = "lofs", dir = "/devices", opts = "-o ro", ifexists = true },
         { action = "mount", fs = "lofs", dir = "/dev", opts = "-o ro" },
         { action = "mount", fs = "fd", dir = "/dev/fd" },
         { action = "mount", fs = "proc", dir = "/proc" },
