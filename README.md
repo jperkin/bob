@@ -6,16 +6,54 @@ utility for building pkgsrc packages.
 ## Status
 
 - [x] Basic app, config files, etc.
-- [x] Sandboxes implemented for illumos, macOS, NetBSD.
-- [x] Threaded scan processes (missing some variables).
-- [x] Scan resolution / DAG (about 80% complete).
-- [ ] Build processes in sandboxes.
-- [ ] Nice full-screen UI / reports / etc.
+- [x] Sandboxes implemented for illumos, macOS, NetBSD, and Linux.
+- [x] Threaded scan and build processes inside sandboxes.
+- [x] Scan resolution / DAG.
+- [x] Ratatui-based terminal interface showing current progress.
+- [x] Basic HTML reports.
 
-Presently you can use `bob` to create sandboxes and perform a multi-threaded
-scan of specified `PKGPATH`s (with a nice progress bar), and it will determine
-the correct order to build the packages in, but does not yet actually build
-them.
+## Getting Started
+
+Install bob either by:
+
+* Cloning this repository and running `cargo build --release`
+* Running `cargo install pkgbob` to install directly from crates.io.
+
+Run `bob init /path/to/dir` to generate a directory containing
+`config.lua` and all the scripts necessary to build packages.
+
+On non-NetBSD systems you will need a pkgsrc bootstrap kit.  By default bob
+will look for `bootstrap.tar.gz` inside the configuration directory.
+
+Review `config.lua` and ensure that all of the paths are correct for your
+target environment.  The defaults have been chosen to work mostly out of the
+box.
+
+When you are happy with the configuration, either run:
+
+```
+$ cd /path/to/bob/init/dir
+$ bob build
+```
+
+or:
+
+```
+$ bob -c /path/to/bob/init/dir/config.lua build
+```
+
+and bob will proceed to:
+
+* Create a single sandbox under `sandboxes.basedir`.
+* Launch `options.scan_threads` number of scan processes inside the sandbox,
+  scanning the package directories defined in `pkgsrc.pkgpaths`, recursively
+  discovering dependencies until a full dependency tree has been calculated.
+* Resolve the scan (ensure that all scanned packages are discoverable).
+* Destroy the scan sandbox, and create `options.build_threads` number of build
+  sandboxes.
+* Launch a build process in sandbox, building packages bottom-up until all have
+  been processed.
+* Destroy the build sandboxes and generate a summary and HTML report.
 
 ## Design Goals
 
