@@ -71,22 +71,22 @@ sandboxes = {
     basedir = "/Volumes/data/chroot",
 
     actions = {
-        { action = "mount", fs = "dev", dest = "/dev" },
-        { action = "mount", fs = "tmp", dest = "/tmp", opts = "-e -s 384m" },
-        { action = "mount", fs = "tmp", dest = "/var", opts = "-e -s 512m" },
+        { action = "mount", fs = "dev", dir = "/dev" },
+        { action = "mount", fs = "tmp", dir = "/tmp", opts = "-e -s 384m" },
+        { action = "mount", fs = "tmp", dir = "/var", opts = "-e -s 512m" },
 
         -- Read-only system mounts.
-        { action = "mount", fs = "bind", dest = "/Library", opts = "-r" },
-        { action = "mount", fs = "bind", dest = "/System", opts = "-r" },
-        { action = "mount", fs = "bind", dest = "/bin", opts = "-r" },
-        { action = "mount", fs = "bind", dest = "/etc", src = "/private/etc", opts = "-r" },
-        { action = "mount", fs = "bind", dest = "/sbin", opts = "-r" },
-        { action = "mount", fs = "bind", dest = "/usr", opts = "-r" },
+        { action = "mount", fs = "bind", dir = "/Library", opts = "-r" },
+        { action = "mount", fs = "bind", dir = "/System", opts = "-r" },
+        { action = "mount", fs = "bind", dir = "/bin", opts = "-r" },
+        { action = "mount", fs = "bind", src = "/private/etc", dest = "/etc", opts = "-r" },
+        { action = "mount", fs = "bind", dir = "/sbin", opts = "-r" },
+        { action = "mount", fs = "bind", dir = "/usr", opts = "-r" },
 
-        -- Postfix spool (read-only for safety)
-        { action = "mount", fs = "bind", dest = "/private/var/spool/postfix", opts = "-r" },
+        -- Postfix spool needs to be read-write
+        { action = "mount", fs = "bind", dir = "/private/var/spool/postfix" },
 
         -- Directory where this config and support scripts live.
-        { action = "mount", fs = "bind", src = initdir },
+        { action = "mount", fs = "bind", dir = initdir },
     },
 }

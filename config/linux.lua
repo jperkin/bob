@@ -78,28 +78,30 @@ sandboxes = {
     basedir = "/data/chroot/bob",
 
     actions = {
-        { action = "mount", fs = "proc", dest = "/proc" },
-        { action = "mount", fs = "dev", dest = "/dev" },
-        { action = "mount", fs = "tmp", dest = "/tmp", opts = "size=2G" },
-        { action = "mount", fs = "tmp", dest = "/var/tmp", opts = "size=1G" },
-        { action = "mount", fs = "bind", src = "/usr/bin", opts = "ro" },
-        { action = "mount", fs = "bind", src = "/usr/sbin", opts = "ro" },
-        { action = "mount", fs = "bind", src = "/usr/lib", opts = "ro" },
-        { action = "mount", fs = "bind", src = "/usr/lib64", opts = "ro" },
-        { action = "mount", fs = "bind", src = "/usr/libexec", opts = "ro" },
-        { action = "mount", fs = "bind", src = "/usr/include", opts = "ro" },
-        { action = "mount", fs = "bind", src = "/usr/share", opts = "ro" },
+        { action = "mount", fs = "proc", dir = "/proc" },
+        { action = "mount", fs = "dev", dir = "/dev" },
 
-        { action = "copy", dest = "/etc" },
+        { action = "mount", fs = "tmp", dir = "/tmp", opts = "size=1G" },
+        { action = "mount", fs = "tmp", dir = "/var/tmp", opts = "size=1G" },
+
+        { action = "mount", fs = "bind", dir = "/usr/bin", opts = "ro" },
+        { action = "mount", fs = "bind", dir = "/usr/sbin", opts = "ro" },
+        { action = "mount", fs = "bind", dir = "/usr/lib", opts = "ro" },
+        { action = "mount", fs = "bind", dir = "/usr/lib64", opts = "ro" },
+        { action = "mount", fs = "bind", dir = "/usr/libexec", opts = "ro" },
+        { action = "mount", fs = "bind", dir = "/usr/include", opts = "ro" },
+        { action = "mount", fs = "bind", dir = "/usr/share", opts = "ro" },
+
+        { action = "copy", dir = "/etc" },
 
         { action = "symlink", src = "usr/bin", dest = "/bin" },
         { action = "symlink", src = "usr/lib", dest = "/lib" },
         { action = "symlink", src = "usr/lib64", dest = "/lib64" },
         { action = "symlink", src = "usr/sbin", dest = "/sbin" },
 
-        { action = "mount", fs = "bind", src = pkgsrc_dir, opts = "ro" },
+        { action = "mount", fs = "bind", dir = pkgsrc_dir, opts = "ro" },
 
         -- Bob config directory (contains bulklog, packages, distfiles, scripts)
-        { action = "mount", fs = "bind", src = initdir },
+        { action = "mount", fs = "bind", dir = initdir },
     },
 }

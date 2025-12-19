@@ -71,20 +71,20 @@ sandboxes = {
     basedir = "/chroot",
 
     actions = {
-        { action = "mount", fs = "lofs", dest = "/devices", opts = "-o ro" },
-        { action = "mount", fs = "lofs", dest = "/dev", opts = "-o ro" },
-        { action = "mount", fs = "fd", dest = "/dev/fd" },
-        { action = "mount", fs = "proc", dest = "/proc" },
-        { action = "mount", fs = "tmp", dest = "/tmp", opts = "-o size=1024k" },
-        { action = "mount", fs = "tmp", dest = "/var/tmp" },
+        { action = "mount", fs = "lofs", dir = "/devices", opts = "-o ro" },
+        { action = "mount", fs = "lofs", dir = "/dev", opts = "-o ro" },
+        { action = "mount", fs = "fd", dir = "/dev/fd" },
+        { action = "mount", fs = "proc", dir = "/proc" },
+        { action = "mount", fs = "tmp", dir = "/tmp", opts = "-o size=1g" },
+        { action = "mount", fs = "tmp", dir = "/var/tmp", opts = "-o size=1g"  },
 
         -- System directories (read-only for safety)
-        { action = "mount", fs = "lofs", dest = "/lib", opts = "-o ro" },
-        { action = "mount", fs = "lofs", dest = "/sbin", opts = "-o ro" },
-        { action = "mount", fs = "lofs", dest = "/usr", opts = "-o ro" },
-        { action = "mount", fs = "lofs", dest = "/bin", src = "/usr/bin", opts = "-o ro" },
+        { action = "mount", fs = "lofs", dir = "/lib", opts = "-o ro" },
+        { action = "mount", fs = "lofs", dir = "/sbin", opts = "-o ro" },
+        { action = "mount", fs = "lofs", dir = "/usr", opts = "-o ro" },
+        { action = "mount", fs = "lofs", src = "/usr/bin", dest = "/bin", opts = "-o ro" },
 
         -- Directory where this config and support scripts live.
-        { action = "mount", fs = "lofs", src = initdir },
+        { action = "mount", fs = "lofs", dir = initdir },
     },
 }
