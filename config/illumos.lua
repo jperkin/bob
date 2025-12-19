@@ -82,7 +82,8 @@ sandboxes = {
         { action = "mount", fs = "lofs", dir = "/lib", opts = "-o ro" },
         { action = "mount", fs = "lofs", dir = "/sbin", opts = "-o ro" },
         { action = "mount", fs = "lofs", dir = "/usr", opts = "-o ro" },
-        { action = "mount", fs = "lofs", src = "/usr/bin", dest = "/bin", opts = "-o ro" },
+
+        { action = "symlink", src = "usr/bin", dest = "/bin" },
 
         -- Directory where this config and support scripts live.
         { action = "mount", fs = "lofs", dir = initdir },
