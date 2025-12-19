@@ -191,10 +191,13 @@ impl Sandbox {
 
     /// Kill all processes using files within a sandbox path.
     pub fn kill_processes(&self, sandbox: &Path) {
+        use std::process::Stdio;
         // Use fuser -k to kill all processes using files under the sandbox
         let _ = Command::new("fuser")
             .arg("-k")
             .arg(sandbox)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
 
         // Give processes a moment to die
