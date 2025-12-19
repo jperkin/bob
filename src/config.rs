@@ -158,6 +158,8 @@ pub struct Options {
 #[derive(Clone, Debug, Default)]
 pub struct Pkgsrc {
     pub basedir: PathBuf,
+    pub bootstrap: Option<PathBuf>,
+    pub build_user: Option<String>,
     pub bulklog: PathBuf,
     pub make: PathBuf,
     pub packages: PathBuf,
@@ -167,7 +169,6 @@ pub struct Pkgsrc {
     pub report_dir: Option<PathBuf>,
     pub save_wrkdir_patterns: Vec<String>,
     pub tar: PathBuf,
-    pub build_user: Option<String>,
 }
 
 ///
@@ -219,18 +220,17 @@ impl Config {
         config.lua_env = lua_env;
 
         /*
-         * Parse scripts section.  Script values are parsed as filenames
-         * (relative to config dir if not absolute).
+         * Parse scripts section.  Paths are resolved relative to config dir
+         * if not absolute.
          */
         let mut newscripts: HashMap<String, PathBuf> = HashMap::new();
         for (k, v) in &config.file.scripts {
-            let spath = Path::new(v);
-            let sfullpath = if spath.is_relative() {
-                config.filename.parent().unwrap().join(spath)
+            let fullpath = if v.is_relative() {
+                config.filename.parent().unwrap().join(v)
             } else {
-                spath.to_path_buf()
+                v.clone()
             };
-            newscripts.insert(k.clone(), sfullpath);
+            newscripts.insert(k.clone(), fullpath);
         }
         /*
          * Overwrite scripts map, we're done with the input.
@@ -330,6 +330,10 @@ impl Config {
 
     pub fn build_user(&self) -> Option<&str> {
         self.file.pkgsrc.build_user.as_deref()
+    }
+
+    pub fn bootstrap(&self) -> Option<&PathBuf> {
+        self.file.pkgsrc.bootstrap.as_ref()
     }
 
     /// Get environment variables for a package from the Lua env function/table.
@@ -497,13 +501,16 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
     let pkgsrc: Table = globals.get("pkgsrc")?;
 
     let basedir: String = pkgsrc.get("basedir")?;
+    let bootstrap: Option<PathBuf> = pkgsrc
+        .get::<Option<String>>("bootstrap")?
+        .map(PathBuf::from);
+    let build_user: Option<String> = pkgsrc.get::<Option<String>>("build_user")?;
     let bulklog: String = pkgsrc.get("bulklog")?;
     let make: String = pkgsrc.get("make")?;
     let packages: String = pkgsrc.get("packages")?;
     let pkgtools: String = pkgsrc.get("pkgtools")?;
     let prefix: String = pkgsrc.get("prefix")?;
     let tar: String = pkgsrc.get("tar")?;
-    let build_user: Option<String> = pkgsrc.get::<Option<String>>("build_user")?;
 
     let pkgpaths: Option<Vec<PkgPath>> = match pkgsrc.get::<Value>("pkgpaths")? {
         Value::Nil => None,
@@ -534,6 +541,8 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
 
     Ok(Pkgsrc {
         basedir: PathBuf::from(basedir),
+        bootstrap,
+        build_user,
         bulklog: PathBuf::from(bulklog),
         make: PathBuf::from(make),
         packages: PathBuf::from(packages),
@@ -543,7 +552,6 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         report_dir,
         save_wrkdir_patterns,
         tar: PathBuf::from(tar),
-        build_user,
     })
 }
 

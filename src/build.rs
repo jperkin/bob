@@ -317,11 +317,15 @@ impl PackageBuild {
             envs.push(("bob_build_user", build_user.to_string()));
         }
 
+        if let Some(bootstrap) = self.config.bootstrap() {
+            envs.push(("bob_bootstrap", format!("{}", bootstrap.display())));
+        }
+
         // Add script paths
-        if let Some(pkg_up_to_date) = self.config.script("pkg-up-to-date") {
+        if let Some(path) = self.config.script("pkg-up-to-date") {
             envs.push((
                 "PKG_UP_TO_DATE",
-                format!("{}", pkg_up_to_date.display()),
+                format!("{}", path.display()),
             ));
         }
 
@@ -345,7 +349,7 @@ impl PackageBuild {
             envs.push(("SKIP_CLEAN", "1".to_string()));
         }
 
-        let Some(pkg_build_path) = &self.config.script("pkg-build") else {
+        let Some(pkg_build_script) = self.config.script("pkg-build") else {
             error!(pkgname = %pkgname, "No pkg-build script defined");
             bail!("No pkg-build script defined");
         };
@@ -355,9 +359,8 @@ impl PackageBuild {
 
         debug!(
             pkgname = %pkgname,
-            script = %pkg_build_path.display(),
             env_count = envs.len(),
-            "Executing pkg-build script"
+            "Executing build scripts"
         );
         trace!(
             pkgname = %pkgname,
@@ -366,47 +369,63 @@ impl PackageBuild {
             "Build environment variables"
         );
 
-        let child = self.sandbox.execute(self.id, pkg_build_path, envs, Some(&stdin_data))?;
-        let output =
-            child.wait_with_output().context("Failed to wait for pkg-build")?;
+        // Run pre-build script if defined (always runs)
+        if let Some(pre_build) = self.config.script("pre-build") {
+            debug!(pkgname = %pkgname, "Running pre-build script");
+            let child = self.sandbox.execute(self.id, pre_build, envs.clone(), None)?;
+            let output = child.wait_with_output().context("Failed to wait for pre-build")?;
+            if !output.status.success() {
+                warn!(pkgname = %pkgname, exit_code = ?output.status.code(), "pre-build script failed");
+            }
+        }
 
+        // Run pkg-build
+        let child = self.sandbox.execute(self.id, pkg_build_script, envs.clone(), Some(&stdin_data))?;
+        let output = child.wait_with_output().context("Failed to wait for pkg-build")?;
         let exit_code = output.status.code().context("Process terminated by signal")?;
 
-        match exit_code {
+        let result = match exit_code {
             0 => {
                 info!(
                     pkgname = %pkgname,
                     "pkg-build completed successfully"
                 );
-                Ok(PackageBuildResult::Success)
+                PackageBuildResult::Success
             }
             42 => {
                 info!(
                     pkgname = %pkgname,
                     "pkg-build skipped (up-to-date)"
                 );
-                Ok(PackageBuildResult::Skipped)
+                PackageBuildResult::Skipped
             }
             code => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
                 error!(
                     pkgname = %pkgname,
                     exit_code = code,
-                    stderr = %stderr,
                     "pkg-build failed"
                 );
-                if !stderr.is_empty() {
-                    eprintln!("pkg-build stderr: {}", stderr);
-                }
 
                 // Save wrkdir files matching configured patterns, then clean up
                 if !patterns.is_empty() {
                     self.save_wrkdir_files(pkgname, pkgpath, bulklog, patterns, &pkg_env);
                     self.run_clean(pkgpath);
                 }
-                Ok(PackageBuildResult::Failed)
+                PackageBuildResult::Failed
+            }
+        };
+
+        // Run post-build script if defined (always runs regardless of pkg-build result)
+        if let Some(post_build) = self.config.script("post-build") {
+            debug!(pkgname = %pkgname, "Running post-build script");
+            let child = self.sandbox.execute(self.id, post_build, envs, None)?;
+            let output = child.wait_with_output().context("Failed to wait for post-build")?;
+            if !output.status.success() {
+                warn!(pkgname = %pkgname, exit_code = ?output.status.code(), "post-build script failed");
             }
         }
+
+        Ok(result)
     }
 
     /// Save files matching patterns from WRKDIR to bulklog on build failure.
