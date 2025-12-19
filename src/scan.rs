@@ -136,7 +136,14 @@ impl Scan {
         let script_envs = self.config.script_env();
 
         if self.sandbox.enabled() {
-            self.sandbox.create(0)?;
+            println!("Creating sandbox...");
+            if let Err(e) = self.sandbox.create(0) {
+                eprintln!("Failed to create sandbox: {}", e);
+                if let Err(destroy_err) = self.sandbox.destroy(0) {
+                    eprintln!("Warning: failed to destroy sandbox: {}", destroy_err);
+                }
+                return Err(e);
+            }
 
             // Run pre-build script if defined
             if let Some(pre_build) = self.config.script("pre-build") {
