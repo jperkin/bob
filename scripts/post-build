@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # Script executed after every build, regardless of whether the build was
-# successful or a failure.
+# successful or a failure.  Also runs after the scan phase has completed.
 #
 # This script should ensure that nothing exists inside the sandbox that wasn't
 # there to start with, both so that subsequent builds are not affected by
