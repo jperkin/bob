@@ -77,16 +77,17 @@ sandboxes = {
         { action = "mount", fs = "lofs", dir = "/dev", opts = "-o ro" },
         { action = "mount", fs = "fd", dir = "/dev/fd" },
         { action = "mount", fs = "proc", dir = "/proc" },
+
         { action = "mount", fs = "tmp", dir = "/tmp", opts = "-o size=1g" },
         { action = "mount", fs = "tmp", dir = "/var/tmp", opts = "-o size=1g"  },
         { action = "cmd", create = "chmod 1777 tmp var/tmp" },
 
-        -- System directories (read-only for safety)
         { action = "mount", fs = "lofs", dir = "/lib", opts = "-o ro" },
         { action = "mount", fs = "lofs", dir = "/sbin", opts = "-o ro" },
         { action = "mount", fs = "lofs", dir = "/usr", opts = "-o ro" },
-
         { action = "symlink", src = "usr/bin", dest = "/bin" },
+
+	{ action = "copy", dir = "/etc" },
 
         { action = "mount", fs = "lofs", dir = pkgsrc.basedir, opts = "-o ro" },
 
