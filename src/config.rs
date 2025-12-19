@@ -26,7 +26,7 @@ use mlua::{Lua, RegistryKey, Result as LuaResult, Table, Value};
 use pkgsrc::{PkgPath, ScanIndex};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::exit;
+use anyhow::{anyhow, Context, Result};
 use std::sync::{Arc, Mutex};
 
 extern crate dirs;
@@ -181,7 +181,7 @@ pub struct Sandboxes {
 }
 
 impl Config {
-    pub fn load(args: &Args) -> Result<Config, std::io::Error> {
+    pub fn load(args: &Args) -> Result<Config> {
         let mut config: Config = Default::default();
 
         /*
@@ -191,31 +191,22 @@ impl Config {
         config.filename = if args.config.is_some() {
             args.config.clone().unwrap()
         } else {
-            let config_dir = dirs::config_dir().unwrap();
+            let config_dir = dirs::config_dir()
+                .ok_or_else(|| anyhow!("Unable to determine configuration directory"))?;
             config_dir.join("bob.lua")
         };
 
         /* A configuration file is mandatory. */
         if !config.filename.exists() {
-            eprintln!(
-                "ERROR: Configuration file {} does not exist",
-                config.filename.display()
-            );
-            exit(1);
+            anyhow::bail!("Configuration file {} does not exist", config.filename.display());
         }
 
         /*
          * Parse configuration file as Lua.
          */
-        let (cfg, lua_env) = match load_lua(&config.filename) {
-            Ok(result) => result,
-            Err(e) => {
-                eprintln!("ERROR: Unable to parse Lua configuration file!");
-                eprintln!(" file: {}", config.filename.display());
-                eprintln!("  err: {}", e);
-                exit(1);
-            }
-        };
+        let (cfg, lua_env) = load_lua(&config.filename)
+            .map_err(|e| anyhow!(e))
+            .with_context(|| format!("Unable to parse Lua configuration file {}", config.filename.display()))?;
         config.file = cfg;
         config.lua_env = lua_env;
 
@@ -225,8 +216,9 @@ impl Config {
          */
         let mut newscripts: HashMap<String, PathBuf> = HashMap::new();
         for (k, v) in &config.file.scripts {
+            let base_dir = config.filename.parent().unwrap_or_else(|| Path::new("."));
             let fullpath = if v.is_relative() {
-                config.filename.parent().unwrap().join(v)
+                base_dir.join(v)
             } else {
                 v.clone()
             };
