@@ -300,26 +300,9 @@ impl PackageBuild {
         };
 
         let bulklog = self.config.bulklog();
-        let packages = self.config.packages();
 
-        // Core environment vars that are always set
-        let mut envs = vec![
-            ("bob_bulklog", format!("{}", bulklog.display())),
-            ("bob_make", format!("{}", self.config.make().display())),
-            ("bob_packages", format!("{}", packages.display())),
-            ("bob_pkgtools", format!("{}", self.config.pkgtools().display())),
-            ("bob_pkgsrc", format!("{}", self.config.pkgsrc().display())),
-            ("bob_prefix", format!("{}", self.config.prefix().display())),
-            ("bob_tar", format!("{}", self.config.tar().display())),
-        ];
-
-        if let Some(build_user) = self.config.build_user() {
-            envs.push(("bob_build_user", build_user.to_string()));
-        }
-
-        if let Some(bootstrap) = self.config.bootstrap() {
-            envs.push(("bob_bootstrap", format!("{}", bootstrap.display())));
-        }
+        // Core environment vars
+        let mut envs = self.config.script_env();
 
         // Add script paths
         if let Some(path) = self.config.script("pkg-up-to-date") {
