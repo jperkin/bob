@@ -102,7 +102,7 @@ if [ -z "${bob_build_user}" ]; then
 	run_build=run_direct
 	run_install=run_direct
 else
-	run_checksum=run_su
+	run_checksum=run_direct
 	run_build=run_su
 	run_install=run_su
 fi
