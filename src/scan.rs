@@ -117,7 +117,6 @@ impl Scan {
         if self.sandbox.enabled() {
             println!("Creating sandbox...");
             if let Err(e) = self.sandbox.create(0) {
-                eprintln!("Failed to create sandbox: {}", e);
                 if let Err(destroy_err) = self.sandbox.destroy(0) {
                     eprintln!("Warning: failed to destroy sandbox: {}", destroy_err);
                 }
@@ -135,6 +134,8 @@ impl Scan {
                 }
             }
         }
+
+        println!("Scanning packages...");
 
         // Set up multi-line progress display using ratatui inline viewport
         let progress = Arc::new(Mutex::new(

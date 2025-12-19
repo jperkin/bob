@@ -940,7 +940,6 @@ impl Build {
             for i in 0..self.config.build_threads() {
                 if let Err(e) = self.sandbox.create(i) {
                     // Rollback: destroy sandboxes including the failed one (may be partial)
-                    eprintln!("Failed to create sandbox {}: {}", i, e);
                     for j in (0..=i).rev() {
                         if let Err(destroy_err) = self.sandbox.destroy(j) {
                             eprintln!("Warning: failed to destroy sandbox {}: {}", j, destroy_err);
@@ -950,6 +949,8 @@ impl Build {
                 }
             }
         }
+
+        println!("Building packages...");
 
         // Set up multi-line progress display using ratatui inline viewport
         let progress = Arc::new(Mutex::new(

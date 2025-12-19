@@ -169,7 +169,6 @@ fn main() -> Result<()> {
                     scan.add(p);
                 }
             }
-            println!("Scanning packages...");
             scan.start()?;
             println!("Resolving dependencies...");
             let scan_result = scan.resolve()?;
@@ -198,7 +197,6 @@ fn main() -> Result<()> {
                 }
             }).expect("Error setting Ctrl-C handler");
 
-            println!("Building packages...");
             let mut summary = build.start(Arc::clone(&shutdown_flag))?;
 
             // Check if we were interrupted
@@ -300,7 +298,6 @@ fn main() -> Result<()> {
                     scan.add(p);
                 }
             }
-            println!("Scanning packages...");
             scan.start()?;
             println!("Resolving dependencies...");
             let result = scan.resolve()?;
