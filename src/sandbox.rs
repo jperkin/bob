@@ -416,6 +416,9 @@ impl Sandbox {
             // For mount/copy actions, dest defaults to src (src is more readable)
             let src = action.src().or(action.dest());
             let dest = action.dest().or(action.src()).map(|d| self.mountpath(id, d));
+            if let Some(ref dest_path) = dest {
+                self.verify_path_in_sandbox(id, dest_path)?;
+            }
 
             let mut opts = vec![];
             if let Some(o) = action.opts() {
@@ -491,6 +494,7 @@ impl Sandbox {
         } else {
             sandbox_path.clone()
         };
+        self.verify_path_in_sandbox(id, &work_dir)?;
 
         // Create the working directory if it doesn't exist
         if !work_dir.exists() {
