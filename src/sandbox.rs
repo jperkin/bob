@@ -445,9 +445,11 @@ impl Sandbox {
                     None
                 }
                 ActionType::Cmd => {
-                    let create_cmd = action.create_cmd()
-                        .ok_or_else(|| anyhow::anyhow!("cmd action requires create"))?;
-                    self.run_action_cmd(id, create_cmd, action.cwd())?
+                    if let Some(create_cmd) = action.create_cmd() {
+                        self.run_action_cmd(id, create_cmd, action.cwd())?
+                    } else {
+                        None
+                    }
                 }
                 ActionType::Symlink => {
                     let src = action.src()
