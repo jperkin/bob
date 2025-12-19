@@ -146,12 +146,15 @@ run_make ${run_install} stage-install > "${LOGDIR}/install.log" 2>&1 || cleanup
 set_stage "package"
 run_make run_direct stage-package-create > "${LOGDIR}/package.log" 2>&1 || cleanup
 
+pkgfile=$(run_make run_direct show-var VARNAME=STAGE_PKGFILE)
+
+if [ -z "${is_bootstrap}" ]; then
+	${bob_pkgtools}/pkg_add ${pkgfile} >> "${LOGDIR}/package.log" 2>&1 || cleanup
+fi
+
 if [ -n "${bob_packages}" ]; then
-    mkdir -p "${bob_packages}/All"
-    PKGFILE=$(run_make run_direct show-var VARNAME=STAGE_PKGFILE)
-    if [ -f "${PKGFILE}" ]; then
-        cp "${PKGFILE}" "${bob_packages}/All/"
-    fi
+	mkdir -p "${bob_packages}/All"
+	cp "${pkgfile}" "${bob_packages}/All/"
 fi
 
 set_stage "clean"
