@@ -111,11 +111,16 @@ impl FromStr for FSType {
 
 impl Action {
     pub fn from_lua(t: &Table) -> LuaResult<Self> {
+        // "dir" can be used as shorthand when src and dest are the same
+        let dir = t.get::<Option<String>>("dir")?.map(PathBuf::from);
+        let src = t.get::<Option<String>>("src")?.map(PathBuf::from).or_else(|| dir.clone());
+        let dest = t.get::<Option<String>>("dest")?.map(PathBuf::from).or_else(|| dir.clone());
+
         Ok(Self {
             action: t.get("action")?,
             fs: t.get("fs").ok(),
-            src: t.get::<Option<String>>("src")?.map(PathBuf::from),
-            dest: t.get::<Option<String>>("dest")?.map(PathBuf::from),
+            src,
+            dest,
             opts: t.get("opts").ok(),
             create: t.get("create").ok(),
             destroy: t.get("destroy").ok(),
