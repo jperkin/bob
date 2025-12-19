@@ -1,0 +1,11 @@
+#!/bin/sh
+#
+# This script is executed immediately prior to pkg-build, and should perform
+# any sandbox setup work necessary for each build.
+#
+
+# If a bootstrap kit has been defined (required on any OS other than NetBSD)
+# then unpack it.
+if [ -n "${bob_bootstrap}" ]; then
+	${bob_tar} -zxpf "${bob_bootstrap}" -C /
+fi

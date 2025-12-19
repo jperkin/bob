@@ -14,6 +14,7 @@ options = {
 -- Variables that configure pkgsrc, where it is, what packages to build, etc.
 pkgsrc = {
     basedir = pkgsrc_dir,
+    bootstrap = initdir .. "/bootstrap.tar.gz",
     bulklog = initdir .. "/bulklog",
     make = "/usr/pkg/bin/bmake",
     packages = initdir .. "/packages",
@@ -22,6 +23,7 @@ pkgsrc = {
     prefix = "/usr/pkg",
     report_dir = initdir .. "/reports",
     tar = "/bin/tar",
+
     -- It is strongly recommended to set up an unprivileged user to perform
     -- builds. If you do, ensure that their home directory is created inside
     -- the sandbox and that work directories are writeable.
@@ -50,7 +52,7 @@ pkgsrc = {
 
         -- Use disk-based WRKOBJDIR for packages that depend on Go
         -- if pkg.scan_depends:match("/lang/go/") then
-        --     env.WRKOBJDIR = "/home/pbulk/build-disk"
+        --     env.WRKOBJDIR = "/home/builder/build-disk"
         -- end
 
         return env
@@ -58,7 +60,9 @@ pkgsrc = {
 }
 
 scripts = {
+    ["pre-build"] = initdir .. "/scripts/pre-build",
     ["pkg-build"] = initdir .. "/scripts/pkg-build",
+    ["post-build"] = initdir .. "/scripts/post-build",
     ["pkg-up-to-date"] = initdir .. "/scripts/pkg-up-to-date",
 }
 
@@ -97,10 +101,5 @@ sandboxes = {
 
         -- Bob config directory (contains bulklog, packages, distfiles, scripts)
         { action = "mount", fs = "bind", src = initdir },
-
-        -- Unpack bootstrap kit
-        { action = "cmd", cwd = "/",
-          create = "tar -zxf " .. initdir .. "/bootstrap.tar.gz",
-          destroy = "rm -rf usr/pkg" },
     },
 }

@@ -1,0 +1,11 @@
+#!/bin/sh
+#
+# Script executed after every build, regardless of whether the build was
+# successful or a failure.
+#
+# This script should ensure that nothing exists inside the sandbox that wasn't
+# there to start with, both so that subsequent builds are not affected by
+# leftovers and also so that the sandbox can be cleanly unmounted and removed
+# (empty directories are ok).
+#
+rm -rf "${bob_prefix}" 2>/dev/null || true
