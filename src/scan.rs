@@ -141,7 +141,7 @@ impl Scan {
             // Run pre-build script if defined
             if let Some(pre_build) = self.config.script("pre-build") {
                 debug!("Running pre-build script");
-                let child = self.sandbox.execute(0, pre_build, script_envs.clone(), None)?;
+                let child = self.sandbox.execute(0, pre_build, script_envs.clone(), None, None)?;
                 let output = child.wait_with_output().context("Failed to wait for pre-build")?;
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -229,7 +229,7 @@ impl Scan {
             // Run post-build script if defined
             if let Some(post_build) = self.config.script("post-build") {
                 debug!("Running post-build script");
-                let child = self.sandbox.execute(0, post_build, script_envs, None)?;
+                let child = self.sandbox.execute(0, post_build, script_envs, None, None)?;
                 let output = child.wait_with_output().context("Failed to wait for post-build")?;
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
