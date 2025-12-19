@@ -29,8 +29,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use std::sync::{Arc, Mutex};
 
-extern crate dirs;
-
 
 /// Holds the Lua state for evaluating env functions.
 #[derive(Clone)]
@@ -191,9 +189,9 @@ impl Config {
         config.filename = if args.config.is_some() {
             args.config.clone().unwrap()
         } else {
-            let config_dir = dirs::config_dir()
-                .ok_or_else(|| anyhow!("Unable to determine configuration directory"))?;
-            config_dir.join("bob.lua")
+            std::env::current_dir()
+                .context("Unable to determine current directory")?
+                .join("config.lua")
         };
 
         /* A configuration file is mandatory. */
