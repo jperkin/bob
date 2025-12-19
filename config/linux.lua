@@ -43,6 +43,7 @@ pkgsrc = {
     env = function(pkg)
         local env = {}
         env.DISTDIR = initdir .. "/distfiles"
+        env.MAKE_JOBS = 2
         env.WRKOBJDIR = "/tmp/bob-work"
 
         -- Set MAKE_JOBS higher for lang/rust builds
