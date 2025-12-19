@@ -199,7 +199,7 @@ impl Sandbox {
         &self,
         id: usize,
         script: &Path,
-        envs: Vec<(&str, String)>,
+        envs: Vec<(String, String)>,
         stdin_data: Option<&str>,
     ) -> Result<Child> {
         use std::io::Write;
@@ -241,7 +241,7 @@ impl Sandbox {
         &self,
         id: usize,
         content: &str,
-        envs: Vec<(&str, String)>,
+        envs: Vec<(String, String)>,
     ) -> Result<Child> {
         use std::io::Write;
 
