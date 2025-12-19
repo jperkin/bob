@@ -6,9 +6,76 @@
 # stdin.
 #
 
+set -e
+
+# Required core variables.
+: ${bob_bulklog:?}
+: ${bob_make:?}
+: ${bob_packages:?}
+: ${bob_pkgtools:?}
+: ${bob_pkgsrc:?}
+: ${bob_prefix:?}
+: ${bob_tar:?}
+
+cleanup() {
+	# Record which stage failed
+	if [ -f "${pkglogdir}/.stage" ]; then
+		echo "$(cat ${pkglogdir}/.stage)" > "${pkglogdir}/.failed"
+	fi
+	if [ -n "${KEEP_WRKDIR}" ]; then
+		${bob_make} pbulk-save-wrkdir \
+		    INTO="${pkglogdir}/wrkdir.tar.gz" \
+		    TAR="${bob_tar}" 2>&1 || true
+	fi
+	if [ -n "${KEEP_PREFIX}" ] && [ -f "${pkglogdir}/install.log" ]; then
+		${bob_tar} -czf "${pkglogdir}/prefix.tar.gz" \
+		    ${bob_prefix} 2>&1 || true
+	fi
+	#
+	# Don't run make clean if SKIP_CLEAN is set, this is so bob can handle
+	# save_wrkdir_patterns first before cleaning up itself.
+	#
+	if [ -z "${SKIP_CLEAN}" ]; then
+		${bob_make} clean > /dev/null 2>&1 || true
+	fi
+	exit 1
+}
+
+run_direct() { "$@"; }
+run_su() { su "${bob_build_user}" -c '"$@"' make "$@"; }
+
+run_make() {
+	local run_cmd
+	run_cmd=$1
+	shift
+	${run_cmd} ${bob_make} "$@" \
+		BATCH=1 \
+		DEPENDS_TARGET=/nonexistent \
+		${MAKE_FLAGS} \
+		WRKLOG="${pkglogdir}/work.log"
+}
+
+run_usergroup() {
+	case "${usergroup_phase}" in
+	*configure)
+		[ "$1" != "configure" ] || ${bob_make} create-usergroup clean
+		;;
+	*build)
+		[ "$1" != "build" ] || ${bob_make} create-usergroup
+		;;
+	pre-install)
+		[ "$1" != "install" ] || ${bob_make} create-usergroup
+		;;
+	esac
+}
+
+# Write current stage to .stage file for reporting
+set_stage() {
+	echo "$1" > "${pkglogdir}/.stage"
+}
 
 #
-# Parse ScanIndex from stdin.
+# Script starts here.  Parse ScanIndex from stdin.
 #
 while read scan_input; do
 	case "${scan_input}" in
@@ -32,61 +99,7 @@ while read scan_input; do
 	esac
 done
 
-set -e
-
-# Required core variables.
-: ${bob_bulklog:?}
-: ${bob_make:?}
-: ${bob_packages:?}
-: ${bob_pkgtools:?}
-: ${bob_pkgsrc:?}
-: ${bob_prefix:?}
-: ${bob_tar:?}
-
-PKGDIR="${bob_pkgsrc}/${pkgdir}"
-LOGDIR="${bob_bulklog}/${pkgname}"
-
-run_direct() {
-	"$@"
-}
-
-run_su() {
-	su "${bob_build_user}" -c '"$@"' make "$@"
-}
-
-run_make() {
-	local run_cmd
-	run_cmd=$1
-	shift
-	${run_cmd} ${bob_make} "$@" \
-		BATCH=1 \
-		DEPENDS_TARGET=/nonexistent \
-		${MAKE_FLAGS} \
-		WRKLOG="${LOGDIR}/work.log"
-}
-
-# Write current stage to .stage file for reporting
-set_stage() {
-    echo "$1" > "${LOGDIR}/.stage"
-}
-
-cleanup() {
-    # Record which stage failed
-    if [ -f "${LOGDIR}/.stage" ]; then
-        echo "$(cat ${LOGDIR}/.stage)" > "${LOGDIR}/.failed"
-    fi
-    if [ -n "${KEEP_WRKDIR}" ]; then
-        ${bob_make} pbulk-save-wrkdir INTO="${LOGDIR}/wrkdir.tar.gz" TAR="${bob_tar}" > "${LOGDIR}/wrkdir-save.log" 2>&1 || true
-    fi
-    if [ -n "${KEEP_PREFIX}" ] && [ -f "${LOGDIR}/install.log" ]; then
-        ${bob_tar} -czf "${LOGDIR}/prefix.tar.gz" "${bob_prefix}" > "${LOGDIR}/prefix-save.log" 2>&1 || true
-    fi
-    # Only clean if SKIP_CLEAN is not set (bob sets this to handle cleanup itself)
-    if [ -z "${SKIP_CLEAN}" ]; then
-        ${bob_make} clean > /dev/null 2>&1 || true
-    fi
-    exit 1
-}
+pkglogdir="${bob_bulklog}/${pkgname}"
 
 if [ -z "${bob_build_user}" ]; then
 	run_checksum=run_direct
@@ -99,68 +112,79 @@ else
 fi
 
 if [ -n "${PKG_UP_TO_DATE}" ] && [ -x "${PKG_UP_TO_DATE}" ]; then
-    mkdir -p "${LOGDIR}"
-    if "${PKG_UP_TO_DATE}" "${pkgname}" ${dependencies} > "${LOGDIR}/up-to-date.log" 2>&1; then
-        rm -rf "${LOGDIR}"
+    mkdir -p "${pkglogdir}"
+    if "${PKG_UP_TO_DATE}" "${pkgname}" ${dependencies} > "${pkglogdir}/up-to-date.log" 2>&1; then
+        rm -rf "${pkglogdir}"
         exit 42  # Special exit code for "skipped (up-to-date)"
     fi
 fi
 
-cd "${PKGDIR}"
+cd ${bob_pkgsrc}/${pkgdir}
 
-mkdir -p "${LOGDIR}"
-rm -f "${LOGDIR}"/.stage "${LOGDIR}"/.failed "${LOGDIR}"/.success
+mkdir -p "${pkglogdir}"
+rm -f "${pkglogdir}"/.stage "${pkglogdir}"/.failed "${pkglogdir}"/.success
 
-exec >${LOGDIR}/pkg-build.log 2>&1
+exec >${pkglogdir}/pkg-build.log 2>&1
 set -x
 
 # Create work.log and make it writable by the unprivileged user
-touch "${LOGDIR}/work.log"
+touch "${pkglogdir}/work.log"
 if [ -n "${bob_build_user}" ]; then
-    chown "${bob_build_user}" "${LOGDIR}/work.log"
+	chown "${bob_build_user}" "${pkglogdir}/work.log"
 fi
 
 trap cleanup INT TERM
 
 set_stage "pre-clean"
-${bob_make} clean > "${LOGDIR}/pre-clean.log" 2>&1
+${bob_make} clean > "${pkglogdir}/pre-clean.log" 2>&1
 
 # Install dependencies
 if [ -n "${dependencies}" ]; then
-    set_stage "depends"
-    PKG_PATH="${bob_packages}/All" ${bob_pkgtools}/pkg_add ${dependencies} > "${LOGDIR}/depends.log" 2>&1 || cleanup
+	set_stage "depends"
+	PKG_PATH="${bob_packages}/All" ${bob_pkgtools}/pkg_add \
+	    ${dependencies} > "${pkglogdir}/depends.log" 2>&1 || cleanup
 fi
 
 set_stage "checksum"
-run_make ${run_checksum} checksum > "${LOGDIR}/checksum.log" 2>&1 || cleanup
+run_make ${run_checksum} checksum > "${pkglogdir}/checksum.log" 2>&1 || cleanup
 
 set_stage "configure"
-run_make ${run_build} configure > "${LOGDIR}/configure.log" 2>&1 || cleanup
+run_usergroup configure > ${pkglogdir}/configure.log 2>&1 || cleanup
+run_make ${run_build} configure >> ${pkglogdir}/configure.log 2>&1 || cleanup
 
 set_stage "build"
-run_make ${run_build} all > "${LOGDIR}/build.log" 2>&1 || cleanup
+run_usergroup build > ${pkglogdir}/build.log 2>&1 || cleanup
+run_make ${run_build} all >> ${pkglogdir}/build.log 2>&1 || cleanup
 
 set_stage "install"
-run_make ${run_install} stage-install > "${LOGDIR}/install.log" 2>&1 || cleanup
+run_usergroup install > ${pkglogdir}/install.log 2>&1 || cleanup
+run_make ${run_install} stage-install >> ${pkglogdir}/install.log 2>&1 || cleanup
 
 set_stage "package"
-run_make run_direct stage-package-create > "${LOGDIR}/package.log" 2>&1 || cleanup
+run_make run_direct stage-package-create > ${pkglogdir}/package.log 2>&1 || cleanup
 
 pkgfile=$(run_make run_direct show-var VARNAME=STAGE_PKGFILE)
 
+# Test package install unless this is a bootstrap package as it will likely
+# already be installed.
 if [ -z "${is_bootstrap}" ]; then
-	${bob_pkgtools}/pkg_add ${pkgfile} >> "${LOGDIR}/package.log" 2>&1 || cleanup
+	${bob_pkgtools}/pkg_add ${pkgfile} >> "${pkglogdir}/package.log" 2>&1 || cleanup
 fi
 
-if [ -n "${bob_packages}" ]; then
-	mkdir -p "${bob_packages}/All"
-	cp "${pkgfile}" "${bob_packages}/All/"
+# Test package uninstall unless bootstrap package (will have preserve flag set).
+if [ -z "${is_bootstrap}" ]; then
+	set_stage "deinstall"
+	${bob_pkgtools}/pkg_delete ${pkgname} > "${pkglogdir}/deinstall.log" 2>&1 || cleanup
 fi
+
+# Save package.
+mkdir -p "${bob_packages}/All"
+cp "${pkgfile}" "${bob_packages}/All/"
 
 set_stage "clean"
-${bob_make} clean > "${LOGDIR}/clean.log" 2>&1 || true
+${bob_make} clean > "${pkglogdir}/clean.log" 2>&1 || true
 
-# Remove bulklog directory on success
-rm -rf "${LOGDIR}"
+# Remove package bulklog directory on success
+rm -rf "${pkglogdir}"
 
 exit 0
