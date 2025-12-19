@@ -8,8 +8,8 @@ license = "ISC"
 repository = "https://github.com/jperkin/bob"
 homepage = "https://github.com/jperkin/bob"
 documentation = "https://docs.rs/pkgbob"
-rust-version = "1.74.0"
-edition = "2021"
+rust-version = "1.85.0"
+edition = "2024"
 
 [[bin]]
 name = "bob"
