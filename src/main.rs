@@ -179,6 +179,10 @@ fn main() -> Result<()> {
                 "Scan complete"
             );
 
+            if scan_result.buildable.is_empty() {
+                bail!("No packages to build");
+            }
+
             let mut build = Build::new(&config, scan_result.buildable.clone());
 
             // Set up Ctrl+C handler for graceful shutdown

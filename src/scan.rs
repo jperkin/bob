@@ -163,6 +163,7 @@ impl Scan {
          * processed, and adding any dependencies to incoming to be processed
          * next.
          */
+        let mut scan_errors: Vec<String> = Vec::new();
         loop {
             /*
              * Convert the incoming HashSet into a Vec for parallel processing.
@@ -186,13 +187,10 @@ impl Scan {
                         p.state_mut().set_worker_active(thread_id, &pathname);
                     }
 
-                    *result = self
-                        .scan_pkgpath(pkgpath)
-                        .context(format!("Scan failed for {}", pathname));
+                    *result = self.scan_pkgpath(pkgpath);
 
-                    // Update progress - increment completed and mark thread idle
+                    // Mark thread idle (counting happens in result processing)
                     if let Ok(mut p) = progress_clone.lock() {
-                        p.state_mut().increment_completed();
                         p.state_mut().set_worker_idle(thread_id);
                     }
                 });
@@ -205,7 +203,23 @@ impl Scan {
              */
             let mut new_incoming: HashSet<PkgPath> = HashSet::new();
             for (pkgpath, scanpkgs) in parpaths.drain(..) {
-                let scanpkgs = scanpkgs?;
+                let scanpkgs = match scanpkgs {
+                    Ok(pkgs) => {
+                        if let Ok(mut p) = progress.lock() {
+                            p.state_mut().increment_completed();
+                        }
+                        pkgs
+                    }
+                    Err(e) => {
+                        eprintln!("{}", e);
+                        scan_errors.push(format!("{}", e));
+                        if let Ok(mut p) = progress.lock() {
+                            p.state_mut().increment_failed();
+                        }
+                        self.done.insert(pkgpath.clone(), vec![]);
+                        continue;
+                    }
+                };
                 self.done.insert(pkgpath.clone(), scanpkgs.clone());
                 for pkg in scanpkgs {
                     for dep in pkg.all_depends {
@@ -256,6 +270,10 @@ impl Scan {
             let _ = p.finish();
         }
 
+        if !scan_errors.is_empty() {
+            bail!("{} package(s) failed to scan", scan_errors.len());
+        }
+
         Ok(())
     }
 
@@ -293,6 +311,13 @@ impl Scan {
                 stderr = %stderr,
                 "pkg-scan script failed"
             );
+            let stderr = stderr.trim();
+            let msg = if stderr.is_empty() {
+                format!("Scan failed for {}", pkgpath_str)
+            } else {
+                format!("Scan failed for {}: {}", pkgpath_str, stderr)
+            };
+            bail!(msg);
         }
 
         let stdout_str = String::from_utf8_lossy(&output.stdout);
