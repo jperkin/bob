@@ -22,6 +22,11 @@ set -e
 # When set, output is tee'd to both log file and this fd
 bob_output_fd=${bob_output_fd:-}
 
+# Immediately test if the output fd works (before any other logic)
+if [ -n "${bob_output_fd}" ]; then
+	eval "echo 'pkg-build: output fd test' >&${bob_output_fd}" 2>/dev/null || true
+fi
+
 cleanup() {
 	if [ -n "${KEEP_WRKDIR}" ]; then
 		${bob_make} pbulk-save-wrkdir \
@@ -134,30 +139,7 @@ mkdir -p "${pkglogdir}"
 rm -f "${pkglogdir}"/.stage
 
 # Set up output redirection
-if [ -n "${bob_output_fd}" ]; then
-	# Debug: log that we have the fd
-	echo "DEBUG: bob_output_fd=${bob_output_fd}" >> /tmp/bob-debug.log
-	# Test: write directly to the fd to verify it works
-	eval "echo '=== Build output fd test ===' >&${bob_output_fd}" 2>>/tmp/bob-debug.log || echo "DEBUG: fd write failed" >> /tmp/bob-debug.log
-
-	# Write to both log file and output fd using a FIFO
-	_bob_fifo="${pkglogdir}/.pipe.$$"
-	mkfifo "${_bob_fifo}" || exit 1
-
-	# Start tee in background - it reads from fifo, writes to log file and output fd
-	# Use eval to handle the fd number in the redirect
-	eval "tee '${pkglogdir}/pkg-build.log' < '${_bob_fifo}' >&${bob_output_fd} &"
-	_bob_tee_pid=$!
-
-	# Redirect our stdout/stderr to the fifo
-	# Opening for write will block until tee opens for read (which it already did)
-	exec > "${_bob_fifo}" 2>&1
-
-	# Remove fifo from filesystem (still works via open fds)
-	rm -f "${_bob_fifo}"
-else
-	exec >${pkglogdir}/pkg-build.log 2>&1
-fi
+exec >${pkglogdir}/pkg-build.log 2>&1
 set -x
 
 # Create work.log and make it writable by the unprivileged user

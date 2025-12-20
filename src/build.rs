@@ -455,17 +455,11 @@ impl PackageBuild {
             status::channel().context("Failed to create status channel")?;
         let status_fd = status_writer.fd();
 
+        // Use fd 10 + worker_id for output to avoid conflicts
+        let target_output_fd = (10 + self.id) as i32;
         let (mut output_reader, output_writer) =
-            status::output_channel().context("Failed to create output channel")?;
+            status::output_channel(target_output_fd).context("Failed to create output channel")?;
         let output_fd = output_writer.fd();
-
-        // Debug: log the fd we're passing
-        {
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/bob-rust-debug.log") {
-                let _ = writeln!(f, "Worker {} passing output_fd={}", self.id, output_fd);
-            }
-        }
 
         let mut child = self.sandbox.execute(
             self.id,
@@ -503,14 +497,6 @@ impl PackageBuild {
             // Read any available output lines
             let output_lines = output_reader.read_all_lines();
             if !output_lines.is_empty() {
-                // Debug: log received lines
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/bob-rust-debug.log") {
-                    let _ = writeln!(f, "Received {} lines from worker {}", output_lines.len(), self.id);
-                    for line in &output_lines {
-                        let _ = writeln!(f, "  > {}", line);
-                    }
-                }
                 let _ = status_tx.send(ChannelCommand::OutputLines(
                     self.id,
                     output_lines,
