@@ -1437,9 +1437,7 @@ impl Build {
         let summary = BuildSummary { duration: started.elapsed(), results };
 
         if self.sandbox.enabled() {
-            for i in 0..self.config.build_threads() {
-                self.sandbox.destroy(i)?;
-            }
+            self.sandbox.destroy_all(self.config.build_threads())?;
         }
 
         Ok(summary)

@@ -385,13 +385,26 @@ impl Sandbox {
     }
 
     /**
-     * Destroy all sandboxes.
+     * Destroy all sandboxes.  Continue on errors to ensure all sandboxes
+     * are attempted, printing each error as it occurs.
      */
     pub fn destroy_all(&self, count: usize) -> Result<()> {
+        let mut failed = 0;
         for i in 0..count {
-            self.destroy(i)?;
+            if let Err(e) = self.destroy(i) {
+                eprintln!("sandbox {}: {}", i, e);
+                failed += 1;
+            }
         }
-        Ok(())
+        if failed == 0 {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "Failed to destroy {} sandbox{}. Fix, then run 'bob sandbox destroy'",
+                failed,
+                if failed == 1 { "" } else { "es" }
+            ))
+        }
     }
 
     /**
