@@ -86,7 +86,7 @@ sandboxes = {
         { action = "mount", fs = "lofs", dir = "/usr", opts = "-o ro" },
         { action = "symlink", src = "usr/bin", dest = "/bin" },
 
-	{ action = "copy", dir = "/etc" },
+        { action = "copy", dir = "/etc" },
 
         { action = "mount", fs = "lofs", dir = pkgsrc.basedir, opts = "-o ro" },
 
