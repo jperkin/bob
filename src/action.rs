@@ -14,64 +14,240 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+//! Sandbox action configuration.
+//!
+//! This module defines the types used to configure sandbox setup and teardown
+//! actions. Actions are specified in the `sandboxes.actions` table of the Lua
+//! configuration file.
+//!
+//! # Action Types
+//!
+//! Four action types are supported:
+//!
+//! - **mount**: Mount a filesystem inside the sandbox
+//! - **copy**: Copy files or directories into the sandbox
+//! - **symlink**: Create a symbolic link inside the sandbox
+//! - **cmd**: Execute shell commands during setup/teardown
+//!
+//! # Execution Order
+//!
+//! Actions are processed in order during sandbox creation, and in reverse order
+//! during sandbox destruction.
+//!
+//! # Configuration Examples
+//!
+//! ```lua
+//! sandboxes = {
+//!     basedir = "/data/chroot/bob",
+//!     actions = {
+//!         -- Mount procfs
+//!         { action = "mount", fs = "proc", dir = "/proc" },
+//!
+//!         -- Mount devfs
+//!         { action = "mount", fs = "dev", dir = "/dev" },
+//!
+//!         -- Mount tmpfs with size limit
+//!         { action = "mount", fs = "tmp", dir = "/tmp", opts = "size=1G" },
+//!
+//!         -- Read-only bind mount from host
+//!         { action = "mount", fs = "bind", dir = "/usr/bin", opts = "ro" },
+//!
+//!         -- Copy /etc into sandbox
+//!         { action = "copy", dir = "/etc" },
+//!
+//!         -- Create symbolic link
+//!         { action = "symlink", src = "usr/bin", dest = "/bin" },
+//!
+//!         -- Run command on setup (working directory is sandbox root)
+//!         { action = "cmd", create = "chmod 1777 tmp" },
+//!
+//!         -- Run different commands on create and destroy
+//!         { action = "cmd", create = "mkdir -p home/builder", destroy = "rm -rf home/builder" },
+//!
+//!         -- Only mount if source exists on host
+//!         { action = "mount", fs = "bind", dir = "/opt/local", ifexists = true },
+//!     },
+//! }
+//! ```
+//!
+//! # Common Fields
+//!
+//! | Field | Type | Description |
+//! |-------|------|-------------|
+//! | `dir` | string | Shorthand when `src` and `dest` are the same path |
+//! | `src` | string | Source path on the host system |
+//! | `dest` | string | Destination path inside the sandbox |
+//! | `ifexists` | boolean | Only perform action if source exists (default: false) |
+
 use anyhow::{bail, Error};
 use mlua::{Result as LuaResult, Table};
 use std::path::PathBuf;
 use std::str::FromStr;
 
-/// A sandbox action - either a filesystem mount, copy, or custom command.
+/// A sandbox action configuration.
 ///
-/// Actions are performed in order during sandbox creation, and in reverse
-/// order during sandbox destruction.
+/// Actions define how sandboxes are set up and torn down. Each action specifies
+/// an operation to perform (mount, copy, symlink, or cmd) along with the
+/// parameters needed for that operation.
+///
+/// Actions are processed in order during sandbox creation and in reverse order
+/// during destruction.
+///
+/// # Fields
+///
+/// The available fields depend on the action type:
+///
+/// ## Mount Actions
+///
+/// | Field | Required | Description |
+/// |-------|----------|-------------|
+/// | `fs` | yes | Filesystem type (bind, dev, fd, nfs, proc, tmp) |
+/// | `dir` or `src`/`dest` | yes | Mount point path |
+/// | `opts` | no | Mount options (e.g., "ro", "size=1G") |
+/// | `ifexists` | no | Only mount if source exists (default: false) |
+///
+/// ## Copy Actions
+///
+/// | Field | Required | Description |
+/// |-------|----------|-------------|
+/// | `dir` or `src`/`dest` | yes | Path to copy |
+///
+/// ## Symlink Actions
+///
+/// | Field | Required | Description |
+/// |-------|----------|-------------|
+/// | `src` | yes | Link target (what the symlink points to) |
+/// | `dest` | yes | Link name (the symlink itself) |
+///
+/// ## Cmd Actions
+///
+/// | Field | Required | Description |
+/// |-------|----------|-------------|
+/// | `create` | no | Command to run during sandbox creation |
+/// | `destroy` | no | Command to run during sandbox destruction |
+/// | `cwd` | no | Working directory relative to sandbox root |
 #[derive(Clone, Debug, Default)]
 pub struct Action {
-    /// The action type: "mount", "copy", or "cmd"
     action: String,
-    /// Filesystem type for "mount" action (e.g., "bind", "proc", "tmp", "null")
     fs: Option<String>,
-    /// Source path (optional, defaults to dest for mounts)
     src: Option<PathBuf>,
-    /// Destination path within the sandbox
     dest: Option<PathBuf>,
-    /// Mount options (for mount actions)
     opts: Option<String>,
-    /// Command to run during creation (for "cmd" action)
     create: Option<String>,
-    /// Command to run during destruction (for "cmd" action)
     destroy: Option<String>,
-    /// Working directory for commands, relative to sandbox root (for "cmd" action)
     cwd: Option<PathBuf>,
-    /// Only perform mount if source exists on host (default: false)
     ifexists: bool,
 }
 
-/// The type of action to perform.
+/// The type of sandbox action to perform.
+///
+/// Used internally to dispatch action handling.
 #[derive(Debug, PartialEq)]
 pub enum ActionType {
-    /// Mount a filesystem
+    /// Mount a filesystem inside the sandbox.
     Mount,
-    /// Copy files/directories into sandbox
+    /// Copy files or directories from host into sandbox.
     Copy,
-    /// Custom command with create/destroy pair
+    /// Execute shell commands during creation and/or destruction.
     Cmd,
-    /// Create a symbolic link
+    /// Create a symbolic link inside the sandbox.
     Symlink,
 }
 
-/// The type of filesystem to mount.
+/// Filesystem types for mount actions.
+///
+/// These map to platform-specific mount implementations. Not all filesystem
+/// types are supported on all platforms; see individual variants for details.
+///
+/// # Filesystem Types
+///
+/// | Type | Aliases | Linux | macOS | NetBSD | illumos |
+/// |------|---------|-------|-------|--------|---------|
+/// | `bind` | `lofs`, `loop`, `null` | Yes | Yes | Yes | Yes |
+/// | `dev` | | Yes | Yes | No | No |
+/// | `fd` | | Yes | No | Yes | Yes |
+/// | `nfs` | | Yes | Yes | Yes | Yes |
+/// | `proc` | | Yes | No | Yes | Yes |
+/// | `tmp` | | Yes | Yes | Yes | Yes |
 #[derive(Debug, PartialEq)]
 pub enum FSType {
-    /// Bind mount (lofs, null, loop are aliases)
+    /// Bind mount from host filesystem.
+    ///
+    /// Makes a directory from the host visible inside the sandbox. Use
+    /// `opts = "ro"` for read-only access.
+    ///
+    /// Aliases: `lofs`, `loop`, `null` (for cross-platform compatibility).
+    ///
+    /// | Platform | Implementation |
+    /// |----------|----------------|
+    /// | Linux | `mount -o bind` |
+    /// | macOS | `bindfs` (requires installation) |
+    /// | NetBSD | `mount_null` |
+    /// | illumos | `mount -F lofs` |
     Bind,
-    /// Mount devfs/devtmpfs
+
+    /// Device filesystem.
+    ///
+    /// Provides `/dev` device nodes inside the sandbox.
+    ///
+    /// | Platform | Implementation |
+    /// |----------|----------------|
+    /// | Linux | `devtmpfs` |
+    /// | macOS | `devfs` |
+    /// | NetBSD | Not supported. Use a `cmd` action with `MAKEDEV` instead. |
+    /// | illumos | Not supported. Use a `bind` mount of `/dev` instead. |
     Dev,
-    /// Mount fdfs/fdescfs
+
+    /// File descriptor filesystem.
+    ///
+    /// Provides `/dev/fd` entries for accessing open file descriptors.
+    ///
+    /// | Platform | Implementation |
+    /// |----------|----------------|
+    /// | Linux | Bind mount of `/dev/fd` |
+    /// | macOS | Not supported. |
+    /// | NetBSD | `mount_fdesc` |
+    /// | illumos | `mount -F fd` |
     Fd,
-    /// NFS mount
+
+    /// Network File System mount.
+    ///
+    /// Mounts an NFS export inside the sandbox. The `src` field must be an
+    /// NFS path in the form `host:/path`.
+    ///
+    /// | Platform | Implementation |
+    /// |----------|----------------|
+    /// | Linux | `mount -t nfs` |
+    /// | macOS | `mount_nfs` |
+    /// | NetBSD | `mount_nfs` |
+    /// | illumos | `mount -F nfs` |
     Nfs,
-    /// Mount procfs
+
+    /// Process filesystem.
+    ///
+    /// Provides `/proc` entries for process information. Required by many
+    /// build tools and commands.
+    ///
+    /// | Platform | Implementation |
+    /// |----------|----------------|
+    /// | Linux | `mount -t proc` |
+    /// | macOS | Not supported. |
+    /// | NetBSD | `mount_procfs` |
+    /// | illumos | `mount -F proc` |
     Proc,
-    /// Mount tmpfs
+
+    /// Temporary filesystem.
+    ///
+    /// Memory-backed filesystem. Contents are lost when unmounted. Use
+    /// `opts = "size=1G"` to limit size (Linux, NetBSD). Useful for `/tmp`
+    /// and build directories.
+    ///
+    /// | Platform | Implementation |
+    /// |----------|----------------|
+    /// | Linux | `mount -t tmpfs` |
+    /// | macOS | `mount_tmpfs` |
+    /// | NetBSD | `mount_tmpfs` |
+    /// | illumos | `mount -F tmpfs` |
     Tmp,
 }
 

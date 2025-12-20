@@ -14,22 +14,13 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-mod action;
-mod build;
-mod config;
-mod init;
-mod logging;
-mod report;
-mod sandbox;
-mod scan;
-mod status;
-mod tui;
-
-use crate::build::Build;
-use crate::config::Config;
-use crate::init::Init;
-use crate::sandbox::Sandbox;
-use crate::scan::{Scan, SkipReason};
+use pkgbob::build::{self, Build};
+use pkgbob::config::Config;
+use pkgbob::logging;
+use pkgbob::report;
+use pkgbob::sandbox::Sandbox;
+use pkgbob::scan::{Scan, SkipReason};
+use pkgbob::Init;
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -142,7 +133,7 @@ fn main() -> Result<()> {
 
     match args.cmd {
         Cmd::Build => {
-            let config = Config::load(&args)?;
+            let config = Config::load(args.config.as_deref(), args.verbose)?;
 
             // Initialize logging
             let logs_dir = config
@@ -240,7 +231,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::GenerateReport => {
-            let config = Config::load(&args)?;
+            let config = Config::load(args.config.as_deref(), args.verbose)?;
             let bulklog = config.bulklog();
 
             if !bulklog.exists() {
@@ -258,7 +249,7 @@ fn main() -> Result<()> {
             Init::create(arg)?;
         }
         Cmd::Sandbox { cmd: SandboxCmd::Create } => {
-            let config = Config::load(&args)?;
+            let config = Config::load(args.config.as_deref(), args.verbose)?;
             let sandbox = Sandbox::new(&config);
             if !sandbox.enabled() {
                 bail!("No sandboxes configured");
@@ -269,7 +260,7 @@ fn main() -> Result<()> {
             sandbox.create_all(config.build_threads())?;
         }
         Cmd::Sandbox { cmd: SandboxCmd::Destroy } => {
-            let config = Config::load(&args)?;
+            let config = Config::load(args.config.as_deref(), args.verbose)?;
             let sandbox = Sandbox::new(&config);
             if !sandbox.enabled() {
                 bail!("No sandboxes configured");
@@ -280,7 +271,7 @@ fn main() -> Result<()> {
             sandbox.destroy_all(config.build_threads())?;
         }
         Cmd::Sandbox { cmd: SandboxCmd::List } => {
-            let config = Config::load(&args)?;
+            let config = Config::load(args.config.as_deref(), args.verbose)?;
             let sandbox = Sandbox::new(&config);
             if !sandbox.enabled() {
                 bail!("No sandboxes configured");
@@ -288,7 +279,7 @@ fn main() -> Result<()> {
             sandbox.list_all(config.build_threads());
         }
         Cmd::Scan => {
-            let config = Config::load(&args)?;
+            let config = Config::load(args.config.as_deref(), args.verbose)?;
             if let Err(errors) = config.validate() {
                 eprintln!("Configuration errors:");
                 for e in &errors {

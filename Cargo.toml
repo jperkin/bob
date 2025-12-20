@@ -11,6 +11,10 @@ documentation = "https://docs.rs/pkgbob"
 rust-version = "1.85.0"
 edition = "2024"
 
+[lib]
+name = "pkgbob"
+path = "src/lib.rs"
+
 [[bin]]
 name = "bob"
 path = "src/main.rs"

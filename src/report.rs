@@ -15,6 +15,49 @@
  */
 
 //! HTML build report generation.
+//!
+//! This module generates HTML reports summarizing build results. Reports include:
+//!
+//! - Summary statistics (succeeded, failed, skipped counts)
+//! - Failed packages with links to build logs
+//! - Skipped packages with reasons
+//! - Successfully built packages with build times
+//!
+//! # Usage
+//!
+//! ```no_run
+//! use pkgbob::{write_html_report, BuildSummary};
+//! use std::path::Path;
+//!
+//! # fn example(summary: &BuildSummary) -> anyhow::Result<()> {
+//! write_html_report(summary, Path::new("/data/bob/bulklog/report.html"))?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Report Structure
+//!
+//! The generated HTML report is self-contained with embedded CSS and JavaScript.
+//! Tables are sortable by clicking column headers.
+//!
+//! ## Failed Packages Section
+//!
+//! Shows packages that failed to build, sorted by the number of other packages
+//! they block. Each entry includes:
+//!
+//! - Package name and path
+//! - Number of packages blocked by this failure
+//! - The build phase where failure occurred
+//! - Links to individual phase logs
+//!
+//! ## Skipped Packages Section
+//!
+//! Shows packages that were not built, with the reason for skipping
+//! (e.g., "Dependency X failed", "up-to-date").
+//!
+//! ## Successful Packages Section
+//!
+//! Shows all successfully built packages with their build duration.
 
 use crate::build::{BuildOutcome, BuildResult, BuildSummary};
 use anyhow::Result;

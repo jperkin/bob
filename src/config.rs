@@ -16,12 +16,129 @@
 
 //! Configuration file parsing (Lua format).
 //!
-//! The Config module is responsible for reading a mandatory configuration file,
-//! parsing command line arguments related to configuration, and producing a
-//! Config struct that combines the two for the rest of the program to use.
+//! Bob uses Lua configuration files for maximum flexibility. The configuration
+//! defines paths to pkgsrc, packages to build, sandbox setup, and build scripts.
+//!
+//! # Configuration File Structure
+//!
+//! A configuration file has four main sections:
+//!
+//! - [`options`](#options-section) - General build options (optional)
+//! - [`pkgsrc`](#pkgsrc-section) - pkgsrc paths and package list (required)
+//! - [`scripts`](#scripts-section) - Build script paths (required)
+//! - [`sandboxes`](#sandboxes-section) - Sandbox configuration (optional)
+//!
+//! # Options Section
+//!
+//! The `options` section is optional. All fields have defaults.
+//!
+//! | Field | Type | Default | Description |
+//! |-------|------|---------|-------------|
+//! | `build_threads` | integer | 1 | Number of parallel build sandboxes. Each sandbox builds one package at a time. |
+//! | `scan_threads` | integer | 1 | Number of parallel scan processes for dependency discovery. |
+//! | `verbose` | boolean | false | Enable verbose output. Can be overridden by the `-v` command line flag. |
+//!
+//! # Pkgsrc Section
+//!
+//! The `pkgsrc` section is required and defines paths to pkgsrc components.
+//!
+//! ## Required Fields
+//!
+//! | Field | Type | Description |
+//! |-------|------|-------------|
+//! | `basedir` | string | Absolute path to the pkgsrc source tree (e.g., `/data/pkgsrc`). |
+//! | `bulklog` | string | Directory where per-package build logs are written. Failed builds leave logs here; successful builds clean up. |
+//! | `make` | string | Absolute path to the bmake binary (e.g., `/usr/pkg/bin/bmake`). |
+//! | `packages` | string | Directory where binary packages are stored after successful builds. |
+//! | `pkgtools` | string | Directory containing `pkg_add`, `pkg_delete`, and other pkg tools (e.g., `/usr/pkg/sbin`). |
+//! | `prefix` | string | Installation prefix for packages (e.g., `/usr/pkg`). Must match the bootstrap kit. |
+//! | `tar` | string | Absolute path to a tar binary capable of extracting the bootstrap kit. |
+//!
+//! ## Optional Fields
+//!
+//! | Field | Type | Default | Description |
+//! |-------|------|---------|-------------|
+//! | `bootstrap` | string | none | Path to a bootstrap tarball. Required on non-NetBSD systems. Unpacked into each sandbox before builds. |
+//! | `build_user` | string | none | Unprivileged user to run builds as. If set, builds run as this user instead of root. |
+//! | `pkgpaths` | table | `{}` | List of package paths to build (e.g., `{"mail/mutt", "www/curl"}`). Dependencies are discovered automatically. |
+//! | `report_dir` | string | `bulklog` | Directory for HTML build reports. Defaults to the `bulklog` directory. |
+//! | `save_wrkdir_patterns` | table | `{}` | Glob patterns for files to preserve from WRKDIR on build failure (e.g., `{"**/config.log"}`). |
+//! | `env` | function or table | `{}` | Environment variables for builds. Can be a table of key-value pairs, or a function receiving package metadata and returning a table. See [Environment Function](#environment-function). |
+//!
+//! ## Environment Function
+//!
+//! The `env` field can be a function that returns environment variables for each
+//! package build. The function receives a `pkg` table with the following fields:
+//!
+//! | Field | Type | Description |
+//! |-------|------|-------------|
+//! | `pkgname` | string | Package name with version (e.g., `mutt-2.2.12`). |
+//! | `pkgpath` | string | Package path in pkgsrc (e.g., `mail/mutt`). |
+//! | `all_depends` | string | Space-separated list of all transitive dependency paths. |
+//! | `depends` | string | Space-separated list of direct dependency package names. |
+//! | `scan_depends` | string | Space-separated list of scan-time dependency paths. |
+//! | `categories` | string | Package categories from `CATEGORIES`. |
+//! | `maintainer` | string | Package maintainer email from `MAINTAINER`. |
+//! | `bootstrap_pkg` | string | Value of `BOOTSTRAP_PKG` if set. |
+//! | `usergroup_phase` | string | Value of `USERGROUP_PHASE` if set. |
+//! | `use_destdir` | string | Value of `USE_DESTDIR`. |
+//! | `multi_version` | string | Value of `MULTI_VERSION` if set. |
+//! | `pbulk_weight` | string | Value of `PBULK_WEIGHT` if set. |
+//! | `pkg_skip_reason` | string | Value of `PKG_SKIP_REASON` if set. |
+//! | `pkg_fail_reason` | string | Value of `PKG_FAIL_REASON` if set. |
+//! | `no_bin_on_ftp` | string | Value of `NO_BIN_ON_FTP` if set. |
+//! | `restricted` | string | Value of `RESTRICTED` if set. |
+//!
+//! # Scripts Section
+//!
+//! The `scripts` section defines paths to build scripts. Relative paths are
+//! resolved from the configuration file's directory.
+//!
+//! | Script | Required | Description |
+//! |--------|----------|-------------|
+//! | `pre-build` | no | Executed before each package build. Used for per-build sandbox setup (e.g., unpacking bootstrap kit). Receives environment variables listed in [Script Environment](#script-environment). |
+//! | `pkg-build` | yes | Main build script. Receives package metadata on stdin and environment variables. Must handle all build phases. |
+//! | `post-build` | no | Executed after each package build completes (success or failure). |
+//! | `pkg-up-to-date` | no | Checks if a package needs rebuilding. Called with package name and dependencies as arguments. Exit 0 to skip building, non-zero to build. |
+//!
+//! ## Script Environment
+//!
+//! Build scripts receive these environment variables:
+//!
+//! | Variable | Description |
+//! |----------|-------------|
+//! | `bob_bulklog` | Path to the bulklog directory. |
+//! | `bob_make` | Path to the bmake binary. |
+//! | `bob_packages` | Path to the packages directory. |
+//! | `bob_pkgtools` | Path to the pkg tools directory. |
+//! | `bob_pkgsrc` | Path to the pkgsrc source tree. |
+//! | `bob_prefix` | Installation prefix. |
+//! | `bob_tar` | Path to the tar binary. |
+//! | `bob_build_user` | Unprivileged build user, if configured. |
+//! | `bob_bootstrap` | Path to the bootstrap tarball, if configured. |
+//! | `bob_status_fd` | File descriptor for sending status messages back to bob. |
+//!
+//! ## Status Messages
+//!
+//! Scripts can send status updates to bob by writing to the file descriptor
+//! in `bob_status_fd`:
+//!
+//! | Message | Description |
+//! |---------|-------------|
+//! | `stage:<name>` | Build entered a new phase (e.g., `stage:configure`). Displayed in the TUI. |
+//! | `skipped` | Package was skipped (e.g., already up-to-date). |
+//!
+//! # Sandboxes Section
+//!
+//! The `sandboxes` section is optional. When present, builds run in isolated
+//! chroot environments.
+//!
+//! | Field | Type | Required | Description |
+//! |-------|------|----------|-------------|
+//! | `basedir` | string | yes | Base directory for sandbox roots. Sandboxes are created as numbered subdirectories (`basedir/0`, `basedir/1`, etc.). |
+//! | `actions` | table | yes | List of actions to perform during sandbox setup. See the [`action`](crate::action) module for details. |
 
 use crate::action::Action;
-use crate::Args;
 use mlua::{Lua, RegistryKey, Result as LuaResult, Table, Value};
 use pkgsrc::{PkgPath, ScanIndex};
 use std::collections::HashMap;
@@ -127,6 +244,21 @@ impl LuaEnv {
     }
 }
 
+/// Main configuration structure.
+///
+/// Load configuration using [`Config::load`], then access settings through
+/// the provided methods.
+///
+/// # Example
+///
+/// ```no_run
+/// use pkgbob::Config;
+/// use std::path::Path;
+///
+/// let config = Config::load(Some(Path::new("/data/bob/config.lua")), false)?;
+/// println!("Building with {} threads", config.build_threads());
+/// # Ok::<(), anyhow::Error>(())
+/// ```
 #[derive(Clone, Debug, Default)]
 pub struct Config {
     file: ConfigFile,
@@ -135,59 +267,129 @@ pub struct Config {
     lua_env: LuaEnv,
 }
 
+/// Parsed configuration file contents.
 #[derive(Clone, Debug, Default)]
 pub struct ConfigFile {
+    /// The `options` section.
     pub options: Option<Options>,
+    /// The `pkgsrc` section.
     pub pkgsrc: Pkgsrc,
+    /// The `scripts` section (script name -> path).
     pub scripts: HashMap<String, PathBuf>,
+    /// The `sandboxes` section.
     pub sandboxes: Option<Sandboxes>,
 }
 
+/// General build options from the `options` section.
+///
+/// All fields are optional; defaults are used when not specified:
+/// - `build_threads`: 1
+/// - `scan_threads`: 1
+/// - `verbose`: false
 #[derive(Clone, Debug, Default)]
 pub struct Options {
+    /// Number of parallel build sandboxes.
     pub build_threads: Option<usize>,
+    /// Number of parallel scan processes.
     pub scan_threads: Option<usize>,
+    /// Enable verbose output.
     pub verbose: Option<bool>,
 }
 
+/// pkgsrc-related configuration from the `pkgsrc` section.
 ///
-/// pkgsrc-related configuration variables.
+/// # Required Fields
 ///
+/// - `basedir`: Path to pkgsrc source tree
+/// - `bulklog`: Directory for build logs
+/// - `make`: Path to bmake binary
+/// - `packages`: Directory for built packages
+/// - `pkgtools`: Directory containing pkg_add/pkg_delete
+/// - `prefix`: Installation prefix (e.g., `/usr/pkg`)
+/// - `tar`: Path to tar binary
+///
+/// # Optional Fields
+///
+/// - `bootstrap`: Path to bootstrap tarball (required on non-NetBSD systems)
+/// - `build_user`: Unprivileged user for builds
+/// - `pkgpaths`: List of packages to build
+/// - `report_dir`: Directory for HTML reports
+/// - `save_wrkdir_patterns`: Glob patterns for files to save on build failure
 #[derive(Clone, Debug, Default)]
 pub struct Pkgsrc {
+    /// Path to pkgsrc source tree.
     pub basedir: PathBuf,
+    /// Path to bootstrap tarball (required on non-NetBSD).
     pub bootstrap: Option<PathBuf>,
+    /// Unprivileged user for builds.
     pub build_user: Option<String>,
+    /// Directory for build logs.
     pub bulklog: PathBuf,
+    /// Path to bmake binary.
     pub make: PathBuf,
+    /// Directory for built packages.
     pub packages: PathBuf,
+    /// Directory containing pkg_add/pkg_delete.
     pub pkgtools: PathBuf,
+    /// List of packages to build.
     pub pkgpaths: Option<Vec<PkgPath>>,
+    /// Installation prefix.
     pub prefix: PathBuf,
+    /// Directory for HTML reports.
     pub report_dir: Option<PathBuf>,
+    /// Glob patterns for files to save from WRKDIR on failure.
     pub save_wrkdir_patterns: Vec<String>,
+    /// Path to tar binary.
     pub tar: PathBuf,
 }
 
+/// Sandbox configuration from the `sandboxes` section.
 ///
-/// Optional sandboxes section
+/// When this section is present in the configuration, builds are performed
+/// in isolated chroot environments.
 ///
+/// # Example
+///
+/// ```lua
+/// sandboxes = {
+///     basedir = "/data/chroot/bob",
+///     actions = {
+///         { action = "mount", fs = "proc", dir = "/proc" },
+///         { action = "copy", dir = "/etc" },
+///     },
+/// }
+/// ```
 #[derive(Clone, Debug, Default)]
 pub struct Sandboxes {
+    /// Base directory for sandbox roots (e.g., `/data/chroot/bob`).
+    ///
+    /// Individual sandboxes are created as numbered subdirectories:
+    /// `basedir/0`, `basedir/1`, etc.
     pub basedir: PathBuf,
+    /// Actions to perform during sandbox setup/teardown.
+    ///
+    /// See [`Action`] for details.
     pub actions: Vec<Action>,
 }
 
 impl Config {
-    pub fn load(args: &Args) -> Result<Config> {
-        let mut config: Config = Default::default();
-
+    /// Load configuration from a Lua file.
+    ///
+    /// # Arguments
+    ///
+    /// * `config_path` - Path to configuration file, or `None` to use `./config.lua`
+    /// * `verbose` - Enable verbose output (overrides config file setting)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the configuration file doesn't exist or contains
+    /// invalid Lua syntax.
+    pub fn load(config_path: Option<&Path>, verbose: bool) -> Result<Config> {
         /*
-         * Load user-supplied configuration file, or the default location based
-         * on the `dirs` module.
+         * Load user-supplied configuration file, or the default location.
          */
-        config.filename = if args.config.is_some() {
-            args.config.clone().unwrap()
+        let filename = if let Some(path) = config_path {
+            path.to_path_buf()
         } else {
             std::env::current_dir()
                 .context("Unable to determine current directory")?
@@ -195,26 +397,24 @@ impl Config {
         };
 
         /* A configuration file is mandatory. */
-        if !config.filename.exists() {
-            anyhow::bail!("Configuration file {} does not exist", config.filename.display());
+        if !filename.exists() {
+            anyhow::bail!("Configuration file {} does not exist", filename.display());
         }
 
         /*
          * Parse configuration file as Lua.
          */
-        let (cfg, lua_env) = load_lua(&config.filename)
+        let (mut file, lua_env) = load_lua(&filename)
             .map_err(|e| anyhow!(e))
-            .with_context(|| format!("Unable to parse Lua configuration file {}", config.filename.display()))?;
-        config.file = cfg;
-        config.lua_env = lua_env;
+            .with_context(|| format!("Unable to parse Lua configuration file {}", filename.display()))?;
 
         /*
          * Parse scripts section.  Paths are resolved relative to config dir
          * if not absolute.
          */
+        let base_dir = filename.parent().unwrap_or_else(|| Path::new("."));
         let mut newscripts: HashMap<String, PathBuf> = HashMap::new();
-        for (k, v) in &config.file.scripts {
-            let base_dir = config.filename.parent().unwrap_or_else(|| Path::new("."));
+        for (k, v) in &file.scripts {
             let fullpath = if v.is_relative() {
                 base_dir.join(v)
             } else {
@@ -222,22 +422,20 @@ impl Config {
             };
             newscripts.insert(k.clone(), fullpath);
         }
-        /*
-         * Overwrite scripts map, we're done with the input.
-         */
-        config.file.scripts = newscripts;
+        file.scripts = newscripts;
 
         /*
-         * Set any top-level Config variables that can be set either via the
-         * command line or configuration file, preferring command line options.
+         * Set verbose from command line option, falling back to config file.
          */
-        if args.verbose {
-            config.verbose = true
-        } else if let Some(v) = &config.file.options {
-            config.verbose = v.verbose.unwrap_or(false);
-        }
+        let verbose = if verbose {
+            true
+        } else if let Some(v) = &file.options {
+            v.verbose.unwrap_or(false)
+        } else {
+            false
+        };
 
-        Ok(config)
+        Ok(Config { file, filename, verbose, lua_env })
     }
 
     pub fn build_threads(&self) -> usize {

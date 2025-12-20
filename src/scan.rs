@@ -14,6 +14,49 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+//! Package dependency scanning and resolution.
+//!
+//! This module provides the [`Scan`] struct for discovering package dependencies
+//! and building a directed acyclic graph (DAG) for build ordering.
+//!
+//! # Scan Process
+//!
+//! 1. Create a scan sandbox
+//! 2. Run `make pbulk-index` on each package to discover dependencies
+//! 3. Recursively discover all transitive dependencies
+//! 4. Resolve dependency patterns to specific package versions
+//! 5. Verify no circular dependencies exist
+//! 6. Return buildable and skipped package lists
+//!
+//! # Skip Reasons
+//!
+//! Packages may be skipped for several reasons:
+//!
+//! - `PKG_SKIP_REASON` - Package explicitly marked to skip on this platform
+//! - `PKG_FAIL_REASON` - Package expected to fail on this platform
+//! - Unresolved dependencies - Required dependency not found
+//! - Circular dependencies - Package has a dependency cycle
+//!
+//! # Example
+//!
+//! ```no_run
+//! use pkgbob::{Config, Scan};
+//! use pkgsrc::PkgPath;
+//!
+//! let config = Config::load(None, false)?;
+//! let mut scan = Scan::new(&config);
+//!
+//! scan.add(&PkgPath::new("mail/mutt")?);
+//! scan.add(&PkgPath::new("www/curl")?);
+//!
+//! scan.start()?;  // Discover dependencies
+//! let result = scan.resolve()?;
+//!
+//! println!("Buildable: {}", result.buildable.len());
+//! println!("Skipped: {}", result.skipped.len());
+//! # Ok::<(), anyhow::Error>(())
+//! ```
+
 use crate::tui::MultiProgress;
 use crate::{Config, Sandbox};
 use anyhow::{bail, Context, Result};
@@ -28,54 +71,82 @@ use std::time::Duration;
 use tracing::{debug, error, info, trace};
 
 /// Reason why a package was excluded from the build.
+///
+/// Packages with skip or fail reasons set in pkgsrc are not built.
 #[derive(Clone, Debug)]
 pub enum SkipReason {
-    /// Package has PKG_SKIP_REASON set.
+    /// Package has `PKG_SKIP_REASON` set.
+    ///
+    /// This typically indicates the package cannot be built on the current
+    /// platform (e.g., architecture-specific code, missing dependencies).
     PkgSkipReason(String),
-    /// Package has PKG_FAIL_REASON set.
+    /// Package has `PKG_FAIL_REASON` set.
+    ///
+    /// This indicates the package is known to fail on the current platform
+    /// and should not be attempted.
     PkgFailReason(String),
 }
 
-/// Information about a skipped package.
+/// Information about a package that was skipped during scanning.
 #[derive(Clone, Debug)]
 pub struct SkippedPackage {
+    /// Package name with version.
     pub pkgname: PkgName,
+    /// Package path in pkgsrc.
     pub pkgpath: Option<PkgPath>,
+    /// Reason the package was skipped.
     pub reason: SkipReason,
 }
 
 /// Result of scanning and resolving packages.
+///
+/// Returned by [`Scan::resolve`], contains the packages that can be built
+/// and those that were skipped.
 #[derive(Clone, Debug, Default)]
 pub struct ScanResult {
-    /// Packages that can be built.
+    /// Packages that can be built, indexed by package name.
+    ///
+    /// These packages have all dependencies resolved and no skip/fail reasons.
     pub buildable: HashMap<PkgName, ScanIndex>,
-    /// Packages that were skipped.
+    /// Packages that were skipped due to skip/fail reasons.
     pub skipped: Vec<SkippedPackage>,
 }
 
+/// Package dependency scanner.
+///
+/// Discovers all dependencies for a set of packages and resolves them into
+/// a buildable set with proper ordering.
+///
+/// # Usage
+///
+/// 1. Create a `Scan` with [`Scan::new`]
+/// 2. Add packages to scan with [`Scan::add`]
+/// 3. Run the scan with [`Scan::start`]
+/// 4. Resolve dependencies with [`Scan::resolve`]
+///
+/// # Example
+///
+/// ```no_run
+/// # use pkgbob::{Config, Scan};
+/// # use pkgsrc::PkgPath;
+/// # fn example() -> anyhow::Result<()> {
+/// let config = Config::load(None, false)?;
+/// let mut scan = Scan::new(&config);
+///
+/// scan.add(&PkgPath::new("mail/mutt")?);
+/// scan.start()?;
+///
+/// let result = scan.resolve()?;
+/// println!("Found {} buildable packages", result.buildable.len());
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Default)]
 pub struct Scan {
-    /**
-     * Parsed [`Config`].
-     */
     config: Config,
-    /**
-     * [`Sandbox`] configuration.
-     */
     sandbox: Sandbox,
-    /**
-     * Incoming queue of PKGPATH to process.
-     */
     incoming: HashSet<PkgPath>,
-    /**
-     * Completed PKGPATH scans.  With MULTI_VERSION there may be multiple
-     * packages produced by a single PKGPATH (e.g. py*-foo), hence why there
-     * is a [`Vec`] of [`ScanIndex`]s.
-     */
     done: HashMap<PkgPath, Vec<ScanIndex>>,
-    /**
-     * Resolved packages, indexed by PKGNAME.
-     */
     resolved: HashMap<PkgName, ScanIndex>,
 }
 

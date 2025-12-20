@@ -14,11 +14,55 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-/*
- * Sandbox creation and management.  Implementation is done on a per-OS
- * basis due to significant differences between them, but the presentation
- * to the user should be uniform.
- */
+//! Sandbox creation and management.
+//!
+//! This module provides the [`Sandbox`] struct for creating isolated build
+//! environments using chroot. The implementation varies by platform but
+//! presents a uniform interface.
+//!
+//! # Platform Support
+//!
+//! | Platform | Implementation |
+//! |----------|---------------|
+//! | Linux | Mount namespaces + chroot |
+//! | macOS | bindfs/devfs + chroot |
+//! | NetBSD | Native mounts + chroot |
+//! | illumos/Solaris | Platform mounts + chroot |
+//!
+//! # Sandbox Lifecycle
+//!
+//! 1. **Create**: Set up the sandbox directory and perform configured actions
+//! 2. **Execute**: Run build scripts inside the sandbox via chroot
+//! 3. **Destroy**: Reverse actions and clean up the sandbox directory
+//!
+//! # Configuration
+//!
+//! Sandboxes are configured in the `sandboxes` section of the Lua config file.
+//! See the [`action`](crate::action) module for available actions.
+//!
+//! ```lua
+//! sandboxes = {
+//!     basedir = "/data/chroot/bob",
+//!     actions = {
+//!         { action = "mount", fs = "proc", dir = "/proc" },
+//!         { action = "mount", fs = "dev", dir = "/dev" },
+//!         { action = "mount", fs = "bind", dir = "/usr/bin", opts = "ro" },
+//!         { action = "copy", dir = "/etc" },
+//!     },
+//! }
+//! ```
+//!
+//! # Multiple Sandboxes
+//!
+//! Multiple sandboxes can be created for parallel builds. Each sandbox is
+//! identified by an integer ID (0, 1, 2, ...) and created as a subdirectory
+//! of `basedir`.
+//!
+//! With `build_threads = 4`, sandboxes are created at:
+//! - `/data/chroot/bob/0`
+//! - `/data/chroot/bob/1`
+//! - `/data/chroot/bob/2`
+//! - `/data/chroot/bob/3`
 #[cfg(target_os = "linux")]
 mod sandbox_linux;
 #[cfg(target_os = "macos")]
@@ -35,9 +79,38 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-/**
- * [Sandbox] implementation.
- */
+/// Build sandbox manager.
+///
+/// Provides methods to create, execute commands in, and destroy sandboxes.
+/// The sandbox implementation is platform-specific but the interface is uniform.
+///
+/// # Example
+///
+/// ```no_run
+/// # use pkgbob::{Config, Sandbox};
+/// # use std::path::Path;
+/// # fn example() -> anyhow::Result<()> {
+/// let config = Config::load(None, false)?;
+/// let sandbox = Sandbox::new(&config);
+///
+/// if sandbox.enabled() {
+///     sandbox.create(0)?;  // Create sandbox 0
+///
+///     // Execute a script in the sandbox
+///     let child = sandbox.execute(
+///         0,
+///         Path::new("/path/to/script"),
+///         vec![("KEY".to_string(), "value".to_string())],
+///         None,
+///         None,
+///     )?;
+///     let output = child.wait_with_output()?;
+///
+///     sandbox.destroy(0)?;
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, Debug, Default)]
 pub struct Sandbox {
     config: Config,
@@ -56,10 +129,10 @@ impl Sandbox {
         Sandbox { config: config.clone() }
     }
 
-    /**
-     * Return whether sandboxes have been enabled.  This is based on whether
-     * a valid [sandboxes] section has been specified in the config file.
-     */
+    /// Return whether sandboxes have been enabled.
+    ///
+    /// This is based on whether a valid `sandboxes` section has been
+    /// specified in the config file.
     pub fn enabled(&self) -> bool {
         self.config.sandboxes().is_some()
     }

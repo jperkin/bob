@@ -14,6 +14,55 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+//! Parallel package builds.
+//!
+//! This module provides the [`Build`] struct for building packages in parallel
+//! across multiple sandboxes. Packages are scheduled using a dependency graph
+//! to ensure correct build order.
+//!
+//! # Build Process
+//!
+//! 1. Create build sandboxes (one per `build_threads`)
+//! 2. Execute pre-build script in each sandbox
+//! 3. Build packages in parallel, respecting dependencies
+//! 4. Execute post-build script after each package
+//! 5. Destroy sandboxes and generate report
+//!
+//! # Build Phases
+//!
+//! Each package goes through these phases (as defined in `pkg-build` script):
+//!
+//! - `pre-clean` - Clean any previous build artifacts
+//! - `depends` - Install required dependencies
+//! - `checksum` - Verify distfile checksums
+//! - `configure` - Configure the build
+//! - `build` - Compile the package
+//! - `install` - Install to staging area
+//! - `package` - Create binary package
+//! - `deinstall` - Test package removal (non-bootstrap only)
+//! - `clean` - Clean up build artifacts
+//!
+//! # Example
+//!
+//! ```no_run
+//! use pkgbob::{Build, Config, Scan};
+//! use std::sync::Arc;
+//! use std::sync::atomic::AtomicBool;
+//!
+//! let config = Config::load(None, false)?;
+//! let mut scan = Scan::new(&config);
+//! // Add packages...
+//! scan.start()?;
+//! let result = scan.resolve()?;
+//!
+//! let mut build = Build::new(&config, result.buildable);
+//! let shutdown = Arc::new(AtomicBool::new(false));
+//! let summary = build.start(shutdown)?;
+//!
+//! println!("Built {} packages", summary.success_count());
+//! # Ok::<(), anyhow::Error>(())
+//! ```
+
 use crate::status::{self, StatusMessage};
 use crate::tui::{format_duration, MultiProgress};
 use crate::{Config, Sandbox};
@@ -61,38 +110,72 @@ fn format_scan_index(idx: &ScanIndex) -> String {
 }
 
 /// Outcome of a package build attempt.
+///
+/// Used in [`BuildResult`] to indicate whether the build succeeded, failed,
+/// or was skipped.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub enum BuildOutcome {
-    /// Package built successfully.
+    /// Package built and packaged successfully.
     Success,
-    /// Package build failed with reason.
+    /// Package build failed.
+    ///
+    /// The string contains the failure reason (e.g., "Failed in build phase").
     Failed(String),
-    /// Package was skipped with reason (e.g., dependency failed).
+    /// Package was not built.
+    ///
+    /// The string contains the skip reason, which may be:
+    /// - "up-to-date" - Package already built
+    /// - "Dependency X failed" - A required dependency failed to build
+    /// - "PKG_SKIP_REASON: ..." - Package explicitly marked to skip
+    /// - "PKG_FAIL_REASON: ..." - Package expected to fail
     Skipped(String),
 }
 
 /// Result of building a single package.
+///
+/// Contains the outcome, timing, and log location for a package build.
 #[derive(Clone, Debug)]
 pub struct BuildResult {
-    /// Package name.
+    /// Package name with version (e.g., `mutt-2.2.12`).
     pub pkgname: PkgName,
-    /// Package path in pkgsrc.
+    /// Package path in pkgsrc (e.g., `mail/mutt`).
     pub pkgpath: Option<PkgPath>,
-    /// Build outcome.
+    /// Build outcome (success, failure, or skipped).
     pub outcome: BuildOutcome,
-    /// Build duration.
+    /// Time spent building this package.
     pub duration: Duration,
-    /// Path to build logs, if any.
+    /// Path to build logs directory, if available.
+    ///
+    /// For failed builds, this contains `pre-clean.log`, `build.log`, etc.
+    /// Successful builds clean up their log directories.
     pub log_dir: Option<PathBuf>,
 }
 
-/// Summary of the entire build run.
+/// Summary of an entire build run.
+///
+/// Contains timing information and results for all packages.
+///
+/// # Example
+///
+/// ```no_run
+/// # use pkgbob::BuildSummary;
+/// # fn example(summary: &BuildSummary) {
+/// println!("Succeeded: {}", summary.success_count());
+/// println!("Failed: {}", summary.failed_count());
+/// println!("Skipped: {}", summary.skipped_count());
+/// println!("Duration: {:?}", summary.duration);
+///
+/// for result in summary.failed() {
+///     println!("  {} failed", result.pkgname.pkgname());
+/// }
+/// # }
+/// ```
 #[derive(Clone, Debug)]
 pub struct BuildSummary {
-    /// Total duration of the build.
+    /// Total duration of the build run.
     pub duration: Duration,
-    /// Individual build results.
+    /// Results for each package.
     pub results: Vec<BuildResult>,
 }
 
