@@ -175,7 +175,7 @@ fn main() -> Result<()> {
 
             let mut build = Build::new(&config, scan_result.buildable.clone());
 
-            // Set up Ctrl+C handler for graceful shutdown
+            // Set up signal handler for graceful shutdown (SIGINT and SIGTERM)
             let shutdown_flag = Arc::new(AtomicBool::new(false));
             let shutdown_for_handler = Arc::clone(&shutdown_flag);
             let sandbox_for_handler = Sandbox::new(&config);
@@ -190,7 +190,7 @@ fn main() -> Result<()> {
                     }
                 }
             })
-            .expect("Error setting Ctrl-C handler");
+            .expect("Error setting signal handler");
 
             let mut summary = build.start(Arc::clone(&shutdown_flag))?;
 
