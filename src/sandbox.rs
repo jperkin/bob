@@ -268,7 +268,8 @@ impl Sandbox {
     /**
      * Execute a script file with supplied environment variables and optional
      * stdin data. If status_fd is provided, it will be passed to the child
-     * process via the bob_status_fd environment variable.
+     * process via the bob_status_fd environment variable. If capture_output
+     * is true, stdout/stderr go to the provided writer instead of being piped.
      */
     pub fn execute(
         &self,
@@ -277,9 +278,10 @@ impl Sandbox {
         mut envs: Vec<(String, String)>,
         stdin_data: Option<&str>,
         status_fd: Option<i32>,
-        output_fd: Option<i32>,
+        output_writer: Option<std::os::unix::io::RawFd>,
     ) -> Result<Child> {
         use std::io::Write;
+        use std::os::unix::io::FromRawFd;
 
         let mut cmd = if self.enabled() {
             let mut c = Command::new("/usr/sbin/chroot");
@@ -293,10 +295,6 @@ impl Sandbox {
             envs.push(("bob_status_fd".to_string(), fd.to_string()));
         }
 
-        if let Some(fd) = output_fd {
-            envs.push(("bob_output_fd".to_string(), fd.to_string()));
-        }
-
         for (key, val) in envs {
             cmd.env(key, val);
         }
@@ -305,8 +303,16 @@ impl Sandbox {
             cmd.stdin(Stdio::piped());
         }
 
-        let mut child =
-            cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        // If output_writer is provided, redirect stdout/stderr to that fd
+        if let Some(fd) = output_writer {
+            let stdout_fd = unsafe { Stdio::from_raw_fd(libc::dup(fd)) };
+            let stderr_fd = unsafe { Stdio::from_raw_fd(libc::dup(fd)) };
+            cmd.stdout(stdout_fd).stderr(stderr_fd);
+        } else {
+            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        }
+
+        let mut child = cmd.spawn()?;
 
         if let Some(data) = stdin_data {
             if let Some(mut stdin) = child.stdin.take() {

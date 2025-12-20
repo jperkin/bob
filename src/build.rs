@@ -455,11 +455,12 @@ impl PackageBuild {
             status::channel().context("Failed to create status channel")?;
         let status_fd = status_writer.fd();
 
-        // Use fd 10 + worker_id for output to avoid conflicts
-        let target_output_fd = (10 + self.id) as i32;
         let (mut output_reader, output_writer) =
-            status::output_channel(target_output_fd).context("Failed to create output channel")?;
+            status::output_channel().context("Failed to create output channel")?;
         let output_fd = output_writer.fd();
+
+        // Pass the output fd to the script
+        envs.push(("bob_output_fd".to_string(), output_fd.to_string()));
 
         let mut child = self.sandbox.execute(
             self.id,
@@ -467,7 +468,7 @@ impl PackageBuild {
             envs.clone(),
             Some(&stdin_data),
             Some(status_fd),
-            Some(output_fd),
+            None, // stdout/stderr handled by script
         )?;
 
         // Close write ends in parent so we get EOF when child exits
@@ -514,6 +515,12 @@ impl PackageBuild {
                     return Err(e).context("Failed to wait for pkg-build");
                 }
             }
+        }
+
+        // Read any remaining output after child exits
+        let remaining = output_reader.read_all_lines();
+        if !remaining.is_empty() {
+            let _ = status_tx.send(ChannelCommand::OutputLines(self.id, remaining));
         }
 
         // Clear stage display

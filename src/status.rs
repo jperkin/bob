@@ -176,31 +176,19 @@ impl OutputWriter {
 }
 
 /// Create an output channel pair for capturing build output.
-/// The target_fd parameter specifies which fd number to use for the write end.
-pub fn output_channel(target_fd: RawFd) -> Result<(OutputReader, OutputWriter)> {
+pub fn output_channel() -> Result<(OutputReader, OutputWriter)> {
     let (reader, writer) =
         os_pipe::pipe().context("Failed to create output pipe")?;
 
+    // Clear O_CLOEXEC on the write end so it survives exec
     let write_fd = writer.into_raw_fd();
-
-    // Dup to the target fd and close the original
     unsafe {
-        if write_fd != target_fd {
-            if libc::dup2(write_fd, target_fd) == -1 {
-                return Err(anyhow::anyhow!(
-                    "Failed to dup2 output fd: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            libc::close(write_fd);
-        }
-        // Clear O_CLOEXEC on the target fd so it survives exec
-        let flags = libc::fcntl(target_fd, libc::F_GETFD);
-        libc::fcntl(target_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+        let flags = libc::fcntl(write_fd, libc::F_GETFD);
+        libc::fcntl(write_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
     }
 
     Ok((
         OutputReader { reader: BufReader::new(reader) },
-        OutputWriter { fd: target_fd },
+        OutputWriter { fd: write_fd },
     ))
 }

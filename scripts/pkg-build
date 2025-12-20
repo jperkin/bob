@@ -18,14 +18,47 @@ set -e
 : ${bob_status_fd:?}
 : ${bob_tar:?}
 
-# Optional output capture fd for real-time TUI display
-# When set, output is tee'd to both log file and this fd
+# Optional: fd for real-time output to TUI
 bob_output_fd=${bob_output_fd:-}
 
-# Immediately test if the output fd works (before any other logic)
-if [ -n "${bob_output_fd}" ]; then
-	eval "echo 'pkg-build: output fd test' >&${bob_output_fd}" 2>/dev/null || true
-fi
+# Run a command, logging output to file and optionally to output fd.
+# Usage: run_logged <logfile> <append|truncate> <command> [args...]
+run_logged() {
+	_rl_logfile="$1"
+	_rl_mode="$2"
+	shift 2
+
+	if [ -n "${bob_output_fd}" ]; then
+		# Create a FIFO for the tee
+		_rl_fifo="${pkglogdir}/.pipe.$$"
+		mkfifo "${_rl_fifo}" || return 1
+
+		# Start tee in background
+		if [ "${_rl_mode}" = "append" ]; then
+			eval "tee -a '${_rl_logfile}' < '${_rl_fifo}' >&${bob_output_fd} &"
+		else
+			eval "tee '${_rl_logfile}' < '${_rl_fifo}' >&${bob_output_fd} &"
+		fi
+		_rl_tee_pid=$!
+
+		# Run command with output to FIFO
+		"$@" > "${_rl_fifo}" 2>&1
+		_rl_status=$?
+
+		# Cleanup
+		rm -f "${_rl_fifo}"
+		wait ${_rl_tee_pid} 2>/dev/null || true
+
+		return ${_rl_status}
+	else
+		# No output fd, just write to log file
+		if [ "${_rl_mode}" = "append" ]; then
+			"$@" >> "${_rl_logfile}" 2>&1
+		else
+			"$@" > "${_rl_logfile}" 2>&1
+		fi
+	fi
+}
 
 cleanup() {
 	if [ -n "${KEEP_WRKDIR}" ]; then
@@ -156,40 +189,44 @@ ${bob_make} clean > "${pkglogdir}/pre-clean.log" 2>&1
 # Install dependencies
 if [ -n "${dependencies}" ]; then
 	set_stage "depends"
-	PKG_PATH="${bob_packages}/All" ${bob_pkgtools}/pkg_add \
-	    ${dependencies} > "${pkglogdir}/depends.log" 2>&1 || cleanup
+	run_logged "${pkglogdir}/depends.log" truncate \
+	    env PKG_PATH="${bob_packages}/All" ${bob_pkgtools}/pkg_add ${dependencies} || cleanup
 fi
 
 set_stage "checksum"
-run_make ${run_checksum} checksum > "${pkglogdir}/checksum.log" 2>&1 || cleanup
+run_logged "${pkglogdir}/checksum.log" truncate \
+    run_make ${run_checksum} checksum || cleanup
 
 set_stage "configure"
-run_usergroup configure > ${pkglogdir}/configure.log 2>&1 || cleanup
-run_make ${run_build} configure >> ${pkglogdir}/configure.log 2>&1 || cleanup
+run_logged "${pkglogdir}/configure.log" truncate run_usergroup configure || cleanup
+run_logged "${pkglogdir}/configure.log" append run_make ${run_build} configure || cleanup
 
 set_stage "build"
-run_usergroup build > ${pkglogdir}/build.log 2>&1 || cleanup
-run_make ${run_build} all >> ${pkglogdir}/build.log 2>&1 || cleanup
+run_logged "${pkglogdir}/build.log" truncate run_usergroup build || cleanup
+run_logged "${pkglogdir}/build.log" append run_make ${run_build} all || cleanup
 
 set_stage "install"
-run_usergroup install > ${pkglogdir}/install.log 2>&1 || cleanup
-run_make ${run_install} stage-install >> ${pkglogdir}/install.log 2>&1 || cleanup
+run_logged "${pkglogdir}/install.log" truncate run_usergroup install || cleanup
+run_logged "${pkglogdir}/install.log" append run_make ${run_install} stage-install || cleanup
 
 set_stage "package"
-run_make run_direct stage-package-create > ${pkglogdir}/package.log 2>&1 || cleanup
+run_logged "${pkglogdir}/package.log" truncate \
+    run_make run_direct stage-package-create || cleanup
 
 pkgfile=$(run_make run_direct show-var VARNAME=STAGE_PKGFILE)
 
 # Test package install unless this is a bootstrap package as it will likely
 # already be installed.
 if [ -z "${is_bootstrap}" ]; then
-	${bob_pkgtools}/pkg_add ${pkgfile} >> "${pkglogdir}/package.log" 2>&1 || cleanup
+	run_logged "${pkglogdir}/package.log" append \
+	    ${bob_pkgtools}/pkg_add ${pkgfile} || cleanup
 fi
 
 # Test package uninstall unless bootstrap package (will have preserve flag set).
 if [ -z "${is_bootstrap}" ]; then
 	set_stage "deinstall"
-	${bob_pkgtools}/pkg_delete ${pkgname} > "${pkglogdir}/deinstall.log" 2>&1 || cleanup
+	run_logged "${pkglogdir}/deinstall.log" truncate \
+	    ${bob_pkgtools}/pkg_delete ${pkgname} || cleanup
 fi
 
 # Save package.
