@@ -307,6 +307,9 @@ impl MultiProgress {
         // Calculate height: workers + progress bar
         let height = (num_workers + 1) as u16;
 
+        // Enable raw mode to capture keyboard events
+        enable_raw_mode()?;
+
         let backend = CrosstermBackend::new(stdout());
         let options = TerminalOptions { viewport: Viewport::Inline(height) };
         let terminal = Terminal::with_options(backend, options)?;
@@ -505,9 +508,8 @@ impl MultiProgress {
 
     /// Switch back to inline progress mode.
     fn switch_to_inline(&mut self) -> io::Result<()> {
-        // Leave alternate screen and raw mode
+        // Leave alternate screen (stay in raw mode for keyboard input)
         stdout().execute(LeaveAlternateScreen)?;
-        disable_raw_mode()?;
 
         // Recreate terminal with inline viewport
         let height = (self.num_workers + 1) as u16;
@@ -582,11 +584,13 @@ impl MultiProgress {
     }
 
     pub fn finish(&mut self) -> io::Result<()> {
-        // If in multi-panel mode, switch back to inline first
+        // If in multi-panel mode, leave alternate screen first
         if self.view_mode == ViewMode::MultiPanel {
             let _ = stdout().execute(LeaveAlternateScreen);
-            let _ = disable_raw_mode();
         }
+
+        // Disable raw mode (always enabled during TUI)
+        let _ = disable_raw_mode();
 
         // Clear the inline viewport area
         self.terminal.clear()?;
@@ -625,11 +629,13 @@ impl MultiProgress {
         // Suppress any further output
         self.state.suppressed = true;
 
-        // If in multi-panel mode, switch back first
+        // If in multi-panel mode, leave alternate screen first
         if self.view_mode == ViewMode::MultiPanel {
             let _ = stdout().execute(LeaveAlternateScreen);
-            let _ = disable_raw_mode();
         }
+
+        // Disable raw mode (always enabled during TUI)
+        let _ = disable_raw_mode();
 
         // Clear the inline viewport area
         self.terminal.clear()?;
@@ -646,11 +652,12 @@ impl MultiProgress {
 
 impl Drop for MultiProgress {
     fn drop(&mut self) {
-        // If in multi-panel mode, restore terminal
+        // If in multi-panel mode, leave alternate screen
         if self.view_mode == ViewMode::MultiPanel {
             let _ = stdout().execute(LeaveAlternateScreen);
-            let _ = disable_raw_mode();
         }
+        // Always disable raw mode (was enabled in new())
+        let _ = disable_raw_mode();
         // Ensure cursor is visible when dropped
         let _ = stdout().execute(Show);
     }
