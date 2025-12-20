@@ -462,6 +462,9 @@ impl PackageBuild {
         // Pass the output fd to the script
         envs.push(("bob_output_fd".to_string(), output_fd.to_string()));
 
+        // Debug: log what fd we're using
+        tracing::debug!(worker_id = self.id, output_fd = output_fd, "passing output fd to pkg-build");
+
         let mut child = self.sandbox.execute(
             self.id,
             pkg_build_script,
@@ -498,6 +501,7 @@ impl PackageBuild {
             // Read any available output lines
             let output_lines = output_reader.read_all_lines();
             if !output_lines.is_empty() {
+                tracing::debug!(worker_id = self.id, num_lines = output_lines.len(), "received output lines");
                 let _ = status_tx.send(ChannelCommand::OutputLines(
                     self.id,
                     output_lines,

@@ -21,6 +21,7 @@ set -e
 # Optional: fd for real-time output to TUI
 bob_output_fd=${bob_output_fd:-}
 
+
 # Run a command, logging output to file and optionally to output fd.
 # Usage: run_logged <logfile> <append|truncate> <command> [args...]
 run_logged() {
@@ -29,9 +30,17 @@ run_logged() {
 	shift 2
 
 	if [ -n "${bob_output_fd}" ]; then
-		# Create a FIFO for the tee
-		_rl_fifo="${pkglogdir}/.pipe.$$"
-		mkfifo "${_rl_fifo}" || return 1
+		# Create a FIFO for the tee - use /tmp to ensure it works in chroot
+		_rl_fifo="/tmp/.bob_pipe.$$"
+		if ! mkfifo "${_rl_fifo}" 2>/dev/null; then
+			# Fallback if mkfifo fails - just log to file
+			if [ "${_rl_mode}" = "append" ]; then
+				"$@" >> "${_rl_logfile}" 2>&1
+			else
+				"$@" > "${_rl_logfile}" 2>&1
+			fi
+			return $?
+		fi
 
 		# Start tee in background
 		if [ "${_rl_mode}" = "append" ]; then
@@ -173,6 +182,17 @@ rm -f "${pkglogdir}"/.stage
 
 # Set up output redirection
 exec >${pkglogdir}/pkg-build.log 2>&1
+
+# Test output fd - any errors will appear in pkg-build.log
+if [ -n "${bob_output_fd}" ]; then
+	echo "Testing output fd ${bob_output_fd}..."
+	if eval "echo '=== pkg-build: ${pkgname} ===' >&${bob_output_fd}"; then
+		echo "Output fd test succeeded"
+	else
+		echo "Output fd test FAILED (exit code $?)"
+	fi
+fi
+
 set -x
 
 # Create work.log and make it writable by the unprivileged user

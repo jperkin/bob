@@ -309,7 +309,8 @@ impl Sandbox {
             let stderr_fd = unsafe { Stdio::from_raw_fd(libc::dup(fd)) };
             cmd.stdout(stdout_fd).stderr(stderr_fd);
         } else {
-            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+            // Use null - script handles its own output redirection
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
         }
 
         let mut child = cmd.spawn()?;
