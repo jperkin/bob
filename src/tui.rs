@@ -249,12 +249,27 @@ fn format_duration_short(d: Duration) -> String {
 }
 
 /// Calculate grid layout for N panels.
+/// If terminal width < 160, use vertical stack (full width panels).
+/// Otherwise use a roughly square grid.
 fn calculate_grid(area: Rect, num_panels: usize) -> Vec<Rect> {
     if num_panels == 0 {
         return vec![];
     }
 
-    // Calculate roughly square grid
+    // For narrow terminals, stack panels vertically (full width each)
+    if area.width < 160 {
+        let constraints: Vec<Constraint> = (0..num_panels)
+            .map(|_| Constraint::Ratio(1, num_panels as u32))
+            .collect();
+
+        return Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(area)
+            .to_vec();
+    }
+
+    // For wide terminals, use a roughly square grid
     let cols = (num_panels as f64).sqrt().ceil() as usize;
     let rows = num_panels.div_ceil(cols);
 
@@ -454,7 +469,7 @@ impl MultiProgress {
     }
 
     /// Poll for keyboard events (non-blocking).
-    /// Returns true if view mode was toggled.
+    /// Returns Ok(true) if view mode was toggled, Err if Ctrl+C pressed.
     pub fn poll_events(&mut self) -> io::Result<bool> {
         if self.state.suppressed {
             return Ok(false);
@@ -468,12 +483,13 @@ impl MultiProgress {
                     self.toggle_view_mode()?;
                     return Ok(true);
                 }
-                // Also handle Ctrl+C in multi-panel mode
+                // Handle Ctrl+C - raise SIGINT to trigger the ctrlc handler
                 if key.code == KeyCode::Char('c')
                     && key.modifiers.contains(KeyModifiers::CONTROL)
                 {
-                    // Let the ctrlc handler deal with this
-                    return Ok(false);
+                    unsafe {
+                        libc::raise(libc::SIGINT);
+                    }
                 }
             }
         }

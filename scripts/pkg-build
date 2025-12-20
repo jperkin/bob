@@ -135,8 +135,10 @@ rm -f "${pkglogdir}"/.stage
 
 # Set up output redirection
 if [ -n "${bob_output_fd}" ]; then
+	# Debug: log that we have the fd
+	echo "DEBUG: bob_output_fd=${bob_output_fd}" >> /tmp/bob-debug.log
 	# Test: write directly to the fd to verify it works
-	eval "echo '=== Build output fd test ===' >&${bob_output_fd}"
+	eval "echo '=== Build output fd test ===' >&${bob_output_fd}" 2>>/tmp/bob-debug.log || echo "DEBUG: fd write failed" >> /tmp/bob-debug.log
 
 	# Write to both log file and output fd using a FIFO
 	_bob_fifo="${pkglogdir}/.pipe.$$"
