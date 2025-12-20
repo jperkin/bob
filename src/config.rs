@@ -524,6 +524,18 @@ impl Config {
         file.scripts = newscripts;
 
         /*
+         * Validate bootstrap path exists if specified.
+         */
+        if let Some(ref bootstrap) = file.pkgsrc.bootstrap {
+            if !bootstrap.exists() {
+                anyhow::bail!(
+                    "pkgsrc.bootstrap file {} does not exist",
+                    bootstrap.display()
+                );
+            }
+        }
+
+        /*
          * Set verbose from command line option, falling back to config file.
          */
         let verbose = if verbose {
