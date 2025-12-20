@@ -1,7 +1,7 @@
 [package]
 name = "pkgbob"
 description = "A pkgsrc package builder"
-version = "0.0.8"
+version = "0.0.9"
 authors = ["Jonathan Perkin <jonathan@perkin.org.uk>"]
 keywords = ["cli", "pkgsrc"]
 license = "ISC"
