@@ -21,46 +21,31 @@ set -e
 # Optional: fd for real-time output to TUI
 bob_output_fd=${bob_output_fd:-}
 
-
 # Run a command, logging output to file and optionally to output fd.
 # Usage: run_logged <logfile> <append|truncate> <command> [args...]
+#
+# Uses a simple pipe approach: run command, capture exit status via temp file,
+# and pipe output through tee. No FIFOs or background process management needed.
 run_logged() {
 	_rl_logfile="$1"
 	_rl_mode="$2"
 	shift 2
 
 	if [ -n "${bob_output_fd}" ]; then
-		# Create a FIFO for the tee - use /tmp to ensure it works in chroot
-		_rl_fifo="/tmp/.bob_pipe.$$"
-		if ! mkfifo "${_rl_fifo}" 2>/dev/null; then
-			# Fallback if mkfifo fails - just log to file
-			if [ "${_rl_mode}" = "append" ]; then
-				"$@" >> "${_rl_logfile}" 2>&1
-			else
-				"$@" > "${_rl_logfile}" 2>&1
-			fi
-			return $?
-		fi
+		_rl_status_file="/tmp/.bob_status.$$"
 
-		# Start tee in background
 		if [ "${_rl_mode}" = "append" ]; then
-			eval "tee -a '${_rl_logfile}' < '${_rl_fifo}' >&${bob_output_fd} &"
+			{ "$@" 2>&1; echo $? > "${_rl_status_file}"; } | \
+				eval "tee -a '${_rl_logfile}' >&${bob_output_fd}"
 		else
-			eval "tee '${_rl_logfile}' < '${_rl_fifo}' >&${bob_output_fd} &"
+			{ "$@" 2>&1; echo $? > "${_rl_status_file}"; } | \
+				eval "tee '${_rl_logfile}' >&${bob_output_fd}"
 		fi
-		_rl_tee_pid=$!
 
-		# Run command with output to FIFO
-		"$@" > "${_rl_fifo}" 2>&1
-		_rl_status=$?
-
-		# Cleanup
-		rm -f "${_rl_fifo}"
-		wait ${_rl_tee_pid} 2>/dev/null || true
-
+		_rl_status=$(cat "${_rl_status_file}")
+		rm -f "${_rl_status_file}"
 		return ${_rl_status}
 	else
-		# No output fd, just write to log file
 		if [ "${_rl_mode}" = "append" ]; then
 			"$@" >> "${_rl_logfile}" 2>&1
 		else
@@ -182,17 +167,6 @@ rm -f "${pkglogdir}"/.stage
 
 # Set up output redirection
 exec >${pkglogdir}/pkg-build.log 2>&1
-
-# Test output fd - any errors will appear in pkg-build.log
-if [ -n "${bob_output_fd}" ]; then
-	echo "Testing output fd ${bob_output_fd}..."
-	if eval "echo '=== pkg-build: ${pkgname} ===' >&${bob_output_fd}"; then
-		echo "Output fd test succeeded"
-	else
-		echo "Output fd test FAILED (exit code $?)"
-	fi
-fi
-
 set -x
 
 # Create work.log and make it writable by the unprivileged user
