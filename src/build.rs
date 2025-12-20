@@ -504,8 +504,6 @@ impl PackageBuild {
         // Get final exit status
         let status =
             child.wait().context("Failed to get pkg-build exit status")?;
-        let exit_code =
-            status.code().context("Process terminated by signal")?;
 
         let result = if was_skipped {
             info!(
@@ -514,15 +512,15 @@ impl PackageBuild {
             );
             PackageBuildResult::Skipped
         } else {
-            match exit_code {
-                0 => {
+            match status.code() {
+                Some(0) => {
                     info!(
                         pkgname = %pkgname,
                         "pkg-build completed successfully"
                     );
                     PackageBuildResult::Success
                 }
-                code => {
+                Some(code) => {
                     error!(
                         pkgname = %pkgname,
                         exit_code = code,
@@ -538,19 +536,32 @@ impl PackageBuild {
                     }
                     PackageBuildResult::Failed
                 }
+                None => {
+                    // Process was terminated by signal (e.g., Ctrl+C)
+                    warn!(
+                        pkgname = %pkgname,
+                        "pkg-build terminated by signal"
+                    );
+                    PackageBuildResult::Failed
+                }
             }
         };
 
         // Run post-build script if defined (always runs regardless of pkg-build result)
         if let Some(post_build) = self.config.script("post-build") {
             debug!(pkgname = %pkgname, "Running post-build script");
-            let child =
-                self.sandbox.execute(self.id, post_build, envs, None, None)?;
-            let output = child
-                .wait_with_output()
-                .context("Failed to wait for post-build")?;
-            if !output.status.success() {
-                warn!(pkgname = %pkgname, exit_code = ?output.status.code(), "post-build script failed");
+            if let Ok(child) =
+                self.sandbox.execute(self.id, post_build, envs, None, None)
+            {
+                match child.wait_with_output() {
+                    Ok(output) if !output.status.success() => {
+                        warn!(pkgname = %pkgname, exit_code = ?output.status.code(), "post-build script failed");
+                    }
+                    Err(e) => {
+                        warn!(pkgname = %pkgname, error = %e, "Failed to wait for post-build");
+                    }
+                    _ => {}
+                }
             }
         }
 
