@@ -33,7 +33,7 @@
 //! # Quick Start
 //!
 //! ```console
-//! $ bob init /path/to/config	    # Create configuration directory
+//! $ bob init /path/to/config      # Create configuration directory
 //! $ cd /path/to/config
 //! $ vi config.lua                 # Customise to taste
 //! $ bob build                     # Build packages
