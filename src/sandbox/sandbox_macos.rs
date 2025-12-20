@@ -15,7 +15,7 @@
  */
 
 use crate::sandbox::Sandbox;
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use std::fs;
 use std::path::Path;
 use std::process::{Command, ExitStatus};
@@ -180,10 +180,7 @@ impl Sandbox {
     /// Kill all processes using files within a sandbox path.
     pub fn kill_processes(&self, sandbox: &Path) {
         // Use lsof and kill on macOS (fuser behavior differs)
-        let output = Command::new("lsof")
-            .arg("+D")
-            .arg(sandbox)
-            .output();
+        let output = Command::new("lsof").arg("+D").arg(sandbox).output();
         if let Ok(out) = output {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let mut pids = std::collections::HashSet::new();

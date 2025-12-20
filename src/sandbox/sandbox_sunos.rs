@@ -15,7 +15,7 @@
  */
 
 use crate::sandbox::Sandbox;
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use std::fs;
 use std::path::Path;
 use std::process::{Command, ExitStatus};

@@ -23,7 +23,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{
+    EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt,
+};
 
 static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 
@@ -32,8 +34,9 @@ static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 /// Also logs to stderr if verbose mode is enabled.
 pub fn init(logs_dir: &PathBuf, verbose: bool) -> Result<()> {
     // Create logs directory
-    fs::create_dir_all(logs_dir)
-        .with_context(|| format!("Failed to create logs directory {:?}", logs_dir))?;
+    fs::create_dir_all(logs_dir).with_context(|| {
+        format!("Failed to create logs directory {:?}", logs_dir)
+    })?;
 
     // Create a rolling file appender that writes to logs/bob.log
     let file_appender = tracing_appender::rolling::never(logs_dir, "bob.log");
@@ -60,10 +63,7 @@ pub fn init(logs_dir: &PathBuf, verbose: bool) -> Result<()> {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(default_filter));
 
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(file_layer)
-        .init();
+    tracing_subscriber::registry().with(filter).with(file_layer).init();
 
     tracing::info!(
         logs_dir = %logs_dir.display(),

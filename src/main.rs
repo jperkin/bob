@@ -14,19 +14,19 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+use anyhow::{Result, bail};
+use clap::{Parser, Subcommand};
+use pkgbob::Init;
 use pkgbob::build::{self, Build};
 use pkgbob::config::Config;
 use pkgbob::logging;
 use pkgbob::report;
 use pkgbob::sandbox::Sandbox;
 use pkgbob::scan::{Scan, SkipReason};
-use pkgbob::Init;
-use anyhow::{bail, Result};
-use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::str;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about, long_about = None)]
@@ -122,10 +122,7 @@ fn scan_bulklog_for_report(bulklog: &Path) -> Result<build::BuildSummary> {
         });
     }
 
-    Ok(build::BuildSummary {
-        duration: Duration::ZERO,
-        results,
-    })
+    Ok(build::BuildSummary { duration: Duration::ZERO, results })
 }
 
 fn main() -> Result<()> {
@@ -140,7 +137,9 @@ fn main() -> Result<()> {
                 .config_path()
                 .and_then(|p| p.parent())
                 .map(|p| p.join("logs"))
-                .ok_or_else(|| anyhow::anyhow!("Cannot determine logs directory"))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Cannot determine logs directory")
+                })?;
             logging::init(&logs_dir, config.verbose())?;
 
             tracing::info!("Build command started");
@@ -190,7 +189,8 @@ fn main() -> Result<()> {
                         sandbox_for_handler.kill_processes_by_id(i);
                     }
                 }
-            }).expect("Error setting Ctrl-C handler");
+            })
+            .expect("Error setting Ctrl-C handler");
 
             let mut summary = build.start(Arc::clone(&shutdown_flag))?;
 
@@ -206,8 +206,12 @@ fn main() -> Result<()> {
             // Add pre-skipped packages from scan to summary
             for pkg in scan_result.skipped {
                 let reason = match pkg.reason {
-                    SkipReason::PkgSkipReason(r) => format!("PKG_SKIP_REASON: {}", r),
-                    SkipReason::PkgFailReason(r) => format!("PKG_FAIL_REASON: {}", r),
+                    SkipReason::PkgSkipReason(r) => {
+                        format!("PKG_SKIP_REASON: {}", r)
+                    }
+                    SkipReason::PkgFailReason(r) => {
+                        format!("PKG_FAIL_REASON: {}", r)
+                    }
                 };
                 summary.results.push(build::BuildResult {
                     pkgname: pkg.pkgname,
@@ -235,7 +239,10 @@ fn main() -> Result<()> {
             let bulklog = config.bulklog();
 
             if !bulklog.exists() {
-                bail!("Bulklog directory does not exist: {}", bulklog.display());
+                bail!(
+                    "Bulklog directory does not exist: {}",
+                    bulklog.display()
+                );
             }
 
             println!("Generating reports...");

@@ -15,7 +15,7 @@
  */
 
 use crate::sandbox::Sandbox;
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use std::fs;
 use std::path::Path;
 use std::process::{Command, ExitStatus};
@@ -48,7 +48,9 @@ impl Sandbox {
         _dest: &Path,
         _opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        bail!("NetBSD does not support 'dev' mounts. Use a 'cmd' action with MAKEDEV instead.")
+        bail!(
+            "NetBSD does not support 'dev' mounts. Use a 'cmd' action with MAKEDEV instead."
+        )
     }
 
     pub fn mount_fdfs(
@@ -152,7 +154,9 @@ impl Sandbox {
         _dest: &Path,
     ) -> anyhow::Result<Option<ExitStatus>> {
         // Should never be called since mount_devfs bails
-        bail!("NetBSD does not support 'dev' mounts. Use a 'cmd' action with MAKEDEV instead.")
+        bail!(
+            "NetBSD does not support 'dev' mounts. Use a 'cmd' action with MAKEDEV instead."
+        )
     }
 
     pub fn unmount_fdfs(
@@ -186,9 +190,7 @@ impl Sandbox {
     /// Kill all processes using files within a sandbox path.
     pub fn kill_processes(&self, sandbox: &Path) {
         // Use fstat to find processes and kill them
-        let output = Command::new("fstat")
-            .arg(sandbox)
-            .output();
+        let output = Command::new("fstat").arg(sandbox).output();
         if let Ok(out) = output {
             let stdout = String::from_utf8_lossy(&out.stdout);
             for line in stdout.lines().skip(1) {

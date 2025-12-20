@@ -52,7 +52,10 @@ impl Init {
             "netbsd" => include_str!("../config/netbsd.lua"),
             "solaris" => include_str!("../config/illumos.lua"),
             os => {
-                eprintln!("WARNING: OS '{}' not explicitly supported, using generic config", os);
+                eprintln!(
+                    "WARNING: OS '{}' not explicitly supported, using generic config",
+                    os
+                );
                 include_str!("../config/generic.lua")
             }
         };

@@ -79,7 +79,7 @@
 //! | `dest` | string | Destination path inside the sandbox |
 //! | `ifexists` | boolean | Only perform action if source exists (default: false) |
 
-use anyhow::{bail, Error};
+use anyhow::{Error, bail};
 use mlua::{Result as LuaResult, Table};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -260,7 +260,10 @@ impl FromStr for ActionType {
             "copy" => Ok(ActionType::Copy),
             "cmd" => Ok(ActionType::Cmd),
             "symlink" => Ok(ActionType::Symlink),
-            _ => bail!("Unsupported action type '{}' (expected 'mount', 'copy', 'cmd', or 'symlink')", s),
+            _ => bail!(
+                "Unsupported action type '{}' (expected 'mount', 'copy', 'cmd', or 'symlink')",
+                s
+            ),
         }
     }
 }
@@ -291,8 +294,14 @@ impl Action {
     pub fn from_lua(t: &Table) -> LuaResult<Self> {
         // "dir" can be used as shorthand when src and dest are the same
         let dir = t.get::<Option<String>>("dir")?.map(PathBuf::from);
-        let src = t.get::<Option<String>>("src")?.map(PathBuf::from).or_else(|| dir.clone());
-        let dest = t.get::<Option<String>>("dest")?.map(PathBuf::from).or_else(|| dir.clone());
+        let src = t
+            .get::<Option<String>>("src")?
+            .map(PathBuf::from)
+            .or_else(|| dir.clone());
+        let dest = t
+            .get::<Option<String>>("dest")?
+            .map(PathBuf::from)
+            .or_else(|| dir.clone());
 
         Ok(Self {
             action: t.get("action")?,
@@ -354,7 +363,9 @@ impl Action {
         match action_type {
             ActionType::Cmd => {
                 if self.create.is_none() && self.destroy.is_none() {
-                    bail!("'cmd' action requires 'create' or 'destroy' command");
+                    bail!(
+                        "'cmd' action requires 'create' or 'destroy' command"
+                    );
                 }
             }
             ActionType::Mount => {

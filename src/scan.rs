@@ -59,7 +59,7 @@
 
 use crate::tui::MultiProgress;
 use crate::{Config, Sandbox};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use petgraph::graphmap::DiGraphMap;
 use pkgsrc::{Depend, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
@@ -189,7 +189,10 @@ impl Scan {
             println!("Creating sandbox...");
             if let Err(e) = self.sandbox.create(0) {
                 if let Err(destroy_err) = self.sandbox.destroy(0) {
-                    eprintln!("Warning: failed to destroy sandbox: {}", destroy_err);
+                    eprintln!(
+                        "Warning: failed to destroy sandbox: {}",
+                        destroy_err
+                    );
                 }
                 return Err(e);
             }
@@ -197,8 +200,16 @@ impl Scan {
             // Run pre-build script if defined
             if let Some(pre_build) = self.config.script("pre-build") {
                 debug!("Running pre-build script");
-                let child = self.sandbox.execute(0, pre_build, script_envs.clone(), None, None)?;
-                let output = child.wait_with_output().context("Failed to wait for pre-build")?;
+                let child = self.sandbox.execute(
+                    0,
+                    pre_build,
+                    script_envs.clone(),
+                    None,
+                    None,
+                )?;
+                let output = child
+                    .wait_with_output()
+                    .context("Failed to wait for pre-build")?;
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     error!(exit_code = ?output.status.code(), stderr = %stderr, "pre-build script failed");
@@ -210,8 +221,14 @@ impl Scan {
 
         // Set up multi-line progress display using ratatui inline viewport
         let progress = Arc::new(Mutex::new(
-            MultiProgress::new("Scanning", "Scanned", self.incoming.len(), self.config.scan_threads(), false)
-                .expect("Failed to initialize progress display"),
+            MultiProgress::new(
+                "Scanning",
+                "Scanned",
+                self.incoming.len(),
+                self.config.scan_threads(),
+                false,
+            )
+            .expect("Failed to initialize progress display"),
         ));
 
         // Flag to stop the refresh thread
@@ -248,7 +265,8 @@ impl Scan {
             pool.install(|| {
                 parpaths.par_iter_mut().for_each(|pkg| {
                     let (pkgpath, result) = pkg;
-                    let pathname = pkgpath.as_path().to_string_lossy().to_string();
+                    let pathname =
+                        pkgpath.as_path().to_string_lossy().to_string();
 
                     // Get rayon thread index for progress tracking
                     let thread_id = rayon::current_thread_index().unwrap_or(0);
@@ -321,8 +339,16 @@ impl Scan {
             // Run post-build script if defined
             if let Some(post_build) = self.config.script("post-build") {
                 debug!("Running post-build script");
-                let child = self.sandbox.execute(0, post_build, script_envs, None, None)?;
-                let output = child.wait_with_output().context("Failed to wait for post-build")?;
+                let child = self.sandbox.execute(
+                    0,
+                    post_build,
+                    script_envs,
+                    None,
+                    None,
+                )?;
+                let output = child
+                    .wait_with_output()
+                    .context("Failed to wait for post-build")?;
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     error!(exit_code = ?output.status.code(), stderr = %stderr, "post-build script failed");
@@ -590,7 +616,10 @@ impl Scan {
         /*
          * Verify that the graph is acyclic.
          */
-        debug!(resolved_count = self.resolved.len(), "Checking for circular dependencies");
+        debug!(
+            resolved_count = self.resolved.len(),
+            "Checking for circular dependencies"
+        );
         let mut graph = DiGraphMap::new();
         for (pkgname, index) in &self.resolved {
             for dep in &index.depends {

@@ -74,7 +74,7 @@ mod sandbox_sunos;
 
 use crate::action::{ActionType, FSType};
 use crate::config::Config;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -188,7 +188,8 @@ impl Sandbox {
         // Canonicalize both paths to resolve any ".." or symlinks
         // Note: canonicalize requires the path to exist, so we check
         // the parent directory for paths that don't exist yet
-        let canonical_sandbox = sandbox_root.canonicalize().unwrap_or(sandbox_root.clone());
+        let canonical_sandbox =
+            sandbox_root.canonicalize().unwrap_or(sandbox_root.clone());
 
         // For the target path, try to canonicalize what exists
         let canonical_path = if path.exists() {
@@ -299,10 +300,8 @@ impl Sandbox {
             cmd.stdin(Stdio::piped());
         }
 
-        let mut child = cmd
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+        let mut child =
+            cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
 
         if let Some(data) = stdin_data {
             if let Some(mut stdin) = child.stdin.take() {
@@ -451,7 +450,11 @@ impl Sandbox {
         if meta.is_symlink() {
             // Symlinks can be removed
             fs::remove_file(path).map_err(|e| {
-                anyhow::anyhow!("Failed to remove symlink {}: {}", path.display(), e)
+                anyhow::anyhow!(
+                    "Failed to remove symlink {}: {}",
+                    path.display(),
+                    e
+                )
             })?;
             return Ok(());
         }
@@ -486,7 +489,9 @@ impl Sandbox {
     ///
     fn perform_actions(&self, id: usize) -> Result<()> {
         let Some(sandbox) = &self.config.sandboxes() else {
-            bail!("Internal error: trying to perform actions when sandboxes disabled.");
+            bail!(
+                "Internal error: trying to perform actions when sandboxes disabled."
+            );
         };
         for action in sandbox.actions.iter() {
             action.validate()?;
@@ -494,7 +499,8 @@ impl Sandbox {
 
             // For mount/copy actions, dest defaults to src (src is more readable)
             let src = action.src().or(action.dest());
-            let dest = action.dest().or(action.src()).map(|d| self.mountpath(id, d));
+            let dest =
+                action.dest().or(action.src()).map(|d| self.mountpath(id, d));
             if let Some(ref dest_path) = dest {
                 self.verify_path_in_sandbox(id, dest_path)?;
             }
@@ -509,8 +515,12 @@ impl Sandbox {
             let status = match action_type {
                 ActionType::Mount => {
                     let fs_type = action.fs_type()?;
-                    let src = src.ok_or_else(|| anyhow::anyhow!("mount action requires src or dest"))?;
-                    let dest = dest.ok_or_else(|| anyhow::anyhow!("mount action requires dest"))?;
+                    let src = src.ok_or_else(|| {
+                        anyhow::anyhow!("mount action requires src or dest")
+                    })?;
+                    let dest = dest.ok_or_else(|| {
+                        anyhow::anyhow!("mount action requires dest")
+                    })?;
                     if action.ifexists() && !src.exists() {
                         continue;
                     }
@@ -524,8 +534,12 @@ impl Sandbox {
                     }
                 }
                 ActionType::Copy => {
-                    let src = src.ok_or_else(|| anyhow::anyhow!("copy action requires src or dest"))?;
-                    let dest = dest.ok_or_else(|| anyhow::anyhow!("copy action requires dest"))?;
+                    let src = src.ok_or_else(|| {
+                        anyhow::anyhow!("copy action requires src or dest")
+                    })?;
+                    let dest = dest.ok_or_else(|| {
+                        anyhow::anyhow!("copy action requires dest")
+                    })?;
                     copy_dir::copy_dir(src, &dest)?;
                     None
                 }
@@ -537,10 +551,12 @@ impl Sandbox {
                     }
                 }
                 ActionType::Symlink => {
-                    let src = action.src()
-                        .ok_or_else(|| anyhow::anyhow!("symlink action requires src"))?;
-                    let dest = action.dest()
-                        .ok_or_else(|| anyhow::anyhow!("symlink action requires dest"))?;
+                    let src = action.src().ok_or_else(|| {
+                        anyhow::anyhow!("symlink action requires src")
+                    })?;
+                    let dest = action.dest().ok_or_else(|| {
+                        anyhow::anyhow!("symlink action requires dest")
+                    })?;
                     let dest_path = self.mountpath(id, dest);
                     // Create parent directory if needed
                     if let Some(parent) = dest_path.parent() {
@@ -594,18 +610,22 @@ impl Sandbox {
 
     fn reverse_actions(&self, id: usize) -> anyhow::Result<()> {
         let Some(sandbox) = &self.config.sandboxes() else {
-            bail!("Internal error: trying to reverse actions when sandboxes disabled.");
+            bail!(
+                "Internal error: trying to reverse actions when sandboxes disabled."
+            );
         };
         for action in sandbox.actions.iter().rev() {
             let action_type = action.action_type()?;
             // dest defaults to src if not specified
-            let dest = action.dest().or(action.src()).map(|d| self.mountpath(id, d));
+            let dest =
+                action.dest().or(action.src()).map(|d| self.mountpath(id, d));
 
             match action_type {
                 ActionType::Cmd => {
                     // For cmd actions, we run the destroy command
                     if let Some(destroy_cmd) = action.destroy_cmd() {
-                        let status = self.run_action_cmd(id, destroy_cmd, action.cwd())?;
+                        let status =
+                            self.run_action_cmd(id, destroy_cmd, action.cwd())?;
                         if let Some(s) = status {
                             if !s.success() {
                                 bail!(
@@ -748,5 +768,4 @@ impl Sandbox {
         fs::remove_dir(path)?;
         Ok(())
     }
-
 }

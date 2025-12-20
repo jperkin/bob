@@ -101,7 +101,8 @@ impl StatusWriter {
 
 /// Create a status channel pair.
 pub fn channel() -> Result<(StatusReader, StatusWriter)> {
-    let (reader, writer) = os_pipe::pipe().context("Failed to create status pipe")?;
+    let (reader, writer) =
+        os_pipe::pipe().context("Failed to create status pipe")?;
 
     // Clear O_CLOEXEC on the write end so it survives exec
     let write_fd = writer.into_raw_fd();
@@ -111,9 +112,7 @@ pub fn channel() -> Result<(StatusReader, StatusWriter)> {
     }
 
     Ok((
-        StatusReader {
-            reader: BufReader::new(reader),
-        },
+        StatusReader { reader: BufReader::new(reader) },
         StatusWriter { fd: write_fd },
     ))
 }

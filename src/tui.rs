@@ -16,15 +16,15 @@
 
 //! Line-based progress display using ratatui's inline viewport.
 
-use crossterm::cursor::Show;
 use crossterm::ExecutableCommand;
+use crossterm::cursor::Show;
 use ratatui::{
+    Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
     layout::{Constraint, Layout},
     text::Line,
-    Terminal, TerminalOptions, Viewport,
 };
-use std::io::{self, stdout, Stdout};
+use std::io::{self, Stdout, stdout};
 use std::time::{Duration, Instant};
 
 /// State for a single worker thread.
@@ -37,11 +37,7 @@ pub struct WorkerState {
 
 impl WorkerState {
     pub fn new() -> Self {
-        Self {
-            package: None,
-            stage: None,
-            started: None,
-        }
+        Self { package: None, stage: None, started: None }
     }
 
     pub fn set_active(&mut self, package: &str) {
@@ -84,7 +80,13 @@ pub struct ProgressState {
 }
 
 impl ProgressState {
-    pub fn new(title: &str, finished_title: &str, total: usize, num_workers: usize, show_skipped: bool) -> Self {
+    pub fn new(
+        title: &str,
+        finished_title: &str,
+        total: usize,
+        num_workers: usize,
+        show_skipped: bool,
+    ) -> Self {
         let workers = (0..num_workers).map(|_| WorkerState::new()).collect();
         Self {
             title: title.to_string(),
@@ -175,7 +177,8 @@ impl ProgressState {
         if self.total == 0 {
             0.0
         } else {
-            (self.completed + self.failed + self.skipped) as f64 / self.total as f64
+            (self.completed + self.failed + self.skipped) as f64
+                / self.total as f64
         }
     }
 }
@@ -195,11 +198,7 @@ pub fn format_duration(d: Duration) -> String {
 /// Format a duration with decimal seconds for short durations.
 fn format_duration_short(d: Duration) -> String {
     let secs = d.as_secs_f64();
-    if secs < 60.0 {
-        format!("{:.1}s", secs)
-    } else {
-        format_duration(d)
-    }
+    if secs < 60.0 { format!("{:.1}s", secs) } else { format_duration(d) }
 }
 
 /// Line-based progress display using ratatui inline viewport.
@@ -209,19 +208,29 @@ pub struct MultiProgress {
 }
 
 impl MultiProgress {
-    pub fn new(title: &str, finished_title: &str, total: usize, num_workers: usize, show_skipped: bool) -> io::Result<Self> {
+    pub fn new(
+        title: &str,
+        finished_title: &str,
+        total: usize,
+        num_workers: usize,
+        show_skipped: bool,
+    ) -> io::Result<Self> {
         // Calculate height: workers + progress bar
         let height = (num_workers + 1) as u16;
 
         let backend = CrosstermBackend::new(stdout());
-        let options = TerminalOptions {
-            viewport: Viewport::Inline(height),
-        };
+        let options = TerminalOptions { viewport: Viewport::Inline(height) };
         let terminal = Terminal::with_options(backend, options)?;
 
         Ok(Self {
             terminal,
-            state: ProgressState::new(title, finished_title, total, num_workers, show_skipped),
+            state: ProgressState::new(
+                title,
+                finished_title,
+                total,
+                num_workers,
+                show_skipped,
+            ),
         })
     }
 
@@ -256,10 +265,8 @@ impl MultiProgress {
             let area = frame.area();
 
             // Create constraints for each line
-            let mut constraints: Vec<Constraint> = state.workers
-                .iter()
-                .map(|_| Constraint::Length(1))
-                .collect();
+            let mut constraints: Vec<Constraint> =
+                state.workers.iter().map(|_| Constraint::Length(1)).collect();
             constraints.push(Constraint::Length(1)); // Progress bar
 
             let chunks = Layout::vertical(constraints).split(area);
@@ -267,11 +274,26 @@ impl MultiProgress {
             // Render worker lines
             let tw = state.timer_width;
             for (i, worker) in state.workers.iter().enumerate() {
-                let text = if let (Some(pkg), Some(elapsed)) = (&worker.package, worker.elapsed()) {
+                let text = if let (Some(pkg), Some(elapsed)) =
+                    (&worker.package, worker.elapsed())
+                {
                     if let Some(stage) = &worker.stage {
-                        format!("  [{:>2}:{:>tw$} ] {} ({})", i, format_duration_short(elapsed), pkg, stage, tw = tw)
+                        format!(
+                            "  [{:>2}:{:>tw$} ] {} ({})",
+                            i,
+                            format_duration_short(elapsed),
+                            pkg,
+                            stage,
+                            tw = tw
+                        )
                     } else {
-                        format!("  [{:>2}:{:>tw$} ] {}", i, format_duration_short(elapsed), pkg, tw = tw)
+                        format!(
+                            "  [{:>2}:{:>tw$} ] {}",
+                            i,
+                            format_duration_short(elapsed),
+                            pkg,
+                            tw = tw
+                        )
                     }
                 } else {
                     format!("  [{:>2}:{:>tw$} ]", i, "idle", tw = tw)
