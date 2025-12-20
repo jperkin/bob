@@ -58,5 +58,4 @@ scripts = {
     ["pre-build"] = initdir .. "/scripts/pre-build",
     ["pkg-build"] = initdir .. "/scripts/pkg-build",
     ["post-build"] = initdir .. "/scripts/post-build",
-    ["pkg-up-to-date"] = initdir .. "/scripts/pkg-up-to-date",
 }

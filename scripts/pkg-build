@@ -113,13 +113,15 @@ else
 	run_install=run_su
 fi
 
-if [ -n "${PKG_UP_TO_DATE}" ] && [ -x "${PKG_UP_TO_DATE}" ]; then
-    mkdir -p "${pkglogdir}"
-    if "${PKG_UP_TO_DATE}" "${pkgname}" ${dependencies} > "${pkglogdir}/up-to-date.log" 2>&1; then
-        rm -rf "${pkglogdir}"
-        send_status "skipped"
-        exit 0
-    fi
+pkg_up_to_date="$(dirname "$0")/pkg-up-to-date"
+if [ -x ${pkg_up_to_date} ]; then
+	mkdir -p ${pkglogdir}
+	if ${pkg_up_to_date} ${pkgname} ${dependencies} \
+	    > ${pkglogdir}/up-to-date.log 2>&1; then
+		rm -rf ${pkglogdir}
+		send_status "skipped"
+		exit 0
+	fi
 fi
 
 cd ${bob_pkgsrc}/${pkgdir}
