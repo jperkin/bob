@@ -440,7 +440,6 @@ impl PackageBuild {
                 envs.clone(),
                 None,
                 None,
-                None,
             )?;
             let output = child
                 .wait_with_output()
@@ -468,7 +467,6 @@ impl PackageBuild {
             envs.clone(),
             Some(&stdin_data),
             Some(status_fd),
-            None, // stdout/stderr handled by script
         )?;
 
         // Close write ends in parent so we get EOF when child exits
@@ -576,7 +574,7 @@ impl PackageBuild {
         if let Some(post_build) = self.config.script("post-build") {
             debug!(pkgname = %pkgname, "Running post-build script");
             if let Ok(child) =
-                self.sandbox.execute(self.id, post_build, envs, None, None, None)
+                self.sandbox.execute(self.id, post_build, envs, None, None)
             {
                 match child.wait_with_output() {
                     Ok(output) if !output.status.success() => {

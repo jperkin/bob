@@ -510,8 +510,7 @@ impl MultiProgress {
         // Clear the inline viewport first
         self.terminal.clear()?;
 
-        // Enter raw mode and alternate screen for fullscreen
-        enable_raw_mode()?;
+        // Enter alternate screen for fullscreen (raw mode already enabled)
         stdout().execute(EnterAlternateScreen)?;
 
         // Recreate terminal with fullscreen viewport
@@ -546,53 +545,51 @@ impl MultiProgress {
 
         self.state.update_timer_width();
 
-        // Clone state needed for rendering
-        let workers: Vec<_> = self.state.workers.clone();
-        let output_buffers: Vec<_> = self.output_buffers.clone();
-        let num_workers = workers.len();
+        // Pre-compute panel data to avoid borrowing issues with draw closure
+        let num_workers = self.num_workers;
+        let panel_data: Vec<_> = (0..num_workers).map(|i| {
+            let title = if let Some(w) = self.state.workers.get(i) {
+                if let Some(pkg) = &w.package {
+                    let stage = w.stage.as_deref().unwrap_or("");
+                    let elapsed = w.elapsed()
+                        .map(format_duration_short)
+                        .unwrap_or_default();
+                    if stage.is_empty() {
+                        format!("[{}] {} {}", i, pkg, elapsed)
+                    } else {
+                        format!("[{}] {} ({}) {}", i, pkg, stage, elapsed)
+                    }
+                } else {
+                    format!("[{}] idle", i)
+                }
+            } else {
+                format!("[{}]", i)
+            };
+
+            // Pre-render last 100 lines (will be trimmed to panel height in draw)
+            let content = self.output_buffers.get(i)
+                .map(|buf| buf.last_n(100).cloned().collect::<Vec<_>>().join("\n"))
+                .unwrap_or_default();
+
+            (title, content)
+        }).collect();
 
         self.terminal.draw(|frame| {
             let area = frame.area();
             let panels = calculate_grid(area, num_workers);
 
             for (i, panel_area) in panels.iter().enumerate() {
-                let worker = workers.get(i);
-                let title = if let Some(w) = worker {
-                    if let Some(pkg) = &w.package {
-                        let stage = w.stage.as_deref().unwrap_or("");
-                        let elapsed = w.elapsed()
-                            .map(format_duration_short)
-                            .unwrap_or_default();
-                        if stage.is_empty() {
-                            format!("[{}] {} {}", i, pkg, elapsed)
-                        } else {
-                            format!("[{}] {} ({}) {}", i, pkg, stage, elapsed)
-                        }
-                    } else {
-                        format!("[{}] idle", i)
-                    }
-                } else {
-                    format!("[{}]", i)
-                };
+                if let Some((title, content)) = panel_data.get(i) {
+                    let block = Block::default()
+                        .title(title.as_str())
+                        .borders(Borders::ALL);
 
-                // Get output content
-                let content = output_buffers.get(i).map(|buf| {
-                    let height = panel_area.height.saturating_sub(2) as usize;
-                    buf.last_n(height)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                }).unwrap_or_default();
+                    let paragraph = Paragraph::new(content.as_str())
+                        .block(block)
+                        .wrap(Wrap { trim: false });
 
-                let block = Block::default()
-                    .title(title)
-                    .borders(Borders::ALL);
-
-                let paragraph = Paragraph::new(content)
-                    .block(block)
-                    .wrap(Wrap { trim: false });
-
-                frame.render_widget(paragraph, *panel_area);
+                    frame.render_widget(paragraph, *panel_area);
+                }
             }
         })?;
 

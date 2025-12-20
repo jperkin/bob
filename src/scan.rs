@@ -206,7 +206,6 @@ impl Scan {
                     script_envs.clone(),
                     None,
                     None,
-                    None,
                 )?;
                 let output = child
                     .wait_with_output()
@@ -344,7 +343,6 @@ impl Scan {
                     0,
                     post_build,
                     script_envs,
-                    None,
                     None,
                     None,
                 )?;

@@ -126,12 +126,6 @@ impl OutputReader {
     /// Read a line of output (non-blocking, returns None if no data available).
     pub fn try_read_line(&mut self) -> Option<String> {
         let mut line = String::new();
-        // Set non-blocking
-        let fd = self.reader.get_ref().as_raw_fd();
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFL);
-            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        }
         match self.reader.read_line(&mut line) {
             Ok(0) => None, // EOF
             Ok(_) => {
@@ -179,6 +173,13 @@ impl OutputWriter {
 pub fn output_channel() -> Result<(OutputReader, OutputWriter)> {
     let (reader, writer) =
         os_pipe::pipe().context("Failed to create output pipe")?;
+
+    // Set read end to non-blocking
+    let read_fd = reader.as_raw_fd();
+    unsafe {
+        let flags = libc::fcntl(read_fd, libc::F_GETFL);
+        libc::fcntl(read_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
 
     // Clear O_CLOEXEC on the write end so it survives exec
     let write_fd = writer.into_raw_fd();
