@@ -14,35 +14,38 @@ utility for building pkgsrc packages.
 
 ## Getting Started
 
-Install bob either by:
-
-* Cloning this repository and running `cargo build --release`
-* Running `cargo install pkgbob` to install directly from crates.io.
-
-Run `bob init /path/to/dir` to generate a directory containing
-`config.lua` and all the scripts necessary to build packages.
-
-On non-NetBSD systems you will need a pkgsrc bootstrap kit.  By default bob
-will look for `bootstrap.tar.gz` inside the configuration directory.
-
-Review `config.lua` and ensure that all of the paths are correct for your
-target environment.  The defaults have been chosen to work mostly out of the
-box.
-
-When you are happy with the configuration, either run:
+Install bob.
 
 ```
-$ cd /path/to/bob/init/dir
+$ cargo install pkgbob
+```
+
+Generate directory containing the configuration file and build scripts.  This
+is also where by default all data will be generated.
+
+```
+$ bob init /bob
+```
+
+Customise the config.  The defaults are designed to work mostly out of the
+box, but you are likely to want to change some things, for example which
+packages to build.
+
+```
+$ cd /bob
+$ vi config.lua
+```
+
+On non-NetBSD systems you will also need a pkgsrc bootstrap kit.  By default
+bob will look for `bootstrap.tar.gz` inside the init directory.
+
+When you are happy with the configuration:
+
+```
 $ bob build
 ```
 
-or:
-
-```
-$ bob -c /path/to/bob/init/dir/config.lua build
-```
-
-and bob will proceed to:
+Bob will proceed to:
 
 * Create a single sandbox under `sandboxes.basedir`.
 * Launch `options.scan_threads` number of scan processes inside the sandbox,
