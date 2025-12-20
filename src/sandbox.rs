@@ -277,6 +277,7 @@ impl Sandbox {
         mut envs: Vec<(String, String)>,
         stdin_data: Option<&str>,
         status_fd: Option<i32>,
+        output_fd: Option<i32>,
     ) -> Result<Child> {
         use std::io::Write;
 
@@ -290,6 +291,10 @@ impl Sandbox {
 
         if let Some(fd) = status_fd {
             envs.push(("bob_status_fd".to_string(), fd.to_string()));
+        }
+
+        if let Some(fd) = output_fd {
+            envs.push(("bob_output_fd".to_string(), fd.to_string()));
         }
 
         for (key, val) in envs {

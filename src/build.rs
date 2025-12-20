@@ -440,6 +440,7 @@ impl PackageBuild {
                 envs.clone(),
                 None,
                 None,
+                None,
             )?;
             let output = child
                 .wait_with_output()
@@ -449,10 +450,14 @@ impl PackageBuild {
             }
         }
 
-        // Run pkg-build with status channel
+        // Run pkg-build with status and output channels
         let (mut status_reader, status_writer) =
             status::channel().context("Failed to create status channel")?;
         let status_fd = status_writer.fd();
+
+        let (mut output_reader, output_writer) =
+            status::output_channel().context("Failed to create output channel")?;
+        let output_fd = output_writer.fd();
 
         let mut child = self.sandbox.execute(
             self.id,
@@ -460,15 +465,17 @@ impl PackageBuild {
             envs.clone(),
             Some(&stdin_data),
             Some(status_fd),
+            Some(output_fd),
         )?;
 
-        // Close write end in parent so we get EOF when child exits
+        // Close write ends in parent so we get EOF when child exits
         status_writer.close();
+        output_writer.close();
 
         // Track if we received a "skipped" message
         let mut was_skipped = false;
 
-        // Poll status channel and child process
+        // Poll status/output channels and child process
         loop {
             // Read any available status messages
             for msg in status_reader.read_all() {
@@ -483,6 +490,15 @@ impl PackageBuild {
                         was_skipped = true;
                     }
                 }
+            }
+
+            // Read any available output lines
+            let output_lines = output_reader.read_all_lines();
+            if !output_lines.is_empty() {
+                let _ = status_tx.send(ChannelCommand::OutputLines(
+                    self.id,
+                    output_lines,
+                ));
             }
 
             // Check if child has exited
@@ -551,7 +567,7 @@ impl PackageBuild {
         if let Some(post_build) = self.config.script("post-build") {
             debug!(pkgname = %pkgname, "Running post-build script");
             if let Ok(child) =
-                self.sandbox.execute(self.id, post_build, envs, None, None)
+                self.sandbox.execute(self.id, post_build, envs, None, None, None)
             {
                 match child.wait_with_output() {
                     Ok(output) if !output.status.success() => {
@@ -796,6 +812,10 @@ enum ChannelCommand {
      * Client reporting a stage update for a build.
      */
     StageUpdate(usize, Option<String>),
+    /**
+     * Client reporting output lines from a build.
+     */
+    OutputLines(usize, Vec<String>),
 }
 
 /**
@@ -1114,9 +1134,11 @@ impl Build {
                 && !shutdown_for_refresh.load(Ordering::SeqCst)
             {
                 if let Ok(mut p) = progress_refresh.lock() {
-                    let _ = p.render();
+                    // Check for keyboard events (like 'v' for view toggle)
+                    let _ = p.poll_events();
+                    let _ = p.render_throttled();
                 }
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(50));
             }
         });
 
@@ -1256,6 +1278,7 @@ impl Build {
                                 // Update thread progress
                                 thread_packages.insert(c, pkg.clone());
                                 if let Ok(mut p) = progress_clone.lock() {
+                                    p.clear_output_buffer(c);
                                     p.state_mut()
                                         .set_worker_active(c, pkg.pkgname());
                                     let _ = p.render_throttled();
@@ -1400,6 +1423,15 @@ impl Build {
                             p.state_mut()
                                 .set_worker_stage(tid, stage.as_deref());
                             let _ = p.render_throttled();
+                        }
+                    }
+                    ChannelCommand::OutputLines(tid, lines) => {
+                        if let Ok(mut p) = progress_clone.lock() {
+                            if let Some(buf) = p.output_buffer_mut(tid) {
+                                for line in lines {
+                                    buf.push(line);
+                                }
+                            }
                         }
                     }
                     _ => {}

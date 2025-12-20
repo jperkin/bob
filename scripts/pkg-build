@@ -18,6 +18,10 @@ set -e
 : ${bob_status_fd:?}
 : ${bob_tar:?}
 
+# Optional output capture fd for real-time TUI display
+# When set, output is tee'd to both log file and this fd
+bob_output_fd=${bob_output_fd:-}
+
 cleanup() {
 	if [ -n "${KEEP_WRKDIR}" ]; then
 		${bob_make} pbulk-save-wrkdir \
@@ -35,6 +39,8 @@ cleanup() {
 	if [ -z "${SKIP_CLEAN}" ]; then
 		${bob_make} clean > /dev/null 2>&1 || true
 	fi
+	# Kill tee process if output capture was enabled
+	[ -n "${_bob_tee_pid}" ] && kill "${_bob_tee_pid}" 2>/dev/null || true
 	exit 1
 }
 
@@ -129,7 +135,19 @@ cd ${bob_pkgsrc}/${pkgdir}
 mkdir -p "${pkglogdir}"
 rm -f "${pkglogdir}"/.stage
 
-exec >${pkglogdir}/pkg-build.log 2>&1
+# Set up output redirection
+# When bob_output_fd is set, tee output to both log file and the fd
+# using a FIFO for portability across shells
+if [ -n "${bob_output_fd}" ]; then
+	_bob_fifo="${pkglogdir}/.output.$$"
+	mkfifo "${_bob_fifo}"
+	tee "${pkglogdir}/pkg-build.log" <"${_bob_fifo}" >&${bob_output_fd} &
+	_bob_tee_pid=$!
+	exec >"${_bob_fifo}" 2>&1
+	rm -f "${_bob_fifo}"
+else
+	exec >${pkglogdir}/pkg-build.log 2>&1
+fi
 set -x
 
 # Create work.log and make it writable by the unprivileged user
@@ -191,5 +209,8 @@ ${bob_make} clean > "${pkglogdir}/clean.log" 2>&1 || true
 
 # Remove package bulklog directory on success
 rm -rf "${pkglogdir}"
+
+# Kill tee process if output capture was enabled
+[ -n "${_bob_tee_pid}" ] && kill "${_bob_tee_pid}" 2>/dev/null || true
 
 exit 0

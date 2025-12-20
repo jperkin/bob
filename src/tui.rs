@@ -18,14 +18,61 @@
 
 use crossterm::ExecutableCommand;
 use crossterm::cursor::Show;
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     text::Line,
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
+use std::collections::VecDeque;
 use std::io::{self, Stdout, stdout};
 use std::time::{Duration, Instant};
+
+/// Ring buffer for build output with fixed line capacity.
+#[derive(Clone, Debug)]
+pub struct OutputBuffer {
+    lines: VecDeque<String>,
+    capacity: usize,
+}
+
+impl OutputBuffer {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            lines: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    pub fn push(&mut self, line: String) {
+        if self.lines.len() >= self.capacity {
+            self.lines.pop_front();
+        }
+        self.lines.push_back(line);
+    }
+
+    pub fn last_n(&self, n: usize) -> impl Iterator<Item = &String> {
+        let skip = self.lines.len().saturating_sub(n);
+        self.lines.iter().skip(skip)
+    }
+
+    pub fn clear(&mut self) {
+        self.lines.clear();
+    }
+}
+
+/// Display mode for the TUI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewMode {
+    /// Inline progress display (default).
+    Inline,
+    /// Fullscreen multi-panel view showing build output.
+    MultiPanel,
+}
 
 /// State for a single worker thread.
 #[derive(Clone, Debug)]
@@ -201,10 +248,52 @@ fn format_duration_short(d: Duration) -> String {
     if secs < 60.0 { format!("{:.1}s", secs) } else { format_duration(d) }
 }
 
+/// Calculate grid layout for N panels.
+fn calculate_grid(area: Rect, num_panels: usize) -> Vec<Rect> {
+    if num_panels == 0 {
+        return vec![];
+    }
+
+    // Calculate roughly square grid
+    let cols = (num_panels as f64).sqrt().ceil() as usize;
+    let rows = num_panels.div_ceil(cols);
+
+    let row_constraints: Vec<Constraint> = (0..rows)
+        .map(|_| Constraint::Ratio(1, rows as u32))
+        .collect();
+    let col_constraints: Vec<Constraint> = (0..cols)
+        .map(|_| Constraint::Ratio(1, cols as u32))
+        .collect();
+
+    let row_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(row_constraints)
+        .split(area);
+
+    let mut panels = Vec::with_capacity(num_panels);
+    for (row_idx, row_area) in row_chunks.iter().enumerate() {
+        let col_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(col_constraints.clone())
+            .split(*row_area);
+
+        for (col_idx, col_area) in col_chunks.iter().enumerate() {
+            let panel_idx = row_idx * cols + col_idx;
+            if panel_idx < num_panels {
+                panels.push(*col_area);
+            }
+        }
+    }
+    panels
+}
+
 /// Line-based progress display using ratatui inline viewport.
 pub struct MultiProgress {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     state: ProgressState,
+    view_mode: ViewMode,
+    output_buffers: Vec<OutputBuffer>,
+    num_workers: usize,
 }
 
 impl MultiProgress {
@@ -222,6 +311,11 @@ impl MultiProgress {
         let options = TerminalOptions { viewport: Viewport::Inline(height) };
         let terminal = Terminal::with_options(backend, options)?;
 
+        // Create output buffer for each worker (100 lines each)
+        let output_buffers = (0..num_workers)
+            .map(|_| OutputBuffer::new(100))
+            .collect();
+
         Ok(Self {
             terminal,
             state: ProgressState::new(
@@ -231,11 +325,29 @@ impl MultiProgress {
                 num_workers,
                 show_skipped,
             ),
+            view_mode: ViewMode::Inline,
+            output_buffers,
+            num_workers,
         })
     }
 
     pub fn state_mut(&mut self) -> &mut ProgressState {
         &mut self.state
+    }
+
+    #[allow(dead_code)]
+    pub fn view_mode(&self) -> ViewMode {
+        self.view_mode
+    }
+
+    pub fn output_buffer_mut(&mut self, id: usize) -> Option<&mut OutputBuffer> {
+        self.output_buffers.get_mut(id)
+    }
+
+    pub fn clear_output_buffer(&mut self, id: usize) {
+        if let Some(buf) = self.output_buffers.get_mut(id) {
+            buf.clear();
+        }
     }
 
     /// Print a status message above the progress display.
@@ -332,10 +444,150 @@ impl MultiProgress {
     }
 
     pub fn render_throttled(&mut self) -> io::Result<()> {
-        self.render()
+        match self.view_mode {
+            ViewMode::Inline => self.render(),
+            ViewMode::MultiPanel => self.render_multipanel(),
+        }
+    }
+
+    /// Poll for keyboard events (non-blocking).
+    /// Returns true if view mode was toggled.
+    pub fn poll_events(&mut self) -> io::Result<bool> {
+        if self.state.suppressed {
+            return Ok(false);
+        }
+
+        // Non-blocking poll
+        if event::poll(Duration::from_millis(0))? {
+            if let Event::Key(key) = event::read()? {
+                // Toggle view mode on 'v' key
+                if key.code == KeyCode::Char('v') && key.modifiers.is_empty() {
+                    self.toggle_view_mode()?;
+                    return Ok(true);
+                }
+                // Also handle Ctrl+C in multi-panel mode
+                if key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    // Let the ctrlc handler deal with this
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Toggle between inline and multi-panel view modes.
+    pub fn toggle_view_mode(&mut self) -> io::Result<()> {
+        match self.view_mode {
+            ViewMode::Inline => self.switch_to_multipanel()?,
+            ViewMode::MultiPanel => self.switch_to_inline()?,
+        }
+        Ok(())
+    }
+
+    /// Switch to fullscreen multi-panel mode.
+    fn switch_to_multipanel(&mut self) -> io::Result<()> {
+        // Clear the inline viewport first
+        self.terminal.clear()?;
+
+        // Enter raw mode and alternate screen for fullscreen
+        enable_raw_mode()?;
+        stdout().execute(EnterAlternateScreen)?;
+
+        // Recreate terminal with fullscreen viewport
+        let backend = CrosstermBackend::new(stdout());
+        self.terminal = Terminal::new(backend)?;
+        self.view_mode = ViewMode::MultiPanel;
+
+        Ok(())
+    }
+
+    /// Switch back to inline progress mode.
+    fn switch_to_inline(&mut self) -> io::Result<()> {
+        // Leave alternate screen and raw mode
+        stdout().execute(LeaveAlternateScreen)?;
+        disable_raw_mode()?;
+
+        // Recreate terminal with inline viewport
+        let height = (self.num_workers + 1) as u16;
+        let backend = CrosstermBackend::new(stdout());
+        let options = TerminalOptions { viewport: Viewport::Inline(height) };
+        self.terminal = Terminal::with_options(backend, options)?;
+        self.view_mode = ViewMode::Inline;
+
+        Ok(())
+    }
+
+
+    /// Render multi-panel fullscreen view.
+    fn render_multipanel(&mut self) -> io::Result<()> {
+        if self.state.suppressed {
+            return Ok(());
+        }
+
+        self.state.update_timer_width();
+
+        // Clone state needed for rendering
+        let workers: Vec<_> = self.state.workers.clone();
+        let output_buffers: Vec<_> = self.output_buffers.clone();
+        let num_workers = workers.len();
+
+        self.terminal.draw(|frame| {
+            let area = frame.area();
+            let panels = calculate_grid(area, num_workers);
+
+            for (i, panel_area) in panels.iter().enumerate() {
+                let worker = workers.get(i);
+                let title = if let Some(w) = worker {
+                    if let Some(pkg) = &w.package {
+                        let stage = w.stage.as_deref().unwrap_or("");
+                        let elapsed = w.elapsed()
+                            .map(format_duration_short)
+                            .unwrap_or_default();
+                        if stage.is_empty() {
+                            format!("[{}] {} {}", i, pkg, elapsed)
+                        } else {
+                            format!("[{}] {} ({}) {}", i, pkg, stage, elapsed)
+                        }
+                    } else {
+                        format!("[{}] idle", i)
+                    }
+                } else {
+                    format!("[{}]", i)
+                };
+
+                // Get output content
+                let content = output_buffers.get(i).map(|buf| {
+                    let height = panel_area.height.saturating_sub(2) as usize;
+                    buf.last_n(height)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }).unwrap_or_default();
+
+                let block = Block::default()
+                    .title(title)
+                    .borders(Borders::ALL);
+
+                let paragraph = Paragraph::new(content)
+                    .block(block)
+                    .wrap(Wrap { trim: false });
+
+                frame.render_widget(paragraph, *panel_area);
+            }
+        })?;
+
+        Ok(())
     }
 
     pub fn finish(&mut self) -> io::Result<()> {
+        // If in multi-panel mode, switch back to inline first
+        if self.view_mode == ViewMode::MultiPanel {
+            let _ = stdout().execute(LeaveAlternateScreen);
+            let _ = disable_raw_mode();
+        }
+
         // Clear the inline viewport area
         self.terminal.clear()?;
 
@@ -373,6 +625,12 @@ impl MultiProgress {
         // Suppress any further output
         self.state.suppressed = true;
 
+        // If in multi-panel mode, switch back first
+        if self.view_mode == ViewMode::MultiPanel {
+            let _ = stdout().execute(LeaveAlternateScreen);
+            let _ = disable_raw_mode();
+        }
+
         // Clear the inline viewport area
         self.terminal.clear()?;
 
@@ -388,6 +646,11 @@ impl MultiProgress {
 
 impl Drop for MultiProgress {
     fn drop(&mut self) {
+        // If in multi-panel mode, restore terminal
+        if self.view_mode == ViewMode::MultiPanel {
+            let _ = stdout().execute(LeaveAlternateScreen);
+            let _ = disable_raw_mode();
+        }
         // Ensure cursor is visible when dropped
         let _ = stdout().execute(Show);
     }
