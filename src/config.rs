@@ -182,8 +182,8 @@ impl Default for LuaEnv {
 }
 
 impl LuaEnv {
-    /// Get global environment variables (only when env is a table, not a function).
-    /// Used during scan phase when package metadata is not yet available.
+    /// Get global environment variables for scan phase.
+    /// Calls env function with empty pkg table, or returns table directly.
     pub fn get_global_env(&self) -> Result<HashMap<String, String>, String> {
         let Some(env_key) = &self.env_key else {
             return Ok(HashMap::new());
@@ -196,10 +196,17 @@ impl LuaEnv {
             .registry_value(env_key)
             .map_err(|e| format!("Failed to get env from registry: {}", e))?;
 
-        // Only return env if it's a table (global). Functions require pkg info.
-        let table = match env_value {
+        let table: Table = match env_value {
+            Value::Function(func) => {
+                let pkg_table = lua
+                    .create_table()
+                    .map_err(|e| format!("Failed to create table: {}", e))?;
+                func.call(pkg_table)
+                    .map_err(|e| format!("Failed to call env function: {}", e))?
+            }
             Value::Table(t) => t,
-            _ => return Ok(HashMap::new()),
+            Value::Nil => return Ok(HashMap::new()),
+            _ => return Err("env must be a function or table".to_string()),
         };
 
         let mut env = HashMap::new();
