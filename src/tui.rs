@@ -465,14 +465,25 @@ impl MultiProgress {
                 format!("{}>{}", "=".repeat(filled), " ".repeat(empty))
             };
 
-            let line = format!(
-                "{:>12} [{}] {}/{} {}",
-                state.title,
-                bar,
-                state.completed + state.failed + state.skipped,
-                state.total,
-                elapsed_str
-            );
+            let line = if state.title == "Building" {
+                format!(
+                    "{:>12} [{}] {}/{} {} (press 'v' for full-screen)",
+                    state.title,
+                    bar,
+                    state.completed + state.failed + state.skipped,
+                    state.total,
+                    elapsed_str
+                )
+            } else {
+                format!(
+                    "{:>12} [{}] {}/{} {}",
+                    state.title,
+                    bar,
+                    state.completed + state.failed + state.skipped,
+                    state.total,
+                    elapsed_str
+                )
+            };
             frame.render_widget(Line::raw(line), chunks[state.workers.len()]);
         })?;
 
