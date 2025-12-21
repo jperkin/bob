@@ -15,14 +15,14 @@
  */
 
 use anyhow::{Result, bail};
+use bob::Init;
+use bob::build::{self, Build};
+use bob::config::Config;
+use bob::logging;
+use bob::report;
+use bob::sandbox::Sandbox;
+use bob::scan::{Scan, SkipReason};
 use clap::{Parser, Subcommand};
-use pkgbob::Init;
-use pkgbob::build::{self, Build};
-use pkgbob::config::Config;
-use pkgbob::logging;
-use pkgbob::report;
-use pkgbob::sandbox::Sandbox;
-use pkgbob::scan::{Scan, SkipReason};
 use std::path::{Path, PathBuf};
 use std::str;
 use std::sync::Arc;
@@ -287,6 +287,14 @@ fn main() -> Result<()> {
         }
         Cmd::Scan => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
+            let logs_dir = config
+                .config_path()
+                .and_then(|p| p.parent())
+                .map(|p| p.join("logs"))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Cannot determine logs directory")
+                })?;
+            logging::init(&logs_dir, config.verbose())?;
             if let Err(errors) = config.validate() {
                 eprintln!("Configuration errors:");
                 for e in &errors {

@@ -12,7 +12,7 @@ rust-version = "1.85.0"
 edition = "2024"
 
 [lib]
-name = "pkgbob"
+name = "bob"
 path = "src/lib.rs"
 
 [[bin]]

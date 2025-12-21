@@ -87,7 +87,7 @@ use std::process::{Child, Command, Stdio};
 /// # Example
 ///
 /// ```no_run
-/// # use pkgbob::{Config, Sandbox};
+/// # use bob::{Config, Sandbox};
 /// # use std::path::Path;
 /// # fn example() -> anyhow::Result<()> {
 /// let config = Config::load(None, false)?;

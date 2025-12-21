@@ -26,7 +26,7 @@
 //! # Usage
 //!
 //! ```no_run
-//! use pkgbob::{write_html_report, BuildSummary};
+//! use bob::{write_html_report, BuildSummary};
 //! use std::path::Path;
 //!
 //! # fn example(summary: &BuildSummary) -> anyhow::Result<()> {
