@@ -34,11 +34,12 @@ run_logged() {
 	if [ -n "${bob_output_fd}" ]; then
 		_rl_status_file="/tmp/.bob_status.$$"
 
+		# Disable tracing in subshell so only command output goes to TUI
 		if [ "${_rl_mode}" = "append" ]; then
-			{ "$@" 2>&1; echo $? > "${_rl_status_file}"; } | \
+			{ set +x; "$@" 2>&1; echo $? > "${_rl_status_file}"; } | \
 				eval "tee -a '${_rl_logfile}' >&${bob_output_fd}"
 		else
-			{ "$@" 2>&1; echo $? > "${_rl_status_file}"; } | \
+			{ set +x; "$@" 2>&1; echo $? > "${_rl_status_file}"; } | \
 				eval "tee '${_rl_logfile}' >&${bob_output_fd}"
 		fi
 

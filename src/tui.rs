@@ -27,11 +27,17 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     text::Line,
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use std::collections::VecDeque;
 use std::io::{self, Stdout, stdout};
 use std::time::{Duration, Instant};
+
+/// Strip ANSI escape sequences from a string.
+fn strip_ansi(s: &str) -> String {
+    let stripped = strip_ansi_escapes::strip(s);
+    String::from_utf8_lossy(&stripped).into_owned()
+}
 
 /// Ring buffer for build output with fixed line capacity.
 #[derive(Clone, Debug)]
@@ -49,10 +55,12 @@ impl OutputBuffer {
     }
 
     pub fn push(&mut self, line: String) {
+        // Strip ANSI escape sequences before storing
+        let clean_line = strip_ansi(&line);
         if self.lines.len() >= self.capacity {
             self.lines.pop_front();
         }
-        self.lines.push_back(line);
+        self.lines.push_back(clean_line);
     }
 
     pub fn last_n(&self, n: usize) -> impl Iterator<Item = &String> {
@@ -580,6 +588,9 @@ impl MultiProgress {
 
             for (i, panel_area) in panels.iter().enumerate() {
                 if let Some((title, content)) = panel_data.get(i) {
+                    // Clear the panel area first to remove old content
+                    frame.render_widget(Clear, *panel_area);
+
                     let block = Block::default()
                         .title(title.as_str())
                         .borders(Borders::ALL);
