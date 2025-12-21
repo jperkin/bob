@@ -309,18 +309,11 @@ fn main() -> Result<()> {
                 }
             }
             scan.start()?;
-            println!("Resolving dependencies...");
-            let result = scan.resolve()?;
-            println!(
-                "Resolved {} buildable packages, {} skipped",
-                result.buildable.len(),
-                result.skipped.len()
-            );
 
-            // Write scan output to file
+            // Write scan output to file (before resolution)
             let scan_file = logs_dir.join("scan.log");
             let mut out = String::new();
-            for idx in result.buildable.values() {
+            for idx in scan.scanned() {
                 out.push_str(&format!("PKGNAME={}\n", idx.pkgname.pkgname()));
                 if let Some(ref loc) = idx.pkg_location {
                     out.push_str(&format!(
@@ -381,6 +374,14 @@ fn main() -> Result<()> {
             }
             std::fs::write(&scan_file, &out)?;
             println!("Scan output written to {}", scan_file.display());
+
+            println!("Resolving dependencies...");
+            let result = scan.resolve()?;
+            println!(
+                "Resolved {} buildable packages, {} skipped",
+                result.buildable.len(),
+                result.skipped.len()
+            );
         }
     };
 

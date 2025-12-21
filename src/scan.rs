@@ -457,6 +457,11 @@ impl Scan {
         Ok(index)
     }
 
+    /// Get all scanned packages (before resolution).
+    pub fn scanned(&self) -> impl Iterator<Item = &ScanIndex> {
+        self.done.values().flatten()
+    }
+
     /**
      * Resolve the list of scanned packages, by ensuring all of the [`Depend`]
      * patterns in `all_depends` match a found package, and that there are no
