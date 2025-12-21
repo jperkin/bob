@@ -160,6 +160,8 @@ fn main() -> Result<()> {
                 }
             }
             scan.start()?;
+            scan.write_log(&logs_dir.join("scan.log"))?;
+
             println!("Resolving dependencies...");
             let scan_result = scan.resolve()?;
 
@@ -309,71 +311,7 @@ fn main() -> Result<()> {
                 }
             }
             scan.start()?;
-
-            // Write scan output to file (before resolution)
-            let scan_file = logs_dir.join("scan.log");
-            let mut out = String::new();
-            for idx in scan.scanned() {
-                out.push_str(&format!("PKGNAME={}\n", idx.pkgname.pkgname()));
-                if let Some(ref loc) = idx.pkg_location {
-                    out.push_str(&format!(
-                        "PKG_LOCATION={}\n",
-                        loc.as_path().display()
-                    ));
-                }
-                if !idx.all_depends.is_empty() {
-                    let deps: Vec<String> = idx
-                        .all_depends
-                        .iter()
-                        .map(|d| d.pkgpath().as_path().display().to_string())
-                        .collect();
-                    out.push_str(&format!("ALL_DEPENDS={}\n", deps.join(" ")));
-                }
-                if !idx.depends.is_empty() {
-                    let deps: Vec<&str> =
-                        idx.depends.iter().map(|d| d.pkgname()).collect();
-                    out.push_str(&format!("DEPENDS={}\n", deps.join(" ")));
-                }
-                if !idx.multi_version.is_empty() {
-                    out.push_str(&format!(
-                        "MULTI_VERSION={}\n",
-                        idx.multi_version.join(" ")
-                    ));
-                }
-                if let Some(ref v) = idx.pkg_skip_reason {
-                    out.push_str(&format!("PKG_SKIP_REASON={}\n", v));
-                }
-                if let Some(ref v) = idx.pkg_fail_reason {
-                    out.push_str(&format!("PKG_FAIL_REASON={}\n", v));
-                }
-                if let Some(ref v) = idx.categories {
-                    out.push_str(&format!("CATEGORIES={}\n", v));
-                }
-                if let Some(ref v) = idx.maintainer {
-                    out.push_str(&format!("MAINTAINER={}\n", v));
-                }
-                if let Some(ref v) = idx.bootstrap_pkg {
-                    out.push_str(&format!("BOOTSTRAP_PKG={}\n", v));
-                }
-                if let Some(ref v) = idx.usergroup_phase {
-                    out.push_str(&format!("USERGROUP_PHASE={}\n", v));
-                }
-                if let Some(ref v) = idx.use_destdir {
-                    out.push_str(&format!("USE_DESTDIR={}\n", v));
-                }
-                if let Some(ref v) = idx.no_bin_on_ftp {
-                    out.push_str(&format!("NO_BIN_ON_FTP={}\n", v));
-                }
-                if let Some(ref v) = idx.restricted {
-                    out.push_str(&format!("RESTRICTED={}\n", v));
-                }
-                if let Some(ref v) = idx.pbulk_weight {
-                    out.push_str(&format!("PBULK_WEIGHT={}\n", v));
-                }
-                out.push('\n');
-            }
-            std::fs::write(&scan_file, &out)?;
-            println!("Scan output written to {}", scan_file.display());
+            scan.write_log(&logs_dir.join("scan.log"))?;
 
             println!("Resolving dependencies...");
             let result = scan.resolve()?;

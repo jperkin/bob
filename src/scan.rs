@@ -462,6 +462,67 @@ impl Scan {
         self.done.values().flatten()
     }
 
+    /// Write scan output to a file in FOO=bar format.
+    pub fn write_log(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        use std::fmt::Write;
+        let mut out = String::new();
+        for idx in self.scanned() {
+            writeln!(out, "PKGNAME={}", idx.pkgname.pkgname())?;
+            if let Some(ref loc) = idx.pkg_location {
+                writeln!(out, "PKG_LOCATION={}", loc.as_path().display())?;
+            }
+            if !idx.all_depends.is_empty() {
+                let deps: Vec<String> = idx
+                    .all_depends
+                    .iter()
+                    .map(|d| d.pkgpath().as_path().display().to_string())
+                    .collect();
+                writeln!(out, "ALL_DEPENDS={}", deps.join(" "))?;
+            }
+            if !idx.depends.is_empty() {
+                let deps: Vec<&str> =
+                    idx.depends.iter().map(|d| d.pkgname()).collect();
+                writeln!(out, "DEPENDS={}", deps.join(" "))?;
+            }
+            if !idx.multi_version.is_empty() {
+                writeln!(out, "MULTI_VERSION={}", idx.multi_version.join(" "))?;
+            }
+            if let Some(ref v) = idx.pkg_skip_reason {
+                writeln!(out, "PKG_SKIP_REASON={}", v)?;
+            }
+            if let Some(ref v) = idx.pkg_fail_reason {
+                writeln!(out, "PKG_FAIL_REASON={}", v)?;
+            }
+            if let Some(ref v) = idx.categories {
+                writeln!(out, "CATEGORIES={}", v)?;
+            }
+            if let Some(ref v) = idx.maintainer {
+                writeln!(out, "MAINTAINER={}", v)?;
+            }
+            if let Some(ref v) = idx.bootstrap_pkg {
+                writeln!(out, "BOOTSTRAP_PKG={}", v)?;
+            }
+            if let Some(ref v) = idx.usergroup_phase {
+                writeln!(out, "USERGROUP_PHASE={}", v)?;
+            }
+            if let Some(ref v) = idx.use_destdir {
+                writeln!(out, "USE_DESTDIR={}", v)?;
+            }
+            if let Some(ref v) = idx.no_bin_on_ftp {
+                writeln!(out, "NO_BIN_ON_FTP={}", v)?;
+            }
+            if let Some(ref v) = idx.restricted {
+                writeln!(out, "RESTRICTED={}", v)?;
+            }
+            if let Some(ref v) = idx.pbulk_weight {
+                writeln!(out, "PBULK_WEIGHT={}", v)?;
+            }
+            out.push('\n');
+        }
+        std::fs::write(path, &out)?;
+        Ok(())
+    }
+
     /**
      * Resolve the list of scanned packages, by ensuring all of the [`Depend`]
      * patterns in `all_depends` match a found package, and that there are no
