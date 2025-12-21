@@ -731,8 +731,12 @@ fn build_visible_lines(
         };
 
         if wrapped.len() > remaining {
-            let start = wrapped.len() - remaining;
-            wrapped = wrapped[start..].to_vec();
+            if is_last {
+                let start = wrapped.len() - remaining;
+                wrapped = wrapped[start..].to_vec();
+            } else {
+                continue;
+            }
         }
 
         for row in wrapped.iter().rev() {

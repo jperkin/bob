@@ -24,7 +24,7 @@
  */
 
 use anyhow::{Context, Result};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::os::unix::io::{AsRawFd, IntoRawFd, RawFd};
 
 /// A status message from the build script.
@@ -120,31 +120,46 @@ pub fn channel() -> Result<(StatusReader, StatusWriter)> {
 /// Read end of an output channel for capturing build output.
 pub struct OutputReader {
     reader: BufReader<os_pipe::PipeReader>,
+    pending: String,
 }
 
 impl OutputReader {
     /// Read a line of output (non-blocking, returns None if no data available).
     pub fn try_read_line(&mut self) -> Option<String> {
-        let mut line = String::new();
-        match self.reader.read_line(&mut line) {
-            Ok(0) => None, // EOF
-            Ok(_) => {
-                // Remove trailing newline
-                if line.ends_with('\n') {
-                    line.pop();
-                }
-                Some(line)
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
-            Err(_) => None,
+        let mut lines = self.read_all_lines();
+        if lines.is_empty() {
+            None
+        } else {
+            Some(lines.remove(0))
         }
     }
 
     /// Read all available lines.
     pub fn read_all_lines(&mut self) -> Vec<String> {
+        let mut buf = [0u8; 8192];
+        loop {
+            match self.reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let chunk = String::from_utf8_lossy(&buf[..n]);
+                    self.pending.push_str(&chunk);
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+
         let mut lines = Vec::new();
-        while let Some(line) = self.try_read_line() {
-            lines.push(line);
+        let mut start = 0usize;
+        while let Some(pos) = self.pending[start..].find('\n') {
+            let end = start + pos;
+            lines.push(self.pending[start..end].to_string());
+            start = end + 1;
+        }
+        if start > 0 {
+            self.pending = self.pending[start..].to_string();
         }
         lines
     }
@@ -189,7 +204,7 @@ pub fn output_channel() -> Result<(OutputReader, OutputWriter)> {
     }
 
     Ok((
-        OutputReader { reader: BufReader::new(reader) },
+        OutputReader { reader: BufReader::new(reader), pending: String::new() },
         OutputWriter { fd: write_fd },
     ))
 }
