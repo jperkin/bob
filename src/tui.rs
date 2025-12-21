@@ -20,7 +20,8 @@ use crossterm::ExecutableCommand;
 use crossterm::cursor::Show;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+    enable_raw_mode,
 };
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
@@ -58,10 +59,7 @@ pub struct OutputBuffer {
 
 impl OutputBuffer {
     pub fn new(capacity: usize) -> Self {
-        Self {
-            lines: VecDeque::with_capacity(capacity),
-            capacity,
-        }
+        Self { lines: VecDeque::with_capacity(capacity), capacity }
     }
 
     pub fn push(&mut self, line: String) {
@@ -293,12 +291,10 @@ fn calculate_grid(area: Rect, num_panels: usize) -> Vec<Rect> {
     let cols = (num_panels as f64).sqrt().ceil() as usize;
     let rows = num_panels.div_ceil(cols);
 
-    let row_constraints: Vec<Constraint> = (0..rows)
-        .map(|_| Constraint::Ratio(1, rows as u32))
-        .collect();
-    let col_constraints: Vec<Constraint> = (0..cols)
-        .map(|_| Constraint::Ratio(1, cols as u32))
-        .collect();
+    let row_constraints: Vec<Constraint> =
+        (0..rows).map(|_| Constraint::Ratio(1, rows as u32)).collect();
+    let col_constraints: Vec<Constraint> =
+        (0..cols).map(|_| Constraint::Ratio(1, cols as u32)).collect();
 
     let row_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -350,9 +346,8 @@ impl MultiProgress {
         let terminal = Terminal::with_options(backend, options)?;
 
         // Create output buffer for each worker (100 lines each)
-        let output_buffers = (0..num_workers)
-            .map(|_| OutputBuffer::new(100))
-            .collect();
+        let output_buffers =
+            (0..num_workers).map(|_| OutputBuffer::new(100)).collect();
 
         Ok(Self {
             terminal,
@@ -378,7 +373,10 @@ impl MultiProgress {
         self.view_mode
     }
 
-    pub fn output_buffer_mut(&mut self, id: usize) -> Option<&mut OutputBuffer> {
+    pub fn output_buffer_mut(
+        &mut self,
+        id: usize,
+    ) -> Option<&mut OutputBuffer> {
         self.output_buffers.get_mut(id)
     }
 
@@ -556,7 +554,6 @@ impl MultiProgress {
         Ok(())
     }
 
-
     /// Render multi-panel fullscreen view.
     fn render_multipanel(&mut self) -> io::Result<()> {
         if self.state.suppressed {
@@ -567,32 +564,37 @@ impl MultiProgress {
 
         // Pre-compute panel data to avoid borrowing issues with draw closure
         let num_workers = self.num_workers;
-        let panel_data: Vec<_> = (0..num_workers).map(|i| {
-            let title = if let Some(w) = self.state.workers.get(i) {
-                if let Some(pkg) = &w.package {
-                    let stage = w.stage.as_deref().unwrap_or("");
-                    let elapsed = w.elapsed()
-                        .map(format_duration_short)
-                        .unwrap_or_default();
-                    if stage.is_empty() {
-                        format!("[{}] {} {}", i, pkg, elapsed)
+        let panel_data: Vec<_> = (0..num_workers)
+            .map(|i| {
+                let title = if let Some(w) = self.state.workers.get(i) {
+                    if let Some(pkg) = &w.package {
+                        let stage = w.stage.as_deref().unwrap_or("");
+                        let elapsed = w
+                            .elapsed()
+                            .map(format_duration_short)
+                            .unwrap_or_default();
+                        if stage.is_empty() {
+                            format!("[{}] {} {}", i, pkg, elapsed)
+                        } else {
+                            format!("[{}] {} ({}) {}", i, pkg, stage, elapsed)
+                        }
                     } else {
-                        format!("[{}] {} ({}) {}", i, pkg, stage, elapsed)
+                        format!("[{}] idle", i)
                     }
                 } else {
-                    format!("[{}] idle", i)
-                }
-            } else {
-                format!("[{}]", i)
-            };
+                    format!("[{}]", i)
+                };
 
-            // Capture last 100 logical lines; draw will trim to fit panel.
-            let lines = self.output_buffers.get(i)
-                .map(|buf| buf.last_n(100).cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
+                // Capture last 100 logical lines; draw will trim to fit panel.
+                let lines = self
+                    .output_buffers
+                    .get(i)
+                    .map(|buf| buf.last_n(100).cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
 
-            (title, lines)
-        }).collect();
+                (title, lines)
+            })
+            .collect();
 
         self.terminal.draw(|frame| {
             let area = frame.area();
@@ -607,18 +609,15 @@ impl MultiProgress {
                         .title(title.as_str())
                         .borders(Borders::ALL);
 
-                    let inner_width = panel_area.width.saturating_sub(2) as usize;
+                    let inner_width =
+                        panel_area.width.saturating_sub(2) as usize;
                     let inner_height =
                         panel_area.height.saturating_sub(2) as usize;
 
-                    let visible = build_visible_lines(
-                        lines,
-                        inner_width,
-                        inner_height,
-                    );
+                    let visible =
+                        build_visible_lines(lines, inner_width, inner_height);
 
-                    let paragraph = Paragraph::new(visible)
-                        .block(block);
+                    let paragraph = Paragraph::new(visible).block(block);
 
                     frame.render_widget(paragraph, *panel_area);
                 }
@@ -743,11 +742,7 @@ fn build_visible_lines(
         is_last = false;
     }
 
-    rows_rev
-        .into_iter()
-        .rev()
-        .map(Line::raw)
-        .collect()
+    rows_rev.into_iter().rev().map(Line::raw).collect()
 }
 
 fn wrap_line(s: &str, width: usize) -> Vec<String> {

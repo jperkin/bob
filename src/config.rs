@@ -201,8 +201,9 @@ impl LuaEnv {
                 let pkg_table = lua
                     .create_table()
                     .map_err(|e| format!("Failed to create table: {}", e))?;
-                func.call(pkg_table)
-                    .map_err(|e| format!("Failed to call env function: {}", e))?
+                func.call(pkg_table).map_err(|e| {
+                    format!("Failed to call env function: {}", e)
+                })?
             }
             Value::Table(t) => t,
             Value::Nil => return Ok(HashMap::new()),

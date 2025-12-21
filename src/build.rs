@@ -454,8 +454,8 @@ impl PackageBuild {
             status::channel().context("Failed to create status channel")?;
         let status_fd = status_writer.fd();
 
-        let (mut output_reader, output_writer) =
-            status::output_channel().context("Failed to create output channel")?;
+        let (mut output_reader, output_writer) = status::output_channel()
+            .context("Failed to create output channel")?;
         let output_fd = output_writer.fd();
 
         // Pass the output fd to the script
@@ -496,10 +496,8 @@ impl PackageBuild {
             // Read any available output lines
             let output_lines = output_reader.read_all_lines();
             if !output_lines.is_empty() {
-                let _ = status_tx.send(ChannelCommand::OutputLines(
-                    self.id,
-                    output_lines,
-                ));
+                let _ = status_tx
+                    .send(ChannelCommand::OutputLines(self.id, output_lines));
             }
 
             // Check if child has exited
@@ -518,7 +516,8 @@ impl PackageBuild {
         // Read any remaining output after child exits
         let remaining = output_reader.read_all_lines();
         if !remaining.is_empty() {
-            let _ = status_tx.send(ChannelCommand::OutputLines(self.id, remaining));
+            let _ =
+                status_tx.send(ChannelCommand::OutputLines(self.id, remaining));
         }
 
         // Clear stage display
