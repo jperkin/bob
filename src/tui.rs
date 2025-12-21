@@ -468,7 +468,7 @@ impl MultiProgress {
             // Fixed parts: "{:>12} [" (14) + "] " (2) + counts + " " + elapsed + " " + hint
             let fixed = 14 + 2 + counts.len() + 1 + elapsed_str.len()
                 + if hint.is_empty() { 0 } else { 1 + hint.len() };
-            let bar_width = width.saturating_sub(fixed).clamp(10, 30);
+            let bar_width = width.saturating_sub(fixed).clamp(1, 30);
             let padding = width.saturating_sub(fixed + bar_width);
 
             let filled = (ratio * bar_width as f64) as usize;
@@ -488,7 +488,7 @@ impl MultiProgress {
                 )
             } else {
                 format!(
-                    "{:>12} [{}] {} {}{:pad$}{}",
+                    "{:>12} [{}] {} {}{:pad$} {}",
                     state.title, bar, counts, elapsed_str, "", hint, pad = padding
                 )
             };
