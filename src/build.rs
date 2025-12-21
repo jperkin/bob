@@ -1302,6 +1302,7 @@ impl Build {
                             }
                             BuildStatus::NoneAvailable => {
                                 if let Ok(mut p) = progress_clone.lock() {
+                                    p.clear_output_buffer(c);
                                     p.state_mut().set_worker_idle(c);
                                     let _ = p.render_throttled();
                                 }
@@ -1310,6 +1311,7 @@ impl Build {
                             }
                             BuildStatus::Done => {
                                 if let Ok(mut p) = progress_clone.lock() {
+                                    p.clear_output_buffer(c);
                                     p.state_mut().set_worker_idle(c);
                                     let _ = p.render_throttled();
                                 }
@@ -1340,6 +1342,7 @@ impl Build {
                             p.state_mut().increment_completed();
                             for (tid, pkg) in &thread_packages {
                                 if pkg == &pkgname {
+                                    p.clear_output_buffer(*tid);
                                     p.state_mut().set_worker_idle(*tid);
                                     break;
                                 }
@@ -1365,6 +1368,7 @@ impl Build {
                             p.state_mut().increment_skipped();
                             for (tid, pkg) in &thread_packages {
                                 if pkg == &pkgname {
+                                    p.clear_output_buffer(*tid);
                                     p.state_mut().set_worker_idle(*tid);
                                     break;
                                 }
@@ -1391,6 +1395,7 @@ impl Build {
                             p.state_mut().increment_failed();
                             for (tid, pkg) in &thread_packages {
                                 if pkg == &pkgname {
+                                    p.clear_output_buffer(*tid);
                                     p.state_mut().set_worker_idle(*tid);
                                     break;
                                 }
@@ -1417,6 +1422,7 @@ impl Build {
                             p.state_mut().increment_failed();
                             for (tid, pkg) in &thread_packages {
                                 if pkg == &pkgname {
+                                    p.clear_output_buffer(*tid);
                                     p.state_mut().set_worker_idle(*tid);
                                     break;
                                 }

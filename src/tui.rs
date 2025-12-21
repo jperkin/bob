@@ -27,7 +27,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     text::Line,
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 use std::collections::VecDeque;
 use std::io::{self, Stdout, stdout};
@@ -57,6 +57,8 @@ impl OutputBuffer {
     pub fn push(&mut self, line: String) {
         // Strip ANSI escape sequences before storing
         let clean_line = strip_ansi(&line);
+        // If carriage returns are present, keep only the final segment.
+        let clean_line = clean_line.rsplit('\r').next().unwrap_or("").to_string();
         if self.lines.len() >= self.capacity {
             self.lines.pop_front();
         }
@@ -574,12 +576,12 @@ impl MultiProgress {
                 format!("[{}]", i)
             };
 
-            // Pre-render last 100 lines (will be trimmed to panel height in draw)
-            let content = self.output_buffers.get(i)
-                .map(|buf| buf.last_n(100).cloned().collect::<Vec<_>>().join("\n"))
+            // Capture last 100 logical lines; draw will trim to fit panel.
+            let lines = self.output_buffers.get(i)
+                .map(|buf| buf.last_n(100).cloned().collect::<Vec<_>>())
                 .unwrap_or_default();
 
-            (title, content)
+            (title, lines)
         }).collect();
 
         self.terminal.draw(|frame| {
@@ -587,7 +589,7 @@ impl MultiProgress {
             let panels = calculate_grid(area, num_workers);
 
             for (i, panel_area) in panels.iter().enumerate() {
-                if let Some((title, content)) = panel_data.get(i) {
+                if let Some((title, lines)) = panel_data.get(i) {
                     // Clear the panel area first to remove old content
                     frame.render_widget(Clear, *panel_area);
 
@@ -595,9 +597,21 @@ impl MultiProgress {
                         .title(title.as_str())
                         .borders(Borders::ALL);
 
-                    let paragraph = Paragraph::new(content.as_str())
-                        .block(block)
-                        .wrap(Wrap { trim: false });
+                    let inner_width = panel_area.width.saturating_sub(2) as usize;
+                    let inner_height = panel_area.height.saturating_sub(2) as usize;
+
+                    let mut display_lines = Vec::new();
+                    for line in lines {
+                        let truncated = truncate_left(line, inner_width);
+                        display_lines.push(Line::raw(truncated));
+                    }
+
+                    let start =
+                        display_lines.len().saturating_sub(inner_height);
+                    let visible = display_lines[start..].to_vec();
+
+                    let paragraph = Paragraph::new(visible)
+                        .block(block);
 
                     frame.render_widget(paragraph, *panel_area);
                 }
@@ -672,6 +686,22 @@ impl MultiProgress {
 
         Ok(())
     }
+}
+
+fn truncate_left(s: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= width {
+        return s.to_string();
+    }
+    if width <= 3 {
+        return chars[chars.len() - width..].iter().collect();
+    }
+    let keep = width - 3;
+    let tail: String = chars[chars.len() - keep..].iter().collect();
+    format!("...{}", tail)
 }
 
 impl Drop for MultiProgress {
