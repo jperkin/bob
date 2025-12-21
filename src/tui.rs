@@ -32,11 +32,24 @@ use ratatui::{
 use std::collections::VecDeque;
 use std::io::{self, Stdout, stdout};
 use std::time::{Duration, Instant};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Strip ANSI escape sequences from a string.
 fn strip_ansi(s: &str) -> String {
     let stripped = strip_ansi_escapes::strip(s);
     String::from_utf8_lossy(&stripped).into_owned()
+}
+
+fn sanitize_control(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\t' => out.push_str("        "),
+            '\x00'..='\x1f' | '\x7f' => {}
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// Ring buffer for build output with fixed line capacity.
@@ -58,7 +71,8 @@ impl OutputBuffer {
         // Strip ANSI escape sequences before storing
         let clean_line = strip_ansi(&line);
         // If carriage returns are present, keep only the final segment.
-        let clean_line = clean_line.rsplit('\r').next().unwrap_or("").to_string();
+        let clean_line = clean_line.rsplit('\r').next().unwrap_or("");
+        let clean_line = sanitize_control(clean_line);
         if self.lines.len() >= self.capacity {
             self.lines.pop_front();
         }
@@ -598,17 +612,14 @@ impl MultiProgress {
                         .borders(Borders::ALL);
 
                     let inner_width = panel_area.width.saturating_sub(2) as usize;
-                    let inner_height = panel_area.height.saturating_sub(2) as usize;
+                    let inner_height =
+                        panel_area.height.saturating_sub(2) as usize;
 
-                    let mut display_lines = Vec::new();
-                    for line in lines {
-                        let truncated = truncate_left(line, inner_width);
-                        display_lines.push(Line::raw(truncated));
-                    }
-
-                    let start =
-                        display_lines.len().saturating_sub(inner_height);
-                    let visible = display_lines[start..].to_vec();
+                    let visible = build_visible_lines(
+                        lines,
+                        inner_width,
+                        inner_height,
+                    );
 
                     let paragraph = Paragraph::new(visible)
                         .block(block);
@@ -688,19 +699,122 @@ impl MultiProgress {
     }
 }
 
-fn truncate_left(s: &str, width: usize) -> String {
+fn build_visible_lines(
+    lines: &[String],
+    width: usize,
+    height: usize,
+) -> Vec<Line<'static>> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    let mut rows_rev: Vec<String> = Vec::new();
+    let mut remaining = height;
+    let mut is_last = true;
+
+    for line in lines.iter().rev() {
+        if remaining == 0 {
+            break;
+        }
+
+        let mut wrapped = if is_last {
+            let max_cols = width.saturating_mul(height);
+            let total_cols = UnicodeWidthStr::width(line.as_str());
+            if total_cols > max_cols {
+                let truncated = truncate_left_total(line, max_cols);
+                wrap_line(&truncated, width)
+            } else {
+                wrap_line(line, width)
+            }
+        } else {
+            wrap_line(line, width)
+        };
+
+        if wrapped.len() > remaining {
+            let start = wrapped.len() - remaining;
+            wrapped = wrapped[start..].to_vec();
+        }
+
+        for row in wrapped.iter().rev() {
+            rows_rev.push(row.clone());
+        }
+
+        remaining = height.saturating_sub(rows_rev.len());
+        is_last = false;
+    }
+
+    rows_rev
+        .into_iter()
+        .rev()
+        .map(Line::raw)
+        .collect()
+}
+
+fn wrap_line(s: &str, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
     if width == 0 {
+        return rows;
+    }
+    let mut current = String::new();
+    let mut count = 0usize;
+    for ch in s.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w == 0 {
+            current.push(ch);
+            continue;
+        }
+        if count + w > width && count > 0 {
+            rows.push(current);
+            current = String::new();
+            count = 0;
+        }
+        current.push(ch);
+        count += w;
+        if count >= width {
+            rows.push(current);
+            current = String::new();
+            count = 0;
+        }
+    }
+    if !current.is_empty() {
+        rows.push(current);
+    }
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    rows
+}
+
+fn tail_by_width(s: &str, max_cols: usize) -> String {
+    if max_cols == 0 {
         return String::new();
     }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= width {
+    let mut cols = 0usize;
+    let mut rev: Vec<char> = Vec::new();
+    for ch in s.chars().rev() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w > 0 && cols + w > max_cols {
+            break;
+        }
+        rev.push(ch);
+        cols = cols.saturating_add(w);
+    }
+    rev.into_iter().rev().collect()
+}
+
+fn truncate_left_total(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let width = UnicodeWidthStr::width(s);
+    if width <= max_chars {
         return s.to_string();
     }
-    if width <= 3 {
-        return chars[chars.len() - width..].iter().collect();
+    if max_chars <= 3 {
+        return tail_by_width(s, max_chars);
     }
-    let keep = width - 3;
-    let tail: String = chars[chars.len() - keep..].iter().collect();
+    let keep = max_chars - 3;
+    let tail = tail_by_width(s, keep);
     format!("...{}", tail)
 }
 
