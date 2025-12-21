@@ -72,7 +72,7 @@ impl OutputBuffer {
         if self.lines.len() >= self.capacity {
             self.lines.pop_front();
         }
-        self.lines.push_back(clean_line);
+        self.lines.push_back(clean_line.to_string());
     }
 
     pub fn last_n(&self, n: usize) -> impl Iterator<Item = &String> {

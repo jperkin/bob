@@ -63,12 +63,27 @@
 //! | `pkgpaths` | table | `{}` | List of package paths to build (e.g., `{"mail/mutt", "www/curl"}`). Dependencies are discovered automatically. |
 //! | `report_dir` | string | `bulklog` | Directory for HTML build reports. Defaults to the `bulklog` directory. |
 //! | `save_wrkdir_patterns` | table | `{}` | Glob patterns for files to preserve from WRKDIR on build failure (e.g., `{"**/config.log"}`). |
-//! | `env` | function or table | `{}` | Environment variables for builds. Can be a table of key-value pairs, or a function receiving package metadata and returning a table. See [Environment Function](#environment-function). |
+//! | `env` | function or table | `{}` | Environment variables passed to make. See [Environment Variables](#environment-variables). |
 //!
-//! ## Environment Function
+//! ## Environment Variables
 //!
-//! The `env` field can be a function that returns environment variables for each
-//! package build. The function receives a `pkg` table with the following fields:
+//! The `env` field sets environment variables passed to pkgsrc make commands.
+//! It can be a table of key-value pairs, or a function that receives a `pkg`
+//! table and returns variables. Functions only apply during build since package
+//! metadata is not available during scan.
+//!
+//! ```lua
+//! env = function(pkg)
+//!     local env = {}
+//!     env.MAKE_JOBS = 2
+//!     if pkg.pkgpath == "lang/rust" then
+//!         env.MAKE_JOBS = 8
+//!     end
+//!     return env
+//! end
+//! ```
+//!
+//! The `pkg` table contains the following fields:
 //!
 //! | Field | Type | Description |
 //! |-------|------|-------------|
@@ -167,6 +182,36 @@ impl Default for LuaEnv {
 }
 
 impl LuaEnv {
+    /// Get global environment variables (only when env is a table, not a function).
+    /// Used during scan phase when package metadata is not yet available.
+    pub fn get_global_env(&self) -> Result<HashMap<String, String>, String> {
+        let Some(env_key) = &self.env_key else {
+            return Ok(HashMap::new());
+        };
+
+        let lua =
+            self.lua.lock().map_err(|e| format!("Lua lock error: {}", e))?;
+
+        let env_value: Value = lua
+            .registry_value(env_key)
+            .map_err(|e| format!("Failed to get env from registry: {}", e))?;
+
+        // Only return env if it's a table (global). Functions require pkg info.
+        let table = match env_value {
+            Value::Table(t) => t,
+            _ => return Ok(HashMap::new()),
+        };
+
+        let mut env = HashMap::new();
+        for pair in table.pairs::<String, String>() {
+            let (k, v) = pair
+                .map_err(|e| format!("Failed to iterate env table: {}", e))?;
+            env.insert(k, v);
+        }
+
+        Ok(env)
+    }
+
     /// Get environment variables for a package by calling the env function.
     /// Returns a HashMap of VAR_NAME -> value.
     pub fn get_env(
@@ -641,6 +686,15 @@ impl Config {
         idx: &ScanIndex,
     ) -> Result<std::collections::HashMap<String, String>, String> {
         self.lua_env.get_env(idx)
+    }
+
+    /// Get global environment variables from the Lua env table.
+    /// Only returns values when env is a table; functions require package info
+    /// and are only evaluated during build.
+    pub fn get_global_env(
+        &self,
+    ) -> Result<std::collections::HashMap<String, String>, String> {
+        self.lua_env.get_global_env()
     }
 
     /// Return environment variables for script execution.

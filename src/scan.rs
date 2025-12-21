@@ -394,12 +394,21 @@ impl Scan {
             pkgsrcdir, pkgpath_str, bmake
         );
 
+        // Get global env vars (only from table, not function)
+        let envs: Vec<(String, String)> = self
+            .config
+            .get_global_env()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
         trace!(
             pkgpath = %pkgpath_str,
             script = %script,
+            env_count = envs.len(),
             "Executing pkg-scan"
         );
-        let child = self.sandbox.execute_script(0, &script, vec![])?;
+        let child = self.sandbox.execute_script(0, &script, envs)?;
         let output = child.wait_with_output()?;
 
         if !output.status.success() {
