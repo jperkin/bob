@@ -452,9 +452,25 @@ impl MultiProgress {
             // Render cargo-style progress bar: Scanning [====>        ] 5/20 1.2s
             let ratio = state.progress_ratio();
             let elapsed_str = format_duration_short(state.elapsed());
+            let counts = format!(
+                "{}/{}",
+                state.completed + state.failed + state.skipped,
+                state.total
+            );
 
-            // Fixed width progress bar
-            let bar_width: usize = 30;
+            // Calculate bar width: shrink if needed to fit hint, max 30
+            let hint = if state.title == "Building" {
+                "(press 'v' for full-screen)"
+            } else {
+                ""
+            };
+            let width = area.width as usize;
+            // Fixed parts: "{:>12} [" (14) + "] " (2) + counts + " " + elapsed + " " + hint
+            let fixed = 14 + 2 + counts.len() + 1 + elapsed_str.len()
+                + if hint.is_empty() { 0 } else { 1 + hint.len() };
+            let bar_width = width.saturating_sub(fixed).clamp(10, 30);
+            let padding = width.saturating_sub(fixed + bar_width);
+
             let filled = (ratio * bar_width as f64) as usize;
             let empty = bar_width.saturating_sub(filled).saturating_sub(1);
             let bar = if filled >= bar_width {
@@ -465,23 +481,15 @@ impl MultiProgress {
                 format!("{}>{}", "=".repeat(filled), " ".repeat(empty))
             };
 
-            let line = if state.title == "Building" {
+            let line = if hint.is_empty() {
                 format!(
-                    "{:>12} [{}] {}/{} {} (press 'v' for full-screen)",
-                    state.title,
-                    bar,
-                    state.completed + state.failed + state.skipped,
-                    state.total,
-                    elapsed_str
+                    "{:>12} [{}] {} {}",
+                    state.title, bar, counts, elapsed_str
                 )
             } else {
                 format!(
-                    "{:>12} [{}] {}/{} {}",
-                    state.title,
-                    bar,
-                    state.completed + state.failed + state.skipped,
-                    state.total,
-                    elapsed_str
+                    "{:>12} [{}] {} {}{:pad$}{}",
+                    state.title, bar, counts, elapsed_str, "", hint, pad = padding
                 )
             };
             frame.render_widget(Line::raw(line), chunks[state.workers.len()]);
