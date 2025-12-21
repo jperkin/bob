@@ -124,16 +124,6 @@ pub struct OutputReader {
 }
 
 impl OutputReader {
-    /// Read a line of output (non-blocking, returns None if no data available).
-    pub fn try_read_line(&mut self) -> Option<String> {
-        let mut lines = self.read_all_lines();
-        if lines.is_empty() {
-            None
-        } else {
-            Some(lines.remove(0))
-        }
-    }
-
     /// Read all available lines.
     pub fn read_all_lines(&mut self) -> Vec<String> {
         let mut buf = [0u8; 8192];

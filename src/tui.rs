@@ -34,13 +34,10 @@ use std::io::{self, Stdout, stdout};
 use std::time::{Duration, Instant};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// Strip ANSI escape sequences from a string.
-fn strip_ansi(s: &str) -> String {
+/// Strip ANSI escape sequences and sanitize control characters.
+fn sanitize_output(s: &str) -> String {
     let stripped = strip_ansi_escapes::strip(s);
-    String::from_utf8_lossy(&stripped).into_owned()
-}
-
-fn sanitize_control(s: &str) -> String {
+    let s = String::from_utf8_lossy(&stripped);
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
@@ -68,11 +65,10 @@ impl OutputBuffer {
     }
 
     pub fn push(&mut self, line: String) {
-        // Strip ANSI escape sequences before storing
-        let clean_line = strip_ansi(&line);
+        // Strip ANSI escapes and sanitize control characters before storing.
+        let clean_line = sanitize_output(&line);
         // If carriage returns are present, keep only the final segment.
         let clean_line = clean_line.rsplit('\r').next().unwrap_or("");
-        let clean_line = sanitize_control(clean_line);
         if self.lines.len() >= self.capacity {
             self.lines.pop_front();
         }
@@ -721,7 +717,7 @@ fn build_visible_lines(
             let max_cols = width.saturating_mul(height);
             let total_cols = UnicodeWidthStr::width(line.as_str());
             if total_cols > max_cols {
-                let truncated = truncate_left_total(line, max_cols);
+                let truncated = truncate_left_cols(line, max_cols);
                 wrap_line(&truncated, width)
             } else {
                 wrap_line(line, width)
@@ -806,18 +802,18 @@ fn tail_by_width(s: &str, max_cols: usize) -> String {
     rev.into_iter().rev().collect()
 }
 
-fn truncate_left_total(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
+fn truncate_left_cols(s: &str, max_cols: usize) -> String {
+    if max_cols == 0 {
         return String::new();
     }
     let width = UnicodeWidthStr::width(s);
-    if width <= max_chars {
+    if width <= max_cols {
         return s.to_string();
     }
-    if max_chars <= 3 {
-        return tail_by_width(s, max_chars);
+    if max_cols <= 3 {
+        return tail_by_width(s, max_cols);
     }
-    let keep = max_chars - 3;
+    let keep = max_cols - 3;
     let tail = tail_by_width(s, keep);
     format!("...{}", tail)
 }
