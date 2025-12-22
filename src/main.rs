@@ -160,6 +160,8 @@ fn main() -> Result<()> {
                 }
             }
             scan.start()?;
+            scan.write_log(&logs_dir.join("scan.log"))?;
+
             println!("Resolving dependencies...");
             let scan_result = scan.resolve()?;
 
@@ -287,6 +289,14 @@ fn main() -> Result<()> {
         }
         Cmd::Scan => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
+            let logs_dir = config
+                .config_path()
+                .and_then(|p| p.parent())
+                .map(|p| p.join("logs"))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Cannot determine logs directory")
+                })?;
+            logging::init(&logs_dir, config.verbose())?;
             if let Err(errors) = config.validate() {
                 eprintln!("Configuration errors:");
                 for e in &errors {
@@ -301,6 +311,8 @@ fn main() -> Result<()> {
                 }
             }
             scan.start()?;
+            scan.write_log(&logs_dir.join("scan.log"))?;
+
             println!("Resolving dependencies...");
             let result = scan.resolve()?;
             println!(
