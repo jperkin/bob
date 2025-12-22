@@ -13,7 +13,7 @@ options = {
 -- Variables that configure pkgsrc, where it is, what packages to build, etc.
 pkgsrc = {
     basedir = "/usr/pkgsrc",
-    bulklog = initdir .. "/bulklog",
+    logdir = initdir .. "/logs",
     make = "/usr/bin/make",
     packages = initdir .. "/packages",
     pkgtools = "/usr/sbin",

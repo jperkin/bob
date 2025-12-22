@@ -30,7 +30,7 @@
 //! use std::path::Path;
 //!
 //! # fn example(summary: &BuildSummary) -> anyhow::Result<()> {
-//! write_html_report(summary, Path::new("/data/bob/bulklog/report.html"))?;
+//! write_html_report(summary, Path::new("/data/bob/logs/report.html"))?;
 //! # Ok(())
 //! # }
 //! ```

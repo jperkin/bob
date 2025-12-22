@@ -377,7 +377,7 @@ impl PackageBuild {
             bail!("Could not get PKGPATH for {}", pkgname);
         };
 
-        let bulklog = self.config.bulklog();
+        let logdir = self.config.logdir();
 
         // Core environment vars
         let mut envs = self.config.script_env();
@@ -546,7 +546,7 @@ impl PackageBuild {
                     // Save wrkdir files matching configured patterns, then clean up
                     if !patterns.is_empty() {
                         self.save_wrkdir_files(
-                            pkgname, pkgpath, bulklog, patterns, &pkg_env,
+                            pkgname, pkgpath, logdir, patterns, &pkg_env,
                         );
                         self.run_clean(pkgpath);
                     }
@@ -583,12 +583,12 @@ impl PackageBuild {
         Ok(result)
     }
 
-    /// Save files matching patterns from WRKDIR to bulklog on build failure.
+    /// Save files matching patterns from WRKDIR to logdir on build failure.
     fn save_wrkdir_files(
         &self,
         pkgname: &str,
         pkgpath: &PkgPath,
-        bulklog: &Path,
+        logdir: &Path,
         patterns: &[String],
         pkg_env: &HashMap<String, String>,
     ) {
@@ -620,7 +620,7 @@ impl PackageBuild {
             return;
         }
 
-        let save_dir = bulklog.join(pkgname).join("wrkdir-files");
+        let save_dir = logdir.join(pkgname).join("wrkdir-files");
         if let Err(e) = fs::create_dir_all(&save_dir) {
             warn!(pkgname = %pkgname,
                 error = %e,
@@ -839,7 +839,7 @@ struct BuildJobs {
     done: HashSet<PkgName>,
     failed: HashSet<PkgName>,
     results: Vec<BuildResult>,
-    bulklog: PathBuf,
+    logdir: PathBuf,
 }
 
 impl BuildJobs {
@@ -885,7 +885,7 @@ impl BuildJobs {
 
         // Record the result
         let scanpkg = self.scanpkgs.get(pkgname);
-        let log_dir = Some(self.bulklog.join(pkgname.pkgname()));
+        let log_dir = Some(self.logdir.join(pkgname.pkgname()));
         self.results.push(BuildResult {
             pkgname: pkgname.clone(),
             pkgpath: scanpkg.and_then(|s| s.pkg_location.clone()),
@@ -935,7 +935,7 @@ impl BuildJobs {
 
             // Record the result
             let scanpkg = self.scanpkgs.get(&pkg);
-            let log_dir = Some(self.bulklog.join(pkg.pkgname()));
+            let log_dir = Some(self.logdir.join(pkg.pkgname()));
             let (outcome, dur) = if is_original(&pkg) {
                 (BuildOutcome::Failed("Build failed".to_string()), duration)
             } else {
@@ -1069,7 +1069,7 @@ impl Build {
         let done: HashSet<PkgName> = HashSet::new();
         let failed: HashSet<PkgName> = HashSet::new();
         let results: Vec<BuildResult> = Vec::new();
-        let bulklog = self.config.bulklog().clone();
+        let logdir = self.config.logdir().clone();
         let jobs = BuildJobs {
             scanpkgs: self.scanpkgs.clone(),
             incoming,
@@ -1077,7 +1077,7 @@ impl Build {
             done,
             failed,
             results,
-            bulklog,
+            logdir,
         };
 
         // Create sandboxes before starting progress display

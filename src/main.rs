@@ -47,7 +47,7 @@ pub struct Args {
 enum Cmd {
     /// Build all packages as defined by the configuration file
     Build,
-    /// Generate HTML report from existing bulklog data
+    /// Generate HTML report from existing logdir data
     GenerateReport,
     /// Create a new configuration area
     Init { dir: PathBuf },
@@ -80,14 +80,14 @@ fn print_summary(summary: &build::BuildSummary) {
     println!();
 }
 
-/// Scan the bulklog directory to reconstruct build results for report generation.
-fn scan_bulklog_for_report(bulklog: &Path) -> Result<build::BuildSummary> {
+/// Scan the logdir directory to reconstruct build results for report generation.
+fn scan_logdir_for_report(logdir: &Path) -> Result<build::BuildSummary> {
     use std::fs;
     use std::time::Duration;
 
     let mut results = Vec::new();
 
-    for entry in fs::read_dir(bulklog)? {
+    for entry in fs::read_dir(logdir)? {
         let entry = entry?;
         let path = entry.path();
 
@@ -112,7 +112,7 @@ fn scan_bulklog_for_report(bulklog: &Path) -> Result<build::BuildSummary> {
             "Build failed (no phase marker)".to_string()
         };
 
-        // Any directory in bulklog = failed build (successful builds clean up)
+        // Any directory in logdir = failed build (successful builds clean up)
         results.push(build::BuildResult {
             pkgname: pkgsrc::PkgName::new(&pkg_name),
             pkgpath: None,
@@ -132,14 +132,8 @@ fn main() -> Result<()> {
         Cmd::Build => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
 
-            // Initialize logging
-            let logs_dir = config
-                .config_path()
-                .and_then(|p| p.parent())
-                .map(|p| p.join("logs"))
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Cannot determine logs directory")
-                })?;
+            // Initialize logging in logdir/bob/
+            let logs_dir = config.logdir().join("bob");
             logging::init(&logs_dir, config.verbose())?;
 
             tracing::info!("Build command started");
@@ -226,10 +220,10 @@ fn main() -> Result<()> {
 
             print_summary(&summary);
 
-            // Generate HTML report in bulklog directory
+            // Generate HTML report in logdir directory
             println!("Generating reports...");
-            let bulklog = config.bulklog();
-            let report_path = bulklog.join("report.html");
+            let logdir = config.logdir();
+            let report_path = logdir.join("report.html");
             if let Err(e) = report::write_html_report(&summary, &report_path) {
                 eprintln!("Warning: Failed to write HTML report: {}", e);
             } else {
@@ -238,18 +232,15 @@ fn main() -> Result<()> {
         }
         Cmd::GenerateReport => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
-            let bulklog = config.bulklog();
+            let logdir = config.logdir();
 
-            if !bulklog.exists() {
-                bail!(
-                    "Bulklog directory does not exist: {}",
-                    bulklog.display()
-                );
+            if !logdir.exists() {
+                bail!("logdir directory does not exist: {}", logdir.display());
             }
 
             println!("Generating reports...");
-            let summary = scan_bulklog_for_report(bulklog)?;
-            let report_path = bulklog.join("report.html");
+            let summary = scan_logdir_for_report(logdir)?;
+            let report_path = logdir.join("report.html");
 
             report::write_html_report(&summary, &report_path)?;
             println!("HTML report written to: {}", report_path.display());
@@ -289,13 +280,7 @@ fn main() -> Result<()> {
         }
         Cmd::Scan => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
-            let logs_dir = config
-                .config_path()
-                .and_then(|p| p.parent())
-                .map(|p| p.join("logs"))
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Cannot determine logs directory")
-                })?;
+            let logs_dir = config.logdir().join("bob");
             logging::init(&logs_dir, config.verbose())?;
             if let Err(errors) = config.validate() {
                 eprintln!("Configuration errors:");

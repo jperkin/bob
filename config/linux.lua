@@ -14,7 +14,7 @@ options = {
 pkgsrc = {
     basedir = "/data/pkgsrc",
     bootstrap = initdir .. "/bootstrap.tar.gz",
-    bulklog = initdir .. "/bulklog",
+    logdir = initdir .. "/logs",
     make = "/usr/pkg/bin/bmake",
     packages = initdir .. "/packages",
     pkgtools = "/usr/pkg/sbin",
@@ -101,7 +101,7 @@ sandboxes = {
 
         { action = "mount", fs = "bind", dir = pkgsrc.basedir, opts = "ro" },
 
-        -- Bob config directory (contains bulklog, packages, distfiles, scripts)
+        -- Directory where this config and support scripts live.
         { action = "mount", fs = "bind", dir = initdir },
     },
 }

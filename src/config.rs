@@ -47,7 +47,7 @@
 //! | Field | Type | Description |
 //! |-------|------|-------------|
 //! | `basedir` | string | Absolute path to the pkgsrc source tree (e.g., `/data/pkgsrc`). |
-//! | `bulklog` | string | Directory where per-package build logs are written. Failed builds leave logs here; successful builds clean up. |
+//! | `logdir` | string | Directory for all logs. Per-package build logs go in subdirectories. Failed builds leave logs here; successful builds clean up. |
 //! | `make` | string | Absolute path to the bmake binary (e.g., `/usr/pkg/bin/bmake`). |
 //! | `packages` | string | Directory where binary packages are stored after successful builds. |
 //! | `pkgtools` | string | Directory containing `pkg_add`, `pkg_delete`, and other pkg tools (e.g., `/usr/pkg/sbin`). |
@@ -61,7 +61,7 @@
 //! | `bootstrap` | string | none | Path to a bootstrap tarball. Required on non-NetBSD systems. Unpacked into each sandbox before builds. |
 //! | `build_user` | string | none | Unprivileged user to run builds as. If set, builds run as this user instead of root. |
 //! | `pkgpaths` | table | `{}` | List of package paths to build (e.g., `{"mail/mutt", "www/curl"}`). Dependencies are discovered automatically. |
-//! | `report_dir` | string | `bulklog` | Directory for HTML build reports. Defaults to the `bulklog` directory. |
+//! | `report_dir` | string | `logdir` | Directory for HTML build reports. Defaults to the `logdir` directory. |
 //! | `save_wrkdir_patterns` | table | `{}` | Glob patterns for files to preserve from WRKDIR on build failure (e.g., `{"**/config.log"}`). |
 //! | `env` | function or table | `{}` | Environment variables for builds. Can be a table of key-value pairs, or a function receiving package metadata and returning a table. See [Environment Function](#environment-function). |
 //!
@@ -106,7 +106,7 @@
 //!
 //! | Variable | Description |
 //! |----------|-------------|
-//! | `bob_bulklog` | Path to the bulklog directory. |
+//! | `bob_logdir` | Path to the log directory. |
 //! | `bob_make` | Path to the bmake binary. |
 //! | `bob_packages` | Path to the packages directory. |
 //! | `bob_pkgtools` | Path to the pkg tools directory. |
@@ -396,7 +396,7 @@ pub struct Options {
 /// # Required Fields
 ///
 /// - `basedir`: Path to pkgsrc source tree
-/// - `bulklog`: Directory for build logs
+/// - `logdir`: Directory for logs
 /// - `make`: Path to bmake binary
 /// - `packages`: Directory for built packages
 /// - `pkgtools`: Directory containing pkg_add/pkg_delete
@@ -418,8 +418,8 @@ pub struct Pkgsrc {
     pub bootstrap: Option<PathBuf>,
     /// Unprivileged user for builds.
     pub build_user: Option<String>,
-    /// Directory for build logs.
-    pub bulklog: PathBuf,
+    /// Directory for logs.
+    pub logdir: PathBuf,
     /// Path to bmake binary.
     pub make: PathBuf,
     /// Directory for built packages.
@@ -598,8 +598,8 @@ impl Config {
         }
     }
 
-    pub fn bulklog(&self) -> &PathBuf {
-        &self.file.pkgsrc.bulklog
+    pub fn logdir(&self) -> &PathBuf {
+        &self.file.pkgsrc.logdir
     }
 
     pub fn packages(&self) -> &PathBuf {
@@ -646,10 +646,7 @@ impl Config {
     /// Return environment variables for script execution.
     pub fn script_env(&self) -> Vec<(String, String)> {
         let mut envs = vec![
-            (
-                "bob_bulklog".to_string(),
-                format!("{}", self.bulklog().display()),
-            ),
+            ("bob_logdir".to_string(), format!("{}", self.logdir().display())),
             ("bob_make".to_string(), format!("{}", self.make().display())),
             (
                 "bob_packages".to_string(),
@@ -726,11 +723,11 @@ impl Config {
             }
         }
 
-        // Check bulklog dir can be created
-        if let Some(parent) = self.file.pkgsrc.bulklog.parent() {
+        // Check logdir can be created
+        if let Some(parent) = self.file.pkgsrc.logdir.parent() {
             if !parent.exists() {
                 errors.push(format!(
-                    "Bulklog parent directory does not exist: {}",
+                    "logdir parent directory does not exist: {}",
                     parent.display()
                 ));
             }
@@ -831,7 +828,7 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         pkgsrc.get::<Option<String>>("bootstrap")?.map(PathBuf::from);
     let build_user: Option<String> =
         pkgsrc.get::<Option<String>>("build_user")?;
-    let bulklog: String = pkgsrc.get("bulklog")?;
+    let logdir: String = pkgsrc.get("logdir")?;
     let make: String = pkgsrc.get("make")?;
     let packages: String = pkgsrc.get("packages")?;
     let pkgtools: String = pkgsrc.get("pkgtools")?;
@@ -868,7 +865,7 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         basedir: PathBuf::from(basedir),
         bootstrap,
         build_user,
-        bulklog: PathBuf::from(bulklog),
+        logdir: PathBuf::from(logdir),
         make: PathBuf::from(make),
         packages: PathBuf::from(packages),
         pkgtools: PathBuf::from(pkgtools),

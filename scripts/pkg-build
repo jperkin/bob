@@ -9,7 +9,7 @@
 set -e
 
 # Required core variables.
-: ${bob_bulklog:?}
+: ${bob_logdir:?}
 : ${bob_make:?}
 : ${bob_packages:?}
 : ${bob_pkgtools:?}
@@ -121,7 +121,7 @@ while read scan_input; do
 	esac
 done
 
-pkglogdir="${bob_bulklog}/${pkgname}"
+pkglogdir="${bob_logdir}/${pkgname}"
 
 if [ -z "${bob_build_user}" ]; then
 	run_checksum=run_direct
@@ -213,7 +213,7 @@ cp "${pkgfile}" "${bob_packages}/All/"
 set_stage "clean"
 run_log "${pkglogdir}/clean.log" ${bob_make} clean || true
 
-# Remove package bulklog directory on success
+# Remove package logdir on success
 rm -rf "${pkglogdir}"
 
 exit 0
