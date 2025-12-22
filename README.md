@@ -1,5 +1,9 @@
 # Bob - A Package Builder
 
+[![Crates.io](https://img.shields.io/crates/v/pkgbob.svg)](https://crates.io/crates/pkgbob)
+[![Documentation](https://docs.rs/pkgbob/badge.svg)](https://docs.rs/pkgbob)
+[![License](https://img.shields.io/crates/l/pkgbob.svg)](https://github.com/jperkin/bob)
+
 Bob's goal is to become a simple but powerful, complete, and user-friendly
 utility for building pkgsrc packages.
 
@@ -11,6 +15,12 @@ utility for building pkgsrc packages.
 - [x] Scan resolution / DAG.
 - [x] Ratatui-based terminal interface showing current progress.
 - [x] Basic HTML reports.
+
+Bob should work pretty much out-of-the-box on NetBSD, Linux, and illumos.
+
+Bob works on macOS, but due to Apple, there is a lot of additional sandbox work
+to do before things work correctly (e.g. name resolution inside chroot).  This
+will be implemented in due course.
 
 ## Getting Started
 
@@ -58,6 +68,10 @@ Bob will proceed to:
   been processed.
 * Destroy the build sandboxes and generate a summary and HTML report.
 
+During the build phase you can press 'v' to toggle between the default inline
+progress bars and a full-screen paned layout that shows live build logs to
+track progress.
+
 ## Design Goals
 
 There are two main methods currently used to update a pkgsrc installation.
@@ -85,11 +99,12 @@ their own drawbacks:
  * Historically pbulk has been notoriously difficult to set up and configure,
    and any runtime problems can be very hard to diagnose.
 
- * Support for concurrent builds and sandbox configuration is left to external
-   patches and the user to configure manually.
+ * A separate pkgsrc prefix (e.g. `/usr/pbulk`) is required to hold pbulk and
+   associated tools.
 
- * A separate tool such as `pkgin` needs to be used to upgrade the system using
-   the resulting packages.
+ * Support for concurrent builds and sandbox configuration is left to external
+   patches and the user to configure manually, and it can be very easy to
+   accidentally trash your system.
 
 Bob aims to combine these methods into a best-of-both approach:
 
@@ -102,5 +117,7 @@ Bob aims to combine these methods into a best-of-both approach:
  * Build packages inside sandboxes, using a directed acyclic graph to perform
    builds in the correct order, and take advantage of parallel builds where
    possible.
+
+ * Provide a very flexible configuration interface for local customisation.
 
 all with a user-friendly and easy to configure interface.
