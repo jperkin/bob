@@ -148,6 +148,8 @@ pub struct Scan {
     incoming: HashSet<PkgPath>,
     done: HashMap<PkgPath, Vec<ScanIndex>>,
     resolved: HashMap<PkgName, ScanIndex>,
+    /// Full tree scan - skip recursive dependency discovery.
+    full_tree: bool,
 }
 
 impl Scan {
@@ -169,6 +171,7 @@ impl Scan {
     /// Perform a full scan if pkgsrc.pkgpaths is not defined.
     fn discover_packages(&mut self) -> anyhow::Result<()> {
         println!("Discovering packages...");
+        self.full_tree = true;
         let pkgsrc = self.config.pkgsrc().display();
         let make = self.config.make().display();
 
@@ -390,15 +393,19 @@ impl Scan {
                     }
                 };
                 self.done.insert(pkgpath.clone(), scanpkgs.clone());
-                for pkg in scanpkgs {
-                    for dep in pkg.all_depends {
-                        if !self.done.contains_key(dep.pkgpath())
-                            && !self.incoming.contains(dep.pkgpath())
-                            && new_incoming.insert(dep.pkgpath().clone())
-                        {
-                            // Update total count for new dependencies
-                            if let Ok(mut p) = progress.lock() {
-                                p.state_mut().total += 1;
+                // For limited scans, recursively discover dependencies.
+                // For full tree scans, we already have all packages.
+                if !self.full_tree {
+                    for pkg in scanpkgs {
+                        for dep in pkg.all_depends {
+                            if !self.done.contains_key(dep.pkgpath())
+                                && !self.incoming.contains(dep.pkgpath())
+                                && new_incoming.insert(dep.pkgpath().clone())
+                            {
+                                // Update total count for new dependencies
+                                if let Ok(mut p) = progress.lock() {
+                                    p.state_mut().total += 1;
+                                }
                             }
                         }
                     }
