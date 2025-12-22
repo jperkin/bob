@@ -362,9 +362,14 @@ impl Scan {
 
                     *result = self.scan_pkgpath(pkgpath);
 
-                    // Mark thread idle (counting happens in result processing)
+                    // Update counter immediately after each package
                     if let Ok(mut p) = progress_clone.lock() {
                         p.state_mut().set_worker_idle(thread_id);
+                        if result.is_ok() {
+                            p.state_mut().increment_completed();
+                        } else {
+                            p.state_mut().increment_failed();
+                        }
                     }
                 });
             });
@@ -377,17 +382,9 @@ impl Scan {
             let mut new_incoming: HashSet<PkgPath> = HashSet::new();
             for (pkgpath, scanpkgs) in parpaths.drain(..) {
                 let scanpkgs = match scanpkgs {
-                    Ok(pkgs) => {
-                        if let Ok(mut p) = progress.lock() {
-                            p.state_mut().increment_completed();
-                        }
-                        pkgs
-                    }
+                    Ok(pkgs) => pkgs,
                     Err(e) => {
                         scan_errors.push(format!("{}", e));
-                        if let Ok(mut p) = progress.lock() {
-                            p.state_mut().increment_failed();
-                        }
                         self.done.insert(pkgpath.clone(), vec![]);
                         continue;
                     }
