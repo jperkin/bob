@@ -201,6 +201,7 @@ impl Sandbox {
                         let _ = Command::new("kill")
                             .arg("-9")
                             .arg(pid.to_string())
+                            .stderr(std::process::Stdio::null())
                             .status();
                     }
                 }
