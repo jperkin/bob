@@ -24,7 +24,7 @@
  */
 
 use anyhow::{Context, Result};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::os::unix::io::{AsRawFd, IntoRawFd, RawFd};
 
 /// A status message from the build script.
@@ -114,5 +114,87 @@ pub fn channel() -> Result<(StatusReader, StatusWriter)> {
     Ok((
         StatusReader { reader: BufReader::new(reader) },
         StatusWriter { fd: write_fd },
+    ))
+}
+
+/// Read end of an output channel for capturing build output.
+pub struct OutputReader {
+    reader: BufReader<os_pipe::PipeReader>,
+    pending: String,
+}
+
+impl OutputReader {
+    /// Read all available lines.
+    pub fn read_all_lines(&mut self) -> Vec<String> {
+        let mut buf = [0u8; 8192];
+        loop {
+            match self.reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let chunk = String::from_utf8_lossy(&buf[..n]);
+                    self.pending.push_str(&chunk);
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+
+        let mut lines = Vec::new();
+        let mut start = 0usize;
+        while let Some(pos) = self.pending[start..].find('\n') {
+            let end = start + pos;
+            lines.push(self.pending[start..end].to_string());
+            start = end + 1;
+        }
+        if start > 0 {
+            self.pending = self.pending[start..].to_string();
+        }
+        lines
+    }
+}
+
+/// Write end of an output channel (passed to child process).
+pub struct OutputWriter {
+    fd: RawFd,
+}
+
+impl OutputWriter {
+    /// Get the file descriptor number to pass to the child.
+    pub fn fd(&self) -> RawFd {
+        self.fd
+    }
+
+    /// Consume and close the writer.
+    pub fn close(self) {
+        unsafe {
+            libc::close(self.fd);
+        }
+    }
+}
+
+/// Create an output channel pair for capturing build output.
+pub fn output_channel() -> Result<(OutputReader, OutputWriter)> {
+    let (reader, writer) =
+        os_pipe::pipe().context("Failed to create output pipe")?;
+
+    // Set read end to non-blocking
+    let read_fd = reader.as_raw_fd();
+    unsafe {
+        let flags = libc::fcntl(read_fd, libc::F_GETFL);
+        libc::fcntl(read_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+
+    // Clear O_CLOEXEC on the write end so it survives exec
+    let write_fd = writer.into_raw_fd();
+    unsafe {
+        let flags = libc::fcntl(write_fd, libc::F_GETFD);
+        libc::fcntl(write_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+    }
+
+    Ok((
+        OutputReader { reader: BufReader::new(reader), pending: String::new() },
+        OutputWriter { fd: write_fd },
     ))
 }

@@ -300,8 +300,10 @@ impl Sandbox {
             cmd.stdin(Stdio::piped());
         }
 
-        let mut child =
-            cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        // Script handles its own output redirection to log files
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+
+        let mut child = cmd.spawn()?;
 
         if let Some(data) = stdin_data {
             if let Some(mut stdin) = child.stdin.take() {

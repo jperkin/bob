@@ -18,6 +18,26 @@ set -e
 : ${bob_status_fd:?}
 : ${bob_tar:?}
 
+# Optional file descriptor for real-time output to UI
+bob_output_fd=${bob_output_fd:-}
+
+# Run a command, logging output to file and optionally to the output fd for
+# live status in the UI.
+run_log() {
+	logfile="$1"
+	shift
+	if [ -n "${bob_output_fd}" ]; then
+		status_file="/tmp/.bob_status.$$"
+		{ set +x; "$@" 2>&1; echo $? > "${status_file}"; } | \
+		    tee -a "${logfile}" >&${bob_output_fd}
+		status=$(cat "${status_file}")
+		rm -f "${status_file}"
+		return ${status}
+	else
+		"$@" >> "${logfile}" 2>&1
+	fi
+}
+
 cleanup() {
 	if [ -n "${KEEP_WRKDIR}" ]; then
 		${bob_make} pbulk-save-wrkdir \
@@ -129,6 +149,7 @@ cd ${bob_pkgsrc}/${pkgdir}
 mkdir -p "${pkglogdir}"
 rm -f "${pkglogdir}"/.stage
 
+# Set up output redirection
 exec >${pkglogdir}/pkg-build.log 2>&1
 set -x
 
@@ -141,45 +162,48 @@ fi
 trap cleanup INT TERM
 
 set_stage "pre-clean"
-${bob_make} clean > "${pkglogdir}/pre-clean.log" 2>&1
+run_log "${pkglogdir}/pre-clean.log" ${bob_make} clean
 
 # Install dependencies
 if [ -n "${dependencies}" ]; then
 	set_stage "depends"
-	PKG_PATH="${bob_packages}/All" ${bob_pkgtools}/pkg_add \
-	    ${dependencies} > "${pkglogdir}/depends.log" 2>&1 || cleanup
+	run_log "${pkglogdir}/depends.log" \
+	    env PKG_PATH="${bob_packages}/All" \
+	    ${bob_pkgtools}/pkg_add ${dependencies} || cleanup
 fi
 
 set_stage "checksum"
-run_make ${run_checksum} checksum > "${pkglogdir}/checksum.log" 2>&1 || cleanup
+run_log "${pkglogdir}/checksum.log" run_make ${run_checksum} checksum || cleanup
 
 set_stage "configure"
-run_usergroup configure > ${pkglogdir}/configure.log 2>&1 || cleanup
-run_make ${run_build} configure >> ${pkglogdir}/configure.log 2>&1 || cleanup
+run_log "${pkglogdir}/configure.log" run_usergroup configure || cleanup
+run_log "${pkglogdir}/configure.log" run_make ${run_build} configure || cleanup
 
 set_stage "build"
-run_usergroup build > ${pkglogdir}/build.log 2>&1 || cleanup
-run_make ${run_build} all >> ${pkglogdir}/build.log 2>&1 || cleanup
+run_log "${pkglogdir}/build.log" run_usergroup build || cleanup
+run_log "${pkglogdir}/build.log" run_make ${run_build} all || cleanup
 
 set_stage "install"
-run_usergroup install > ${pkglogdir}/install.log 2>&1 || cleanup
-run_make ${run_install} stage-install >> ${pkglogdir}/install.log 2>&1 || cleanup
+run_log "${pkglogdir}/install.log" run_usergroup install || cleanup
+run_log "${pkglogdir}/install.log" run_make ${run_install} stage-install || cleanup
 
 set_stage "package"
-run_make run_direct stage-package-create > ${pkglogdir}/package.log 2>&1 || cleanup
+run_log "${pkglogdir}/package.log" run_make run_direct stage-package-create || cleanup
 
 pkgfile=$(run_make run_direct show-var VARNAME=STAGE_PKGFILE)
 
 # Test package install unless this is a bootstrap package as it will likely
 # already be installed.
 if [ -z "${is_bootstrap}" ]; then
-	${bob_pkgtools}/pkg_add ${pkgfile} >> "${pkglogdir}/package.log" 2>&1 || cleanup
+	run_log "${pkglogdir}/package.log" \
+	    ${bob_pkgtools}/pkg_add ${pkgfile} || cleanup
 fi
 
 # Test package uninstall unless bootstrap package (will have preserve flag set).
 if [ -z "${is_bootstrap}" ]; then
 	set_stage "deinstall"
-	${bob_pkgtools}/pkg_delete ${pkgname} > "${pkglogdir}/deinstall.log" 2>&1 || cleanup
+	run_log "${pkglogdir}/deinstall.log" \
+	    ${bob_pkgtools}/pkg_delete ${pkgname} || cleanup
 fi
 
 # Save package.
@@ -187,7 +211,7 @@ mkdir -p "${bob_packages}/All"
 cp "${pkgfile}" "${bob_packages}/All/"
 
 set_stage "clean"
-${bob_make} clean > "${pkglogdir}/clean.log" 2>&1 || true
+run_log "${pkglogdir}/clean.log" ${bob_make} clean || true
 
 # Remove package bulklog directory on success
 rm -rf "${pkglogdir}"

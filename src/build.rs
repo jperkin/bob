@@ -449,10 +449,17 @@ impl PackageBuild {
             }
         }
 
-        // Run pkg-build with status channel
+        // Run pkg-build with status and output channels
         let (mut status_reader, status_writer) =
             status::channel().context("Failed to create status channel")?;
         let status_fd = status_writer.fd();
+
+        let (mut output_reader, output_writer) = status::output_channel()
+            .context("Failed to create output channel")?;
+        let output_fd = output_writer.fd();
+
+        // Pass the output fd to the script
+        envs.push(("bob_output_fd".to_string(), output_fd.to_string()));
 
         let mut child = self.sandbox.execute(
             self.id,
@@ -462,13 +469,14 @@ impl PackageBuild {
             Some(status_fd),
         )?;
 
-        // Close write end in parent so we get EOF when child exits
+        // Close write ends in parent so we get EOF when child exits
         status_writer.close();
+        output_writer.close();
 
         // Track if we received a "skipped" message
         let mut was_skipped = false;
 
-        // Poll status channel and child process
+        // Poll status/output channels and child process
         loop {
             // Read any available status messages
             for msg in status_reader.read_all() {
@@ -485,6 +493,13 @@ impl PackageBuild {
                 }
             }
 
+            // Read any available output lines
+            let output_lines = output_reader.read_all_lines();
+            if !output_lines.is_empty() {
+                let _ = status_tx
+                    .send(ChannelCommand::OutputLines(self.id, output_lines));
+            }
+
             // Check if child has exited
             match child.try_wait() {
                 Ok(Some(_status)) => break,
@@ -496,6 +511,13 @@ impl PackageBuild {
                     return Err(e).context("Failed to wait for pkg-build");
                 }
             }
+        }
+
+        // Read any remaining output after child exits
+        let remaining = output_reader.read_all_lines();
+        if !remaining.is_empty() {
+            let _ =
+                status_tx.send(ChannelCommand::OutputLines(self.id, remaining));
         }
 
         // Clear stage display
@@ -796,6 +818,10 @@ enum ChannelCommand {
      * Client reporting a stage update for a build.
      */
     StageUpdate(usize, Option<String>),
+    /**
+     * Client reporting output lines from a build.
+     */
+    OutputLines(usize, Vec<String>),
 }
 
 /**
@@ -1114,9 +1140,11 @@ impl Build {
                 && !shutdown_for_refresh.load(Ordering::SeqCst)
             {
                 if let Ok(mut p) = progress_refresh.lock() {
-                    let _ = p.render();
+                    // Check for keyboard events (like 'v' for view toggle)
+                    let _ = p.poll_events();
+                    let _ = p.render_throttled();
                 }
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(50));
             }
         });
 
@@ -1256,6 +1284,7 @@ impl Build {
                                 // Update thread progress
                                 thread_packages.insert(c, pkg.clone());
                                 if let Ok(mut p) = progress_clone.lock() {
+                                    p.clear_output_buffer(c);
                                     p.state_mut()
                                         .set_worker_active(c, pkg.pkgname());
                                     let _ = p.render_throttled();
@@ -1272,6 +1301,7 @@ impl Build {
                             }
                             BuildStatus::NoneAvailable => {
                                 if let Ok(mut p) = progress_clone.lock() {
+                                    p.clear_output_buffer(c);
                                     p.state_mut().set_worker_idle(c);
                                     let _ = p.render_throttled();
                                 }
@@ -1280,6 +1310,7 @@ impl Build {
                             }
                             BuildStatus::Done => {
                                 if let Ok(mut p) = progress_clone.lock() {
+                                    p.clear_output_buffer(c);
                                     p.state_mut().set_worker_idle(c);
                                     let _ = p.render_throttled();
                                 }
@@ -1310,6 +1341,7 @@ impl Build {
                             p.state_mut().increment_completed();
                             for (tid, pkg) in &thread_packages {
                                 if pkg == &pkgname {
+                                    p.clear_output_buffer(*tid);
                                     p.state_mut().set_worker_idle(*tid);
                                     break;
                                 }
@@ -1335,6 +1367,7 @@ impl Build {
                             p.state_mut().increment_skipped();
                             for (tid, pkg) in &thread_packages {
                                 if pkg == &pkgname {
+                                    p.clear_output_buffer(*tid);
                                     p.state_mut().set_worker_idle(*tid);
                                     break;
                                 }
@@ -1361,6 +1394,7 @@ impl Build {
                             p.state_mut().increment_failed();
                             for (tid, pkg) in &thread_packages {
                                 if pkg == &pkgname {
+                                    p.clear_output_buffer(*tid);
                                     p.state_mut().set_worker_idle(*tid);
                                     break;
                                 }
@@ -1387,6 +1421,7 @@ impl Build {
                             p.state_mut().increment_failed();
                             for (tid, pkg) in &thread_packages {
                                 if pkg == &pkgname {
+                                    p.clear_output_buffer(*tid);
                                     p.state_mut().set_worker_idle(*tid);
                                     break;
                                 }
@@ -1400,6 +1435,15 @@ impl Build {
                             p.state_mut()
                                 .set_worker_stage(tid, stage.as_deref());
                             let _ = p.render_throttled();
+                        }
+                    }
+                    ChannelCommand::OutputLines(tid, lines) => {
+                        if let Ok(mut p) = progress_clone.lock() {
+                            if let Some(buf) = p.output_buffer_mut(tid) {
+                                for line in lines {
+                                    buf.push(line);
+                                }
+                            }
                         }
                     }
                     _ => {}
