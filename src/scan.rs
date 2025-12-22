@@ -346,8 +346,14 @@ impl Scan {
             }
 
             let progress_clone = Arc::clone(&progress);
+            let shutdown_clone = Arc::clone(&shutdown_flag);
             pool.install(|| {
                 parpaths.par_iter_mut().for_each(|pkg| {
+                    // Check for shutdown before starting each package
+                    if shutdown_clone.load(Ordering::Relaxed) {
+                        return;
+                    }
+
                     let (pkgpath, result) = pkg;
                     let pathname =
                         pkgpath.as_path().to_string_lossy().to_string();
@@ -373,6 +379,12 @@ impl Scan {
                     }
                 });
             });
+
+            // Check if we were interrupted during parallel processing
+            if shutdown_flag.load(Ordering::Relaxed) {
+                interrupted = true;
+                break;
+            }
 
             /*
              * Look through the results we just processed for any new PKGPATH
