@@ -153,8 +153,7 @@ pub struct Scan {
 impl Scan {
     pub fn new(config: &Config) -> Scan {
         let sandbox = Sandbox::new(config);
-        debug!(
-            pkgsrc = %config.pkgsrc().display(),
+        debug!(pkgsrc = %config.pkgsrc().display(),
             make = %config.make().display(),
             scan_threads = config.scan_threads(),
             "Created new Scan instance"
@@ -394,8 +393,7 @@ impl Scan {
             pkgsrcdir, pkgpath_str, bmake
         );
 
-        trace!(
-            pkgpath = %pkgpath_str,
+        trace!(pkgpath = %pkgpath_str,
             script = %script,
             "Executing pkg-scan"
         );
@@ -404,8 +402,7 @@ impl Scan {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            error!(
-                pkgpath = %pkgpath_str,
+            error!(pkgpath = %pkgpath_str,
                 exit_code = ?output.status.code(),
                 stderr = %stderr,
                 "pkg-scan script failed"
@@ -420,8 +417,7 @@ impl Scan {
         }
 
         let stdout_str = String::from_utf8_lossy(&output.stdout);
-        trace!(
-            pkgpath = %pkgpath_str,
+        trace!(pkgpath = %pkgpath_str,
             stdout_len = stdout_str.len(),
             stdout = %stdout_str,
             "pkg-scan script output"
@@ -430,8 +426,7 @@ impl Scan {
         let reader = BufReader::new(&output.stdout[..]);
         let mut index = ScanIndex::from_reader(reader)?;
 
-        info!(
-            pkgpath = %pkgpath_str,
+        info!(pkgpath = %pkgpath_str,
             packages_found = index.len(),
             "Scan complete for pkgpath"
         );
@@ -441,8 +436,7 @@ impl Scan {
          */
         for pkg in &mut index {
             pkg.pkg_location = Some(pkgpath.clone());
-            debug!(
-                pkgpath = %pkgpath_str,
+            debug!(pkgpath = %pkgpath_str,
                 pkgname = %pkg.pkgname.pkgname(),
                 skip_reason = ?pkg.pkg_skip_reason,
                 fail_reason = ?pkg.pkg_fail_reason,
@@ -485,8 +479,7 @@ impl Scan {
 
         // Log what we have in self.done
         for (pkgpath, index) in &self.done {
-            debug!(
-                pkgpath = %pkgpath.as_path().display(),
+            debug!(pkgpath = %pkgpath.as_path().display(),
                 packages_in_index = index.len(),
                 "Processing done entry"
             );
@@ -497,8 +490,7 @@ impl Scan {
                 // Check for skip/fail reasons
                 if let Some(reason) = &pkg.pkg_skip_reason {
                     if !reason.is_empty() {
-                        info!(
-                            pkgname = %pkg.pkgname.pkgname(),
+                        info!(pkgname = %pkg.pkgname.pkgname(),
                             reason = %reason,
                             "Skipping package due to PKG_SKIP_REASON"
                         );
@@ -512,8 +504,7 @@ impl Scan {
                 }
                 if let Some(reason) = &pkg.pkg_fail_reason {
                     if !reason.is_empty() {
-                        info!(
-                            pkgname = %pkg.pkgname.pkgname(),
+                        info!(pkgname = %pkg.pkgname.pkgname(),
                             reason = %reason,
                             "Skipping package due to PKG_FAIL_REASON"
                         );
@@ -526,8 +517,7 @@ impl Scan {
                     }
                 }
 
-                debug!(
-                    pkgname = %pkg.pkgname.pkgname(),
+                debug!(pkgname = %pkg.pkgname.pkgname(),
                     "Adding package to resolved set"
                 );
                 pkgnames.insert(pkg.pkgname.clone());

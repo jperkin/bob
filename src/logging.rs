@@ -65,8 +65,7 @@ pub fn init(logs_dir: &PathBuf, verbose: bool) -> Result<()> {
 
     tracing_subscriber::registry().with(filter).with(file_layer).init();
 
-    tracing::info!(
-        logs_dir = %logs_dir.display(),
+    tracing::info!(logs_dir = %logs_dir.display(),
         verbose = verbose,
         "Logging initialized"
     );

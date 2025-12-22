@@ -367,8 +367,7 @@ impl PackageBuild {
         status_tx: &Sender<ChannelCommand>,
     ) -> anyhow::Result<PackageBuildResult> {
         let pkgname = self.pkginfo.pkgname.pkgname();
-        info!(
-            pkgname = %pkgname,
+        info!(pkgname = %pkgname,
             sandbox_id = self.id,
             "Starting package build"
         );
@@ -419,13 +418,11 @@ impl PackageBuild {
         // Format ScanIndex as pbulk-index output for stdin
         let stdin_data = format_scan_index(&self.pkginfo);
 
-        debug!(
-            pkgname = %pkgname,
+        debug!(pkgname = %pkgname,
             env_count = envs.len(),
             "Executing build scripts"
         );
-        trace!(
-            pkgname = %pkgname,
+        trace!(pkgname = %pkgname,
             envs = ?envs,
             stdin = %stdin_data,
             "Build environment variables"
@@ -528,23 +525,20 @@ impl PackageBuild {
             child.wait().context("Failed to get pkg-build exit status")?;
 
         let result = if was_skipped {
-            info!(
-                pkgname = %pkgname,
+            info!(pkgname = %pkgname,
                 "pkg-build skipped (up-to-date)"
             );
             PackageBuildResult::Skipped
         } else {
             match status.code() {
                 Some(0) => {
-                    info!(
-                        pkgname = %pkgname,
+                    info!(pkgname = %pkgname,
                         "pkg-build completed successfully"
                     );
                     PackageBuildResult::Success
                 }
                 Some(code) => {
-                    error!(
-                        pkgname = %pkgname,
+                    error!(pkgname = %pkgname,
                         exit_code = code,
                         "pkg-build failed"
                     );
@@ -560,8 +554,7 @@ impl PackageBuild {
                 }
                 None => {
                     // Process was terminated by signal (e.g., Ctrl+C)
-                    warn!(
-                        pkgname = %pkgname,
+                    warn!(pkgname = %pkgname,
                         "pkg-build terminated by signal"
                     );
                     PackageBuildResult::Failed
@@ -620,8 +613,7 @@ impl PackageBuild {
         let wrkdir_path = make.resolve_path(&wrkdir);
 
         if !wrkdir_path.exists() {
-            debug!(
-                pkgname = %pkgname,
+            debug!(pkgname = %pkgname,
                 wrkdir = %wrkdir_path.display(),
                 "WRKDIR does not exist, skipping file save"
             );
@@ -630,8 +622,7 @@ impl PackageBuild {
 
         let save_dir = bulklog.join(pkgname).join("wrkdir-files");
         if let Err(e) = fs::create_dir_all(&save_dir) {
-            warn!(
-                pkgname = %pkgname,
+            warn!(pkgname = %pkgname,
                 error = %e,
                 "Failed to create wrkdir-files directory"
             );
@@ -662,16 +653,14 @@ impl PackageBuild {
             &compiled_patterns,
             &mut saved_count,
         ) {
-            warn!(
-                pkgname = %pkgname,
+            warn!(pkgname = %pkgname,
                 error = %e,
                 "Error while saving wrkdir files"
             );
         }
 
         if saved_count > 0 {
-            info!(
-                pkgname = %pkgname,
+            info!(pkgname = %pkgname,
                 count = saved_count,
                 dest = %save_dir.display(),
                 "Saved wrkdir files"
@@ -750,15 +739,13 @@ fn walk_and_save(
 
                     // Copy the file
                     if let Err(e) = fs::copy(&path, &dest_path) {
-                        warn!(
-                            src = %path.display(),
+                        warn!(src = %path.display(),
                             dest = %dest_path.display(),
                             error = %e,
                             "Failed to copy file"
                         );
                     } else {
-                        debug!(
-                            src = %path.display(),
+                        debug!(src = %path.display(),
                             dest = %dest_path.display(),
                             "Saved wrkdir file"
                         );
@@ -1036,8 +1023,7 @@ impl Build {
             "Creating new Build instance"
         );
         for (pkgname, index) in &scanpkgs {
-            debug!(
-                pkgname = %pkgname.pkgname(),
+            debug!(pkgname = %pkgname.pkgname(),
                 pkgpath = ?index.pkg_location,
                 depends_count = index.depends.len(),
                 depends = ?index.depends.iter().map(|d| d.pkgname()).collect::<Vec<_>>(),
@@ -1065,8 +1051,7 @@ impl Build {
             for dep in &index.depends {
                 deps.insert(dep.clone());
             }
-            trace!(
-                pkgname = %pkgname.pkgname(),
+            trace!(pkgname = %pkgname.pkgname(),
                 deps_count = deps.len(),
                 deps = ?deps.iter().map(|d| d.pkgname()).collect::<Vec<_>>(),
                 "Adding package to incoming build queue"
