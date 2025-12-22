@@ -152,6 +152,8 @@ fn main() -> Result<()> {
                 for p in pkgs {
                     scan.add(p);
                 }
+            } else {
+                scan.discover_packages()?;
             }
             scan.start()?;
             scan.write_log(&logs_dir.join("scan.log"))?;
@@ -294,6 +296,8 @@ fn main() -> Result<()> {
                 for p in pkgs {
                     scan.add(p);
                 }
+            } else {
+                scan.discover_packages()?;
             }
             scan.start()?;
             scan.write_log(&logs_dir.join("scan.log"))?;

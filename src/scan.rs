@@ -166,6 +166,70 @@ impl Scan {
         self.incoming.insert(pkgpath.clone());
     }
 
+    /// Perform a full scan if pkgsrc.pkgpaths is not defined.
+    pub fn discover_packages(&mut self) -> anyhow::Result<()> {
+        println!("Discovering packages...");
+        let pkgsrc = self.config.pkgsrc();
+        let make = self.config.make();
+
+        // Get top-level SUBDIR (categories + USER_ADDITIONAL_PKGS)
+        let output = std::process::Command::new(make)
+            .args(["show-subdir-var", "VARNAME=SUBDIR"])
+            .current_dir(pkgsrc)
+            .output()
+            .context("Failed to run make show-subdir-var")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("Failed to get categories: {}", stderr);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let entries: Vec<&str> = stdout.split_whitespace().collect();
+
+        for entry in entries {
+            if entry.contains('/') {
+                // USER_ADDITIONAL_PKGS - add directly as pkgpath
+                if let Ok(pkgpath) = PkgPath::new(entry) {
+                    self.incoming.insert(pkgpath);
+                }
+            } else {
+                // Category - get packages within it
+                let cat_dir = pkgsrc.join(entry);
+                let cat_output = std::process::Command::new(make)
+                    .args(["show-subdir-var", "VARNAME=SUBDIR"])
+                    .current_dir(&cat_dir)
+                    .output();
+
+                match cat_output {
+                    Ok(o) if o.status.success() => {
+                        let pkgs = String::from_utf8_lossy(&o.stdout);
+                        for pkg in pkgs.split_whitespace() {
+                            let path = format!("{}/{}", entry, pkg);
+                            if let Ok(pkgpath) = PkgPath::new(&path) {
+                                self.incoming.insert(pkgpath);
+                            }
+                        }
+                    }
+                    Ok(o) => {
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        debug!(category = entry, stderr = %stderr,
+                            "Failed to get packages for category");
+                    }
+                    Err(e) => {
+                        debug!(category = entry, error = %e,
+                            "Failed to run make in category");
+                    }
+                }
+            }
+        }
+
+        info!(discovered = self.incoming.len(), "Package discovery complete");
+        println!("Discovered {} packages", self.incoming.len());
+
+        Ok(())
+    }
+
     pub fn start(&mut self) -> anyhow::Result<()> {
         info!(
             incoming_count = self.incoming.len(),
