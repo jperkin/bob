@@ -167,17 +167,19 @@ impl Scan {
     }
 
     /// Perform a full scan if pkgsrc.pkgpaths is not defined.
-    pub fn discover_packages(&mut self) -> anyhow::Result<()> {
+    fn discover_packages(&mut self) -> anyhow::Result<()> {
         println!("Discovering packages...");
-        let pkgsrc = self.config.pkgsrc();
-        let make = self.config.make();
+        let pkgsrc = self.config.pkgsrc().display();
+        let make = self.config.make().display();
 
         // Get top-level SUBDIR (categories + USER_ADDITIONAL_PKGS)
-        let output = std::process::Command::new(make)
-            .args(["show-subdir-var", "VARNAME=SUBDIR"])
-            .current_dir(pkgsrc)
-            .output()
-            .context("Failed to run make show-subdir-var")?;
+        let script = format!(
+            "cd {} && {} show-subdir-var VARNAME=SUBDIR\n",
+            pkgsrc, make
+        );
+        let child = self.sandbox.execute_script(0, &script, vec![])?;
+        let output = child.wait_with_output()
+            .context("Failed to run show-subdir-var")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -195,11 +197,12 @@ impl Scan {
                 }
             } else {
                 // Category - get packages within it
-                let cat_dir = pkgsrc.join(entry);
-                let cat_output = std::process::Command::new(make)
-                    .args(["show-subdir-var", "VARNAME=SUBDIR"])
-                    .current_dir(&cat_dir)
-                    .output();
+                let script = format!(
+                    "cd {}/{} && {} show-subdir-var VARNAME=SUBDIR\n",
+                    pkgsrc, entry, make
+                );
+                let child = self.sandbox.execute_script(0, &script, vec![])?;
+                let cat_output = child.wait_with_output();
 
                 match cat_output {
                     Ok(o) if o.status.success() => {
@@ -278,6 +281,11 @@ impl Scan {
                     error!(exit_code = ?output.status.code(), stderr = %stderr, "pre-build script failed");
                 }
             }
+        }
+
+        // Discover all packages if none were specified
+        if self.incoming.is_empty() {
+            self.discover_packages()?;
         }
 
         println!("Scanning packages...");
