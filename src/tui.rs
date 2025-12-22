@@ -325,6 +325,8 @@ pub struct MultiProgress {
     view_mode: ViewMode,
     output_buffers: Vec<OutputBuffer>,
     num_workers: usize,
+    /// Messages buffered while in fullscreen mode, printed when returning to inline.
+    pending_messages: Vec<String>,
 }
 
 impl MultiProgress {
@@ -361,6 +363,7 @@ impl MultiProgress {
             view_mode: ViewMode::Inline,
             output_buffers,
             num_workers,
+            pending_messages: Vec::new(),
         })
     }
 
@@ -390,6 +393,11 @@ impl MultiProgress {
     pub fn print_status(&mut self, msg: &str) -> io::Result<()> {
         // Don't print if suppressed
         if self.state.suppressed {
+            return Ok(());
+        }
+        // Buffer messages while in fullscreen mode
+        if self.view_mode == ViewMode::MultiPanel {
+            self.pending_messages.push(msg.to_string());
             return Ok(());
         }
         // Insert blank lines to scroll up the viewport, then print message
@@ -569,6 +577,15 @@ impl MultiProgress {
         let options = TerminalOptions { viewport: Viewport::Inline(height) };
         self.terminal = Terminal::with_options(backend, options)?;
         self.view_mode = ViewMode::Inline;
+
+        // Print any messages that were buffered while in fullscreen mode
+        for msg in self.pending_messages.drain(..) {
+            self.terminal.insert_before(1, |buf| {
+                let line = Line::raw(&msg);
+                let area = buf.area;
+                buf.set_line(0, 0, &line, area.width);
+            })?;
+        }
 
         Ok(())
     }
