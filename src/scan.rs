@@ -40,7 +40,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use pkgbob::{Config, Scan};
+//! use bob::{Config, Scan};
 //! use pkgsrc::PkgPath;
 //!
 //! let config = Config::load(None, false)?;
@@ -127,7 +127,7 @@ pub struct ScanResult {
 /// # Example
 ///
 /// ```no_run
-/// # use pkgbob::{Config, Scan};
+/// # use bob::{Config, Scan};
 /// # use pkgsrc::PkgPath;
 /// # fn example() -> anyhow::Result<()> {
 /// let config = Config::load(None, false)?;

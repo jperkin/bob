@@ -347,7 +347,7 @@ impl LuaEnv {
 /// # Example
 ///
 /// ```no_run
-/// use pkgbob::Config;
+/// use bob::Config;
 /// use std::path::Path;
 ///
 /// let config = Config::load(Some(Path::new("/data/bob/config.lua")), false)?;

@@ -45,7 +45,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use pkgbob::{Build, Config, Scan};
+//! use bob::{Build, Config, Scan};
 //! use std::sync::Arc;
 //! use std::sync::atomic::AtomicBool;
 //!
@@ -162,7 +162,7 @@ pub struct BuildResult {
 /// # Example
 ///
 /// ```no_run
-/// # use pkgbob::BuildSummary;
+/// # use bob::BuildSummary;
 /// # fn example(summary: &BuildSummary) {
 /// println!("Succeeded: {}", summary.success_count());
 /// println!("Failed: {}", summary.failed_count());

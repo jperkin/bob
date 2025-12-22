@@ -15,14 +15,14 @@
  */
 
 use anyhow::{Result, bail};
+use bob::Init;
+use bob::build::{self, Build};
+use bob::config::Config;
+use bob::logging;
+use bob::report;
+use bob::sandbox::Sandbox;
+use bob::scan::{Scan, SkipReason};
 use clap::{Parser, Subcommand};
-use pkgbob::Init;
-use pkgbob::build::{self, Build};
-use pkgbob::config::Config;
-use pkgbob::logging;
-use pkgbob::report;
-use pkgbob::sandbox::Sandbox;
-use pkgbob::scan::{Scan, SkipReason};
 use std::path::{Path, PathBuf};
 use std::str;
 use std::sync::Arc;
