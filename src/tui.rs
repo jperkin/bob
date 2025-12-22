@@ -474,7 +474,11 @@ impl MultiProgress {
             };
             let width = area.width as usize;
             // Fixed parts: "{:>12} [" (14) + "] " (2) + counts + " " + elapsed + " " + hint
-            let fixed = 14 + 2 + counts.len() + 1 + elapsed_str.len()
+            let fixed = 14
+                + 2
+                + counts.len()
+                + 1
+                + elapsed_str.len()
                 + if hint.is_empty() { 0 } else { 1 + hint.len() };
             let bar_width = width.saturating_sub(fixed).clamp(1, 30);
             let padding = width.saturating_sub(fixed + bar_width);
@@ -497,7 +501,13 @@ impl MultiProgress {
             } else {
                 format!(
                     "{:>12} [{}] {} {}{:pad$} {}",
-                    state.title, bar, counts, elapsed_str, "", hint, pad = padding
+                    state.title,
+                    bar,
+                    counts,
+                    elapsed_str,
+                    "",
+                    hint,
+                    pad = padding
                 )
             };
             frame.render_widget(Line::raw(line), chunks[state.workers.len()]);
