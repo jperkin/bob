@@ -730,11 +730,7 @@ impl Sandbox {
                     };
                     if let Some(s) = status {
                         if !s.success() {
-                            bail!(
-                                "Failed to unmount {}: exit code {:?}",
-                                mntdest.display(),
-                                s.code()
-                            );
+                            bail!("Failed to unmount {}", mntdest.display());
                         }
                     }
                     self.remove_empty_dirs(id, &mntdest);
