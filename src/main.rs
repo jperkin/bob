@@ -147,30 +147,6 @@ fn main() -> Result<()> {
                 bail!("{} configuration error(s) found", errors.len());
             }
 
-            let mut scan = Scan::new(&config);
-            if let Some(pkgs) = config.pkgpaths() {
-                for p in pkgs {
-                    scan.add(p);
-                }
-            }
-            scan.start()?;
-            scan.write_log(&logs_dir.join("scan.log"))?;
-
-            println!("Resolving dependencies...");
-            let scan_result = scan.resolve()?;
-
-            tracing::info!(
-                buildable = scan_result.buildable.len(),
-                skipped = scan_result.skipped.len(),
-                "Scan complete"
-            );
-
-            if scan_result.buildable.is_empty() {
-                bail!("No packages to build");
-            }
-
-            let mut build = Build::new(&config, scan_result.buildable.clone());
-
             // Set up signal handler for graceful shutdown (SIGINT and SIGTERM)
             let shutdown_flag = Arc::new(AtomicBool::new(false));
             let shutdown_for_handler = Arc::clone(&shutdown_flag);
@@ -188,6 +164,31 @@ fn main() -> Result<()> {
             })
             .expect("Error setting signal handler");
 
+            let mut scan = Scan::new(&config);
+            if let Some(pkgs) = config.pkgpaths() {
+                for p in pkgs {
+                    scan.add(p);
+                }
+            }
+            if scan.start(Arc::clone(&shutdown_flag))? {
+                std::process::exit(130);
+            }
+            scan.write_log(&logs_dir.join("scan.log"))?;
+
+            println!("Resolving dependencies...");
+            let scan_result = scan.resolve()?;
+
+            tracing::info!(
+                buildable = scan_result.buildable.len(),
+                skipped = scan_result.skipped.len(),
+                "Scan complete"
+            );
+
+            if scan_result.buildable.is_empty() {
+                bail!("No packages to build");
+            }
+
+            let mut build = Build::new(&config, scan_result.buildable.clone());
             let mut summary = build.start(Arc::clone(&shutdown_flag))?;
 
             // Check if we were interrupted
@@ -289,13 +290,29 @@ fn main() -> Result<()> {
                 }
                 bail!("{} configuration error(s) found", errors.len());
             }
+
+            // Set up signal handler for graceful shutdown
+            let shutdown_flag = Arc::new(AtomicBool::new(false));
+            let shutdown_for_handler = Arc::clone(&shutdown_flag);
+            let sandbox_for_handler = Sandbox::new(&config);
+
+            ctrlc::set_handler(move || {
+                shutdown_for_handler.store(true, Ordering::SeqCst);
+                if sandbox_for_handler.enabled() {
+                    sandbox_for_handler.kill_processes_by_id(0);
+                }
+            })
+            .expect("Error setting signal handler");
+
             let mut scan = Scan::new(&config);
             if let Some(pkgs) = config.pkgpaths() {
                 for p in pkgs {
                     scan.add(p);
                 }
             }
-            scan.start()?;
+            if scan.start(Arc::clone(&shutdown_flag))? {
+                std::process::exit(130);
+            }
             scan.write_log(&logs_dir.join("scan.log"))?;
 
             println!("Resolving dependencies...");

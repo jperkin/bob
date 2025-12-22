@@ -233,7 +233,10 @@ impl Scan {
         Ok(())
     }
 
-    pub fn start(&mut self) -> anyhow::Result<()> {
+    pub fn start(
+        &mut self,
+        shutdown_flag: Arc<AtomicBool>,
+    ) -> anyhow::Result<bool> {
         info!(
             incoming_count = self.incoming.len(),
             sandbox_enabled = self.sandbox.enabled(),
@@ -323,7 +326,14 @@ impl Scan {
          * next.
          */
         let mut scan_errors: Vec<String> = Vec::new();
+        let mut interrupted = false;
         loop {
+            // Check for shutdown signal
+            if shutdown_flag.load(Ordering::Relaxed) {
+                interrupted = true;
+                break;
+            }
+
             /*
              * Convert the incoming HashSet into a Vec for parallel processing.
              */
@@ -437,6 +447,10 @@ impl Scan {
             let _ = p.finish();
         }
 
+        if interrupted {
+            return Ok(true);
+        }
+
         if !scan_errors.is_empty() {
             for err in &scan_errors {
                 eprintln!("{}", err);
@@ -444,7 +458,7 @@ impl Scan {
             bail!("{} package(s) failed to scan", scan_errors.len());
         }
 
-        Ok(())
+        Ok(false)
     }
 
     /**
