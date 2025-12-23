@@ -178,6 +178,9 @@ fn main() -> Result<()> {
                 }
             }
             if scan.start(&ctx)? {
+                if let Some(ref s) = ctx.stats {
+                    s.flush();
+                }
                 std::process::exit(130);
             }
             scan.write_log(&logs_dir.join("scan.log"))?;
@@ -331,6 +334,9 @@ fn main() -> Result<()> {
                 }
             }
             if scan.start(&ctx)? {
+                if let Some(ref s) = ctx.stats {
+                    s.flush();
+                }
                 std::process::exit(130);
             }
             scan.write_log(&logs_dir.join("scan.log"))?;

@@ -120,3 +120,9 @@ impl Stats {
         }
     }
 }
+
+impl Drop for Stats {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
