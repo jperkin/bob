@@ -31,7 +31,9 @@ $ cargo install pkgbob
 ```
 
 Generate directory containing the configuration file and build scripts.  This
-is also where by default all data will be generated.
+is also where by default all data will be generated.  `/bob` here is used as
+an example, but this can be any location.  You may wish to put this directory
+under version control to track changes.
 
 ```
 $ bob init /bob
@@ -39,7 +41,7 @@ $ bob init /bob
 
 Customise the config.  The defaults are designed to work mostly out of the
 box, but you are likely to want to change some things, for example which
-packages to build.
+packages to build, or any additional mount points required.
 
 ```
 $ cd /bob
