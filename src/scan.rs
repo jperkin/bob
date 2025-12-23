@@ -433,8 +433,11 @@ impl Scan {
         // Spawn a thread to periodically refresh the display (for timer updates)
         let progress_refresh = Arc::clone(&progress);
         let stop_flag = Arc::clone(&stop_refresh);
+        let shutdown_for_refresh = Arc::clone(&shutdown_flag);
         let refresh_thread = std::thread::spawn(move || {
-            while !stop_flag.load(Ordering::Relaxed) {
+            while !stop_flag.load(Ordering::Relaxed)
+                && !shutdown_for_refresh.load(Ordering::SeqCst)
+            {
                 if let Ok(mut p) = progress_refresh.lock() {
                     let _ = p.render();
                 }
@@ -587,7 +590,11 @@ impl Scan {
         let _ = refresh_thread.join();
 
         if let Ok(mut p) = progress.lock() {
-            let _ = p.finish();
+            if interrupted {
+                let _ = p.finish_interrupted();
+            } else {
+                let _ = p.finish();
+            }
         }
 
         if interrupted {
