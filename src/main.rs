@@ -210,9 +210,7 @@ fn main() -> Result<()> {
             }
 
             println!("Resolving dependencies...");
-            let scan_result = scan.resolve()?;
-            scan_result.write_resolve_log(&logs_dir.join("resolve.log"))?;
-            scan_result.write_resolve_dag(&logs_dir.join("resolve.dag"))?;
+            let scan_result = scan.resolve(Some(&logs_dir))?;
 
             tracing::info!(
                 buildable = scan_result.buildable.len(),
@@ -391,9 +389,7 @@ fn main() -> Result<()> {
             }
 
             println!("Resolving dependencies...");
-            let result = scan.resolve()?;
-            result.write_resolve_log(&logs_dir.join("resolve.log"))?;
-            result.write_resolve_dag(&logs_dir.join("resolve.dag"))?;
+            let result = scan.resolve(Some(&logs_dir))?;
             println!(
                 "Resolved {} buildable packages, {} skipped",
                 result.buildable.len(),

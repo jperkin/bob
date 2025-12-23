@@ -53,7 +53,7 @@
 //!
 //! let ctx = RunContext::new(Arc::new(AtomicBool::new(false)));
 //! scan.start(&ctx)?;  // Discover dependencies
-//! let result = scan.resolve()?;
+//! let result = scan.resolve(None)?;
 //!
 //! println!("Buildable: {}", result.buildable.len());
 //! println!("Skipped: {}", result.skipped.len());
@@ -68,6 +68,7 @@ use pkgsrc::{Depend, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -790,8 +791,10 @@ impl Scan {
      * `depends` for the package in question.
      *
      * Return a [`ScanResult`] containing buildable packages and skipped packages.
+     *
+     * If `log_dir` is provided, logs will be written even on failure.
      */
-    pub fn resolve(&mut self) -> Result<ScanResult> {
+    pub fn resolve(&mut self, log_dir: Option<&Path>) -> Result<ScanResult> {
         info!(
             done_pkgpaths = self.done.len(),
             "Starting dependency resolution"
@@ -1024,13 +1027,6 @@ impl Scan {
             })
             .collect();
 
-        if !errors.is_empty() {
-            for err in &errors {
-                error!(error = %err, "Unresolved dependency");
-            }
-            bail!("Unresolved dependencies:\n  {}", errors.join("\n  "));
-        }
-
         /*
          * Verify that the graph is acyclic.
          */
@@ -1044,15 +1040,15 @@ impl Scan {
                 graph.add_edge(dep.pkgname(), pkgname.pkgname(), ());
             }
         }
-        if let Some(cycle) = find_cycle(&graph) {
+        let cycle_error = find_cycle(&graph).map(|cycle| {
             let mut err = "Circular dependencies detected:\n".to_string();
             for n in cycle.iter().rev() {
                 err.push_str(&format!("\t{}\n", n));
             }
             err.push_str(&format!("\t{}", cycle.last().unwrap()));
             error!(cycle = ?cycle, "Circular dependency detected");
-            bail!(err);
-        }
+            err
+        });
 
         info!(
             buildable_count = self.resolved.len(),
@@ -1075,11 +1071,31 @@ impl Scan {
             })
             .collect();
 
-        Ok(ScanResult {
+        let result = ScanResult {
             buildable: self.resolved.clone(),
             skipped,
             scan_failed,
-        })
+        };
+
+        // Write logs before potentially failing
+        if let Some(dir) = log_dir {
+            let _ = result.write_resolve_log(&dir.join("resolve.log"));
+            let _ = result.write_resolve_dag(&dir.join("resolve.dag"));
+        }
+
+        // Now check for errors
+        if !errors.is_empty() {
+            for err in &errors {
+                error!(error = %err, "Unresolved dependency");
+            }
+            bail!("Unresolved dependencies:\n  {}", errors.join("\n  "));
+        }
+
+        if let Some(err) = cycle_error {
+            bail!(err);
+        }
+
+        Ok(result)
     }
 }
 
