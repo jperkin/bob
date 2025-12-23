@@ -564,6 +564,18 @@ impl Scan {
             }
         }
 
+        // Stop the refresh thread and print final summary
+        stop_refresh.store(true, Ordering::Relaxed);
+        let _ = refresh_thread.join();
+
+        if let Ok(mut p) = progress.lock() {
+            if interrupted {
+                let _ = p.finish_interrupted();
+            } else {
+                let _ = p.finish();
+            }
+        }
+
         if self.sandbox.enabled() {
             // Run post-build script if defined
             if let Some(post_build) = self.config.script("post-build") {
@@ -585,18 +597,6 @@ impl Scan {
             }
 
             self.sandbox.destroy(0)?;
-        }
-
-        // Stop the refresh thread and print final summary
-        stop_refresh.store(true, Ordering::Relaxed);
-        let _ = refresh_thread.join();
-
-        if let Ok(mut p) = progress.lock() {
-            if interrupted {
-                let _ = p.finish_interrupted();
-            } else {
-                let _ = p.finish();
-            }
         }
 
         if interrupted {
