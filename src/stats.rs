@@ -47,17 +47,9 @@ pub struct Stats {
 #[serde(tag = "event")]
 pub enum Event<'a> {
     #[serde(rename = "scan")]
-    Scan {
-        pkgpath: &'a str,
-        duration_ms: u64,
-        success: bool,
-    },
+    Scan { pkgpath: &'a str, duration_ms: u64, success: bool },
     #[serde(rename = "resolve")]
-    Resolve {
-        buildable: usize,
-        skipped: usize,
-        duration_ms: u64,
-    },
+    Resolve { buildable: usize, skipped: usize, duration_ms: u64 },
     #[serde(rename = "build")]
     Build {
         pkgname: &'a str,
@@ -71,9 +63,7 @@ impl Stats {
     /// Create a new stats writer that writes to the given path.
     pub fn new(path: &Path) -> anyhow::Result<Self> {
         let file = File::create(path)?;
-        Ok(Self {
-            writer: Mutex::new(BufWriter::new(file)),
-        })
+        Ok(Self { writer: Mutex::new(BufWriter::new(file)) })
     }
 
     /// Record an event to the stats file.
@@ -95,7 +85,12 @@ impl Stats {
     }
 
     /// Record a dependency resolution event.
-    pub fn resolve(&self, buildable: usize, skipped: usize, duration: Duration) {
+    pub fn resolve(
+        &self,
+        buildable: usize,
+        skipped: usize,
+        duration: Duration,
+    ) {
         self.record(Event::Resolve {
             buildable,
             skipped,
@@ -104,7 +99,13 @@ impl Stats {
     }
 
     /// Record a package build event.
-    pub fn build(&self, pkgname: &str, pkgpath: Option<&str>, duration: Duration, outcome: &str) {
+    pub fn build(
+        &self,
+        pkgname: &str,
+        pkgpath: Option<&str>,
+        duration: Duration,
+        outcome: &str,
+    ) {
         self.record(Event::Build {
             pkgname,
             pkgpath,
