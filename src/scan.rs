@@ -439,9 +439,11 @@ impl Scan {
                 && !shutdown_for_refresh.load(Ordering::SeqCst)
             {
                 if let Ok(mut p) = progress_refresh.lock() {
+                    // Check for keyboard events (Ctrl+C raises SIGINT)
+                    let _ = p.poll_events();
                     let _ = p.render();
                 }
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(50));
             }
         });
 
