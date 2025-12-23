@@ -1321,7 +1321,9 @@ impl Build {
                                 .scanpkgs
                                 .get(&pkgname)
                                 .and_then(|idx| idx.pkg_location.as_ref())
-                                .map(|p| p.as_path().to_string_lossy().to_string());
+                                .map(|p| {
+                                    p.as_path().to_string_lossy().to_string()
+                                });
                             s.build(
                                 pkgname.pkgname(),
                                 pkgpath.as_deref(),
@@ -1363,7 +1365,9 @@ impl Build {
                                 .scanpkgs
                                 .get(&pkgname)
                                 .and_then(|idx| idx.pkg_location.as_ref())
-                                .map(|p| p.as_path().to_string_lossy().to_string());
+                                .map(|p| {
+                                    p.as_path().to_string_lossy().to_string()
+                                });
                             s.build(
                                 pkgname.pkgname(),
                                 pkgpath.as_deref(),
@@ -1404,7 +1408,9 @@ impl Build {
                                 .scanpkgs
                                 .get(&pkgname)
                                 .and_then(|idx| idx.pkg_location.as_ref())
-                                .map(|p| p.as_path().to_string_lossy().to_string());
+                                .map(|p| {
+                                    p.as_path().to_string_lossy().to_string()
+                                });
                             s.build(
                                 pkgname.pkgname(),
                                 pkgpath.as_deref(),
@@ -1446,7 +1452,9 @@ impl Build {
                                 .scanpkgs
                                 .get(&pkgname)
                                 .and_then(|idx| idx.pkg_location.as_ref())
-                                .map(|p| p.as_path().to_string_lossy().to_string());
+                                .map(|p| {
+                                    p.as_path().to_string_lossy().to_string()
+                                });
                             s.build(
                                 pkgname.pkgname(),
                                 pkgpath.as_deref(),
