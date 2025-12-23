@@ -874,10 +874,23 @@ impl Scan {
         }
 
         /*
+         * Build a set of skipped package names for checking if unresolved
+         * dependencies are due to skipped packages vs truly missing.
+         */
+        let skipped_pkgnames: HashSet<PkgName> =
+            skipped.iter().map(|s| s.pkgname.clone()).collect();
+
+        /*
          * Keep a cache of best Depend => PkgName matches we've already seen
          * as it's likely the same patterns will be used in multiple places.
          */
         let mut match_cache: HashMap<Depend, PkgName> = HashMap::new();
+
+        /*
+         * Track packages to skip due to skipped dependencies, and truly
+         * unresolved dependencies (errors).
+         */
+        let mut skip_due_to_dep: HashMap<PkgName, String> = HashMap::new();
         let mut errors: Vec<String> = Vec::new();
 
         for pkg in self.resolved.values_mut() {
@@ -915,21 +928,101 @@ impl Scan {
                     }
                 }
                 /*
-                 * If we found a match, save it and add to the cache,
-                 * otherwise collect the error (batch errors).
+                 * If we found a match, save it and add to the cache.
+                 * Otherwise check if the dependency matches a skipped package.
                  */
                 if let Some(pkgname) = best {
                     pkg.depends.push(pkgname.clone());
                     match_cache.insert(depend.clone(), pkgname.clone());
                 } else {
-                    errors.push(format!(
-                        "No match found for {} in {}",
-                        depend.pattern().pattern(),
-                        pkg.pkgname.pkgname()
-                    ));
+                    // Check if the dependency matches a skipped package
+                    let mut matched_skipped: Option<&PkgName> = None;
+                    for candidate in &skipped_pkgnames {
+                        if depend.pattern().matches(candidate.pkgname()) {
+                            matched_skipped = Some(candidate);
+                            break;
+                        }
+                    }
+
+                    if let Some(skipped_dep) = matched_skipped {
+                        // Dependency is skipped, so this package should be too
+                        skip_due_to_dep.insert(
+                            pkg.pkgname.clone(),
+                            format!("Dependency {} skipped", skipped_dep.pkgname()),
+                        );
+                    } else {
+                        // Truly unresolved - no matching package exists
+                        errors.push(format!(
+                            "No match found for {} in {}",
+                            depend.pattern().pattern(),
+                            pkg.pkgname.pkgname()
+                        ));
+                    }
                 }
             }
         }
+
+        /*
+         * Iteratively propagate skips: if A depends on B, and B is now
+         * marked to skip, then A should also be skipped.
+         */
+        loop {
+            let mut new_skips: HashMap<PkgName, String> = HashMap::new();
+
+            for pkg in self.resolved.values() {
+                if skip_due_to_dep.contains_key(&pkg.pkgname) {
+                    continue;
+                }
+                for dep in &pkg.depends {
+                    if skip_due_to_dep.contains_key(dep) {
+                        // Our dependency is being skipped
+                        new_skips.insert(
+                            pkg.pkgname.clone(),
+                            format!("Dependency {} skipped", dep.pkgname()),
+                        );
+                        break;
+                    }
+                }
+            }
+
+            if new_skips.is_empty() {
+                break;
+            }
+            skip_due_to_dep.extend(new_skips);
+        }
+
+        /*
+         * Move packages with skipped dependencies from resolved to skipped.
+         */
+        for (pkgname, reason) in &skip_due_to_dep {
+            if let Some(pkg) = self.resolved.remove(pkgname) {
+                skipped.push(SkippedPackage {
+                    pkgname: pkg.pkgname.clone(),
+                    pkgpath: pkg.pkg_location.clone(),
+                    reason: SkipReason::PkgSkipReason(reason.clone()),
+                });
+            }
+        }
+
+        /*
+         * Filter out errors for packages that are being skipped anyway.
+         * If a package has both a skipped dependency and a missing dependency,
+         * we only care about the skip - the missing dep error is noise.
+         */
+        let errors: Vec<String> = errors
+            .into_iter()
+            .filter(|err| {
+                // Error format is "No match found for X in PKGNAME"
+                // Extract PKGNAME and check if it's being skipped
+                if let Some(pkgname_str) = err.split(" in ").last() {
+                    !skip_due_to_dep
+                        .keys()
+                        .any(|k| k.pkgname() == pkgname_str)
+                } else {
+                    true // Keep error if we can't parse it
+                }
+            })
+            .collect();
 
         if !errors.is_empty() {
             for err in &errors {
