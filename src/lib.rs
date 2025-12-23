@@ -98,7 +98,7 @@ pub use build::{Build, BuildOutcome, BuildResult, BuildSummary};
 pub use config::{Config, Options, Pkgsrc, Sandboxes};
 pub use report::write_html_report;
 pub use sandbox::Sandbox;
-pub use scan::{Scan, ScanResult, SkipReason, SkippedPackage};
+pub use scan::{Scan, ScanFailure, ScanResult, SkipReason, SkippedPackage};
 pub use stats::Stats;
 
 // Re-export init for CLI use

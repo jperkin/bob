@@ -101,6 +101,15 @@ pub struct SkippedPackage {
     pub reason: SkipReason,
 }
 
+/// Information about a package that failed to scan.
+#[derive(Clone, Debug)]
+pub struct ScanFailure {
+    /// Package path in pkgsrc (e.g., `games/plib`).
+    pub pkgpath: PkgPath,
+    /// Error message from the scan failure.
+    pub error: String,
+}
+
 /// Result of scanning and resolving packages.
 ///
 /// Returned by [`Scan::resolve`], contains the packages that can be built
@@ -113,6 +122,8 @@ pub struct ScanResult {
     pub buildable: HashMap<PkgName, ScanIndex>,
     /// Packages that were skipped due to skip/fail reasons.
     pub skipped: Vec<SkippedPackage>,
+    /// Packages that failed to scan (bmake pbulk-index failed).
+    pub scan_failed: Vec<ScanFailure>,
 }
 
 impl ScanResult {
@@ -268,6 +279,8 @@ pub struct Scan {
     resolved: HashMap<PkgName, ScanIndex>,
     /// Full tree scan - skip recursive dependency discovery.
     full_tree: bool,
+    /// Packages that failed to scan (pkgpath, error message).
+    scan_failures: Vec<(PkgPath, String)>,
 }
 
 impl Scan {
@@ -452,7 +465,6 @@ impl Scan {
          * processed, and adding any dependencies to incoming to be processed
          * next.
          */
-        let mut scan_errors: Vec<String> = Vec::new();
         let mut interrupted = false;
         loop {
             // Check for shutdown signal
@@ -538,7 +550,8 @@ impl Scan {
                 let scanpkgs = match scanpkgs {
                     Ok(pkgs) => pkgs,
                     Err(e) => {
-                        scan_errors.push(format!("{}", e));
+                        self.scan_failures
+                            .push((pkgpath.clone(), format!("{}", e)));
                         self.done.insert(pkgpath.clone(), vec![]);
                         continue;
                     }
@@ -613,14 +626,17 @@ impl Scan {
             return Ok(true);
         }
 
-        if !scan_errors.is_empty() {
-            for err in &scan_errors {
-                eprintln!("{}", err);
-            }
-            bail!("{} package(s) failed to scan", scan_errors.len());
-        }
-
         Ok(false)
+    }
+
+    /// Returns scan failures as formatted error strings.
+    pub fn scan_errors(&self) -> Vec<String> {
+        self.scan_failures.iter().map(|(_, e)| e.clone()).collect()
+    }
+
+    /// Returns scan failures with pkgpath information.
+    pub fn scan_failures(&self) -> &[(PkgPath, String)] {
+        &self.scan_failures
     }
 
     /**
@@ -956,7 +972,21 @@ impl Scan {
             debug!(pkgname = %pkgname.pkgname(), "Package is buildable");
         }
 
-        Ok(ScanResult { buildable: self.resolved.clone(), skipped })
+        // Convert scan failures to ScanFailure structs
+        let scan_failed: Vec<ScanFailure> = self
+            .scan_failures
+            .iter()
+            .map(|(pkgpath, error)| ScanFailure {
+                pkgpath: pkgpath.clone(),
+                error: error.clone(),
+            })
+            .collect();
+
+        Ok(ScanResult {
+            buildable: self.resolved.clone(),
+            skipped,
+            scan_failed,
+        })
     }
 }
 

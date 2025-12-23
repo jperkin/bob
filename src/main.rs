@@ -75,9 +75,12 @@ fn print_summary(summary: &build::BuildSummary) {
     println!();
     println!("Build Summary");
     println!("=============");
-    println!("  Succeeded: {}", summary.success_count());
-    println!("  Failed:    {}", summary.failed_count());
-    println!("  Skipped:   {}", summary.skipped_count());
+    println!("  Succeeded:   {}", summary.success_count());
+    println!("  Failed:      {}", summary.failed_count());
+    println!("  Skipped:     {}", summary.skipped_count());
+    if summary.scan_failed_count() > 0 {
+        println!("  Scan failed: {}", summary.scan_failed_count());
+    }
     println!();
 }
 
@@ -123,7 +126,11 @@ fn scan_logdir_for_report(logdir: &Path) -> Result<build::BuildSummary> {
         });
     }
 
-    Ok(build::BuildSummary { duration: Duration::ZERO, results })
+    Ok(build::BuildSummary {
+        duration: Duration::ZERO,
+        results,
+        scan_failed: Vec::new(),
+    })
 }
 
 fn main() -> Result<()> {
@@ -185,6 +192,23 @@ fn main() -> Result<()> {
             }
             scan.write_log(&logs_dir.join("scan.log"))?;
 
+            // Handle scan errors
+            let scan_errors = scan.scan_errors();
+            if !scan_errors.is_empty() {
+                eprintln!();
+                for err in &scan_errors {
+                    eprintln!("{}", err);
+                }
+                if config.strict_scan() {
+                    bail!("{} package(s) failed to scan", scan_errors.len());
+                }
+                eprintln!(
+                    "Warning: {} package(s) failed to scan, continuing anyway",
+                    scan_errors.len()
+                );
+                eprintln!();
+            }
+
             println!("Resolving dependencies...");
             let scan_result = scan.resolve()?;
             scan_result.write_resolve_log(&logs_dir.join("resolve.log"))?;
@@ -235,6 +259,9 @@ fn main() -> Result<()> {
                     log_dir: None,
                 });
             }
+
+            // Add scan failures to summary
+            summary.scan_failed = scan_result.scan_failed;
 
             print_summary(&summary);
 
@@ -340,6 +367,23 @@ fn main() -> Result<()> {
                 std::process::exit(130);
             }
             scan.write_log(&logs_dir.join("scan.log"))?;
+
+            // Handle scan errors
+            let scan_errors = scan.scan_errors();
+            if !scan_errors.is_empty() {
+                eprintln!();
+                for err in &scan_errors {
+                    eprintln!("{}", err);
+                }
+                if config.strict_scan() {
+                    bail!("{} package(s) failed to scan", scan_errors.len());
+                }
+                eprintln!(
+                    "Warning: {} package(s) failed to scan, continuing anyway",
+                    scan_errors.len()
+                );
+                eprintln!();
+            }
 
             // Flush stats
             if let Some(ref s) = ctx.stats {

@@ -60,6 +60,7 @@
 //! Shows all successfully built packages with their build duration.
 
 use crate::build::{BuildOutcome, BuildResult, BuildSummary};
+use crate::scan::ScanFailure;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::fs;
@@ -187,6 +188,11 @@ pub fn write_html_report(summary: &BuildSummary, path: &Path) -> Result<()> {
     // Failed packages section
     write_failed_section(&mut file, &failed_info)?;
 
+    // Scan failed section (if any)
+    if !summary.scan_failed.is_empty() {
+        write_scan_failed_section(&mut file, &summary.scan_failed)?;
+    }
+
     // Skipped packages section
     write_skipped_section(&mut file, &skipped)?;
 
@@ -238,6 +244,7 @@ fn write_styles(file: &mut fs::File) -> Result<()> {
     writeln!(file, "    .stat.success .value {{ color: #28a745; }}")?;
     writeln!(file, "    .stat.failed .value {{ color: #dc3545; }}")?;
     writeln!(file, "    .stat.skipped .value {{ color: #ffc107; }}")?;
+    writeln!(file, "    .stat.scan-failed .value {{ color: #fd7e14; }}")?;
     writeln!(
         file,
         "    .stat.duration .value {{ color: #17a2b8; font-size: 24px; }}"
@@ -261,6 +268,10 @@ fn write_styles(file: &mut fs::File) -> Result<()> {
     writeln!(
         file,
         "    .section.skipped h2 {{ color: #856404; border-color: #ffc107; }}"
+    )?;
+    writeln!(
+        file,
+        "    .section.scan-failed h2 {{ color: #fd7e14; border-color: #fd7e14; }}"
     )?;
     writeln!(file, "    table {{ width: 100%; border-collapse: collapse; }}")?;
     writeln!(
@@ -395,6 +406,13 @@ fn write_summary_stats(
         "  <div class=\"stat skipped\"><h2>Skipped</h2><div class=\"value\">{}</div></div>",
         summary.skipped_count()
     )?;
+    if summary.scan_failed_count() > 0 {
+        writeln!(
+            file,
+            "  <div class=\"stat scan-failed\"><h2>Scan Failed</h2><div class=\"value\">{}</div></div>",
+            summary.scan_failed_count()
+        )?;
+    }
     writeln!(
         file,
         "  <div class=\"stat duration\"><h2>Duration</h2><div class=\"value\">{}</div></div>",
@@ -619,6 +637,47 @@ fn write_success_section(
         writeln!(file, "    </tbody>")?;
         writeln!(file, "  </table>")?;
     }
+    writeln!(file, "</div>")?;
+    Ok(())
+}
+
+fn write_scan_failed_section(
+    file: &mut fs::File,
+    scan_failed: &[ScanFailure],
+) -> Result<()> {
+    writeln!(file, "<div class=\"section scan-failed\">")?;
+    writeln!(file, "  <h2>Scan Failed Packages ({})</h2>", scan_failed.len())?;
+
+    writeln!(file, "  <table id=\"scan-failed-table\">")?;
+    writeln!(file, "    <thead><tr>")?;
+    writeln!(
+        file,
+        "      <th onclick=\"sortTable(document.getElementById('scan-failed-table'), 0, 'str')\">Path<span class=\"sort-indicator\"></span></th>"
+    )?;
+    writeln!(
+        file,
+        "      <th onclick=\"sortTable(document.getElementById('scan-failed-table'), 1, 'str')\">Error<span class=\"sort-indicator\"></span></th>"
+    )?;
+    writeln!(file, "    </tr></thead>")?;
+    writeln!(file, "    <tbody>")?;
+
+    for failure in scan_failed {
+        let pkgpath = failure.pkgpath.as_path().display().to_string();
+        // Escape HTML in error message
+        let error = failure
+            .error
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        writeln!(
+            file,
+            "    <tr><td>{}</td><td class=\"reason\">{}</td></tr>",
+            pkgpath, error
+        )?;
+    }
+
+    writeln!(file, "    </tbody>")?;
+    writeln!(file, "  </table>")?;
     writeln!(file, "</div>")?;
     Ok(())
 }

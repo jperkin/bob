@@ -36,6 +36,7 @@
 //! |-------|------|---------|-------------|
 //! | `build_threads` | integer | 1 | Number of parallel build sandboxes. Each sandbox builds one package at a time. |
 //! | `scan_threads` | integer | 1 | Number of parallel scan processes for dependency discovery. |
+//! | `strict_scan` | boolean | false | If true, abort on scan errors. If false, continue and report failures separately. |
 //! | `verbose` | boolean | false | Enable verbose output. Can be overridden by the `-v` command line flag. |
 //!
 //! # Pkgsrc Section
@@ -387,6 +388,8 @@ pub struct Options {
     pub build_threads: Option<usize>,
     /// Number of parallel scan processes.
     pub scan_threads: Option<usize>,
+    /// If true, abort on scan errors. If false, continue and report failures.
+    pub strict_scan: Option<bool>,
     /// Enable verbose output.
     pub verbose: Option<bool>,
 }
@@ -562,6 +565,14 @@ impl Config {
             opts.scan_threads.unwrap_or(1)
         } else {
             1
+        }
+    }
+
+    pub fn strict_scan(&self) -> bool {
+        if let Some(opts) = &self.file.options {
+            opts.strict_scan.unwrap_or(false)
+        } else {
+            false
         }
     }
 
@@ -816,6 +827,7 @@ fn parse_options(globals: &Table) -> LuaResult<Option<Options>> {
     Ok(Some(Options {
         build_threads: table.get("build_threads").ok(),
         scan_threads: table.get("scan_threads").ok(),
+        strict_scan: table.get("strict_scan").ok(),
         verbose: table.get("verbose").ok(),
     }))
 }

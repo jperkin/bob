@@ -63,6 +63,7 @@
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 
+use crate::scan::ScanFailure;
 use crate::status::{self, StatusMessage};
 use crate::tui::{MultiProgress, format_duration};
 use crate::{Config, RunContext, Sandbox};
@@ -180,6 +181,8 @@ pub struct BuildSummary {
     pub duration: Duration,
     /// Results for each package.
     pub results: Vec<BuildResult>,
+    /// Packages that failed to scan (bmake pbulk-index failed).
+    pub scan_failed: Vec<ScanFailure>,
 }
 
 impl BuildSummary {
@@ -205,6 +208,11 @@ impl BuildSummary {
             .iter()
             .filter(|r| matches!(r.outcome, BuildOutcome::Skipped(_)))
             .count()
+    }
+
+    /// Count of packages that failed to scan.
+    pub fn scan_failed_count(&self) -> usize {
+        self.scan_failed.len()
     }
 
     /// Get all failed results.
@@ -1533,7 +1541,11 @@ impl Build {
 
         // Collect results from manager
         let results = results_rx.recv().unwrap_or_default();
-        let summary = BuildSummary { duration: started.elapsed(), results };
+        let summary = BuildSummary {
+            duration: started.elapsed(),
+            results,
+            scan_failed: Vec::new(),
+        };
 
         if self.sandbox.enabled() {
             self.sandbox.destroy_all(self.config.build_threads())?;
