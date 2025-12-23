@@ -62,12 +62,35 @@ pub mod config;
 pub mod report;
 pub mod sandbox;
 pub mod scan;
+pub mod stats;
 
 // Internal modules - exposed for binary use but not primary API
 mod init;
 pub mod logging;
 mod status;
 mod tui;
+
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+
+/// Shared context for a build or scan run.
+pub struct RunContext {
+    /// Optional stats collector for performance metrics.
+    pub stats: Option<Arc<stats::Stats>>,
+    /// Flag to signal graceful shutdown.
+    pub shutdown: Arc<AtomicBool>,
+}
+
+impl RunContext {
+    pub fn new(shutdown: Arc<AtomicBool>) -> Self {
+        Self { stats: None, shutdown }
+    }
+
+    pub fn with_stats(mut self, stats: Arc<stats::Stats>) -> Self {
+        self.stats = Some(stats);
+        self
+    }
+}
 
 // Re-export main types for convenience
 pub use action::{Action, ActionType, FSType};
@@ -76,6 +99,7 @@ pub use config::{Config, Options, Pkgsrc, Sandboxes};
 pub use report::write_html_report;
 pub use sandbox::Sandbox;
 pub use scan::{Scan, ScanResult, SkipReason, SkippedPackage};
+pub use stats::Stats;
 
 // Re-export init for CLI use
 pub use init::Init;

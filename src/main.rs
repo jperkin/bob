@@ -22,6 +22,7 @@ use bob::logging;
 use bob::report;
 use bob::sandbox::Sandbox;
 use bob::scan::{Scan, SkipReason};
+use bob::{RunContext, Stats};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::str;
@@ -164,13 +165,19 @@ fn main() -> Result<()> {
             })
             .expect("Error setting signal handler");
 
+            // Create stats collector
+            let stats_path = logs_dir.join("stats.jsonl");
+            let stats = Stats::new(&stats_path)?;
+            let ctx = RunContext::new(Arc::clone(&shutdown_flag))
+                .with_stats(Arc::new(stats));
+
             let mut scan = Scan::new(&config);
             if let Some(pkgs) = config.pkgpaths() {
                 for p in pkgs {
                     scan.add(p);
                 }
             }
-            if scan.start(Arc::clone(&shutdown_flag))? {
+            if scan.start(&ctx)? {
                 std::process::exit(130);
             }
             scan.write_log(&logs_dir.join("scan.log"))?;
@@ -191,10 +198,15 @@ fn main() -> Result<()> {
             }
 
             let mut build = Build::new(&config, scan_result.buildable.clone());
-            let mut summary = build.start(Arc::clone(&shutdown_flag))?;
+            let mut summary = build.start(&ctx)?;
+
+            // Flush stats before checking for interruption
+            if let Some(ref s) = ctx.stats {
+                s.flush();
+            }
 
             // Check if we were interrupted
-            if shutdown_flag.load(Ordering::SeqCst) {
+            if ctx.shutdown.load(Ordering::SeqCst) {
                 let sandbox = Sandbox::new(&config);
                 if sandbox.enabled() {
                     let _ = sandbox.destroy_all(config.build_threads());
@@ -306,16 +318,27 @@ fn main() -> Result<()> {
             })
             .expect("Error setting signal handler");
 
+            // Create stats collector
+            let stats_path = logs_dir.join("stats.jsonl");
+            let stats = Stats::new(&stats_path)?;
+            let ctx = RunContext::new(Arc::clone(&shutdown_flag))
+                .with_stats(Arc::new(stats));
+
             let mut scan = Scan::new(&config);
             if let Some(pkgs) = config.pkgpaths() {
                 for p in pkgs {
                     scan.add(p);
                 }
             }
-            if scan.start(Arc::clone(&shutdown_flag))? {
+            if scan.start(&ctx)? {
                 std::process::exit(130);
             }
             scan.write_log(&logs_dir.join("scan.log"))?;
+
+            // Flush stats
+            if let Some(ref s) = ctx.stats {
+                s.flush();
+            }
 
             println!("Resolving dependencies...");
             let result = scan.resolve()?;

@@ -1012,6 +1012,8 @@ dependencies = [
  "ratatui",
  "rayon",
  "rust-embed",
+ "serde",
+ "serde_json",
  "strip-ansi-escapes",
  "thiserror 1.0.69",
  "tracing",

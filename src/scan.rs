@@ -40,8 +40,10 @@
 //! # Example
 //!
 //! ```no_run
-//! use bob::{Config, Scan};
+//! use bob::{Config, RunContext, Scan};
 //! use pkgsrc::PkgPath;
+//! use std::sync::Arc;
+//! use std::sync::atomic::AtomicBool;
 //!
 //! let config = Config::load(None, false)?;
 //! let mut scan = Scan::new(&config);
@@ -49,7 +51,8 @@
 //! scan.add(&PkgPath::new("mail/mutt")?);
 //! scan.add(&PkgPath::new("www/curl")?);
 //!
-//! scan.start()?;  // Discover dependencies
+//! let ctx = RunContext::new(Arc::new(AtomicBool::new(false)));
+//! scan.start(&ctx)?;  // Discover dependencies
 //! let result = scan.resolve()?;
 //!
 //! println!("Buildable: {}", result.buildable.len());
@@ -58,7 +61,7 @@
 //! ```
 
 use crate::tui::MultiProgress;
-use crate::{Config, Sandbox};
+use crate::{Config, RunContext, Sandbox};
 use anyhow::{Context, Result, bail};
 use petgraph::graphmap::DiGraphMap;
 use pkgsrc::{Depend, PkgName, PkgPath, ScanIndex};
@@ -67,7 +70,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, trace};
 
 /// Reason why a package was excluded from the build.
@@ -239,14 +242,17 @@ impl ScanResult {
 /// # Example
 ///
 /// ```no_run
-/// # use bob::{Config, Scan};
+/// # use bob::{Config, RunContext, Scan};
 /// # use pkgsrc::PkgPath;
+/// # use std::sync::Arc;
+/// # use std::sync::atomic::AtomicBool;
 /// # fn example() -> anyhow::Result<()> {
 /// let config = Config::load(None, false)?;
 /// let mut scan = Scan::new(&config);
 ///
 /// scan.add(&PkgPath::new("mail/mutt")?);
-/// scan.start()?;
+/// let ctx = RunContext::new(Arc::new(AtomicBool::new(false)));
+/// scan.start(&ctx)?;
 ///
 /// let result = scan.resolve()?;
 /// println!("Found {} buildable packages", result.buildable.len());
@@ -349,10 +355,7 @@ impl Scan {
         Ok(())
     }
 
-    pub fn start(
-        &mut self,
-        shutdown_flag: Arc<AtomicBool>,
-    ) -> anyhow::Result<bool> {
+    pub fn start(&mut self, ctx: &RunContext) -> anyhow::Result<bool> {
         info!(
             incoming_count = self.incoming.len(),
             sandbox_enabled = self.sandbox.enabled(),
@@ -363,6 +366,9 @@ impl Scan {
             .num_threads(self.config.scan_threads())
             .build()
             .context("Failed to build scan thread pool")?;
+
+        let shutdown_flag = Arc::clone(&ctx.shutdown);
+        let stats = ctx.stats.clone();
 
         /*
          * Only a single sandbox is required, 'make pbulk-index' can safely be
@@ -460,6 +466,7 @@ impl Scan {
 
             let progress_clone = Arc::clone(&progress);
             let shutdown_clone = Arc::clone(&shutdown_flag);
+            let stats_clone = stats.clone();
             pool.install(|| {
                 parpaths.par_iter_mut().for_each(|pkg| {
                     // Check for shutdown before starting each package
@@ -479,7 +486,14 @@ impl Scan {
                         p.state_mut().set_worker_active(thread_id, &pathname);
                     }
 
+                    let scan_start = Instant::now();
                     *result = self.scan_pkgpath(pkgpath);
+                    let scan_duration = scan_start.elapsed();
+
+                    // Record stats if enabled
+                    if let Some(ref s) = stats_clone {
+                        s.scan(&pathname, scan_duration, result.is_ok());
+                    }
 
                     // Update counter immediately after each package
                     if let Ok(mut p) = progress_clone.lock() {

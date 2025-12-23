@@ -45,19 +45,19 @@
 //! # Example
 //!
 //! ```no_run
-//! use bob::{Build, Config, Scan};
+//! use bob::{Build, Config, RunContext, Scan};
 //! use std::sync::Arc;
 //! use std::sync::atomic::AtomicBool;
 //!
 //! let config = Config::load(None, false)?;
 //! let mut scan = Scan::new(&config);
 //! // Add packages...
-//! scan.start()?;
+//! let ctx = RunContext::new(Arc::new(AtomicBool::new(false)));
+//! scan.start(&ctx)?;
 //! let result = scan.resolve()?;
 //!
 //! let mut build = Build::new(&config, result.buildable);
-//! let shutdown = Arc::new(AtomicBool::new(false));
-//! let summary = build.start(shutdown)?;
+//! let summary = build.start(&ctx)?;
 //!
 //! println!("Built {} packages", summary.success_count());
 //! # Ok::<(), anyhow::Error>(())
@@ -65,7 +65,7 @@
 
 use crate::status::{self, StatusMessage};
 use crate::tui::{MultiProgress, format_duration};
-use crate::{Config, Sandbox};
+use crate::{Config, RunContext, Sandbox};
 use anyhow::{Context, bail};
 use glob::Pattern;
 use pkgsrc::{PkgName, PkgPath, ScanIndex};
@@ -1033,13 +1033,13 @@ impl Build {
         Build { config: config.clone(), sandbox, scanpkgs }
     }
 
-    pub fn start(
-        &mut self,
-        shutdown_flag: Arc<AtomicBool>,
-    ) -> anyhow::Result<BuildSummary> {
+    pub fn start(&mut self, ctx: &RunContext) -> anyhow::Result<BuildSummary> {
         let started = Instant::now();
 
         info!(package_count = self.scanpkgs.len(), "Build::start() called");
+
+        let shutdown_flag = Arc::clone(&ctx.shutdown);
+        let stats = ctx.stats.clone();
 
         /*
          * Populate BuildJobs.
@@ -1222,6 +1222,7 @@ impl Build {
         let sandbox = self.sandbox.clone();
         let progress_clone = Arc::clone(&progress);
         let shutdown_for_manager = Arc::clone(&shutdown_flag);
+        let stats_for_manager = stats.clone();
         let (results_tx, results_rx) = mpsc::channel::<Vec<BuildResult>>();
         let (interrupted_tx, interrupted_rx) = mpsc::channel::<bool>();
         let manager = std::thread::spawn(move || {
@@ -1230,6 +1231,7 @@ impl Build {
             let sandbox = sandbox.clone();
             let mut jobs = jobs.clone();
             let mut was_interrupted = false;
+            let stats = stats_for_manager;
 
             // Track which thread is building which package
             let mut thread_packages: HashMap<usize, PkgName> = HashMap::new();
@@ -1313,6 +1315,21 @@ impl Build {
                             continue;
                         }
 
+                        // Record stats
+                        if let Some(ref s) = stats {
+                            let pkgpath = jobs
+                                .scanpkgs
+                                .get(&pkgname)
+                                .and_then(|idx| idx.pkg_location.as_ref())
+                                .map(|p| p.as_path().to_string_lossy().to_string());
+                            s.build(
+                                pkgname.pkgname(),
+                                pkgpath.as_deref(),
+                                duration,
+                                "success",
+                            );
+                        }
+
                         jobs.mark_success(&pkgname, duration);
                         jobs.running.remove(&pkgname);
 
@@ -1338,6 +1355,21 @@ impl Build {
                         // Don't report if we're shutting down
                         if shutdown_for_manager.load(Ordering::SeqCst) {
                             continue;
+                        }
+
+                        // Record stats
+                        if let Some(ref s) = stats {
+                            let pkgpath = jobs
+                                .scanpkgs
+                                .get(&pkgname)
+                                .and_then(|idx| idx.pkg_location.as_ref())
+                                .map(|p| p.as_path().to_string_lossy().to_string());
+                            s.build(
+                                pkgname.pkgname(),
+                                pkgpath.as_deref(),
+                                Duration::ZERO,
+                                "skipped",
+                            );
                         }
 
                         jobs.mark_skipped(&pkgname);
@@ -1366,6 +1398,21 @@ impl Build {
                             continue;
                         }
 
+                        // Record stats
+                        if let Some(ref s) = stats {
+                            let pkgpath = jobs
+                                .scanpkgs
+                                .get(&pkgname)
+                                .and_then(|idx| idx.pkg_location.as_ref())
+                                .map(|p| p.as_path().to_string_lossy().to_string());
+                            s.build(
+                                pkgname.pkgname(),
+                                pkgpath.as_deref(),
+                                duration,
+                                "failed",
+                            );
+                        }
+
                         jobs.mark_failure(&pkgname, duration);
                         jobs.running.remove(&pkgname);
 
@@ -1391,6 +1438,21 @@ impl Build {
                         // Don't report if we're shutting down
                         if shutdown_for_manager.load(Ordering::SeqCst) {
                             continue;
+                        }
+
+                        // Record stats
+                        if let Some(ref s) = stats {
+                            let pkgpath = jobs
+                                .scanpkgs
+                                .get(&pkgname)
+                                .and_then(|idx| idx.pkg_location.as_ref())
+                                .map(|p| p.as_path().to_string_lossy().to_string());
+                            s.build(
+                                pkgname.pkgname(),
+                                pkgpath.as_deref(),
+                                duration,
+                                "error",
+                            );
                         }
 
                         jobs.mark_failure(&pkgname, duration);
