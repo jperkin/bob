@@ -457,6 +457,11 @@ impl Scan {
         loop {
             // Check for shutdown signal
             if shutdown_flag.load(Ordering::Relaxed) {
+                // Immediately show interrupted message
+                stop_refresh.store(true, Ordering::Relaxed);
+                if let Ok(mut p) = progress.lock() {
+                    let _ = p.finish_interrupted();
+                }
                 interrupted = true;
                 break;
             }
@@ -514,6 +519,11 @@ impl Scan {
 
             // Check if we were interrupted during parallel processing
             if shutdown_flag.load(Ordering::Relaxed) {
+                // Immediately show interrupted message
+                stop_refresh.store(true, Ordering::Relaxed);
+                if let Ok(mut p) = progress.lock() {
+                    let _ = p.finish_interrupted();
+                }
                 interrupted = true;
                 break;
             }
@@ -568,10 +578,10 @@ impl Scan {
         stop_refresh.store(true, Ordering::Relaxed);
         let _ = refresh_thread.join();
 
-        if let Ok(mut p) = progress.lock() {
-            if interrupted {
-                let _ = p.finish_interrupted();
-            } else {
+        // Only call finish() for normal completion; finish_interrupted()
+        // was already called immediately when interrupt was detected
+        if !interrupted {
+            if let Ok(mut p) = progress.lock() {
                 let _ = p.finish();
             }
         }
