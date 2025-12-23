@@ -112,6 +112,118 @@ pub struct ScanResult {
     pub skipped: Vec<SkippedPackage>,
 }
 
+impl ScanResult {
+    /// Write resolved packages to a log file in pbulk presolve format.
+    pub fn write_resolve_log(
+        &self,
+        path: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        let mut out = String::new();
+
+        // Sort by package name for deterministic output
+        let mut pkgnames: Vec<_> = self.buildable.keys().collect();
+        pkgnames.sort_by(|a, b| a.pkgname().cmp(b.pkgname()));
+
+        for pkgname in pkgnames {
+            let idx = &self.buildable[pkgname];
+
+            out.push_str(&format!("PKGNAME={}\n", idx.pkgname.pkgname()));
+
+            if let Some(ref loc) = idx.pkg_location {
+                out.push_str(&format!(
+                    "PKG_LOCATION={}\n",
+                    loc.as_path().display()
+                ));
+            }
+
+            if !idx.all_depends.is_empty() {
+                let deps: Vec<String> = idx
+                    .all_depends
+                    .iter()
+                    .map(|d| {
+                        format!(
+                            "{}:{}",
+                            d.pattern().pattern(),
+                            d.pkgpath().as_path().display()
+                        )
+                    })
+                    .collect();
+                out.push_str(&format!("ALL_DEPENDS={}\n", deps.join(" ")));
+            }
+
+            if !idx.depends.is_empty() {
+                let deps: Vec<&str> =
+                    idx.depends.iter().map(|d| d.pkgname()).collect();
+                out.push_str(&format!("DEPENDS={}\n", deps.join(" ")));
+            }
+
+            if !idx.multi_version.is_empty() {
+                out.push_str(&format!(
+                    "MULTI_VERSION={}\n",
+                    idx.multi_version.join(" ")
+                ));
+            }
+
+            if let Some(ref v) = idx.categories {
+                out.push_str(&format!("CATEGORIES={}\n", v));
+            }
+            if let Some(ref v) = idx.maintainer {
+                out.push_str(&format!("MAINTAINER={}\n", v));
+            }
+
+            out.push('\n');
+        }
+
+        // Output skipped packages
+        for pkg in &self.skipped {
+            out.push_str(&format!("PKGNAME={}\n", pkg.pkgname.pkgname()));
+            if let Some(ref loc) = pkg.pkgpath {
+                out.push_str(&format!(
+                    "PKG_LOCATION={}\n",
+                    loc.as_path().display()
+                ));
+            }
+            match &pkg.reason {
+                SkipReason::PkgSkipReason(r) => {
+                    out.push_str(&format!("PKG_SKIP_REASON={}\n", r));
+                }
+                SkipReason::PkgFailReason(r) => {
+                    out.push_str(&format!("PKG_FAIL_REASON={}\n", r));
+                }
+            }
+            out.push('\n');
+        }
+
+        std::fs::write(path, &out)?;
+        Ok(())
+    }
+
+    /// Write the resolved DAG as a sorted edge list for comparison.
+    pub fn write_resolve_dag(
+        &self,
+        path: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        let mut edges: Vec<String> = Vec::new();
+
+        for (pkgname, idx) in &self.buildable {
+            for dep in &idx.depends {
+                edges.push(format!(
+                    "{} -> {}",
+                    dep.pkgname(),
+                    pkgname.pkgname()
+                ));
+            }
+        }
+
+        // Sort edges for deterministic output
+        edges.sort();
+
+        let out = edges.join("\n") + "\n";
+        std::fs::write(path, &out)?;
+        Ok(())
+    }
+}
+
 /// Package dependency scanner.
 ///
 /// Discovers all dependencies for a set of packages and resolves them into
@@ -181,7 +293,8 @@ impl Scan {
             pkgsrc, make
         );
         let child = self.sandbox.execute_script(0, &script, vec![])?;
-        let output = child.wait_with_output()
+        let output = child
+            .wait_with_output()
             .context("Failed to run show-subdir-var")?;
 
         if !output.status.success() {
