@@ -54,7 +54,7 @@
 //! // Add packages...
 //! let ctx = RunContext::new(Arc::new(AtomicBool::new(false)));
 //! scan.start(&ctx)?;
-//! let result = scan.resolve()?;
+//! let result = scan.resolve(None)?;
 //!
 //! let mut build = Build::new(&config, result.buildable);
 //! let summary = build.start(&ctx)?;
@@ -63,13 +63,14 @@
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 
+use crate::scan::ResolvedIndex;
 use crate::scan::ScanFailure;
 use crate::status::{self, StatusMessage};
 use crate::tui::{MultiProgress, format_duration};
 use crate::{Config, RunContext, Sandbox};
 use anyhow::{Context, bail};
 use glob::Pattern;
-use pkgsrc::{PkgName, PkgPath, ScanIndex};
+use pkgsrc::{PkgName, PkgPath};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -79,38 +80,9 @@ use std::sync::{Arc, Mutex, mpsc, mpsc::Sender};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, trace, warn};
 
-/// Format a ScanIndex as pbulk-index output for piping to scripts.
-/// XXX: switch to simply calling display() once pkgsrc-rs is updated.
-fn format_scan_index(idx: &ScanIndex) -> String {
-    let mut out = String::new();
-
-    out.push_str(&format!("PKGNAME={}\n", idx.pkgname.pkgname()));
-
-    if let Some(ref loc) = idx.pkg_location {
-        out.push_str(&format!("PKG_LOCATION={}\n", loc.as_path().display()));
-    }
-
-    if !idx.depends.is_empty() {
-        let deps: Vec<&str> = idx.depends.iter().map(|d| d.pkgname()).collect();
-        out.push_str(&format!("DEPENDS={}\n", deps.join(" ")));
-    }
-
-    if !idx.multi_version.is_empty() {
-        out.push_str(&format!(
-            "MULTI_VERSION={}\n",
-            idx.multi_version.join(" ")
-        ));
-    }
-
-    if let Some(ref bootstrap) = idx.bootstrap_pkg {
-        out.push_str(&format!("BOOTSTRAP_PKG={}\n", bootstrap));
-    }
-
-    if let Some(ref phase) = idx.usergroup_phase {
-        out.push_str(&format!("USERGROUP_PHASE={}\n", phase));
-    }
-
-    out
+/// Format a ResolvedIndex as pbulk-index output for piping to scripts.
+fn format_scan_index(idx: &ResolvedIndex) -> String {
+    idx.to_string()
 }
 
 /// Outcome of a package build attempt.
@@ -253,14 +225,14 @@ pub struct Build {
     /**
      * List of packages to build, as input from Scan::resolve.
      */
-    scanpkgs: HashMap<PkgName, ScanIndex>,
+    scanpkgs: HashMap<PkgName, ResolvedIndex>,
 }
 
 #[derive(Debug)]
 struct PackageBuild {
     id: usize,
     config: Config,
-    pkginfo: ScanIndex,
+    pkginfo: ResolvedIndex,
     sandbox: Sandbox,
 }
 
@@ -841,7 +813,7 @@ enum BuildStatus {
 
 #[derive(Clone, Debug)]
 struct BuildJobs {
-    scanpkgs: HashMap<PkgName, ScanIndex>,
+    scanpkgs: HashMap<PkgName, ResolvedIndex>,
     incoming: HashMap<PkgName, HashSet<PkgName>>,
     running: HashSet<PkgName>,
     done: HashSet<PkgName>,
@@ -1021,7 +993,7 @@ impl BuildJobs {
 impl Build {
     pub fn new(
         config: &Config,
-        scanpkgs: HashMap<PkgName, ScanIndex>,
+        scanpkgs: HashMap<PkgName, ResolvedIndex>,
     ) -> Build {
         let sandbox = Sandbox::new(config);
         info!(

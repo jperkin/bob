@@ -139,9 +139,10 @@
 //! | `actions` | table | yes | List of actions to perform during sandbox setup. See the [`action`](crate::action) module for details. |
 
 use crate::action::Action;
+use crate::scan::ResolvedIndex;
 use anyhow::{Context, Result, anyhow};
 use mlua::{Lua, RegistryKey, Result as LuaResult, Table, Value};
-use pkgsrc::{PkgPath, ScanIndex};
+use pkgsrc::PkgPath;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -172,7 +173,7 @@ impl LuaEnv {
     /// Returns a HashMap of VAR_NAME -> value.
     pub fn get_env(
         &self,
-        idx: &ScanIndex,
+        idx: &ResolvedIndex,
     ) -> Result<HashMap<String, String>, String> {
         let Some(env_key) = &self.env_key else {
             return Ok(HashMap::new());
@@ -195,7 +196,7 @@ impl LuaEnv {
 
                 // Set all ScanIndex fields
                 pkg_table
-                    .set("pkgname", idx.pkgname.pkgname())
+                    .set("pkgname", idx.pkgname.to_string())
                     .map_err(|e| format!("Failed to set pkgname: {}", e))?;
                 pkg_table
                     .set(
@@ -210,12 +211,19 @@ impl LuaEnv {
                     .set(
                         "all_depends",
                         idx.all_depends
-                            .iter()
-                            .map(|d| {
-                                d.pkgpath().as_path().display().to_string()
+                            .as_ref()
+                            .map(|deps| {
+                                deps.iter()
+                                    .map(|d| {
+                                        d.pkgpath()
+                                            .as_path()
+                                            .display()
+                                            .to_string()
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
                             })
-                            .collect::<Vec<_>>()
-                            .join(" "),
+                            .unwrap_or_default(),
                     )
                     .map_err(|e| format!("Failed to set all_depends: {}", e))?;
                 pkg_table
@@ -286,10 +294,14 @@ impl LuaEnv {
                     .set(
                         "scan_depends",
                         idx.scan_depends
-                            .iter()
-                            .map(|p| p.display().to_string())
-                            .collect::<Vec<_>>()
-                            .join(" "),
+                            .as_ref()
+                            .map(|deps| {
+                                deps.iter()
+                                    .map(|p| p.display().to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            })
+                            .unwrap_or_default(),
                     )
                     .map_err(|e| {
                         format!("Failed to set scan_depends: {}", e)
@@ -303,7 +315,13 @@ impl LuaEnv {
                         format!("Failed to set pbulk_weight: {}", e)
                     })?;
                 pkg_table
-                    .set("multi_version", idx.multi_version.join(" "))
+                    .set(
+                        "multi_version",
+                        idx.multi_version
+                            .as_ref()
+                            .map(|v| v.join(" "))
+                            .unwrap_or_default(),
+                    )
                     .map_err(|e| {
                         format!("Failed to set multi_version: {}", e)
                     })?;
@@ -312,7 +330,7 @@ impl LuaEnv {
                         "depends",
                         idx.depends
                             .iter()
-                            .map(|d| d.pkgname())
+                            .map(|d| d.to_string())
                             .collect::<Vec<_>>()
                             .join(" "),
                     )
@@ -649,7 +667,7 @@ impl Config {
     /// Get environment variables for a package from the Lua env function/table.
     pub fn get_pkg_env(
         &self,
-        idx: &ScanIndex,
+        idx: &ResolvedIndex,
     ) -> Result<std::collections::HashMap<String, String>, String> {
         self.lua_env.get_env(idx)
     }

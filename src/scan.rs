@@ -111,6 +111,51 @@ pub struct ScanFailure {
     pub error: String,
 }
 
+/// A resolved package index entry with dependency information.
+///
+/// This extends [`ScanIndex`] with resolved dependencies (`depends`).
+#[derive(Clone, Debug)]
+pub struct ResolvedIndex {
+    /// The underlying scan index data.
+    pub index: ScanIndex,
+    /// Resolved dependencies as package names.
+    pub depends: Vec<PkgName>,
+}
+
+impl ResolvedIndex {
+    /// Create from a ScanIndex with empty depends.
+    pub fn from_scan_index(index: ScanIndex) -> Self {
+        Self { index, depends: Vec::new() }
+    }
+}
+
+impl std::ops::Deref for ResolvedIndex {
+    type Target = ScanIndex;
+    fn deref(&self) -> &Self::Target {
+        &self.index
+    }
+}
+
+impl std::ops::DerefMut for ResolvedIndex {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.index
+    }
+}
+
+impl std::fmt::Display for ResolvedIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.index)?;
+        write!(f, "DEPENDS=")?;
+        for (i, d) in self.depends.iter().enumerate() {
+            if i > 0 {
+                write!(f, " ")?;
+            }
+            write!(f, "{d}")?;
+        }
+        writeln!(f)
+    }
+}
+
 /// Result of scanning and resolving packages.
 ///
 /// Returned by [`Scan::resolve`], contains the packages that can be built
@@ -120,7 +165,7 @@ pub struct ScanResult {
     /// Packages that can be built, indexed by package name.
     ///
     /// These packages have all dependencies resolved and no skip/fail reasons.
-    pub buildable: HashMap<PkgName, ScanIndex>,
+    pub buildable: HashMap<PkgName, ResolvedIndex>,
     /// Packages that were skipped due to skip/fail reasons.
     pub skipped: Vec<SkippedPackage>,
     /// Packages that failed to scan (bmake pbulk-index failed).
@@ -141,57 +186,13 @@ impl ScanResult {
 
         for pkgname in pkgnames {
             let idx = &self.buildable[pkgname];
-
-            out.push_str(&format!("PKGNAME={}\n", idx.pkgname.pkgname()));
-
-            if let Some(ref loc) = idx.pkg_location {
-                out.push_str(&format!(
-                    "PKG_LOCATION={}\n",
-                    loc.as_path().display()
-                ));
-            }
-
-            if !idx.all_depends.is_empty() {
-                let deps: Vec<String> = idx
-                    .all_depends
-                    .iter()
-                    .map(|d| {
-                        format!(
-                            "{}:{}",
-                            d.pattern().pattern(),
-                            d.pkgpath().as_path().display()
-                        )
-                    })
-                    .collect();
-                out.push_str(&format!("ALL_DEPENDS={}\n", deps.join(" ")));
-            }
-
-            if !idx.depends.is_empty() {
-                let deps: Vec<&str> =
-                    idx.depends.iter().map(|d| d.pkgname()).collect();
-                out.push_str(&format!("DEPENDS={}\n", deps.join(" ")));
-            }
-
-            if !idx.multi_version.is_empty() {
-                out.push_str(&format!(
-                    "MULTI_VERSION={}\n",
-                    idx.multi_version.join(" ")
-                ));
-            }
-
-            if let Some(ref v) = idx.categories {
-                out.push_str(&format!("CATEGORIES={}\n", v));
-            }
-            if let Some(ref v) = idx.maintainer {
-                out.push_str(&format!("MAINTAINER={}\n", v));
-            }
-
+            out.push_str(&idx.to_string());
             out.push('\n');
         }
 
         // Output skipped packages
         for pkg in &self.skipped {
-            out.push_str(&format!("PKGNAME={}\n", pkg.pkgname.pkgname()));
+            out.push_str(&format!("PKGNAME={}\n", pkg.pkgname));
             if let Some(ref loc) = pkg.pkgpath {
                 out.push_str(&format!(
                     "PKG_LOCATION={}\n",
@@ -222,11 +223,7 @@ impl ScanResult {
 
         for (pkgname, idx) in &self.buildable {
             for dep in &idx.depends {
-                edges.push(format!(
-                    "{} -> {}",
-                    dep.pkgname(),
-                    pkgname.pkgname()
-                ));
+                edges.push(format!("{} -> {}", dep, pkgname));
             }
         }
 
@@ -266,7 +263,7 @@ impl ScanResult {
 /// let ctx = RunContext::new(Arc::new(AtomicBool::new(false)));
 /// scan.start(&ctx)?;
 ///
-/// let result = scan.resolve()?;
+/// let result = scan.resolve(None)?;
 /// println!("Found {} buildable packages", result.buildable.len());
 /// # Ok(())
 /// # }
@@ -277,7 +274,7 @@ pub struct Scan {
     sandbox: Sandbox,
     incoming: HashSet<PkgPath>,
     done: HashMap<PkgPath, Vec<ScanIndex>>,
-    resolved: HashMap<PkgName, ScanIndex>,
+    resolved: HashMap<PkgName, ResolvedIndex>,
     /// Full tree scan - skip recursive dependency discovery.
     full_tree: bool,
     /// Packages that failed to scan (pkgpath, error message).
@@ -562,14 +559,17 @@ impl Scan {
                 // For full tree scans, we already have all packages.
                 if !self.full_tree {
                     for pkg in scanpkgs {
-                        for dep in pkg.all_depends {
-                            if !self.done.contains_key(dep.pkgpath())
-                                && !self.incoming.contains(dep.pkgpath())
-                                && new_incoming.insert(dep.pkgpath().clone())
-                            {
-                                // Update total count for new dependencies
-                                if let Ok(mut p) = progress.lock() {
-                                    p.state_mut().total += 1;
+                        if let Some(ref all_deps) = pkg.all_depends {
+                            for dep in all_deps {
+                                if !self.done.contains_key(dep.pkgpath())
+                                    && !self.incoming.contains(dep.pkgpath())
+                                    && new_incoming
+                                        .insert(dep.pkgpath().clone())
+                                {
+                                    // Update total count for new dependencies
+                                    if let Ok(mut p) = progress.lock() {
+                                        p.state_mut().total += 1;
+                                    }
                                 }
                             }
                         }
@@ -689,7 +689,8 @@ impl Scan {
         );
 
         let reader = BufReader::new(&output.stdout[..]);
-        let mut index = ScanIndex::from_reader(reader)?;
+        let mut index: Vec<ScanIndex> =
+            ScanIndex::from_reader(reader).collect::<Result<_, _>>()?;
 
         info!(pkgpath = %pkgpath_str,
             packages_found = index.len(),
@@ -705,7 +706,7 @@ impl Scan {
                 pkgname = %pkg.pkgname.pkgname(),
                 skip_reason = ?pkg.pkg_skip_reason,
                 fail_reason = ?pkg.pkg_fail_reason,
-                depends_count = pkg.all_depends.len(),
+                depends_count = pkg.all_depends.as_ref().map_or(0, |v| v.len()),
                 "Found package in scan"
             );
         }
@@ -722,62 +723,7 @@ impl Scan {
     pub fn write_log(&self, path: &std::path::Path) -> anyhow::Result<()> {
         let mut out = String::new();
         for idx in self.scanned() {
-            out.push_str(&format!("PKGNAME={}\n", idx.pkgname.pkgname()));
-            if let Some(ref loc) = idx.pkg_location {
-                out.push_str(&format!(
-                    "PKG_LOCATION={}\n",
-                    loc.as_path().display()
-                ));
-            }
-            if !idx.all_depends.is_empty() {
-                let deps: Vec<String> = idx
-                    .all_depends
-                    .iter()
-                    .map(|d| d.pkgpath().as_path().display().to_string())
-                    .collect();
-                out.push_str(&format!("ALL_DEPENDS={}\n", deps.join(" ")));
-            }
-            if !idx.depends.is_empty() {
-                let deps: Vec<&str> =
-                    idx.depends.iter().map(|d| d.pkgname()).collect();
-                out.push_str(&format!("DEPENDS={}\n", deps.join(" ")));
-            }
-            if !idx.multi_version.is_empty() {
-                out.push_str(&format!(
-                    "MULTI_VERSION={}\n",
-                    idx.multi_version.join(" ")
-                ));
-            }
-            if let Some(ref v) = idx.pkg_skip_reason {
-                out.push_str(&format!("PKG_SKIP_REASON={}\n", v));
-            }
-            if let Some(ref v) = idx.pkg_fail_reason {
-                out.push_str(&format!("PKG_FAIL_REASON={}\n", v));
-            }
-            if let Some(ref v) = idx.categories {
-                out.push_str(&format!("CATEGORIES={}\n", v));
-            }
-            if let Some(ref v) = idx.maintainer {
-                out.push_str(&format!("MAINTAINER={}\n", v));
-            }
-            if let Some(ref v) = idx.bootstrap_pkg {
-                out.push_str(&format!("BOOTSTRAP_PKG={}\n", v));
-            }
-            if let Some(ref v) = idx.usergroup_phase {
-                out.push_str(&format!("USERGROUP_PHASE={}\n", v));
-            }
-            if let Some(ref v) = idx.use_destdir {
-                out.push_str(&format!("USE_DESTDIR={}\n", v));
-            }
-            if let Some(ref v) = idx.no_bin_on_ftp {
-                out.push_str(&format!("NO_BIN_ON_FTP={}\n", v));
-            }
-            if let Some(ref v) = idx.restricted {
-                out.push_str(&format!("RESTRICTED={}\n", v));
-            }
-            if let Some(ref v) = idx.pbulk_weight {
-                out.push_str(&format!("PBULK_WEIGHT={}\n", v));
-            }
+            out.push_str(&idx.to_string());
             out.push('\n');
         }
         std::fs::write(path, &out)?;
@@ -859,7 +805,10 @@ impl Scan {
                     "Adding package to resolved set"
                 );
                 pkgnames.insert(pkg.pkgname.clone());
-                self.resolved.insert(pkg.pkgname.clone(), pkg.clone());
+                self.resolved.insert(
+                    pkg.pkgname.clone(),
+                    ResolvedIndex::from_scan_index(pkg.clone()),
+                );
             }
         }
 
@@ -897,12 +846,16 @@ impl Scan {
         let mut errors: Vec<String> = Vec::new();
 
         for pkg in self.resolved.values_mut() {
-            for depend in &pkg.all_depends {
+            let all_deps = match pkg.all_depends.clone() {
+                Some(deps) => deps,
+                None => continue,
+            };
+            for depend in &all_deps {
                 /*
                  * Check for cached DEPENDS match first.  If found, use it.
                  */
                 if let Some(pkgname) = match_cache.get(depend) {
-                    pkg.depends.push(pkgname.clone().clone());
+                    pkg.depends.push(pkgname.clone());
                     continue;
                 }
                 /*
@@ -916,14 +869,14 @@ impl Scan {
                                 current.pkgname(),
                                 candidate.pkgname(),
                             ) {
-                                Some(m) if m == current.pkgname() => {
+                                Ok(Some(m)) if m == current.pkgname() => {
                                     Some(current)
                                 }
-                                Some(m) if m == candidate.pkgname() => {
+                                Ok(Some(m)) if m == candidate.pkgname() => {
                                     Some(candidate)
                                 }
-                                Some(_) => todo!(),
-                                None => None,
+                                Ok(Some(_)) => todo!(),
+                                Ok(None) | Err(_) => None,
                             };
                         } else {
                             best = Some(candidate);
@@ -950,15 +903,18 @@ impl Scan {
                     if let Some(skipped_dep) = matched_skipped {
                         // Dependency is skipped, so this package should be too
                         skip_due_to_dep.insert(
-                            pkg.pkgname.clone(),
-                            format!("Dependency {} skipped", skipped_dep.pkgname()),
+                            pkg.index.pkgname.clone(),
+                            format!(
+                                "Dependency {} skipped",
+                                skipped_dep.pkgname()
+                            ),
                         );
                     } else {
                         // Truly unresolved - no matching package exists
                         errors.push(format!(
                             "No match found for {} in {}",
                             depend.pattern().pattern(),
-                            pkg.pkgname.pkgname()
+                            pkg.index.pkgname.pkgname()
                         ));
                     }
                 }
@@ -1018,9 +974,7 @@ impl Scan {
                 // Error format is "No match found for X in PKGNAME"
                 // Extract PKGNAME and check if it's being skipped
                 if let Some(pkgname_str) = err.split(" in ").last() {
-                    !skip_due_to_dep
-                        .keys()
-                        .any(|k| k.pkgname() == pkgname_str)
+                    !skip_due_to_dep.keys().any(|k| k.pkgname() == pkgname_str)
                 } else {
                     true // Keep error if we can't parse it
                 }
