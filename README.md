@@ -7,6 +7,12 @@
 Bob's goal is to become a simple but powerful, complete, and user-friendly
 utility for building pkgsrc packages.
 
+## Screencasts
+
+[![Example build session](https://asciinema.org/a/763171.svg)](https://asciinema.org/a/763171)
+
+[![Live build log viewer](https://asciinema.org/a/763316.svg)](https://asciinema.org/a/763316)
+
 ## Status
 
 - [x] Basic app, config files, etc.
