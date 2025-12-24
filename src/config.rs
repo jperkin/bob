@@ -906,10 +906,9 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
     let scanenv: HashMap<String, String> =
         match pkgsrc.get::<Value>("scanenv")? {
             Value::Nil => HashMap::new(),
-            Value::Table(t) => t
-                .pairs::<String, String>()
-                .filter_map(|r| r.ok())
-                .collect(),
+            Value::Table(t) => {
+                t.pairs::<String, String>().filter_map(|r| r.ok()).collect()
+            }
             _ => HashMap::new(),
         };
 
