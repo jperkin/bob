@@ -803,6 +803,16 @@ impl Scan {
                     }
                 }
 
+                // Skip duplicate PKGNAMEs - keep only the first (preferred)
+                // variant for multi-version packages.
+                if pkgnames.contains(&pkg.pkgname) {
+                    debug!(pkgname = %pkg.pkgname.pkgname(),
+                        multi_version = ?pkg.multi_version,
+                        "Skipping duplicate PKGNAME"
+                    );
+                    continue;
+                }
+
                 debug!(pkgname = %pkg.pkgname.pkgname(),
                     "Adding package to resolved set"
                 );
