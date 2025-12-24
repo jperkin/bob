@@ -658,11 +658,13 @@ impl Scan {
             pkgsrcdir, pkgpath_str, bmake
         );
 
+        let scan_env = self.config.scan_env();
         trace!(pkgpath = %pkgpath_str,
             script = %script,
+            scan_env = ?scan_env,
             "Executing pkg-scan"
         );
-        let child = self.sandbox.execute_script(0, &script, vec![])?;
+        let child = self.sandbox.execute_script(0, &script, scan_env)?;
         let output = child.wait_with_output()?;
 
         if !output.status.success() {

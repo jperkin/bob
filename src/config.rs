@@ -455,6 +455,8 @@ pub struct Pkgsrc {
     pub report_dir: Option<PathBuf>,
     /// Glob patterns for files to save from WRKDIR on failure.
     pub save_wrkdir_patterns: Vec<String>,
+    /// Environment variables for scan processes.
+    pub scanenv: HashMap<String, String>,
     /// Path to tar binary.
     pub tar: PathBuf,
 }
@@ -701,6 +703,16 @@ impl Config {
         envs
     }
 
+    /// Return environment variables for scan processes.
+    pub fn scan_env(&self) -> Vec<(String, String)> {
+        self.file
+            .pkgsrc
+            .scanenv
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
     /// Validate the configuration, checking that required paths and files exist.
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors: Vec<String> = Vec::new();
@@ -891,6 +903,16 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
             _ => Vec::new(),
         };
 
+    let scanenv: HashMap<String, String> =
+        match pkgsrc.get::<Value>("scanenv")? {
+            Value::Nil => HashMap::new(),
+            Value::Table(t) => t
+                .pairs::<String, String>()
+                .filter_map(|r| r.ok())
+                .collect(),
+            _ => HashMap::new(),
+        };
+
     Ok(Pkgsrc {
         basedir: PathBuf::from(basedir),
         bootstrap,
@@ -903,6 +925,7 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         prefix: PathBuf::from(prefix),
         report_dir,
         save_wrkdir_patterns,
+        scanenv,
         tar: PathBuf::from(tar),
     })
 }
