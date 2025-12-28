@@ -48,15 +48,7 @@ pub struct Args {
 #[derive(Debug, Subcommand)]
 enum Cmd {
     /// Build all packages as defined by the configuration file
-    Build {
-        /// Resume the most recent session if possible
-        #[arg(long)]
-        resume: bool,
-
-        /// Force a new session (don't prompt about existing sessions)
-        #[arg(long, conflicts_with = "resume")]
-        new: bool,
-    },
+    Build,
     /// Generate HTML report from existing logdir data
     GenerateReport,
     /// Create a new configuration area
@@ -68,27 +60,8 @@ enum Cmd {
     },
     /// Scan packages as defined by the configuration file
     Scan,
-    /// Manage build sessions
-    Session {
-        #[command(subcommand)]
-        cmd: SessionCmd,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum SessionCmd {
-    /// List all build sessions
-    List,
-    /// Show details of a specific session
-    Show {
-        /// Session ID to show
-        id: i64,
-    },
-    /// Delete a session
-    Delete {
-        /// Session ID to delete
-        id: i64,
-    },
+    /// Show current build status
+    Status,
 }
 
 #[derive(Debug, Subcommand)]
@@ -101,76 +74,39 @@ enum SandboxCmd {
     List,
 }
 
-/// Determine which session to use based on CLI flags and existing sessions.
-/// Returns (session_id, should_resume_scan).
-fn determine_session(db: &Database, resume: bool, new: bool) -> Result<(i64, bool)> {
-    // If --new is specified, always create a new session
-    if new {
-        let session_id = db.create_session()?;
-        println!("Created new session {}", session_id);
-        return Ok((session_id, false));
-    }
-
+/// Determine which session to use - automatically resumes if possible.
+/// Returns (session_id, should_skip_scan).
+fn determine_session(db: &Database) -> Result<(i64, bool)> {
     // Check for existing resumable session
     if let Some(session) = db.get_latest_session()? {
         if session.can_resume() {
-            if resume {
-                // --resume specified, use existing session
+            println!(
+                "Resuming session {} (status: {:?})",
+                session.id, session.status
+            );
+
+            // If scan is complete, we can skip it
+            let skip_scan = session.scan_complete();
+            if skip_scan {
                 println!(
-                    "Resuming session {} (status: {:?})",
-                    session.id, session.status
+                    "  Scan already complete: {} packages scanned",
+                    session.scanned_packages
                 );
-
-                // If scan is complete, we can skip it
-                let skip_scan = session.scan_complete();
-                if skip_scan {
-                    println!(
-                        "  Scan already complete: {} packages scanned",
-                        session.scanned_packages
-                    );
-                    let (pending, success, failed, skipped) =
-                        db.get_build_status_counts(session.id)?;
-                    println!(
-                        "  Build progress: {} pending, {} success, {} failed, {} skipped",
-                        pending, success, failed, skipped
-                    );
-                }
-
-                return Ok((session.id, skip_scan));
-            } else {
-                // Prompt about existing session
-                println!();
-                println!("Found existing session {} that can be resumed:", session.id);
-                println!("  Status: {:?}", session.status);
-                println!("  Created: {}", session.created_at);
-                if session.scan_complete() {
-                    println!(
-                        "  Scan: complete ({} packages)",
-                        session.scanned_packages
-                    );
-                    let (pending, success, failed, skipped) =
-                        db.get_build_status_counts(session.id)?;
-                    println!(
-                        "  Build: {} pending, {} success, {} failed, {} skipped",
-                        pending, success, failed, skipped
-                    );
-                }
-                println!();
-                println!("Options:");
-                println!("  bob build --resume    Resume this session");
-                println!("  bob build --new       Start a fresh build");
-                println!();
-                bail!(
-                    "Session {} can be resumed. Use --resume or --new to proceed.",
-                    session.id
+                let (pending, success, failed, skipped) =
+                    db.get_build_status_counts(session.id)?;
+                println!(
+                    "  Build progress: {} pending, {} success, {} failed, {} skipped",
+                    pending, success, failed, skipped
                 );
             }
+
+            return Ok((session.id, skip_scan));
         }
     }
 
     // No resumable session, create new one
     let session_id = db.create_session()?;
-    println!("Created new session {}", session_id);
+    println!("Starting new session {}", session_id);
     Ok((session_id, false))
 }
 
@@ -240,7 +176,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     match args.cmd {
-        Cmd::Build { resume, new } => {
+        Cmd::Build => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
 
             // Initialize logging in logdir/bob/
@@ -262,8 +198,8 @@ fn main() -> Result<()> {
             let db_path = logs_dir.join("bob.db");
             let db = Database::open(&db_path)?;
 
-            // Determine session: resume existing or create new
-            let (session_id, resuming_scan) = determine_session(&db, resume, new)?;
+            // Determine session: automatically resume if possible
+            let (session_id, resuming_scan) = determine_session(&db)?;
 
             // Set up signal handler for graceful shutdown (SIGINT and SIGTERM)
             let shutdown_flag = Arc::new(AtomicBool::new(false));
@@ -390,7 +326,7 @@ fn main() -> Result<()> {
                 if sandbox.enabled() {
                     let _ = sandbox.destroy_all(config.build_threads());
                 }
-                eprintln!("\nBuild interrupted. Resume with: bob build --resume");
+                eprintln!("\nBuild interrupted. Run 'bob build' again to resume.");
                 std::process::exit(130);
             }
 
@@ -558,88 +494,69 @@ fn main() -> Result<()> {
                 result.skipped.len()
             );
         }
-        Cmd::Session { cmd: SessionCmd::List } => {
+        Cmd::Status => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
             let logs_dir = config.logdir().join("bob");
             let db_path = logs_dir.join("bob.db");
 
             if !db_path.exists() {
-                println!("No sessions found (database does not exist)");
+                println!("No build in progress");
+                println!();
+                println!("Run 'bob build' to start a new build.");
                 return Ok(());
             }
 
             let db = Database::open(&db_path)?;
-            let sessions = db.list_sessions()?;
-
-            if sessions.is_empty() {
-                println!("No sessions found");
-                return Ok(());
-            }
-
-            println!(
-                "{:>4}  {:>12}  {:>10}  {:>8}  {:>8}  {:>8}  {}",
-                "ID", "STATUS", "TOTAL", "SCANNED", "BUILT", "FAILED", "CREATED"
-            );
-            println!("{}", "-".repeat(80));
-
-            for session in sessions {
-                println!(
-                    "{:>4}  {:>12}  {:>10}  {:>8}  {:>8}  {:>8}  {}",
-                    session.id,
-                    format!("{:?}", session.status),
-                    session.total_packages,
-                    session.scanned_packages,
-                    session.built_packages,
-                    session.failed_packages,
-                    session.created_at
-                );
-            }
-        }
-        Cmd::Session { cmd: SessionCmd::Show { id } } => {
-            let config = Config::load(args.config.as_deref(), args.verbose)?;
-            let logs_dir = config.logdir().join("bob");
-            let db_path = logs_dir.join("bob.db");
-
-            let db = Database::open(&db_path)?;
-            let session = db.get_session(id)?;
+            let session = db.get_latest_session()?;
 
             match session {
                 Some(s) => {
-                    println!("Session {}", s.id);
-                    println!("=========");
-                    println!("  Status:          {:?}", s.status);
-                    println!("  Created:         {}", s.created_at);
-                    println!("  Updated:         {}", s.updated_at);
-                    println!("  Total packages:  {}", s.total_packages);
-                    println!("  Scanned:         {}", s.scanned_packages);
-                    println!("  Built:           {}", s.built_packages);
-                    println!("  Failed:          {}", s.failed_packages);
-                    println!("  Skipped:         {}", s.skipped_packages);
+                    let status_str = match s.status {
+                        SessionStatus::Pending => "pending",
+                        SessionStatus::Scanning => "scanning",
+                        SessionStatus::Scanned => "scanned (ready to build)",
+                        SessionStatus::Building => "building",
+                        SessionStatus::Completed => "completed",
+                        SessionStatus::Interrupted => "interrupted",
+                        SessionStatus::Failed => "failed",
+                    };
+
+                    println!("Build Status");
+                    println!("============");
+                    println!("  Status:    {}", status_str);
+                    println!("  Started:   {}", s.created_at);
+                    println!("  Updated:   {}", s.updated_at);
+                    println!();
+
+                    if s.total_packages > 0 {
+                        println!("Packages");
+                        println!("--------");
+                        println!("  Total:     {}", s.total_packages);
+                        println!("  Scanned:   {}", s.scanned_packages);
+                        println!("  Built:     {}", s.built_packages);
+                        println!("  Failed:    {}", s.failed_packages);
+                        println!("  Skipped:   {}", s.skipped_packages);
+
+                        let remaining = s.total_packages
+                            - s.built_packages
+                            - s.failed_packages
+                            - s.skipped_packages;
+                        if remaining > 0 && s.scan_complete() {
+                            println!("  Remaining: {}", remaining);
+                        }
+                    }
 
                     if s.can_resume() {
                         println!();
-                        println!("This session can be resumed with: bob build --resume");
+                        println!("Run 'bob build' to continue.");
                     }
                 }
                 None => {
-                    bail!("Session {} not found", id);
+                    println!("No build in progress");
+                    println!();
+                    println!("Run 'bob build' to start a new build.");
                 }
             }
-        }
-        Cmd::Session { cmd: SessionCmd::Delete { id } } => {
-            let config = Config::load(args.config.as_deref(), args.verbose)?;
-            let logs_dir = config.logdir().join("bob");
-            let db_path = logs_dir.join("bob.db");
-
-            let db = Database::open(&db_path)?;
-
-            // Check session exists
-            if db.get_session(id)?.is_none() {
-                bail!("Session {} not found", id);
-            }
-
-            db.delete_session(id)?;
-            println!("Deleted session {}", id);
         }
     };
 
