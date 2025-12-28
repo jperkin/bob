@@ -16,42 +16,31 @@
 
 //! SQLite database for persistent state storage.
 //!
-//! This module provides persistent storage for bob's build state, enabling:
+//! This module provides persistent storage for bob's state, enabling:
 //!
-//! - **Session resumption**: Resume interrupted builds from where they left off
+//! - **Resumption**: Resume interrupted scans/builds from where they left off
 //! - **Scan caching**: Reuse scan data from completed scans
-//! - **Build tracking**: Track package build status across sessions
-//! - **Stage management**: Track progress through build stages
+//! - **Build tracking**: Track package build status
+//! - **Stage management**: Track progress through stages (scan, build, report)
 //!
 //! # Database Location
 //!
 //! The database is stored at `{logdir}/bob/bob.db`.
 //!
-//! # Session Lifecycle
-//!
-//! 1. Create a new session or resume an existing one
-//! 2. Run scan phase (or skip if already completed)
-//! 3. Run build phase (resuming from last position)
-//! 4. Generate reports
-//!
 //! # Example
 //!
 //! ```no_run
-//! use bob::db::{Database, SessionStatus};
+//! use bob::db::Database;
 //! use std::path::Path;
 //!
 //! let db = Database::open(Path::new("/path/to/logdir/bob/bob.db"))?;
 //!
-//! // Check for resumable session
-//! if let Some(session) = db.get_latest_session()? {
-//!     if session.can_resume() {
-//!         println!("Resuming session {}", session.id);
+//! // Check for resumable state
+//! if let Some(state) = db.get_latest_session()? {
+//!     if state.can_resume() {
 //!         // Resume from where we left off
 //!     }
 //! }
-//!
-//! // Or create a new session
-//! let session_id = db.create_session()?;
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 
