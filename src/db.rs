@@ -45,7 +45,7 @@
 //! ```
 
 use anyhow::{Context, Result};
-use pkgsrc::{Depend, PkgName, PkgPath, ScanIndex};
+use pkgsrc::{PkgName, ScanIndex};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -117,27 +117,6 @@ pub enum ScanStatus {
     Skipped,
 }
 
-impl ScanStatus {
-    fn as_str(&self) -> &'static str {
-        match self {
-            ScanStatus::Pending => "pending",
-            ScanStatus::Completed => "completed",
-            ScanStatus::Failed => "failed",
-            ScanStatus::Skipped => "skipped",
-        }
-    }
-
-    fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "pending" => Some(ScanStatus::Pending),
-            "completed" => Some(ScanStatus::Completed),
-            "failed" => Some(ScanStatus::Failed),
-            "skipped" => Some(ScanStatus::Skipped),
-            _ => None,
-        }
-    }
-}
-
 /// Status of a package build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BuildStatus {
@@ -151,29 +130,6 @@ pub enum BuildStatus {
     Failed,
     /// Build was skipped (dependency failed or up-to-date)
     Skipped,
-}
-
-impl BuildStatus {
-    fn as_str(&self) -> &'static str {
-        match self {
-            BuildStatus::Pending => "pending",
-            BuildStatus::InProgress => "in_progress",
-            BuildStatus::Success => "success",
-            BuildStatus::Failed => "failed",
-            BuildStatus::Skipped => "skipped",
-        }
-    }
-
-    fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "pending" => Some(BuildStatus::Pending),
-            "in_progress" => Some(BuildStatus::InProgress),
-            "success" => Some(BuildStatus::Success),
-            "failed" => Some(BuildStatus::Failed),
-            "skipped" => Some(BuildStatus::Skipped),
-            _ => None,
-        }
-    }
 }
 
 /// Information about a build session.
@@ -223,104 +179,17 @@ impl Session {
     }
 }
 
-/// Serializable form of ScanIndex for database storage.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct StoredScanIndex {
-    pub pkgname: String,
-    pub pkgpath: Option<String>,
-    /// Depends stored as "pattern:pkgpath" strings (the original Depend format)
-    pub all_depends: Option<Vec<String>>,
-    pub pkg_skip_reason: Option<String>,
-    pub pkg_fail_reason: Option<String>,
-    pub no_bin_on_ftp: Option<String>,
-    pub restricted: Option<String>,
-    pub categories: Option<String>,
-    pub maintainer: Option<String>,
-    pub use_destdir: Option<String>,
-    pub bootstrap_pkg: Option<String>,
-    pub usergroup_phase: Option<String>,
-    pub scan_depends: Option<Vec<String>>,
-    pub pbulk_weight: Option<String>,
-    pub multi_version: Option<Vec<String>>,
-}
-
-impl StoredScanIndex {
-    /// Convert from pkgsrc::ScanIndex.
-    pub fn from_scan_index(idx: &ScanIndex) -> Self {
-        Self {
-            pkgname: idx.pkgname.to_string(),
-            pkgpath: idx.pkg_location.as_ref().map(|p| p.to_string()),
-            all_depends: idx.all_depends.as_ref().map(|deps| {
-                deps.iter()
-                    .map(|d| {
-                        // Format as "pattern:pkgpath" which is what Depend::new expects
-                        format!("{}:{}", d.pattern().pattern(), d.pkgpath())
-                    })
-                    .collect()
-            }),
-            pkg_skip_reason: idx.pkg_skip_reason.clone(),
-            pkg_fail_reason: idx.pkg_fail_reason.clone(),
-            no_bin_on_ftp: idx.no_bin_on_ftp.clone(),
-            restricted: idx.restricted.clone(),
-            categories: idx.categories.clone(),
-            maintainer: idx.maintainer.clone(),
-            use_destdir: idx.use_destdir.clone(),
-            bootstrap_pkg: idx.bootstrap_pkg.clone(),
-            usergroup_phase: idx.usergroup_phase.clone(),
-            scan_depends: idx.scan_depends.as_ref().map(|deps| {
-                deps.iter().map(|p| p.to_string_lossy().to_string()).collect()
-            }),
-            pbulk_weight: idx.pbulk_weight.clone(),
-            multi_version: idx.multi_version.clone(),
-        }
-    }
-
-    /// Convert back to pkgsrc::ScanIndex.
-    pub fn to_scan_index(&self) -> Result<ScanIndex> {
-        let pkgname = PkgName::new(&self.pkgname);
-        let pkg_location = self
-            .pkgpath
-            .as_ref()
-            .map(|s| PkgPath::new(s))
-            .transpose()
-            .context("Invalid pkgpath in stored scan index")?;
-        let all_depends = self
-            .all_depends
-            .as_ref()
-            .map(|deps| {
-                deps.iter()
-                    .map(|s| Depend::new(s))
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .transpose()
-            .context("Invalid depend in stored scan index")?;
-
-        Ok(ScanIndex {
-            pkgname,
-            pkg_location,
-            all_depends,
-            pkg_skip_reason: self.pkg_skip_reason.clone(),
-            pkg_fail_reason: self.pkg_fail_reason.clone(),
-            no_bin_on_ftp: self.no_bin_on_ftp.clone(),
-            restricted: self.restricted.clone(),
-            categories: self.categories.clone(),
-            maintainer: self.maintainer.clone(),
-            use_destdir: self.use_destdir.clone(),
-            bootstrap_pkg: self.bootstrap_pkg.clone(),
-            usergroup_phase: self.usergroup_phase.clone(),
-            scan_depends: self.scan_depends.as_ref().map(|deps| {
-                deps.iter().map(|s| std::path::PathBuf::from(s)).collect()
-            }),
-            pbulk_weight: self.pbulk_weight.clone(),
-            multi_version: self.multi_version.clone(),
-        })
-    }
-}
-
 /// Serializable form of ResolvedIndex for database storage.
+///
+/// Instead of duplicating all ScanIndex fields, we store the pbulk-index
+/// text format directly. This is the same format produced by `bmake pbulk-index`
+/// and parsed by `ScanIndex::from_reader()`, so it automatically stays in sync
+/// with any changes to the pkgsrc crate.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredResolvedIndex {
-    pub index: StoredScanIndex,
+    /// ScanIndex serialized as pbulk-index text format.
+    pub index_text: String,
+    /// Resolved dependencies as package names.
     pub depends: Vec<String>,
 }
 
@@ -328,14 +197,26 @@ impl StoredResolvedIndex {
     /// Convert from ResolvedIndex.
     pub fn from_resolved_index(idx: &ResolvedIndex) -> Self {
         Self {
-            index: StoredScanIndex::from_scan_index(&idx.index),
+            // ScanIndex implements Display, producing pbulk-index format
+            index_text: idx.index.to_string(),
             depends: idx.depends.iter().map(|d| d.to_string()).collect(),
         }
     }
 
     /// Convert back to ResolvedIndex.
     pub fn to_resolved_index(&self) -> Result<ResolvedIndex> {
-        let index = self.index.to_scan_index()?;
+        use std::io::BufReader;
+
+        // Parse ScanIndex from pbulk-index text format
+        let reader = BufReader::new(self.index_text.as_bytes());
+        let mut indices: Vec<ScanIndex> = ScanIndex::from_reader(reader)
+            .collect::<Result<_, _>>()
+            .context("Failed to parse stored scan index")?;
+
+        let index = indices
+            .pop()
+            .context("No scan index found in stored data")?;
+
         let depends = self.depends.iter().map(|s| PkgName::new(s)).collect();
         Ok(ResolvedIndex { index, depends })
     }
