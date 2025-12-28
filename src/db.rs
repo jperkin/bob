@@ -363,7 +363,7 @@ impl Database {
             [],
         )?;
         let id = self.conn.last_insert_rowid();
-        info!(session_id = id, "Created new session");
+        info!(state_id = id, "Created new state");
         Ok(id)
     }
 
@@ -461,26 +461,26 @@ impl Database {
             "UPDATE sessions SET status = ?1, updated_at = datetime('now') WHERE id = ?2",
             params![status.as_str(), id],
         )?;
-        debug!(session_id = id, status = status.as_str(), "Updated session status");
+        debug!(state_id = id, status = status.as_str(), "Updated state status");
         Ok(())
     }
 
-    /// Add a package to scan for a session.
-    pub fn add_package(&self, session_id: i64, pkgpath: &str) -> Result<()> {
+    /// Add a package to scan.
+    pub fn add_package(&self, state_id: i64, pkgpath: &str) -> Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO packages (session_id, pkgpath) VALUES (?1, ?2)",
-            params![session_id, pkgpath],
+            params![state_id, pkgpath],
         )?;
         Ok(())
     }
 
-    /// Add multiple packages to scan for a session.
-    pub fn add_packages(&self, session_id: i64, pkgpaths: &[&str]) -> Result<()> {
+    /// Add multiple packages to scan.
+    pub fn add_packages(&self, state_id: i64, pkgpaths: &[&str]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         for pkgpath in pkgpaths {
             tx.execute(
                 "INSERT OR IGNORE INTO packages (session_id, pkgpath) VALUES (?1, ?2)",
-                params![session_id, pkgpath],
+                params![state_id, pkgpath],
             )?;
         }
         tx.commit()?;
@@ -491,14 +491,14 @@ impl Database {
                 SELECT COUNT(*) FROM packages WHERE session_id = ?1
              ), updated_at = datetime('now')
              WHERE id = ?1",
-            [session_id],
+            [state_id],
         )?;
 
         Ok(())
     }
 
-    /// Get packages pending scan for a session.
-    pub fn get_packages_to_scan(&self, session_id: i64) -> Result<Vec<String>> {
+    /// Get packages pending scan.
+    pub fn get_packages_to_scan(&self, state_id: i64) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT pkgpath FROM packages
              WHERE session_id = ?1 AND scan_status = 'pending'
@@ -506,7 +506,7 @@ impl Database {
         )?;
 
         let pkgpaths = stmt
-            .query_map([session_id], |row| row.get(0))?
+            .query_map([state_id], |row| row.get(0))?
             .collect::<Result<Vec<String>, _>>()?;
 
         Ok(pkgpaths)
@@ -515,7 +515,7 @@ impl Database {
     /// Mark a package scan as complete and store the result.
     pub fn complete_package_scan(
         &self,
-        session_id: i64,
+        state_id: i64,
         pkgpath: &str,
         resolved: &ResolvedIndex,
     ) -> Result<()> {
@@ -527,7 +527,7 @@ impl Database {
              SET pkgname = ?1, scan_status = 'completed', scan_data = ?2,
                  updated_at = datetime('now')
              WHERE session_id = ?3 AND pkgpath = ?4",
-            params![resolved.pkgname.to_string(), json, session_id, pkgpath],
+            params![resolved.pkgname.to_string(), json, state_id, pkgpath],
         )?;
 
         // Store dependencies
@@ -535,7 +535,7 @@ impl Database {
             self.conn.execute(
                 "INSERT OR IGNORE INTO dependencies (session_id, pkgname, depends_on)
                  VALUES (?1, ?2, ?3)",
-                params![session_id, resolved.pkgname.to_string(), dep.to_string()],
+                params![state_id, resolved.pkgname.to_string(), dep.to_string()],
             )?;
         }
 
@@ -546,7 +546,7 @@ impl Database {
                 WHERE session_id = ?1 AND scan_status = 'completed'
              ), updated_at = datetime('now')
              WHERE id = ?1",
-            [session_id],
+            [state_id],
         )?;
 
         Ok(())
@@ -555,7 +555,7 @@ impl Database {
     /// Mark a package scan as failed.
     pub fn fail_package_scan(
         &self,
-        session_id: i64,
+        state_id: i64,
         pkgpath: &str,
         error: &str,
     ) -> Result<()> {
@@ -563,7 +563,7 @@ impl Database {
             "UPDATE packages
              SET scan_status = 'failed', scan_error = ?1, updated_at = datetime('now')
              WHERE session_id = ?2 AND pkgpath = ?3",
-            params![error, session_id, pkgpath],
+            params![error, state_id, pkgpath],
         )?;
         Ok(())
     }
@@ -571,7 +571,7 @@ impl Database {
     /// Mark a package as skipped during scan (PKG_SKIP_REASON, etc.).
     pub fn skip_package_scan(
         &self,
-        session_id: i64,
+        state_id: i64,
         pkgpath: &str,
         pkgname: &str,
         reason: &str,
@@ -582,15 +582,15 @@ impl Database {
                  build_status = 'skipped', build_reason = ?2,
                  updated_at = datetime('now')
              WHERE session_id = ?3 AND pkgpath = ?4",
-            params![pkgname, reason, session_id, pkgpath],
+            params![pkgname, reason, state_id, pkgpath],
         )?;
         Ok(())
     }
 
-    /// Get all successfully scanned packages for a session as ResolvedIndex.
+    /// Get all successfully scanned packages as ResolvedIndex.
     pub fn get_scanned_packages(
         &self,
-        session_id: i64,
+        state_id: i64,
     ) -> Result<HashMap<PkgName, ResolvedIndex>> {
         let mut stmt = self.conn.prepare(
             "SELECT scan_data FROM packages
@@ -598,7 +598,7 @@ impl Database {
         )?;
 
         let mut result = HashMap::new();
-        let rows = stmt.query_map([session_id], |row| {
+        let rows = stmt.query_map([state_id], |row| {
             let json: String = row.get(0)?;
             Ok(json)
         })?;
@@ -614,8 +614,8 @@ impl Database {
         Ok(result)
     }
 
-    /// Get packages pending build for a session.
-    pub fn get_packages_to_build(&self, session_id: i64) -> Result<Vec<String>> {
+    /// Get packages pending build.
+    pub fn get_packages_to_build(&self, state_id: i64) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT pkgname FROM packages
              WHERE session_id = ?1
@@ -625,19 +625,19 @@ impl Database {
         )?;
 
         let pkgnames = stmt
-            .query_map([session_id], |row| row.get(0))?
+            .query_map([state_id], |row| row.get(0))?
             .collect::<Result<Vec<String>, _>>()?;
 
         Ok(pkgnames)
     }
 
     /// Mark a package build as starting.
-    pub fn start_package_build(&self, session_id: i64, pkgname: &str) -> Result<()> {
+    pub fn start_package_build(&self, state_id: i64, pkgname: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE packages
              SET build_status = 'in_progress', updated_at = datetime('now')
              WHERE session_id = ?1 AND pkgname = ?2",
-            params![session_id, pkgname],
+            params![state_id, pkgname],
         )?;
         Ok(())
     }
@@ -645,7 +645,7 @@ impl Database {
     /// Mark a package build as successful.
     pub fn complete_package_build(
         &self,
-        session_id: i64,
+        state_id: i64,
         pkgname: &str,
         duration: Duration,
     ) -> Result<()> {
@@ -654,7 +654,7 @@ impl Database {
              SET build_status = 'success', build_duration_ms = ?1,
                  updated_at = datetime('now')
              WHERE session_id = ?2 AND pkgname = ?3",
-            params![duration.as_millis() as i64, session_id, pkgname],
+            params![duration.as_millis() as i64, state_id, pkgname],
         )?;
 
         // Update built count
@@ -664,7 +664,7 @@ impl Database {
                 WHERE session_id = ?1 AND build_status = 'success'
              ), updated_at = datetime('now')
              WHERE id = ?1",
-            [session_id],
+            [state_id],
         )?;
 
         Ok(())
@@ -673,7 +673,7 @@ impl Database {
     /// Mark a package build as failed.
     pub fn fail_package_build(
         &self,
-        session_id: i64,
+        state_id: i64,
         pkgname: &str,
         reason: &str,
         duration: Duration,
@@ -683,7 +683,7 @@ impl Database {
              SET build_status = 'failed', build_reason = ?1, build_duration_ms = ?2,
                  updated_at = datetime('now')
              WHERE session_id = ?3 AND pkgname = ?4",
-            params![reason, duration.as_millis() as i64, session_id, pkgname],
+            params![reason, duration.as_millis() as i64, state_id, pkgname],
         )?;
 
         // Update failed count
@@ -693,7 +693,7 @@ impl Database {
                 WHERE session_id = ?1 AND build_status = 'failed'
              ), updated_at = datetime('now')
              WHERE id = ?1",
-            [session_id],
+            [state_id],
         )?;
 
         Ok(())
@@ -702,7 +702,7 @@ impl Database {
     /// Mark a package build as skipped.
     pub fn skip_package_build(
         &self,
-        session_id: i64,
+        state_id: i64,
         pkgname: &str,
         reason: &str,
     ) -> Result<()> {
@@ -711,7 +711,7 @@ impl Database {
              SET build_status = 'skipped', build_reason = ?1,
                  updated_at = datetime('now')
              WHERE session_id = ?2 AND pkgname = ?3",
-            params![reason, session_id, pkgname],
+            params![reason, state_id, pkgname],
         )?;
 
         // Update skipped count
@@ -721,22 +721,22 @@ impl Database {
                 WHERE session_id = ?1 AND build_status = 'skipped'
              ), updated_at = datetime('now')
              WHERE id = ?1",
-            [session_id],
+            [state_id],
         )?;
 
         Ok(())
     }
 
-    /// Reset in-progress builds to pending (for resuming interrupted sessions).
-    pub fn reset_in_progress_builds(&self, session_id: i64) -> Result<usize> {
+    /// Reset in-progress builds to pending (for resuming after interruption).
+    pub fn reset_in_progress_builds(&self, state_id: i64) -> Result<usize> {
         let count = self.conn.execute(
             "UPDATE packages
              SET build_status = 'pending', updated_at = datetime('now')
              WHERE session_id = ?1 AND build_status = 'in_progress'",
-            [session_id],
+            [state_id],
         )?;
         if count > 0 {
-            info!(session_id, count, "Reset in-progress builds to pending");
+            info!(state_id, count, "Reset in-progress builds to pending");
         }
         Ok(count)
     }
@@ -744,23 +744,23 @@ impl Database {
     /// Delete a session and all its data.
     pub fn delete_session(&self, id: i64) -> Result<()> {
         self.conn.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
-        info!(session_id = id, "Deleted session");
+        info!(state_id = id, "Deleted state");
         Ok(())
     }
 
-    /// Check if a scan is complete for a session.
-    pub fn is_scan_complete(&self, session_id: i64) -> Result<bool> {
+    /// Check if a scan is complete.
+    pub fn is_scan_complete(&self, state_id: i64) -> Result<bool> {
         let pending: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM packages
              WHERE session_id = ?1 AND scan_status = 'pending'",
-            [session_id],
+            [state_id],
             |row| row.get(0),
         )?;
         Ok(pending == 0)
     }
 
-    /// Get build status counts for a session.
-    pub fn get_build_status_counts(&self, session_id: i64) -> Result<(i64, i64, i64, i64)> {
+    /// Get build status counts.
+    pub fn get_build_status_counts(&self, state_id: i64) -> Result<(i64, i64, i64, i64)> {
         let mut stmt = self.conn.prepare(
             "SELECT
                 SUM(CASE WHEN build_status = 'pending' THEN 1 ELSE 0 END),
@@ -771,7 +771,7 @@ impl Database {
              WHERE session_id = ?1 AND scan_status = 'completed'",
         )?;
 
-        let (pending, success, failed, skipped) = stmt.query_row([session_id], |row| {
+        let (pending, success, failed, skipped) = stmt.query_row([state_id], |row| {
             Ok((
                 row.get::<_, Option<i64>>(0)?.unwrap_or(0),
                 row.get::<_, Option<i64>>(1)?.unwrap_or(0),
@@ -786,7 +786,7 @@ impl Database {
     /// Store all resolved packages from a ScanResult.
     pub fn store_scan_result(
         &self,
-        session_id: i64,
+        state_id: i64,
         buildable: &HashMap<PkgName, ResolvedIndex>,
     ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
@@ -810,7 +810,7 @@ impl Database {
                     scan_status = excluded.scan_status,
                     scan_data = excluded.scan_data,
                     updated_at = datetime('now')",
-                params![session_id, pkgpath, pkgname.to_string(), json],
+                params![state_id, pkgpath, pkgname.to_string(), json],
             )?;
 
             // Store dependencies
@@ -818,7 +818,7 @@ impl Database {
                 tx.execute(
                     "INSERT OR IGNORE INTO dependencies (session_id, pkgname, depends_on)
                      VALUES (?1, ?2, ?3)",
-                    params![session_id, pkgname.to_string(), dep.to_string()],
+                    params![state_id, pkgname.to_string(), dep.to_string()],
                 )?;
             }
         }
@@ -832,7 +832,7 @@ impl Database {
                 scanned_packages = (SELECT COUNT(*) FROM packages WHERE session_id = ?1 AND scan_status = 'completed'),
                 updated_at = datetime('now')
              WHERE id = ?1",
-            [session_id],
+            [state_id],
         )?;
 
         Ok(())
@@ -845,44 +845,44 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn test_session_lifecycle() {
+    fn test_state_lifecycle() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let db = Database::open(&db_path).unwrap();
 
-        // Create session
-        let session_id = db.create_session().unwrap();
-        assert_eq!(session_id, 1);
+        // Create state
+        let state_id = db.create_session().unwrap();
+        assert_eq!(state_id, 1);
 
-        // Get session - starts as Pending (not resumable yet)
-        let session = db.get_session(session_id).unwrap().unwrap();
-        assert_eq!(session.status, SessionStatus::Pending);
-        assert!(!session.can_resume()); // Pending can't be resumed
+        // Get state - starts as Pending (not resumable yet)
+        let state = db.get_session(state_id).unwrap().unwrap();
+        assert_eq!(state.status, SessionStatus::Pending);
+        assert!(!state.can_resume()); // Pending can't be resumed
 
         // Update status to Scanning (now resumable)
-        db.set_session_status(session_id, SessionStatus::Scanning).unwrap();
-        let session = db.get_session(session_id).unwrap().unwrap();
-        assert_eq!(session.status, SessionStatus::Scanning);
-        assert!(session.can_resume());
+        db.set_session_status(state_id, SessionStatus::Scanning).unwrap();
+        let state = db.get_session(state_id).unwrap().unwrap();
+        assert_eq!(state.status, SessionStatus::Scanning);
+        assert!(state.can_resume());
 
         // Update to Scanned (still resumable)
-        db.set_session_status(session_id, SessionStatus::Scanned).unwrap();
-        let session = db.get_session(session_id).unwrap().unwrap();
-        assert!(session.scan_complete());
-        assert!(session.can_resume());
+        db.set_session_status(state_id, SessionStatus::Scanned).unwrap();
+        let state = db.get_session(state_id).unwrap().unwrap();
+        assert!(state.scan_complete());
+        assert!(state.can_resume());
 
         // Update to Completed (no longer resumable)
-        db.set_session_status(session_id, SessionStatus::Completed).unwrap();
-        let session = db.get_session(session_id).unwrap().unwrap();
-        assert!(!session.can_resume());
+        db.set_session_status(state_id, SessionStatus::Completed).unwrap();
+        let state = db.get_session(state_id).unwrap().unwrap();
+        assert!(!state.can_resume());
 
-        // List sessions
-        let sessions = db.list_sessions().unwrap();
-        assert_eq!(sessions.len(), 1);
+        // List states
+        let states = db.list_sessions().unwrap();
+        assert_eq!(states.len(), 1);
 
-        // Delete session
-        db.delete_session(session_id).unwrap();
-        assert!(db.get_session(session_id).unwrap().is_none());
+        // Delete state
+        db.delete_session(state_id).unwrap();
+        assert!(db.get_session(state_id).unwrap().is_none());
     }
 
     #[test]
@@ -891,17 +891,17 @@ mod tests {
         let db_path = dir.path().join("test.db");
         let db = Database::open(&db_path).unwrap();
 
-        let session_id = db.create_session().unwrap();
+        let state_id = db.create_session().unwrap();
 
         // Add packages
-        db.add_packages(session_id, &["mail/mutt", "www/curl"]).unwrap();
+        db.add_packages(state_id, &["mail/mutt", "www/curl"]).unwrap();
 
         // Check pending
-        let pending = db.get_packages_to_scan(session_id).unwrap();
+        let pending = db.get_packages_to_scan(state_id).unwrap();
         assert_eq!(pending.len(), 2);
 
-        // Check session counts
-        let session = db.get_session(session_id).unwrap().unwrap();
-        assert_eq!(session.total_packages, 2);
+        // Check state counts
+        let state = db.get_session(state_id).unwrap().unwrap();
+        assert_eq!(state.total_packages, 2);
     }
 }

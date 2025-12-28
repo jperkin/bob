@@ -413,7 +413,7 @@ fn main() -> Result<()> {
             let db = Database::open(&db_path)?;
 
             // Check existing state and determine session
-            let session_id = match db.get_latest_session()? {
+            let state_id = match db.get_latest_session()? {
                 Some(state) if state.scan_complete() && state.scanned_packages > 0 => {
                     // Scan already complete, nothing to do
                     println!(
@@ -428,7 +428,7 @@ fn main() -> Result<()> {
                 _ => db.create_session()?,
             };
 
-            db.set_session_status(session_id, SessionStatus::Scanning)?;
+            db.set_session_status(state_id, SessionStatus::Scanning)?;
 
             // Set up signal handler for graceful shutdown
             let shutdown_flag = Arc::new(AtomicBool::new(false));
@@ -456,7 +456,7 @@ fn main() -> Result<()> {
                 }
             }
             if scan.start(&ctx)? {
-                db.set_session_status(session_id, SessionStatus::Interrupted)?;
+                db.set_session_status(state_id, SessionStatus::Interrupted)?;
                 if let Some(ref s) = ctx.stats {
                     s.flush();
                 }
@@ -473,7 +473,7 @@ fn main() -> Result<()> {
                     eprintln!("{}", err);
                 }
                 if config.strict_scan() {
-                    db.set_session_status(session_id, SessionStatus::Failed)?;
+                    db.set_session_status(state_id, SessionStatus::Failed)?;
                     bail!("{} package(s) failed to scan", scan_errors.len());
                 }
                 eprintln!(
@@ -492,8 +492,8 @@ fn main() -> Result<()> {
             let result = scan.resolve(Some(&logs_dir))?;
 
             // Store scan result in database
-            db.store_scan_result(session_id, &result.buildable)?;
-            db.set_session_status(session_id, SessionStatus::Scanned)?;
+            db.store_scan_result(state_id, &result.buildable)?;
+            db.set_session_status(state_id, SessionStatus::Scanned)?;
 
             println!(
                 "Resolved {} buildable packages, {} skipped",
