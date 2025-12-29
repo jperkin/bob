@@ -114,7 +114,7 @@ pub struct ScanFailure {
 /// A resolved package index entry with dependency information.
 ///
 /// This extends [`ScanIndex`] with resolved dependencies (`depends`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedIndex {
     /// The underlying scan index data.
     pub index: ScanIndex,

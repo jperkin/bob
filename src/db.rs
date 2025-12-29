@@ -45,7 +45,7 @@
 //! ```
 
 use anyhow::{Context, Result};
-use pkgsrc::{PkgName, ScanIndex};
+use pkgsrc::PkgName;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -179,49 +179,6 @@ impl Session {
     }
 }
 
-/// Serializable form of ResolvedIndex for database storage.
-///
-/// Instead of duplicating all ScanIndex fields, we store the pbulk-index
-/// text format directly. This is the same format produced by `bmake pbulk-index`
-/// and parsed by `ScanIndex::from_reader()`, so it automatically stays in sync
-/// with any changes to the pkgsrc crate.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct StoredResolvedIndex {
-    /// ScanIndex serialized as pbulk-index text format.
-    pub index_text: String,
-    /// Resolved dependencies as package names.
-    pub depends: Vec<String>,
-}
-
-impl StoredResolvedIndex {
-    /// Convert from ResolvedIndex.
-    pub fn from_resolved_index(idx: &ResolvedIndex) -> Self {
-        Self {
-            // ScanIndex implements Display, producing pbulk-index format
-            index_text: idx.index.to_string(),
-            depends: idx.depends.iter().map(|d| d.to_string()).collect(),
-        }
-    }
-
-    /// Convert back to ResolvedIndex.
-    pub fn to_resolved_index(&self) -> Result<ResolvedIndex> {
-        use std::io::BufReader;
-
-        // Parse ScanIndex from pbulk-index text format
-        let reader = BufReader::new(self.index_text.as_bytes());
-        let mut indices: Vec<ScanIndex> = ScanIndex::from_reader(reader)
-            .collect::<Result<_, _>>()
-            .context("Failed to parse stored scan index")?;
-
-        let index = indices
-            .pop()
-            .context("No scan index found in stored data")?;
-
-        let depends = self.depends.iter().map(|s| PkgName::new(s)).collect();
-        Ok(ResolvedIndex { index, depends })
-    }
-}
-
 /// Package information stored in the database.
 #[derive(Clone, Debug)]
 pub struct StoredPackage {
@@ -231,7 +188,7 @@ pub struct StoredPackage {
     pub pkgname: Option<String>,
     /// Scan status.
     pub scan_status: ScanStatus,
-    /// Scan data as JSON (StoredResolvedIndex).
+    /// Scan data as JSON (ResolvedIndex).
     pub scan_data: Option<String>,
     /// Error message if scan failed.
     pub scan_error: Option<String>,
@@ -519,8 +476,7 @@ impl Database {
         pkgpath: &str,
         resolved: &ResolvedIndex,
     ) -> Result<()> {
-        let stored = StoredResolvedIndex::from_resolved_index(resolved);
-        let json = serde_json::to_string(&stored)?;
+        let json = serde_json::to_string(resolved)?;
 
         self.conn.execute(
             "UPDATE packages
@@ -605,9 +561,8 @@ impl Database {
 
         for row in rows {
             let json = row?;
-            let stored: StoredResolvedIndex = serde_json::from_str(&json)
+            let resolved: ResolvedIndex = serde_json::from_str(&json)
                 .context("Failed to deserialize scan data")?;
-            let resolved = stored.to_resolved_index()?;
             result.insert(resolved.index.pkgname.clone(), resolved);
         }
 
@@ -798,8 +753,7 @@ impl Database {
                 .map(|p| p.to_string())
                 .unwrap_or_default();
 
-            let stored = StoredResolvedIndex::from_resolved_index(resolved);
-            let json = serde_json::to_string(&stored)?;
+            let json = serde_json::to_string(resolved)?;
 
             // Insert or update the package
             tx.execute(
