@@ -18,7 +18,7 @@ use anyhow::{Result, bail};
 use bob::Init;
 use bob::build::{self, Build};
 use bob::config::Config;
-use bob::db::{Database, SessionStatus};
+use bob::db::{Database, Status};
 use bob::logging;
 use bob::report;
 use bob::sandbox::Sandbox;
@@ -77,7 +77,7 @@ enum SandboxCmd {
 /// Determine which state to use - automatically resumes if possible.
 /// Returns (state_id, should_skip_scan).
 fn get_or_create_state(db: &Database) -> Result<(i64, bool)> {
-    if let Some(state) = db.get_latest_session()? {
+    if let Some(state) = db.get_latest_state()? {
         if state.can_resume() {
             let skip_scan = state.scan_complete();
             if skip_scan {
@@ -93,7 +93,7 @@ fn get_or_create_state(db: &Database) -> Result<(i64, bool)> {
             return Ok((state.id, skip_scan));
         }
     }
-    Ok((db.create_session()?, false))
+    Ok((db.create_state()?, false))
 }
 
 fn print_summary(summary: &build::BuildSummary) {
@@ -212,7 +212,7 @@ fn main() -> Result<()> {
 
             // Get scan result either from database (resume) or by scanning
             let scan_result = if resuming_scan {
-                db.set_session_status(state_id, SessionStatus::Building)?;
+                db.set_status(state_id, Status::Building)?;
 
                 // Reset any in-progress builds from interrupted state
                 db.reset_in_progress_builds(state_id)?;
@@ -230,7 +230,7 @@ fn main() -> Result<()> {
                 }
             } else {
                 // Mark as scanning
-                db.set_session_status(state_id, SessionStatus::Scanning)?;
+                db.set_status(state_id, Status::Scanning)?;
 
                 let mut scan = Scan::new(&config);
                 if let Some(pkgs) = config.pkgpaths() {
@@ -239,7 +239,7 @@ fn main() -> Result<()> {
                     }
                 }
                 if scan.start(&ctx)? {
-                    db.set_session_status(state_id, SessionStatus::Interrupted)?;
+                    db.set_status(state_id, Status::Interrupted)?;
                     if let Some(ref s) = ctx.stats {
                         s.flush();
                     }
@@ -256,7 +256,7 @@ fn main() -> Result<()> {
                         eprintln!("{}", err);
                     }
                     if config.strict_scan() {
-                        db.set_session_status(state_id, SessionStatus::Failed)?;
+                        db.set_status(state_id, Status::Failed)?;
                         bail!("{} package(s) failed to scan", scan_errors.len());
                     }
                     eprintln!(
@@ -277,7 +277,7 @@ fn main() -> Result<()> {
 
                 // Store scan result in database
                 db.store_scan_result(state_id, &scan_result.buildable)?;
-                db.set_session_status(state_id, SessionStatus::Scanned)?;
+                db.set_status(state_id, Status::Scanned)?;
 
                 println!("Scan complete, {} packages to build", scan_result.buildable.len());
 
@@ -285,12 +285,12 @@ fn main() -> Result<()> {
             };
 
             if scan_result.buildable.is_empty() {
-                db.set_session_status(state_id, SessionStatus::Completed)?;
+                db.set_status(state_id, Status::Completed)?;
                 bail!("No packages to build");
             }
 
             // Mark as building
-            db.set_session_status(state_id, SessionStatus::Building)?;
+            db.set_status(state_id, Status::Building)?;
 
             let mut build = Build::new(&config, scan_result.buildable.clone());
             let mut summary = build.start(&ctx)?;
@@ -302,7 +302,7 @@ fn main() -> Result<()> {
 
             // Check if we were interrupted
             if ctx.shutdown.load(Ordering::SeqCst) {
-                db.set_session_status(state_id, SessionStatus::Interrupted)?;
+                db.set_status(state_id, Status::Interrupted)?;
                 let sandbox = Sandbox::new(&config);
                 if sandbox.enabled() {
                     let _ = sandbox.destroy_all(config.build_threads());
@@ -334,7 +334,7 @@ fn main() -> Result<()> {
             summary.scan_failed = scan_result.scan_failed;
 
             // Mark as completed
-            db.set_session_status(state_id, SessionStatus::Completed)?;
+            db.set_status(state_id, Status::Completed)?;
 
             print_summary(&summary);
 
@@ -413,7 +413,7 @@ fn main() -> Result<()> {
             let db = Database::open(&db_path)?;
 
             // Check existing state and determine session
-            let state_id = match db.get_latest_session()? {
+            let state_id = match db.get_latest_state()? {
                 Some(state) if state.scan_complete() && state.scanned_packages > 0 => {
                     // Scan already complete, nothing to do
                     println!(
@@ -425,10 +425,10 @@ fn main() -> Result<()> {
                     return Ok(());
                 }
                 Some(state) if state.can_resume() => state.id,
-                _ => db.create_session()?,
+                _ => db.create_state()?,
             };
 
-            db.set_session_status(state_id, SessionStatus::Scanning)?;
+            db.set_status(state_id, Status::Scanning)?;
 
             // Set up signal handler for graceful shutdown
             let shutdown_flag = Arc::new(AtomicBool::new(false));
@@ -456,7 +456,7 @@ fn main() -> Result<()> {
                 }
             }
             if scan.start(&ctx)? {
-                db.set_session_status(state_id, SessionStatus::Interrupted)?;
+                db.set_status(state_id, Status::Interrupted)?;
                 if let Some(ref s) = ctx.stats {
                     s.flush();
                 }
@@ -473,7 +473,7 @@ fn main() -> Result<()> {
                     eprintln!("{}", err);
                 }
                 if config.strict_scan() {
-                    db.set_session_status(state_id, SessionStatus::Failed)?;
+                    db.set_status(state_id, Status::Failed)?;
                     bail!("{} package(s) failed to scan", scan_errors.len());
                 }
                 eprintln!(
@@ -493,7 +493,7 @@ fn main() -> Result<()> {
 
             // Store scan result in database
             db.store_scan_result(state_id, &result.buildable)?;
-            db.set_session_status(state_id, SessionStatus::Scanned)?;
+            db.set_status(state_id, Status::Scanned)?;
 
             println!(
                 "Resolved {} buildable packages, {} skipped",
@@ -512,21 +512,11 @@ fn main() -> Result<()> {
             }
 
             let db = Database::open(&db_path)?;
-            let state = db.get_latest_session()?;
+            let state = db.get_latest_state()?;
 
             match state {
                 Some(s) => {
-                    let status_str = match s.status {
-                        SessionStatus::Pending => "pending",
-                        SessionStatus::Scanning => "scanning",
-                        SessionStatus::Scanned => "scan complete",
-                        SessionStatus::Building => "building",
-                        SessionStatus::Completed => "completed",
-                        SessionStatus::Interrupted => "interrupted",
-                        SessionStatus::Failed => "failed",
-                    };
-
-                    println!("Status: {}", status_str);
+                    println!("Status: {}", s.status);
                     println!();
 
                     if s.total_packages > 0 {

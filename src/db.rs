@@ -36,7 +36,7 @@
 //! let db = Database::open(Path::new("/path/to/logdir/bob/bob.db"))?;
 //!
 //! // Check for resumable state
-//! if let Some(state) = db.get_latest_session()? {
+//! if let Some(state) = db.get_latest_state()? {
 //!     if state.can_resume() {
 //!         // Resume from where we left off
 //!     }
@@ -58,11 +58,11 @@ use crate::scan::ResolvedIndex;
 /// Current database schema version.
 const SCHEMA_VERSION: i32 = 1;
 
-/// Status of a build session.
+/// Current status of a build run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SessionStatus {
-    /// Session created but not started
-    Pending,
+pub enum Status {
+    /// Clean state, ready to start
+    Clean,
     /// Currently scanning packages
     Scanning,
     /// Scan complete, ready to build
@@ -77,29 +77,33 @@ pub enum SessionStatus {
     Failed,
 }
 
-impl SessionStatus {
-    fn as_str(&self) -> &'static str {
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SessionStatus::Pending => "pending",
-            SessionStatus::Scanning => "scanning",
-            SessionStatus::Scanned => "scanned",
-            SessionStatus::Building => "building",
-            SessionStatus::Completed => "completed",
-            SessionStatus::Interrupted => "interrupted",
-            SessionStatus::Failed => "failed",
+            Status::Clean => write!(f, "clean"),
+            Status::Scanning => write!(f, "scanning"),
+            Status::Scanned => write!(f, "scanned"),
+            Status::Building => write!(f, "building"),
+            Status::Completed => write!(f, "completed"),
+            Status::Interrupted => write!(f, "interrupted"),
+            Status::Failed => write!(f, "failed"),
         }
     }
+}
 
-    fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for Status {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "pending" => Some(SessionStatus::Pending),
-            "scanning" => Some(SessionStatus::Scanning),
-            "scanned" => Some(SessionStatus::Scanned),
-            "building" => Some(SessionStatus::Building),
-            "completed" => Some(SessionStatus::Completed),
-            "interrupted" => Some(SessionStatus::Interrupted),
-            "failed" => Some(SessionStatus::Failed),
-            _ => None,
+            "clean" => Ok(Status::Clean),
+            "scanning" => Ok(Status::Scanning),
+            "scanned" => Ok(Status::Scanned),
+            "building" => Ok(Status::Building),
+            "completed" => Ok(Status::Completed),
+            "interrupted" => Ok(Status::Interrupted),
+            "failed" => Ok(Status::Failed),
+            _ => Err(()),
         }
     }
 }
@@ -132,16 +136,16 @@ pub enum BuildStatus {
     Skipped,
 }
 
-/// Information about a build session.
+/// Current build state information.
 #[derive(Clone, Debug)]
-pub struct Session {
-    /// Unique session identifier.
+pub struct State {
+    /// Unique state identifier.
     pub id: i64,
-    /// Session status.
-    pub status: SessionStatus,
-    /// When the session was created.
+    /// Current status.
+    pub status: Status,
+    /// When the state was created.
     pub created_at: String,
-    /// When the session was last updated.
+    /// When the state was last updated.
     pub updated_at: String,
     /// Total packages to process.
     pub total_packages: i64,
@@ -155,15 +159,15 @@ pub struct Session {
     pub skipped_packages: i64,
 }
 
-impl Session {
-    /// Check if this session can be resumed.
+impl State {
+    /// Check if this state can be resumed.
     pub fn can_resume(&self) -> bool {
         matches!(
             self.status,
-            SessionStatus::Scanning
-                | SessionStatus::Scanned
-                | SessionStatus::Building
-                | SessionStatus::Interrupted
+            Status::Scanning
+                | Status::Scanned
+                | Status::Building
+                | Status::Interrupted
         )
     }
 
@@ -171,10 +175,10 @@ impl Session {
     pub fn scan_complete(&self) -> bool {
         matches!(
             self.status,
-            SessionStatus::Scanned
-                | SessionStatus::Building
-                | SessionStatus::Completed
-                | SessionStatus::Interrupted
+            Status::Scanned
+                | Status::Building
+                | Status::Completed
+                | Status::Interrupted
         )
     }
 }
@@ -248,10 +252,10 @@ impl Database {
         if version < 1 {
             self.conn.execute_batch(
                 r#"
-                -- Sessions table: tracks build runs
+                -- State table: tracks build runs
                 CREATE TABLE IF NOT EXISTS sessions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    status TEXT NOT NULL DEFAULT 'pending',
+                    status TEXT NOT NULL DEFAULT 'clean',
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
                     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
                     total_packages INTEGER NOT NULL DEFAULT 0,
@@ -313,8 +317,8 @@ impl Database {
         Ok(())
     }
 
-    /// Create a new build session.
-    pub fn create_session(&self) -> Result<i64> {
+    /// Create a new build state.
+    pub fn create_state(&self) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO sessions DEFAULT VALUES",
             [],
@@ -324,8 +328,8 @@ impl Database {
         Ok(id)
     }
 
-    /// Get the latest session.
-    pub fn get_latest_session(&self) -> Result<Option<Session>> {
+    /// Get the latest state.
+    pub fn get_latest_state(&self) -> Result<Option<State>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, status, created_at, updated_at, total_packages,
                     scanned_packages, built_packages, failed_packages, skipped_packages
@@ -334,12 +338,11 @@ impl Database {
              LIMIT 1",
         )?;
 
-        let session = stmt
+        let state = stmt
             .query_row([], |row| {
-                Ok(Session {
+                Ok(State {
                     id: row.get(0)?,
-                    status: SessionStatus::from_str(row.get::<_, String>(1)?.as_str())
-                        .unwrap_or(SessionStatus::Failed),
+                    status: row.get::<_, String>(1)?.parse().unwrap_or(Status::Failed),
                     created_at: row.get(2)?,
                     updated_at: row.get(3)?,
                     total_packages: row.get(4)?,
@@ -351,11 +354,11 @@ impl Database {
             })
             .ok();
 
-        Ok(session)
+        Ok(state)
     }
 
-    /// Get a session by ID.
-    pub fn get_session(&self, id: i64) -> Result<Option<Session>> {
+    /// Get a state by ID.
+    pub fn get_state(&self, id: i64) -> Result<Option<State>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, status, created_at, updated_at, total_packages,
                     scanned_packages, built_packages, failed_packages, skipped_packages
@@ -363,12 +366,11 @@ impl Database {
              WHERE id = ?1",
         )?;
 
-        let session = stmt
+        let state = stmt
             .query_row([id], |row| {
-                Ok(Session {
+                Ok(State {
                     id: row.get(0)?,
-                    status: SessionStatus::from_str(row.get::<_, String>(1)?.as_str())
-                        .unwrap_or(SessionStatus::Failed),
+                    status: row.get::<_, String>(1)?.parse().unwrap_or(Status::Failed),
                     created_at: row.get(2)?,
                     updated_at: row.get(3)?,
                     total_packages: row.get(4)?,
@@ -380,11 +382,11 @@ impl Database {
             })
             .ok();
 
-        Ok(session)
+        Ok(state)
     }
 
-    /// List all sessions.
-    pub fn list_sessions(&self) -> Result<Vec<Session>> {
+    /// List all states.
+    pub fn list_states(&self) -> Result<Vec<State>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, status, created_at, updated_at, total_packages,
                     scanned_packages, built_packages, failed_packages, skipped_packages
@@ -392,12 +394,11 @@ impl Database {
              ORDER BY id DESC",
         )?;
 
-        let sessions = stmt
+        let states = stmt
             .query_map([], |row| {
-                Ok(Session {
+                Ok(State {
                     id: row.get(0)?,
-                    status: SessionStatus::from_str(row.get::<_, String>(1)?.as_str())
-                        .unwrap_or(SessionStatus::Failed),
+                    status: row.get::<_, String>(1)?.parse().unwrap_or(Status::Failed),
                     created_at: row.get(2)?,
                     updated_at: row.get(3)?,
                     total_packages: row.get(4)?,
@@ -409,16 +410,16 @@ impl Database {
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(sessions)
+        Ok(states)
     }
 
-    /// Update session status.
-    pub fn set_session_status(&self, id: i64, status: SessionStatus) -> Result<()> {
+    /// Update status.
+    pub fn set_status(&self, id: i64, status: Status) -> Result<()> {
         self.conn.execute(
             "UPDATE sessions SET status = ?1, updated_at = datetime('now') WHERE id = ?2",
-            params![status.as_str(), id],
+            params![status.to_string(), id],
         )?;
-        debug!(state_id = id, status = status.as_str(), "Updated state status");
+        debug!(state_id = id, %status, "Updated status");
         Ok(())
     }
 
@@ -696,8 +697,8 @@ impl Database {
         Ok(count)
     }
 
-    /// Delete a session and all its data.
-    pub fn delete_session(&self, id: i64) -> Result<()> {
+    /// Delete a state and all its data.
+    pub fn delete_state(&self, id: i64) -> Result<()> {
         self.conn.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
         info!(state_id = id, "Deleted state");
         Ok(())
@@ -805,38 +806,38 @@ mod tests {
         let db = Database::open(&db_path).unwrap();
 
         // Create state
-        let state_id = db.create_session().unwrap();
+        let state_id = db.create_state().unwrap();
         assert_eq!(state_id, 1);
 
-        // Get state - starts as Pending (not resumable yet)
-        let state = db.get_session(state_id).unwrap().unwrap();
-        assert_eq!(state.status, SessionStatus::Pending);
-        assert!(!state.can_resume()); // Pending can't be resumed
+        // Get state - starts as Clean (not resumable yet)
+        let state = db.get_state(state_id).unwrap().unwrap();
+        assert_eq!(state.status, Status::Clean);
+        assert!(!state.can_resume()); // Clean can't be resumed
 
         // Update status to Scanning (now resumable)
-        db.set_session_status(state_id, SessionStatus::Scanning).unwrap();
-        let state = db.get_session(state_id).unwrap().unwrap();
-        assert_eq!(state.status, SessionStatus::Scanning);
+        db.set_status(state_id, Status::Scanning).unwrap();
+        let state = db.get_state(state_id).unwrap().unwrap();
+        assert_eq!(state.status, Status::Scanning);
         assert!(state.can_resume());
 
         // Update to Scanned (still resumable)
-        db.set_session_status(state_id, SessionStatus::Scanned).unwrap();
-        let state = db.get_session(state_id).unwrap().unwrap();
+        db.set_status(state_id, Status::Scanned).unwrap();
+        let state = db.get_state(state_id).unwrap().unwrap();
         assert!(state.scan_complete());
         assert!(state.can_resume());
 
         // Update to Completed (no longer resumable)
-        db.set_session_status(state_id, SessionStatus::Completed).unwrap();
-        let state = db.get_session(state_id).unwrap().unwrap();
+        db.set_status(state_id, Status::Completed).unwrap();
+        let state = db.get_state(state_id).unwrap().unwrap();
         assert!(!state.can_resume());
 
         // List states
-        let states = db.list_sessions().unwrap();
+        let states = db.list_states().unwrap();
         assert_eq!(states.len(), 1);
 
         // Delete state
-        db.delete_session(state_id).unwrap();
-        assert!(db.get_session(state_id).unwrap().is_none());
+        db.delete_state(state_id).unwrap();
+        assert!(db.get_state(state_id).unwrap().is_none());
     }
 
     #[test]
@@ -845,7 +846,7 @@ mod tests {
         let db_path = dir.path().join("test.db");
         let db = Database::open(&db_path).unwrap();
 
-        let state_id = db.create_session().unwrap();
+        let state_id = db.create_state().unwrap();
 
         // Add packages
         db.add_packages(state_id, &["mail/mutt", "www/curl"]).unwrap();
@@ -855,7 +856,7 @@ mod tests {
         assert_eq!(pending.len(), 2);
 
         // Check state counts
-        let state = db.get_session(state_id).unwrap().unwrap();
+        let state = db.get_state(state_id).unwrap().unwrap();
         assert_eq!(state.total_packages, 2);
     }
 }

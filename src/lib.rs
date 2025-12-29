@@ -97,7 +97,7 @@ impl RunContext {
 pub use action::{Action, ActionType, FSType};
 pub use build::{Build, BuildOutcome, BuildResult, BuildSummary};
 pub use config::{Config, Options, Pkgsrc, Sandboxes};
-pub use db::{Database, Session, SessionStatus};
+pub use db::{Database, State, Status};
 pub use report::write_html_report;
 pub use sandbox::Sandbox;
 pub use scan::{
