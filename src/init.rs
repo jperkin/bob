@@ -36,7 +36,12 @@ impl Init {
             env::current_dir()?.join(dir)
         };
         if initdir.exists() {
-            bail!("{} already exists", initdir.display());
+            if !initdir.is_dir() {
+                bail!("{} exists and is not a directory", initdir.display());
+            }
+            if fs::read_dir(&initdir)?.next().is_some() {
+                bail!("{} exists and is not empty", initdir.display());
+            }
         }
 
         let Some(initdir_str) = initdir.to_str() else {
