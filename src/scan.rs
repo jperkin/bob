@@ -145,14 +145,18 @@ impl std::ops::DerefMut for ResolvedIndex {
 impl std::fmt::Display for ResolvedIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.index)?;
-        write!(f, "DEPENDS=")?;
-        for (i, d) in self.depends.iter().enumerate() {
-            if i > 0 {
-                write!(f, " ")?;
+        // Only output DEPENDS= if there are dependencies
+        if !self.depends.is_empty() {
+            write!(f, "DEPENDS=")?;
+            for (i, d) in self.depends.iter().enumerate() {
+                if i > 0 {
+                    write!(f, " ")?;
+                }
+                write!(f, "{d}")?;
             }
-            write!(f, "{d}")?;
+            writeln!(f)?;
         }
-        writeln!(f)
+        Ok(())
     }
 }
 
