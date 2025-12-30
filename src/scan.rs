@@ -100,6 +100,8 @@ pub struct SkippedPackage {
     pub pkgpath: Option<PkgPath>,
     /// Reason the package was skipped.
     pub reason: SkipReason,
+    /// Full resolved index (for presolve output).
+    pub index: Option<ResolvedIndex>,
 }
 
 /// Information about a package that failed to scan.
@@ -169,11 +171,15 @@ pub struct ScanResult {
     /// Packages that can be built, indexed by package name.
     ///
     /// These packages have all dependencies resolved and no skip/fail reasons.
-    pub buildable: HashMap<PkgName, ResolvedIndex>,
+    /// Uses IndexMap to preserve insertion order from the original scan.
+    pub buildable: IndexMap<PkgName, ResolvedIndex>,
     /// Packages that were skipped due to skip/fail reasons.
     pub skipped: Vec<SkippedPackage>,
     /// Packages that failed to scan (bmake pbulk-index failed).
     pub scan_failed: Vec<ScanFailure>,
+    /// All packages in original order with their skip reason (if any).
+    /// Used for presolve output that needs to preserve original ordering.
+    pub all_ordered: Vec<(ResolvedIndex, Option<SkipReason>)>,
 }
 
 /// Package dependency scanner.
@@ -216,7 +222,7 @@ pub struct Scan {
     done: IndexMap<PkgPath, Vec<ScanIndex>>,
     /// Full cache from database for on-demand loading of dependencies.
     cache: IndexMap<PkgPath, Vec<ScanIndex>>,
-    resolved: HashMap<PkgName, ResolvedIndex>,
+    resolved: IndexMap<PkgName, ResolvedIndex>,
     /// Full tree scan - discover all packages, skip recursive dependency discovery.
     /// Defaults to true; set to false when packages are explicitly added.
     full_tree: bool,
@@ -815,19 +821,18 @@ impl Scan {
         );
 
         /*
-         * Populate the resolved hash.  This becomes our new working set,
-         * with a flat mapping of PKGNAME -> ScanIndex.
+         * Populate the resolved hash with ALL packages first, including those
+         * with skip/fail reasons. This allows us to resolve dependencies for
+         * all packages before separating them.
          *
          * self.done must no longer be used after this point, as its ScanIndex
          * entries are out of date (do not have depends set, for example).
-         * Maybe at some point we'll handle lifetimes properly and just have
-         * one canonical index.
-         *
-         * Also create a simple HashSet for looking up known PKGNAME for
-         * matches.
          */
-        let mut pkgnames: HashSet<PkgName> = HashSet::new();
-        let mut skipped: Vec<SkippedPackage> = Vec::new();
+        let mut pkgnames: indexmap::IndexSet<PkgName> =
+            indexmap::IndexSet::new();
+
+        // Track which packages have skip/fail reasons
+        let mut skip_reasons: HashMap<PkgName, SkipReason> = HashMap::new();
 
         // Log what we have in self.done
         for (pkgpath, index) in &self.done {
@@ -839,36 +844,6 @@ impl Scan {
 
         for index in self.done.values() {
             for pkg in index {
-                // Check for skip/fail reasons
-                if let Some(reason) = &pkg.pkg_skip_reason {
-                    if !reason.is_empty() {
-                        info!(pkgname = %pkg.pkgname.pkgname(),
-                            reason = %reason,
-                            "Skipping package due to PKG_SKIP_REASON"
-                        );
-                        skipped.push(SkippedPackage {
-                            pkgname: pkg.pkgname.clone(),
-                            pkgpath: pkg.pkg_location.clone(),
-                            reason: SkipReason::PkgSkipReason(reason.clone()),
-                        });
-                        continue;
-                    }
-                }
-                if let Some(reason) = &pkg.pkg_fail_reason {
-                    if !reason.is_empty() {
-                        info!(pkgname = %pkg.pkgname.pkgname(),
-                            reason = %reason,
-                            "Skipping package due to PKG_FAIL_REASON"
-                        );
-                        skipped.push(SkippedPackage {
-                            pkgname: pkg.pkgname.clone(),
-                            pkgpath: pkg.pkg_location.clone(),
-                            reason: SkipReason::PkgFailReason(reason.clone()),
-                        });
-                        continue;
-                    }
-                }
-
                 // Skip duplicate PKGNAMEs - keep only the first (preferred)
                 // variant for multi-version packages.
                 if pkgnames.contains(&pkg.pkgname) {
@@ -877,6 +852,34 @@ impl Scan {
                         "Skipping duplicate PKGNAME"
                     );
                     continue;
+                }
+
+                // Track skip/fail reasons but still add to resolved
+                if let Some(reason) = &pkg.pkg_skip_reason {
+                    if !reason.is_empty() {
+                        info!(pkgname = %pkg.pkgname.pkgname(),
+                            reason = %reason,
+                            "Package has PKG_SKIP_REASON"
+                        );
+                        skip_reasons.insert(
+                            pkg.pkgname.clone(),
+                            SkipReason::PkgSkipReason(reason.clone()),
+                        );
+                    }
+                }
+                if let Some(reason) = &pkg.pkg_fail_reason {
+                    if !reason.is_empty()
+                        && !skip_reasons.contains_key(&pkg.pkgname)
+                    {
+                        info!(pkgname = %pkg.pkgname.pkgname(),
+                            reason = %reason,
+                            "Package has PKG_FAIL_REASON"
+                        );
+                        skip_reasons.insert(
+                            pkg.pkgname.clone(),
+                            SkipReason::PkgFailReason(reason.clone()),
+                        );
+                    }
                 }
 
                 debug!(pkgname = %pkg.pkgname.pkgname(),
@@ -892,16 +895,9 @@ impl Scan {
 
         info!(
             resolved_count = self.resolved.len(),
-            skipped_count = skipped.len(),
+            skip_reasons_count = skip_reasons.len(),
             "Initial resolution complete"
         );
-
-        /*
-         * Build a set of skipped package names for checking if unresolved
-         * dependencies are due to skipped packages vs truly missing.
-         */
-        let skipped_pkgnames: HashSet<PkgName> =
-            skipped.iter().map(|s| s.pkgname.clone()).collect();
 
         /*
          * Keep a cache of best Depend => PkgName matches we've already seen
@@ -914,7 +910,12 @@ impl Scan {
          * unresolved dependencies (errors).
          */
         let mut skip_due_to_dep: HashMap<PkgName, String> = HashMap::new();
-        let mut errors: Vec<String> = Vec::new();
+        let mut errors: Vec<(PkgName, String)> = Vec::new();
+
+        // Helper to check if a dependency pattern is already satisfied
+        let is_satisfied = |depends: &[PkgName], pattern: &pkgsrc::Pattern| {
+            depends.iter().any(|existing| pattern.matches(existing.pkgname()))
+        };
 
         for pkg in self.resolved.values_mut() {
             let all_deps = match pkg.all_depends.clone() {
@@ -922,77 +923,71 @@ impl Scan {
                 None => continue,
             };
             for depend in &all_deps {
-                /*
-                 * Check for cached DEPENDS match first.  If found, use it.
-                 */
+                // Check for cached DEPENDS match first. If found, use it
+                // (but only add if the pattern isn't already satisfied).
                 if let Some(pkgname) = match_cache.get(depend) {
-                    if !pkg.depends.contains(pkgname) {
+                    if !is_satisfied(&pkg.depends, depend.pattern())
+                        && !pkg.depends.contains(pkgname)
+                    {
                         pkg.depends.push(pkgname.clone());
                     }
                     continue;
                 }
                 /*
                  * Find best DEPENDS match out of all known PKGNAME.
+                 * Collect all candidates that match the pattern.
                  */
-                let mut best: Option<&PkgName> = None;
+                let mut candidates: Vec<&PkgName> = Vec::new();
                 for candidate in &pkgnames {
                     if depend.pattern().matches(candidate.pkgname()) {
-                        if let Some(current) = best {
-                            best = match depend.pattern().best_match(
-                                current.pkgname(),
-                                candidate.pkgname(),
-                            ) {
-                                Ok(Some(m)) if m == current.pkgname() => {
-                                    Some(current)
-                                }
+                        candidates.push(candidate);
+                    }
+                }
+
+                // Find best match among all candidates. Use best_match for
+                // version comparison. On version tie, prefer larger name
+                // (e.g., py314 over py311, mpg123-nas over mpg123).
+                let mut best: Option<&PkgName> = None;
+                for candidate in candidates {
+                    if let Some(current) = best {
+                        let winner = depend
+                            .pattern()
+                            .best_match(current.pkgname(), candidate.pkgname());
+                        // On version tie, prefer larger name
+                        best = if current.pkgversion() == candidate.pkgversion()
+                        {
+                            if current.pkgname() > candidate.pkgname() {
+                                Some(current)
+                            } else {
+                                Some(candidate)
+                            }
+                        } else {
+                            // Different versions - use best_match result
+                            match winner {
                                 Ok(Some(m)) if m == candidate.pkgname() => {
                                     Some(candidate)
                                 }
-                                Ok(Some(_)) => todo!(),
-                                Ok(None) | Err(_) => None,
-                            };
-                        } else {
-                            best = Some(candidate);
-                        }
+                                _ => Some(current),
+                            }
+                        };
+                    } else {
+                        best = Some(candidate);
                     }
                 }
-                /*
-                 * If we found a match, save it and add to the cache.
-                 * Otherwise check if the dependency matches a skipped package.
-                 */
+                // If found, save to cache and add to depends (if not already satisfied)
                 if let Some(pkgname) = best {
-                    // Avoid duplicate dependencies
-                    if !pkg.depends.contains(pkgname) {
+                    if !is_satisfied(&pkg.depends, depend.pattern())
+                        && !pkg.depends.contains(pkgname)
+                    {
                         pkg.depends.push(pkgname.clone());
                     }
                     match_cache.insert(depend.clone(), pkgname.clone());
                 } else {
-                    // Check if the dependency matches a skipped package
-                    let mut matched_skipped: Option<&PkgName> = None;
-                    for candidate in &skipped_pkgnames {
-                        if depend.pattern().matches(candidate.pkgname()) {
-                            matched_skipped = Some(candidate);
-                            break;
-                        }
-                    }
-
-                    if let Some(skipped_dep) = matched_skipped {
-                        // Dependency is skipped, so this package should be too
-                        skip_due_to_dep.insert(
-                            pkg.index.pkgname.clone(),
-                            format!(
-                                "Dependency {} skipped",
-                                skipped_dep.pkgname()
-                            ),
-                        );
-                    } else {
-                        // Truly unresolved - no matching package exists
-                        errors.push(format!(
-                            "No match found for {} in {}",
-                            depend.pattern().pattern(),
-                            pkg.index.pkgname.pkgname()
-                        ));
-                    }
+                    // No matching package exists
+                    errors.push((
+                        pkg.index.pkgname.clone(),
+                        depend.pattern().pattern().to_string(),
+                    ));
                 }
             }
         }
@@ -1026,46 +1021,59 @@ impl Scan {
             skip_due_to_dep.extend(new_skips);
         }
 
-        /*
-         * Move packages with skipped dependencies from resolved to skipped.
-         */
-        for (pkgname, reason) in &skip_due_to_dep {
-            if let Some(pkg) = self.resolved.remove(pkgname) {
+        // Merge skip_due_to_dep into skip_reasons
+        for (pkgname, reason) in skip_due_to_dep.iter() {
+            if !skip_reasons.contains_key(pkgname) {
+                skip_reasons.insert(
+                    pkgname.clone(),
+                    SkipReason::PkgSkipReason(reason.clone()),
+                );
+            }
+        }
+
+        // Filter out errors for packages that are being skipped anyway
+        let errors: Vec<String> = errors
+            .into_iter()
+            .filter(|(pkgname, _)| !skip_reasons.contains_key(pkgname))
+            .map(|(pkgname, pattern)| {
+                format!(
+                    "No match found for {} in {}",
+                    pattern,
+                    pkgname.pkgname()
+                )
+            })
+            .collect();
+
+        // Build all_ordered first to preserve original order, then separate
+        let mut all_ordered: Vec<(ResolvedIndex, Option<SkipReason>)> =
+            Vec::new();
+        let mut buildable: IndexMap<PkgName, ResolvedIndex> = IndexMap::new();
+        let mut skipped: Vec<SkippedPackage> = Vec::new();
+
+        for (pkgname, index) in std::mem::take(&mut self.resolved) {
+            let reason = skip_reasons.remove(&pkgname);
+            all_ordered.push((index.clone(), reason.clone()));
+            if let Some(r) = reason {
                 skipped.push(SkippedPackage {
-                    pkgname: pkg.pkgname.clone(),
-                    pkgpath: pkg.pkg_location.clone(),
-                    reason: SkipReason::PkgSkipReason(reason.clone()),
+                    pkgname: index.pkgname.clone(),
+                    pkgpath: index.pkg_location.clone(),
+                    reason: r,
+                    index: Some(index),
                 });
+            } else {
+                buildable.insert(pkgname, index);
             }
         }
 
         /*
-         * Filter out errors for packages that are being skipped anyway.
-         * If a package has both a skipped dependency and a missing dependency,
-         * we only care about the skip - the missing dep error is noise.
-         */
-        let errors: Vec<String> = errors
-            .into_iter()
-            .filter(|err| {
-                // Error format is "No match found for X in PKGNAME"
-                // Extract PKGNAME and check if it's being skipped
-                if let Some(pkgname_str) = err.split(" in ").last() {
-                    !skip_due_to_dep.keys().any(|k| k.pkgname() == pkgname_str)
-                } else {
-                    true // Keep error if we can't parse it
-                }
-            })
-            .collect();
-
-        /*
-         * Verify that the graph is acyclic.
+         * Verify that the graph is acyclic (only for buildable packages).
          */
         debug!(
-            resolved_count = self.resolved.len(),
+            buildable_count = buildable.len(),
             "Checking for circular dependencies"
         );
         let mut graph = DiGraphMap::new();
-        for (pkgname, index) in &self.resolved {
+        for (pkgname, index) in &buildable {
             for dep in &index.depends {
                 graph.add_edge(dep.pkgname(), pkgname.pkgname(), ());
             }
@@ -1081,13 +1089,13 @@ impl Scan {
         });
 
         info!(
-            buildable_count = self.resolved.len(),
+            buildable_count = buildable.len(),
             skipped_count = skipped.len(),
             "Resolution complete"
         );
 
         // Log all buildable packages
-        for pkgname in self.resolved.keys() {
+        for pkgname in buildable.keys() {
             debug!(pkgname = %pkgname.pkgname(), "Package is buildable");
         }
 
@@ -1101,11 +1109,8 @@ impl Scan {
             })
             .collect();
 
-        let result = ScanResult {
-            buildable: self.resolved.clone(),
-            skipped,
-            scan_failed,
-        };
+        let result =
+            ScanResult { buildable, skipped, scan_failed, all_ordered };
 
         // Now check for errors
         if !errors.is_empty() {

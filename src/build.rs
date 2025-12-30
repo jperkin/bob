@@ -70,6 +70,7 @@ use crate::tui::{MultiProgress, format_duration};
 use crate::{Config, RunContext, Sandbox};
 use anyhow::{Context, bail};
 use glob::Pattern;
+use indexmap::IndexMap;
 use pkgsrc::{PkgName, PkgPath};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -225,7 +226,7 @@ pub struct Build {
     /**
      * List of packages to build, as input from Scan::resolve.
      */
-    scanpkgs: HashMap<PkgName, ResolvedIndex>,
+    scanpkgs: IndexMap<PkgName, ResolvedIndex>,
 }
 
 #[derive(Debug)]
@@ -813,7 +814,7 @@ enum BuildStatus {
 
 #[derive(Clone, Debug)]
 struct BuildJobs {
-    scanpkgs: HashMap<PkgName, ResolvedIndex>,
+    scanpkgs: IndexMap<PkgName, ResolvedIndex>,
     incoming: HashMap<PkgName, HashSet<PkgName>>,
     running: HashSet<PkgName>,
     done: HashSet<PkgName>,
@@ -993,7 +994,7 @@ impl BuildJobs {
 impl Build {
     pub fn new(
         config: &Config,
-        scanpkgs: HashMap<PkgName, ResolvedIndex>,
+        scanpkgs: IndexMap<PkgName, ResolvedIndex>,
     ) -> Build {
         let sandbox = Sandbox::new(config);
         info!(

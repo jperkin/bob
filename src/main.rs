@@ -391,37 +391,10 @@ fn main() -> Result<()> {
 
             let result = scan.resolve()?;
 
-            // Build presolve output
+            // Build presolve output in original order
             let mut out = String::new();
-
-            // Sort by package name for deterministic output
-            let mut pkgnames: Vec<_> = result.buildable.keys().collect();
-            pkgnames.sort_by(|a, b| a.pkgname().cmp(b.pkgname()));
-
-            for pkgname in pkgnames {
-                let idx = &result.buildable[pkgname];
+            for (idx, _reason) in &result.all_ordered {
                 out.push_str(&idx.to_string());
-                out.push('\n');
-            }
-
-            // Output skipped packages
-            for pkg in &result.skipped {
-                out.push_str(&format!("PKGNAME={}\n", pkg.pkgname));
-                if let Some(ref loc) = pkg.pkgpath {
-                    out.push_str(&format!(
-                        "PKG_LOCATION={}\n",
-                        loc.as_path().display()
-                    ));
-                }
-                match &pkg.reason {
-                    SkipReason::PkgSkipReason(r) => {
-                        out.push_str(&format!("PKG_SKIP_REASON={}\n", r));
-                    }
-                    SkipReason::PkgFailReason(r) => {
-                        out.push_str(&format!("PKG_FAIL_REASON={}\n", r));
-                    }
-                }
-                out.push('\n');
             }
 
             // Write to file or stdout
@@ -438,8 +411,8 @@ fn main() -> Result<()> {
             }
         }
         Cmd::ImportPscan { file } => {
+            use indexmap::IndexMap;
             use pkgsrc::ScanIndex;
-            use std::collections::HashMap;
             use std::fs::File;
             use std::io::BufReader;
 
@@ -453,9 +426,9 @@ fn main() -> Result<()> {
             let f = File::open(&file)?;
             let reader = BufReader::new(f);
 
-            // Parse all ScanIndex entries and group by pkgpath
-            let mut by_pkgpath: HashMap<String, Vec<ScanIndex>> =
-                HashMap::new();
+            // Parse all ScanIndex entries and group by pkgpath (preserving order)
+            let mut by_pkgpath: IndexMap<String, Vec<ScanIndex>> =
+                IndexMap::new();
             let mut count = 0;
             let mut errors = 0;
 
