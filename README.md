@@ -9,9 +9,13 @@ utility for building pkgsrc packages.
 
 ## Screencasts
 
-[![Example build session](https://asciinema.org/a/763171.svg)](https://asciinema.org/a/763171)
+- Example build session
 
-[![Live build log viewer](https://asciinema.org/a/763316.svg)](https://asciinema.org/a/763316)
+  [![Example build session](https://jperkin.github.io/bob/assets/build.gif)](https://asciinema.org/a/763171)
+
+- Live build log viewer
+
+  [![Live build log viewer](https://jperkin.github.io/bob/assets/panes.gif)](https://asciinema.org/a/763316)
 
 ## Status
 
