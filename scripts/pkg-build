@@ -96,6 +96,16 @@ send_status() {
 	echo "$1" >&${bob_status_fd}
 }
 
+if [ -z "${bob_build_user}" ]; then
+	run_checksum=run_direct
+	run_build=run_direct
+	run_install=run_direct
+else
+	run_checksum=run_direct
+	run_build=run_su
+	run_install=run_su
+fi
+
 #
 # Script starts here.  Parse ScanIndex from stdin.
 #
@@ -121,45 +131,31 @@ while read scan_input; do
 	esac
 done
 
-pkglogdir="${bob_logdir}/${pkgname}"
-
-if [ -z "${bob_build_user}" ]; then
-	run_checksum=run_direct
-	run_build=run_direct
-	run_install=run_direct
-else
-	run_checksum=run_direct
-	run_build=run_su
-	run_install=run_su
-fi
-
 pkg_up_to_date="$(dirname "$0")/pkg-up-to-date"
 if [ -x ${pkg_up_to_date} ]; then
-	mkdir -p ${pkglogdir}
-	if ${pkg_up_to_date} ${pkgname} ${dependencies} \
-	    > ${pkglogdir}/up-to-date.log 2>&1; then
-		rm -rf ${pkglogdir}
+	if ${pkg_up_to_date} ${pkgname} ${dependencies}; then
 		send_status "skipped"
 		exit 0
 	fi
 fi
 
-cd ${bob_pkgsrc}/${pkgdir}
-
+pkglogdir="${bob_logdir}/${pkgname}"
+rm -rf "${pkglogdir}"
 mkdir -p "${pkglogdir}"
-rm -f "${pkglogdir}"/.stage
+
+trap cleanup INT TERM
 
 # Set up output redirection
 exec >${pkglogdir}/pkg-build.log 2>&1
 set -x
+
+cd ${bob_pkgsrc}/${pkgdir}
 
 # Create work.log and make it writable by the unprivileged user
 touch "${pkglogdir}/work.log"
 if [ -n "${bob_build_user}" ]; then
 	chown "${bob_build_user}" "${pkglogdir}/work.log"
 fi
-
-trap cleanup INT TERM
 
 set_stage "pre-clean"
 run_log "${pkglogdir}/pre-clean.log" ${bob_make} clean
