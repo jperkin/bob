@@ -34,7 +34,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const EXIT_INTERRUPTED: i32 = 128 + libc::SIGINT;
 
 #[derive(Debug, Parser)]
-#[command(author, version, about, long_about = None)]
+#[command(
+    author,
+    version,
+    about,
+    long_about = "\
+A pkgsrc package builder
+
+\x1b[1;4mFirst time setup:\x1b[0m
+
+  bob init <dir>   Create new configuration directory
+  cd <dir>         Bob looks for config.lua in current directory by default
+  vi config.lua    Configure packages to build, customise sandboxes, etc.
+
+\x1b[1;4mBuild all packages:\x1b[0m
+
+  bob build
+
+Each of the main target commands depend on the previous being up-to-date, so
+'bob build' will automatically run 'bob scan' first to get build information."
+)]
 pub struct Args {
     /// Use the specified configuration file instead of the default path
     #[arg(short, long)]
