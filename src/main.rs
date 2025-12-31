@@ -56,6 +56,25 @@ enum Cmd {
     Scan,
     /// Build all packages as defined by the configuration file
     Build,
+    /// Utility commands for debugging and data import/export
+    Util {
+        #[command(subcommand)]
+        cmd: UtilCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SandboxCmd {
+    /// Create all sandboxes
+    Create,
+    /// Destroy all sandboxes
+    Destroy,
+    /// List currently created sandboxes
+    List,
+}
+
+#[derive(Debug, Subcommand)]
+enum UtilCmd {
     /// Generate HTML report from existing logdir data
     GenerateReport,
     /// Create and destroy build sandboxes
@@ -86,16 +105,6 @@ enum Cmd {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-}
-
-#[derive(Debug, Subcommand)]
-enum SandboxCmd {
-    /// Create all sandboxes
-    Create,
-    /// Destroy all sandboxes
-    Destroy,
-    /// List currently created sandboxes
-    List,
 }
 
 fn print_summary(summary: &build::BuildSummary) {
@@ -321,7 +330,7 @@ fn main() -> Result<()> {
                 println!("HTML report written to: {}", report_path.display());
             }
         }
-        Cmd::GenerateReport => {
+        Cmd::Util { cmd: UtilCmd::GenerateReport } => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
             let logdir = config.logdir();
 
@@ -339,7 +348,7 @@ fn main() -> Result<()> {
         Cmd::Init { dir: ref arg } => {
             Init::create(arg)?;
         }
-        Cmd::PrintDepGraph { output } => {
+        Cmd::Util { cmd: UtilCmd::PrintDepGraph { output } } => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
             let logs_dir = config.logdir().join("bob");
             let db_path = logs_dir.join("bob.db");
@@ -375,7 +384,7 @@ fn main() -> Result<()> {
                 print!("{}", out);
             }
         }
-        Cmd::PrintPresolve { output } => {
+        Cmd::Util { cmd: UtilCmd::PrintPresolve { output } } => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
             let logs_dir = config.logdir().join("bob");
             let db_path = logs_dir.join("bob.db");
@@ -410,7 +419,7 @@ fn main() -> Result<()> {
                 print!("{}", out);
             }
         }
-        Cmd::ImportPscan { file } => {
+        Cmd::Util { cmd: UtilCmd::ImportPscan { file } } => {
             use indexmap::IndexMap;
             use pkgsrc::ScanIndex;
             use std::fs::File;
@@ -466,7 +475,7 @@ fn main() -> Result<()> {
                 by_pkgpath.len()
             );
         }
-        Cmd::PrintPscan { output } => {
+        Cmd::Util { cmd: UtilCmd::PrintPscan { output } } => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
             let logs_dir = config.logdir().join("bob");
             let db_path = logs_dir.join("bob.db");
@@ -475,7 +484,7 @@ fn main() -> Result<()> {
             let cached = db.get_all_scan()?;
             if cached.is_empty() {
                 bail!(
-                    "No cached scan data found. Run 'bob scan' or 'bob import-pscan' first."
+                    "No cached scan data found. Run 'bob scan' or 'bob util import-pscan' first."
                 );
             }
 
@@ -501,7 +510,7 @@ fn main() -> Result<()> {
                 print!("{}", out);
             }
         }
-        Cmd::Sandbox { cmd: SandboxCmd::Create } => {
+        Cmd::Util { cmd: UtilCmd::Sandbox { cmd: SandboxCmd::Create } } => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
             let sandbox = Sandbox::new(&config);
             if !sandbox.enabled() {
@@ -512,7 +521,7 @@ fn main() -> Result<()> {
             }
             sandbox.create_all(config.build_threads())?;
         }
-        Cmd::Sandbox { cmd: SandboxCmd::Destroy } => {
+        Cmd::Util { cmd: UtilCmd::Sandbox { cmd: SandboxCmd::Destroy } } => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
             let sandbox = Sandbox::new(&config);
             if !sandbox.enabled() {
@@ -523,7 +532,7 @@ fn main() -> Result<()> {
             }
             sandbox.destroy_all(config.build_threads())?;
         }
-        Cmd::Sandbox { cmd: SandboxCmd::List } => {
+        Cmd::Util { cmd: UtilCmd::Sandbox { cmd: SandboxCmd::List } } => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
             let sandbox = Sandbox::new(&config);
             if !sandbox.enabled() {
