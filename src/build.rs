@@ -54,7 +54,7 @@
 //! // Add packages...
 //! let ctx = RunContext::new(Arc::new(AtomicBool::new(false)));
 //! scan.start(&ctx)?;
-//! let result = scan.resolve(None)?;
+//! let result = scan.resolve()?;
 //!
 //! let mut build = Build::new(&config, result.buildable);
 //! let summary = build.start(&ctx)?;

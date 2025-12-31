@@ -50,19 +50,19 @@ pub struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
+    /// Create a new configuration area
+    Init { dir: PathBuf },
+    /// Scan packages as defined by the configuration file
+    Scan,
     /// Build all packages as defined by the configuration file
     Build,
     /// Generate HTML report from existing logdir data
     GenerateReport,
-    /// Create a new configuration area
-    Init { dir: PathBuf },
     /// Create and destroy build sandboxes
     Sandbox {
         #[command(subcommand)]
         cmd: SandboxCmd,
     },
-    /// Scan packages as defined by the configuration file
-    Scan,
 }
 
 #[derive(Debug, Subcommand)]
@@ -217,8 +217,6 @@ fn main() -> Result<()> {
                 std::process::exit(EXIT_INTERRUPTED);
             }
 
-            scan.write_log(&logs_dir.join("scan.log"))?;
-
             // Handle scan errors
             let scan_errors = scan.scan_errors();
             if !scan_errors.is_empty() {
@@ -237,7 +235,7 @@ fn main() -> Result<()> {
             }
 
             println!("Resolving dependencies...");
-            let scan_result = scan.resolve(Some(&logs_dir))?;
+            let scan_result = scan.resolve()?;
 
             tracing::info!(
                 buildable = scan_result.buildable.len(),
@@ -414,8 +412,6 @@ fn main() -> Result<()> {
                 std::process::exit(EXIT_INTERRUPTED);
             }
 
-            scan.write_log(&logs_dir.join("scan.log"))?;
-
             // Handle scan errors
             let scan_errors = scan.scan_errors();
             if !scan_errors.is_empty() {
@@ -439,7 +435,7 @@ fn main() -> Result<()> {
             }
 
             println!("Resolving dependencies...");
-            let result = scan.resolve(Some(&logs_dir))?;
+            let result = scan.resolve()?;
             println!("Resolved {} buildable packages", result.buildable.len(),);
         }
     };
