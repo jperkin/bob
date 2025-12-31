@@ -18,6 +18,7 @@ use anyhow::{Result, bail};
 use bob::Init;
 use bob::build::{self, Build};
 use bob::config::Config;
+use bob::db::Database;
 use bob::logging;
 use bob::report;
 use bob::sandbox::Sandbox;
@@ -158,6 +159,9 @@ fn main() -> Result<()> {
                 bail!("{} configuration error(s) found", errors.len());
             }
 
+            let db_path = logs_dir.join("bob.db");
+            let db = Database::open(&db_path)?;
+
             // Set up signal handler for graceful shutdown (SIGINT and SIGTERM)
             let shutdown_flag = Arc::new(AtomicBool::new(false));
             let shutdown_for_handler = Arc::clone(&shutdown_flag);
@@ -187,12 +191,32 @@ fn main() -> Result<()> {
                     scan.add(p);
                 }
             }
-            if scan.start(&ctx)? {
+
+            // Load cached scans
+            let cached = db.get_all_scan()?;
+            if !cached.is_empty() {
+                let loaded = scan.load_cached(cached);
+                if loaded > 0 {
+                    println!("Loaded {} cached package paths", loaded);
+                }
+            }
+
+            let interrupted = scan.start(&ctx)?;
+
+            // Store scan results (including partial progress on interrupt)
+            for (pkgpath, indexes) in scan.completed() {
+                if !indexes.is_empty() {
+                    db.store_scan_pkgpath(&pkgpath.to_string(), indexes)?;
+                }
+            }
+
+            if interrupted {
                 if let Some(ref s) = ctx.stats {
                     s.flush();
                 }
                 std::process::exit(EXIT_INTERRUPTED);
             }
+
             scan.write_log(&logs_dir.join("scan.log"))?;
 
             // Handle scan errors
@@ -336,6 +360,9 @@ fn main() -> Result<()> {
                 bail!("{} configuration error(s) found", errors.len());
             }
 
+            let db_path = logs_dir.join("bob.db");
+            let db = Database::open(&db_path)?;
+
             // Set up signal handler for graceful shutdown
             let shutdown_flag = Arc::new(AtomicBool::new(false));
             let shutdown_for_handler = Arc::clone(&shutdown_flag);
@@ -361,12 +388,32 @@ fn main() -> Result<()> {
                     scan.add(p);
                 }
             }
-            if scan.start(&ctx)? {
+
+            // Load cached scans
+            let cached = db.get_all_scan()?;
+            if !cached.is_empty() {
+                let loaded = scan.load_cached(cached);
+                if loaded > 0 {
+                    println!("Loaded {} cached package paths", loaded);
+                }
+            }
+
+            let interrupted = scan.start(&ctx)?;
+
+            // Store scan results (including partial progress on interrupt)
+            for (pkgpath, indexes) in scan.completed() {
+                if !indexes.is_empty() {
+                    db.store_scan_pkgpath(&pkgpath.to_string(), indexes)?;
+                }
+            }
+
+            if interrupted {
                 if let Some(ref s) = ctx.stats {
                     s.flush();
                 }
                 std::process::exit(EXIT_INTERRUPTED);
             }
+
             scan.write_log(&logs_dir.join("scan.log"))?;
 
             // Handle scan errors

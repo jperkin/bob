@@ -63,6 +63,7 @@
 use crate::tui::MultiProgress;
 use crate::{Config, RunContext, Sandbox};
 use anyhow::{Context, Result, bail};
+use indexmap::IndexMap;
 use petgraph::graphmap::DiGraphMap;
 use pkgsrc::{Depend, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
@@ -114,7 +115,7 @@ pub struct ScanFailure {
 /// A resolved package index entry with dependency information.
 ///
 /// This extends [`ScanIndex`] with resolved dependencies (`depends`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedIndex {
     /// The underlying scan index data.
     pub index: ScanIndex,
@@ -273,9 +274,12 @@ pub struct Scan {
     config: Config,
     sandbox: Sandbox,
     incoming: HashSet<PkgPath>,
-    done: HashMap<PkgPath, Vec<ScanIndex>>,
+    done: IndexMap<PkgPath, Vec<ScanIndex>>,
+    /// Full cache from database for on-demand loading of dependencies.
+    cache: IndexMap<PkgPath, Vec<ScanIndex>>,
     resolved: HashMap<PkgName, ResolvedIndex>,
-    /// Full tree scan - skip recursive dependency discovery.
+    /// Full tree scan - discover all packages, skip recursive dependency discovery.
+    /// Defaults to true; set to false when packages are explicitly added.
     full_tree: bool,
     /// Packages that failed to scan (pkgpath, error message).
     scan_failures: Vec<(PkgPath, String)>,
@@ -289,18 +293,122 @@ impl Scan {
             scan_threads = config.scan_threads(),
             "Created new Scan instance"
         );
-        Scan { config: config.clone(), sandbox, ..Default::default() }
+        Scan {
+            config: config.clone(),
+            sandbox,
+            full_tree: true,
+            ..Default::default()
+        }
     }
 
     pub fn add(&mut self, pkgpath: &PkgPath) {
         info!(pkgpath = %pkgpath.as_path().display(), "Adding package to scan queue");
+        self.full_tree = false;
         self.incoming.insert(pkgpath.clone());
     }
 
-    /// Perform a full scan if pkgsrc.pkgpaths is not defined.
+    /// Load previously cached scan results.
+    ///
+    /// For limited scans, only loads cached packages reachable from the
+    /// configured pkgpaths initially, but keeps the full cache available
+    /// for on-demand loading when new dependencies are discovered.
+    ///
+    /// Returns the number of cached packages initially loaded.
+    pub fn load_cached(
+        &mut self,
+        cached: IndexMap<PkgPath, Vec<ScanIndex>>,
+    ) -> usize {
+        info!(cached_count = cached.len(), "Loading cached scan results");
+
+        // Keep full cache for on-demand loading during scan
+        self.cache = cached.clone();
+
+        if self.full_tree {
+            // For full tree scans, load everything
+            self.done = cached;
+        } else {
+            // For limited scans, only load cached data reachable from incoming
+            let mut relevant: HashSet<PkgPath> = self.incoming.clone();
+            let mut to_process: Vec<PkgPath> =
+                self.incoming.iter().cloned().collect();
+
+            // Walk dependency tree to find all relevant pkgpaths
+            while let Some(pkgpath) = to_process.pop() {
+                if let Some(indexes) = cached.get(&pkgpath) {
+                    for pkg in indexes {
+                        if let Some(ref all_deps) = pkg.all_depends {
+                            for dep in all_deps {
+                                if relevant.insert(dep.pkgpath().clone()) {
+                                    to_process.push(dep.pkgpath().clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Only load relevant cached data
+            for (pkgpath, indexes) in cached {
+                if relevant.contains(&pkgpath) {
+                    self.done.insert(pkgpath, indexes);
+                }
+            }
+        }
+
+        // Rediscover dependencies that aren't cached
+        for indexes in self.done.values() {
+            for pkg in indexes {
+                if let Some(ref all_deps) = pkg.all_depends {
+                    for dep in all_deps {
+                        if !self.done.contains_key(dep.pkgpath()) {
+                            self.incoming.insert(dep.pkgpath().clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        self.incoming.retain(|p| !self.done.contains_key(p));
+        self.done.len()
+    }
+
+    /// Access completed scan results.
+    pub fn completed(&self) -> &IndexMap<PkgPath, Vec<ScanIndex>> {
+        &self.done
+    }
+
+    /// Recursively load a pkgpath and all its cached dependencies.
+    /// Returns the count of packages loaded.
+    fn load_cached_recursive(&mut self, pkgpath: PkgPath) -> usize {
+        let mut count = 0;
+        let mut to_load = vec![pkgpath];
+
+        while let Some(path) = to_load.pop() {
+            if self.done.contains_key(&path) {
+                continue;
+            }
+            if let Some(indexes) = self.cache.get(&path).cloned() {
+                // Discover dependencies before inserting
+                for pkg in &indexes {
+                    if let Some(ref all_deps) = pkg.all_depends {
+                        for dep in all_deps {
+                            if !self.done.contains_key(dep.pkgpath()) {
+                                to_load.push(dep.pkgpath().clone());
+                            }
+                        }
+                    }
+                }
+                self.done.insert(path, indexes);
+                count += 1;
+            }
+        }
+
+        count
+    }
+
+    /// Discover all packages in pkgsrc tree.
     fn discover_packages(&mut self) -> anyhow::Result<()> {
         println!("Discovering packages...");
-        self.full_tree = true;
         let pkgsrc = self.config.pkgsrc().display();
         let make = self.config.make().display();
 
@@ -419,23 +527,45 @@ impl Scan {
             }
         }
 
-        // Discover all packages if none were specified
-        if self.incoming.is_empty() {
+        // For full tree scans, discover all packages
+        if self.full_tree && self.incoming.is_empty() {
             self.discover_packages()?;
+            self.incoming.retain(|p| !self.done.contains_key(p));
+        }
+
+        // Nothing to scan - all packages are cached
+        if self.incoming.is_empty() {
+            if !self.done.is_empty() {
+                println!(
+                    "All {} package paths already scanned",
+                    self.done.len()
+                );
+            }
+            return Ok(false);
         }
 
         println!("Scanning packages...");
 
         // Set up multi-line progress display using ratatui inline viewport
+        // Include cached packages in total so progress shows full picture
+        let cached_count = self.done.len();
+        let total_count = cached_count + self.incoming.len();
         let progress = Arc::new(Mutex::new(
             MultiProgress::new(
                 "Scanning",
                 "Scanned",
-                self.incoming.len(),
+                total_count,
                 self.config.scan_threads(),
             )
             .expect("Failed to initialize progress display"),
         ));
+
+        // Mark cached packages
+        if cached_count > 0 {
+            if let Ok(mut p) = progress.lock() {
+                p.state_mut().cached = cached_count;
+            }
+        }
 
         // Flag to stop the refresh thread
         let stop_refresh = Arc::new(AtomicBool::new(false));
@@ -543,6 +673,7 @@ impl Scan {
              * done nor incoming).
              */
             let mut new_incoming: HashSet<PkgPath> = HashSet::new();
+            let mut loaded_from_cache = 0usize;
             for (pkgpath, scanpkgs) in parpaths.drain(..) {
                 let scanpkgs = match scanpkgs {
                     Ok(pkgs) => pkgs,
@@ -554,25 +685,35 @@ impl Scan {
                     }
                 };
                 self.done.insert(pkgpath.clone(), scanpkgs.clone());
-                // For limited scans, recursively discover dependencies.
-                // For full tree scans, we already have all packages.
-                if !self.full_tree {
-                    for pkg in scanpkgs {
-                        if let Some(ref all_deps) = pkg.all_depends {
-                            for dep in all_deps {
-                                if !self.done.contains_key(dep.pkgpath())
-                                    && !self.incoming.contains(dep.pkgpath())
-                                    && new_incoming
-                                        .insert(dep.pkgpath().clone())
-                                {
-                                    // Update total count for new dependencies
-                                    if let Ok(mut p) = progress.lock() {
-                                        p.state_mut().total += 1;
-                                    }
+                // Discover dependencies not yet seen
+                for pkg in scanpkgs {
+                    if let Some(ref all_deps) = pkg.all_depends {
+                        for dep in all_deps {
+                            let dep_path = dep.pkgpath();
+                            if self.done.contains_key(dep_path)
+                                || self.incoming.contains(dep_path)
+                                || new_incoming.contains(dep_path)
+                            {
+                                continue;
+                            }
+                            // Check cache first - load on-demand if available
+                            if self.cache.contains_key(dep_path) {
+                                loaded_from_cache += self
+                                    .load_cached_recursive(dep_path.clone());
+                            } else {
+                                new_incoming.insert(dep_path.clone());
+                                if let Ok(mut p) = progress.lock() {
+                                    p.state_mut().total += 1;
                                 }
                             }
                         }
                     }
+                }
+            }
+            if loaded_from_cache > 0 {
+                if let Ok(mut p) = progress.lock() {
+                    p.state_mut().total += loaded_from_cache;
+                    p.state_mut().cached += loaded_from_cache;
                 }
             }
 
