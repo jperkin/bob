@@ -75,6 +75,11 @@ enum Cmd {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Import a pbulk pscan file into the database for resolver comparison
+    ImportPscan {
+        /// Path to the pscan file
+        file: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -425,6 +430,62 @@ fn main() -> Result<()> {
             } else {
                 print!("{}", out);
             }
+        }
+        Cmd::ImportPscan { file } => {
+            use pkgsrc::ScanIndex;
+            use std::collections::HashMap;
+            use std::fs::File;
+            use std::io::BufReader;
+
+            let config = Config::load(args.config.as_deref(), args.verbose)?;
+            let logs_dir = config.logdir().join("bob");
+            let db_path = logs_dir.join("bob.db");
+            let db = Database::open(&db_path)?;
+
+            println!("Importing pscan file: {}", file.display());
+
+            let f = File::open(&file)?;
+            let reader = BufReader::new(f);
+
+            // Parse all ScanIndex entries and group by pkgpath
+            let mut by_pkgpath: HashMap<String, Vec<ScanIndex>> =
+                HashMap::new();
+            let mut count = 0;
+            let mut errors = 0;
+
+            for result in ScanIndex::from_reader(reader) {
+                match result {
+                    Ok(index) => {
+                        let pkgpath = index
+                            .pkg_location
+                            .as_ref()
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        by_pkgpath.entry(pkgpath).or_default().push(index);
+                        count += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("Parse error: {}", e);
+                        errors += 1;
+                    }
+                }
+            }
+
+            if errors > 0 {
+                eprintln!("Warning: {} parse errors", errors);
+            }
+
+            // Clear existing data and import
+            db.clear_scan()?;
+            for (pkgpath, indexes) in &by_pkgpath {
+                db.store_scan_pkgpath(pkgpath, indexes)?;
+            }
+
+            println!(
+                "Imported {} packages from {} package paths",
+                count,
+                by_pkgpath.len()
+            );
         }
         Cmd::Sandbox { cmd: SandboxCmd::Create } => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
