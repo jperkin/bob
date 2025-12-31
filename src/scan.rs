@@ -922,7 +922,9 @@ impl Scan {
                  * Check for cached DEPENDS match first.  If found, use it.
                  */
                 if let Some(pkgname) = match_cache.get(depend) {
-                    pkg.depends.push(pkgname.clone());
+                    if !pkg.depends.contains(pkgname) {
+                        pkg.depends.push(pkgname.clone());
+                    }
                     continue;
                 }
                 /*
@@ -955,7 +957,10 @@ impl Scan {
                  * Otherwise check if the dependency matches a skipped package.
                  */
                 if let Some(pkgname) = best {
-                    pkg.depends.push(pkgname.clone());
+                    // Avoid duplicate dependencies
+                    if !pkg.depends.contains(pkgname) {
+                        pkg.depends.push(pkgname.clone());
+                    }
                     match_cache.insert(depend.clone(), pkgname.clone());
                 } else {
                     // Check if the dependency matches a skipped package
