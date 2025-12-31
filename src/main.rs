@@ -393,11 +393,7 @@ fn main() -> Result<()> {
 
             println!("Resolving dependencies...");
             let result = scan.resolve(Some(&logs_dir))?;
-            println!(
-                "Resolved {} buildable packages, {} skipped",
-                result.buildable.len(),
-                result.skipped.len()
-            );
+            println!("Resolved {} buildable packages", result.buildable.len(),);
         }
     };
 

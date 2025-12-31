@@ -361,7 +361,7 @@ impl Scan {
         }
 
         info!(discovered = self.incoming.len(), "Package discovery complete");
-        println!("Discovered {} packages", self.incoming.len());
+        println!("Discovered {} package paths", self.incoming.len());
 
         Ok(())
     }
@@ -433,7 +433,6 @@ impl Scan {
                 "Scanned",
                 self.incoming.len(),
                 self.config.scan_threads(),
-                false,
             )
             .expect("Failed to initialize progress display"),
         ));
@@ -829,13 +828,6 @@ impl Scan {
             skipped_count = skipped.len(),
             "Initial resolution complete"
         );
-
-        if !skipped.is_empty() {
-            println!(
-                "Skipping {} packages with PKG_SKIP_REASON or PKG_FAIL_REASON",
-                skipped.len()
-            );
-        }
 
         /*
          * Build a set of skipped package names for checking if unresolved

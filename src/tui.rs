@@ -133,9 +133,9 @@ pub struct ProgressState {
     pub finished_title: String,
     pub total: usize,
     pub completed: usize,
+    pub cached: usize,
     pub failed: usize,
     pub skipped: usize,
-    pub show_skipped: bool,
     pub workers: Vec<WorkerState>,
     pub started: Instant,
     /// Current timer width tier (6, 10, or 13)
@@ -150,7 +150,6 @@ impl ProgressState {
         finished_title: &str,
         total: usize,
         num_workers: usize,
-        show_skipped: bool,
     ) -> Self {
         let workers = (0..num_workers).map(|_| WorkerState::new()).collect();
         Self {
@@ -158,9 +157,9 @@ impl ProgressState {
             finished_title: finished_title.to_string(),
             total,
             completed: 0,
+            cached: 0,
             failed: 0,
             skipped: 0,
-            show_skipped,
             workers,
             started: Instant::now(),
             timer_width: 6,
@@ -242,7 +241,7 @@ impl ProgressState {
         if self.total == 0 {
             0.0
         } else {
-            (self.completed + self.failed + self.skipped) as f64
+            (self.completed + self.cached + self.failed + self.skipped) as f64
                 / self.total as f64
         }
     }
@@ -335,7 +334,6 @@ impl MultiProgress {
         finished_title: &str,
         total: usize,
         num_workers: usize,
-        show_skipped: bool,
     ) -> io::Result<Self> {
         // Calculate height: workers + progress bar
         let height = (num_workers + 1) as u16;
@@ -358,7 +356,6 @@ impl MultiProgress {
                 finished_title,
                 total,
                 num_workers,
-                show_skipped,
             ),
             view_mode: ViewMode::Inline,
             output_buffers,
@@ -462,7 +459,7 @@ impl MultiProgress {
             let elapsed_str = format_duration_short(state.elapsed());
             let counts = format!(
                 "{}/{}",
-                state.completed + state.failed + state.skipped,
+                state.completed + state.cached + state.failed + state.skipped,
                 state.total
             );
 
@@ -690,26 +687,20 @@ impl MultiProgress {
 
         // Print final summary to stdout (outside ratatui)
         let elapsed = format_duration(self.state.elapsed());
-        if self.state.show_skipped {
-            println!(
-                "{} {} packages in {} ({} succeeded, {} failed, {} skipped)",
-                self.state.finished_title,
-                self.state.completed + self.state.failed + self.state.skipped,
-                elapsed,
-                self.state.completed,
-                self.state.failed,
-                self.state.skipped
-            );
-        } else {
-            println!(
-                "{} {} packages in {} ({} succeeded, {} failed)",
-                self.state.finished_title,
-                self.state.completed + self.state.failed,
-                elapsed,
-                self.state.completed,
-                self.state.failed
-            );
-        }
+        let total = self.state.completed
+            + self.state.cached
+            + self.state.failed
+            + self.state.skipped;
+        println!(
+            "{} {} in {} ({} succeeded, {} cached, {} failed, {} skipped)",
+            self.state.finished_title,
+            total,
+            elapsed,
+            self.state.completed,
+            self.state.cached,
+            self.state.failed,
+            self.state.skipped
+        );
 
         Ok(())
     }
