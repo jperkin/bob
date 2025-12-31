@@ -63,6 +63,18 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SandboxCmd,
     },
+    /// Output the resolved dependency graph from cached scan data
+    PrintDepGraph {
+        /// Output file (defaults to stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Output pbulk-compatible presolve data from cached scan data
+    PrintPresolve {
+        /// Output file (defaults to stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -315,6 +327,104 @@ fn main() -> Result<()> {
         }
         Cmd::Init { dir: ref arg } => {
             Init::create(arg)?;
+        }
+        Cmd::PrintDepGraph { output } => {
+            let config = Config::load(args.config.as_deref(), args.verbose)?;
+            let logs_dir = config.logdir().join("bob");
+            let db_path = logs_dir.join("bob.db");
+            let db = Database::open(&db_path)?;
+
+            let cached = db.get_all_scan()?;
+            if cached.is_empty() {
+                bail!("No cached scan data found. Run 'bob scan' first.");
+            }
+
+            let mut scan = Scan::new(&config);
+            scan.load_cached(cached);
+
+            let result = scan.resolve()?;
+
+            // Build DAG output
+            let mut edges: std::collections::BTreeSet<String> =
+                std::collections::BTreeSet::new();
+            for (pkgname, idx) in &result.buildable {
+                for dep in &idx.depends {
+                    edges.insert(format!("{} -> {}", dep, pkgname));
+                }
+            }
+            let out: String =
+                edges.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n")
+                    + "\n";
+
+            // Write to file or stdout
+            if let Some(path) = output {
+                std::fs::write(&path, &out)?;
+                println!("Wrote {} edges to {}", edges.len(), path.display());
+            } else {
+                print!("{}", out);
+            }
+        }
+        Cmd::PrintPresolve { output } => {
+            let config = Config::load(args.config.as_deref(), args.verbose)?;
+            let logs_dir = config.logdir().join("bob");
+            let db_path = logs_dir.join("bob.db");
+            let db = Database::open(&db_path)?;
+
+            let cached = db.get_all_scan()?;
+            if cached.is_empty() {
+                bail!("No cached scan data found. Run 'bob scan' first.");
+            }
+
+            let mut scan = Scan::new(&config);
+            scan.load_cached(cached);
+
+            let result = scan.resolve()?;
+
+            // Build presolve output
+            let mut out = String::new();
+
+            // Sort by package name for deterministic output
+            let mut pkgnames: Vec<_> = result.buildable.keys().collect();
+            pkgnames.sort_by(|a, b| a.pkgname().cmp(b.pkgname()));
+
+            for pkgname in pkgnames {
+                let idx = &result.buildable[pkgname];
+                out.push_str(&idx.to_string());
+                out.push('\n');
+            }
+
+            // Output skipped packages
+            for pkg in &result.skipped {
+                out.push_str(&format!("PKGNAME={}\n", pkg.pkgname));
+                if let Some(ref loc) = pkg.pkgpath {
+                    out.push_str(&format!(
+                        "PKG_LOCATION={}\n",
+                        loc.as_path().display()
+                    ));
+                }
+                match &pkg.reason {
+                    SkipReason::PkgSkipReason(r) => {
+                        out.push_str(&format!("PKG_SKIP_REASON={}\n", r));
+                    }
+                    SkipReason::PkgFailReason(r) => {
+                        out.push_str(&format!("PKG_FAIL_REASON={}\n", r));
+                    }
+                }
+                out.push('\n');
+            }
+
+            // Write to file or stdout
+            if let Some(path) = output {
+                std::fs::write(&path, &out)?;
+                println!(
+                    "Wrote {} buildable, {} skipped to {}",
+                    result.buildable.len(),
+                    result.skipped.len(),
+                    path.display()
+                );
+            } else {
+                print!("{}", out);
+            }
         }
         Cmd::Sandbox { cmd: SandboxCmd::Create } => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;

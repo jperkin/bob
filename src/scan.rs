@@ -172,70 +172,6 @@ pub struct ScanResult {
     pub scan_failed: Vec<ScanFailure>,
 }
 
-impl ScanResult {
-    /// Write resolved packages to a log file in pbulk presolve format.
-    pub fn write_resolve_log(
-        &self,
-        path: &std::path::Path,
-    ) -> anyhow::Result<()> {
-        let mut out = String::new();
-
-        // Sort by package name for deterministic output
-        let mut pkgnames: Vec<_> = self.buildable.keys().collect();
-        pkgnames.sort_by(|a, b| a.pkgname().cmp(b.pkgname()));
-
-        for pkgname in pkgnames {
-            let idx = &self.buildable[pkgname];
-            out.push_str(&idx.to_string());
-            out.push('\n');
-        }
-
-        // Output skipped packages
-        for pkg in &self.skipped {
-            out.push_str(&format!("PKGNAME={}\n", pkg.pkgname));
-            if let Some(ref loc) = pkg.pkgpath {
-                out.push_str(&format!(
-                    "PKG_LOCATION={}\n",
-                    loc.as_path().display()
-                ));
-            }
-            match &pkg.reason {
-                SkipReason::PkgSkipReason(r) => {
-                    out.push_str(&format!("PKG_SKIP_REASON={}\n", r));
-                }
-                SkipReason::PkgFailReason(r) => {
-                    out.push_str(&format!("PKG_FAIL_REASON={}\n", r));
-                }
-            }
-            out.push('\n');
-        }
-
-        std::fs::write(path, &out)?;
-        Ok(())
-    }
-
-    /// Write the resolved DAG as a sorted edge list for comparison.
-    pub fn write_resolve_dag(
-        &self,
-        path: &std::path::Path,
-    ) -> anyhow::Result<()> {
-        let mut edges: Vec<String> = Vec::new();
-
-        for (pkgname, idx) in &self.buildable {
-            for dep in &idx.depends {
-                edges.push(format!("{} -> {}", dep, pkgname));
-            }
-        }
-
-        // Sort edges for deterministic output
-        edges.sort();
-
-        let out = edges.join("\n") + "\n";
-        std::fs::write(path, &out)?;
-        Ok(())
-    }
-}
-
 /// Package dependency scanner.
 ///
 /// Discovers all dependencies for a set of packages and resolves them into
@@ -858,17 +794,6 @@ impl Scan {
     /// Get all scanned packages (before resolution).
     pub fn scanned(&self) -> impl Iterator<Item = &ScanIndex> {
         self.done.values().flatten()
-    }
-
-    /// Write scan output to a file in FOO=bar format.
-    pub fn write_log(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        let mut out = String::new();
-        for idx in self.scanned() {
-            out.push_str(&idx.to_string());
-            out.push('\n');
-        }
-        std::fs::write(path, &out)?;
-        Ok(())
     }
 
     /**
