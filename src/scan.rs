@@ -1000,11 +1000,15 @@ impl Scan {
             let mut new_skips: HashMap<PkgName, String> = HashMap::new();
 
             for pkg in self.resolved.values() {
-                if skip_due_to_dep.contains_key(&pkg.pkgname) {
+                if skip_due_to_dep.contains_key(&pkg.pkgname)
+                    || skip_reasons.contains_key(&pkg.pkgname)
+                {
                     continue;
                 }
                 for dep in &pkg.depends {
-                    if skip_due_to_dep.contains_key(dep) {
+                    if skip_due_to_dep.contains_key(dep)
+                        || skip_reasons.contains_key(dep)
+                    {
                         // Our dependency is being skipped
                         new_skips.insert(
                             pkg.pkgname.clone(),
