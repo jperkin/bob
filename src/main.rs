@@ -80,6 +80,12 @@ enum Cmd {
         /// Path to the pscan file
         file: PathBuf,
     },
+    /// Output raw scan data from the database (without resolution)
+    PrintPscan {
+        /// Output file (defaults to stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -486,6 +492,41 @@ fn main() -> Result<()> {
                 count,
                 by_pkgpath.len()
             );
+        }
+        Cmd::PrintPscan { output } => {
+            let config = Config::load(args.config.as_deref(), args.verbose)?;
+            let logs_dir = config.logdir().join("bob");
+            let db_path = logs_dir.join("bob.db");
+            let db = Database::open(&db_path)?;
+
+            let cached = db.get_all_scan()?;
+            if cached.is_empty() {
+                bail!(
+                    "No cached scan data found. Run 'bob scan' or 'bob import-pscan' first."
+                );
+            }
+
+            // Collect all ScanIndex entries
+            let all_indexes: Vec<_> =
+                cached.values().flat_map(|v| v.iter()).collect();
+
+            // Build output
+            let mut out = String::new();
+            for idx in &all_indexes {
+                out.push_str(&idx.to_string());
+            }
+
+            // Write to file or stdout
+            if let Some(path) = output {
+                std::fs::write(&path, &out)?;
+                println!(
+                    "Wrote {} packages to {}",
+                    all_indexes.len(),
+                    path.display()
+                );
+            } else {
+                print!("{}", out);
+            }
         }
         Cmd::Sandbox { cmd: SandboxCmd::Create } => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
