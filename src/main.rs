@@ -29,6 +29,9 @@ use std::str;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Exit code when interrupted.  We do not know what exact signal this was.
+const EXIT_INTERRUPTED: i32 = 128 + libc::SIGINT;
+
 #[derive(Debug, Parser)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
@@ -188,7 +191,7 @@ fn main() -> Result<()> {
                 if let Some(ref s) = ctx.stats {
                     s.flush();
                 }
-                std::process::exit(130);
+                std::process::exit(EXIT_INTERRUPTED);
             }
             scan.write_log(&logs_dir.join("scan.log"))?;
 
@@ -236,7 +239,7 @@ fn main() -> Result<()> {
                 if sandbox.enabled() {
                     let _ = sandbox.destroy_all(config.build_threads());
                 }
-                std::process::exit(130);
+                std::process::exit(EXIT_INTERRUPTED);
             }
 
             // Add pre-skipped packages from scan to summary
@@ -362,7 +365,7 @@ fn main() -> Result<()> {
                 if let Some(ref s) = ctx.stats {
                     s.flush();
                 }
-                std::process::exit(130);
+                std::process::exit(EXIT_INTERRUPTED);
             }
             scan.write_log(&logs_dir.join("scan.log"))?;
 
