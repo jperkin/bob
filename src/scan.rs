@@ -944,35 +944,24 @@ impl Scan {
                     }
                 }
 
-                // Find best match among all candidates. Use best_match for
-                // version comparison. On version tie, prefer larger name
-                // (e.g., py314 over py311, mpg123-nas over mpg123).
+                // Find best match among all candidates using pbulk algorithm:
+                // higher version wins, larger name on tie.
                 let mut best: Option<&PkgName> = None;
                 for candidate in candidates {
-                    if let Some(current) = best {
-                        let winner = depend
-                            .pattern()
-                            .best_match(current.pkgname(), candidate.pkgname());
-                        // On version tie, prefer larger name
-                        best = if current.pkgversion() == candidate.pkgversion()
-                        {
-                            if current.pkgname() > candidate.pkgname() {
-                                Some(current)
-                            } else {
-                                Some(candidate)
-                            }
-                        } else {
-                            // Different versions - use best_match result
-                            match winner {
+                    best = match best {
+                        None => Some(candidate),
+                        Some(current) => {
+                            match depend.pattern().best_match_pbulk(
+                                current.pkgname(),
+                                candidate.pkgname(),
+                            ) {
                                 Ok(Some(m)) if m == candidate.pkgname() => {
                                     Some(candidate)
                                 }
                                 _ => Some(current),
                             }
-                        };
-                    } else {
-                        best = Some(candidate);
-                    }
+                        }
+                    };
                 }
                 // If found, save to cache and add to depends (if not already satisfied)
                 if let Some(pkgname) = best {
