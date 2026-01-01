@@ -73,8 +73,12 @@ enum Cmd {
     Init { dir: PathBuf },
     /// Scan packages as defined by the configuration file
     Scan,
-    /// Build all packages as defined by the configuration file
-    Build,
+    /// Build packages (uses config pkgpaths if none specified)
+    Build {
+        /// Package paths to build (overrides config pkgpaths)
+        #[arg(value_name = "PKGPATH")]
+        pkgpaths: Vec<String>,
+    },
     /// Clear all cached scan and build state from the database
     Clean,
     /// Utility commands for debugging and data import/export
@@ -197,7 +201,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     match args.cmd {
-        Cmd::Build => {
+        Cmd::Build { pkgpaths: cmdline_pkgs } => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
 
             // Initialize logging in logdir/bob/
@@ -242,9 +246,20 @@ fn main() -> Result<()> {
                 .with_stats(Arc::new(stats));
 
             let mut scan = Scan::new(&config);
-            if let Some(pkgs) = config.pkgpaths() {
-                for p in pkgs {
-                    scan.add(p);
+            if cmdline_pkgs.is_empty() {
+                // No command-line pkgpaths, use config
+                if let Some(pkgs) = config.pkgpaths() {
+                    for p in pkgs {
+                        scan.add(p);
+                    }
+                }
+            } else {
+                // Command-line pkgpaths override config
+                for p in &cmdline_pkgs {
+                    match pkgsrc::PkgPath::new(p) {
+                        Ok(pkgpath) => scan.add(&pkgpath),
+                        Err(e) => bail!("Invalid PKGPATH '{}': {}", p, e),
+                    }
                 }
             }
 
