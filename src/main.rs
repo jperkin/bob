@@ -75,6 +75,8 @@ enum Cmd {
     Scan,
     /// Build all packages as defined by the configuration file
     Build,
+    /// Clear all cached scan and build state from the database
+    Clean,
     /// Utility commands for debugging and data import/export
     Util {
         #[command(subcommand)]
@@ -381,6 +383,23 @@ fn main() -> Result<()> {
         }
         Cmd::Init { dir: ref arg } => {
             Init::create(arg)?;
+        }
+        Cmd::Clean => {
+            let config = Config::load(args.config.as_deref(), args.verbose)?;
+            let logs_dir = config.logdir().join("bob");
+            let db_path = logs_dir.join("bob.db");
+            let db = Database::open(&db_path)?;
+
+            let scan_count = db.count_scan()?;
+            let build_count = db.count_build()?;
+
+            db.clear_scan()?;
+            db.clear_build()?;
+
+            println!(
+                "Cleared {} cached scan entries and {} cached build entries",
+                scan_count, build_count
+            );
         }
         Cmd::Util { cmd: UtilCmd::PrintDepGraph { output } } => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
