@@ -17,14 +17,14 @@ utility for building pkgsrc packages.
 
   [![Live build log viewer](https://jperkin.github.io/bob/assets/panes.gif)](https://asciinema.org/a/763316)
 
-## Status
+## Features
 
-- [x] Basic app, config files, etc.
-- [x] Sandboxes implemented for illumos, macOS, NetBSD, and Linux.
-- [x] Threaded scan and build processes inside sandboxes.
-- [x] Scan resolution / DAG.
-- [x] Ratatui-based terminal interface showing current progress.
-- [x] Basic HTML reports.
+- [x] Powerful and fast, but easy to use.
+- [x] Native sandbox implementation for common operating systems.
+- [x] Threaded scan and build processes inside concurrent sandboxes.
+- [x] [Ratatui](https://ratatui.rs)-based user interface.
+- [x] Simple, flexible, powerful Lua-based configuration.
+- [x] Easily support multiple build configurations.
 
 Bob should work pretty much out-of-the-box on NetBSD, Linux, and illumos.
 
@@ -34,7 +34,7 @@ will be implemented in due course.
 
 ## Getting Started
 
-Install bob.
+Install bob, or upgrade an existing install to the latest release.
 
 ```
 $ cargo install pkgbob
@@ -44,6 +44,10 @@ Generate directory containing the configuration file and build scripts.  This
 is also where by default all data will be generated.  `/bob` here is used as
 an example, but this can be any location.  You may wish to put this directory
 under version control to track changes.
+
+You may wish to build multiple package sets (e.g. `netbsd-x86_64` and
+`netbsd-i386`) in which case you can simply create a configuration directory
+for each set.
 
 ```
 $ bob init /bob
@@ -67,22 +71,24 @@ When you are happy with the configuration:
 $ bob build
 ```
 
-Bob will proceed to:
-
-* Create a single sandbox under `sandboxes.basedir`.
-* Launch `options.scan_threads` number of scan processes inside the sandbox,
-  scanning the package directories defined in `pkgsrc.pkgpaths`, recursively
-  discovering dependencies until a full dependency tree has been calculated.
-* Resolve the scan (ensure that all scanned packages are discoverable).
-* Destroy the scan sandbox, and create `options.build_threads` number of build
-  sandboxes.
-* Launch a build process in sandbox, building packages bottom-up until all have
-  been processed.
-* Destroy the build sandboxes and generate a summary and HTML report.
+will proceed to build all of the packages you have requested.
 
 During the build phase you can press 'v' to toggle between the default inline
 progress bars and a full-screen paned layout that shows live build logs to
 track progress.
+
+Bob should handle interruptions gracefully, and automatically clean up
+sandboxes, etc.  If the build is interrupted, you can resume with `bob build,
+and bob should continue from where it left off.
+
+After a build has completed, and some time later you wish to update pkgsrc to
+build updated packages, you will first need to run:
+
+```
+$ bob clean
+```
+
+to clear the previous database state, before running a new `bob build`.
 
 ## Design Goals
 
