@@ -947,6 +947,7 @@ impl Scan {
                 // Find best match among all candidates using pbulk algorithm:
                 // higher version wins, larger name on tie.
                 let mut best: Option<&PkgName> = None;
+                let mut match_error: Option<pkgsrc::PatternError> = None;
                 for candidate in candidates {
                     best = match best {
                         None => Some(candidate),
@@ -958,10 +959,26 @@ impl Scan {
                                 Ok(Some(m)) if m == candidate.pkgname() => {
                                     Some(candidate)
                                 }
-                                _ => Some(current),
+                                Ok(_) => Some(current),
+                                Err(e) => {
+                                    match_error = Some(e);
+                                    break;
+                                }
                             }
                         }
                     };
+                }
+                if let Some(e) = match_error {
+                    errors.push((
+                        pkg.index.pkgname.clone(),
+                        format!(
+                            "Pattern error for {} in {}: {}",
+                            depend.pattern().pattern(),
+                            pkg.index.pkgname.pkgname(),
+                            e
+                        ),
+                    ));
+                    continue;
                 }
                 // If found, save to cache and add to depends (if not already satisfied)
                 if let Some(pkgname) = best {
@@ -975,7 +992,11 @@ impl Scan {
                     // No matching package exists
                     errors.push((
                         pkg.index.pkgname.clone(),
-                        depend.pattern().pattern().to_string(),
+                        format!(
+                            "No match found for {} in {}",
+                            depend.pattern().pattern(),
+                            pkg.index.pkgname.pkgname()
+                        ),
                     ));
                 }
             }
@@ -1028,13 +1049,7 @@ impl Scan {
         let errors: Vec<String> = errors
             .into_iter()
             .filter(|(pkgname, _)| !skip_reasons.contains_key(pkgname))
-            .map(|(pkgname, pattern)| {
-                format!(
-                    "No match found for {} in {}",
-                    pattern,
-                    pkgname.pkgname()
-                )
-            })
+            .map(|(_, message)| message)
             .collect();
 
         // Build all_ordered first to preserve original order, then separate
