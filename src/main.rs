@@ -130,11 +130,14 @@ fn print_summary(summary: &build::BuildSummary) {
     println!();
     println!("Build Summary");
     println!("=============");
-    println!("  Succeeded:   {}", summary.success_count());
-    println!("  Failed:      {}", summary.failed_count());
-    println!("  Skipped:     {}", summary.skipped_count());
+    println!("  Succeeded:          {}", summary.success_count());
+    println!("  Failed:             {}", summary.failed_count());
+    println!("  Up-to-date:         {}", summary.up_to_date_count());
+    println!("  Pre-failed:         {}", summary.prefailed_count());
+    println!("  Indirect failed:    {}", summary.indirect_failed_count());
+    println!("  Indirect prefailed: {}", summary.indirect_prefailed_count());
     if summary.scan_failed_count() > 0 {
-        println!("  Scan failed: {}", summary.scan_failed_count());
+        println!("  Scan failed:        {}", summary.scan_failed_count());
     }
     println!();
 }
@@ -299,7 +302,19 @@ fn main() -> Result<()> {
             }
 
             let mut build = Build::new(&config, scan_result.buildable.clone());
+
+            // Load cached build results
+            let cached_build = db.get_all_build()?;
+            if !cached_build.is_empty() {
+                build.load_cached(cached_build);
+            }
+
             let mut summary = build.start(&ctx)?;
+
+            // Store build results (including partial progress on interrupt)
+            for result in &summary.results {
+                db.store_build_pkgname(result.pkgname.pkgname(), result)?;
+            }
 
             // Flush stats before checking for interruption
             if let Some(ref s) = ctx.stats {
@@ -328,7 +343,7 @@ fn main() -> Result<()> {
                 summary.results.push(build::BuildResult {
                     pkgname: pkg.pkgname,
                     pkgpath: pkg.pkgpath,
-                    outcome: build::BuildOutcome::Skipped(reason),
+                    outcome: build::BuildOutcome::PreFailed(reason),
                     duration: std::time::Duration::ZERO,
                     log_dir: None,
                 });

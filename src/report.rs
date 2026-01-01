@@ -97,19 +97,11 @@ fn count_broken_packages(summary: &BuildSummary) -> HashMap<String, usize> {
         }
     }
 
-    // Count skipped packages that reference each failed package
+    // Count indirect failed packages that reference each failed package
     for result in &summary.results {
-        if let BuildOutcome::Skipped(reason) = &result.outcome {
-            // Parse "Dependency <pkgname> failed" pattern
-            if reason.starts_with("Dependency ") && reason.ends_with(" failed")
-            {
-                let dep_name = reason
-                    .strip_prefix("Dependency ")
-                    .and_then(|s| s.strip_suffix(" failed"))
-                    .unwrap_or("");
-                if let Some(count) = counts.get_mut(dep_name) {
-                    *count += 1;
-                }
+        if let BuildOutcome::IndirectFailed(dep_name) = &result.outcome {
+            if let Some(count) = counts.get_mut(dep_name.as_str()) {
+                *count += 1;
             }
         }
     }
@@ -136,7 +128,20 @@ pub fn write_html_report(summary: &BuildSummary, path: &Path) -> Result<()> {
 
     // Collect and sort results
     let mut succeeded: Vec<&BuildResult> = summary.succeeded();
-    let mut skipped: Vec<&BuildResult> = summary.skipped();
+    // Collect all "skipped" variants (everything except Success and Failed)
+    let mut skipped: Vec<&BuildResult> = summary
+        .results
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.outcome,
+                BuildOutcome::UpToDate
+                    | BuildOutcome::PreFailed(_)
+                    | BuildOutcome::IndirectFailed(_)
+                    | BuildOutcome::IndirectPreFailed(_)
+            )
+        })
+        .collect();
 
     // Collect failed packages with additional info
     let mut failed_info: Vec<FailedPackageInfo> = summary
@@ -401,10 +406,14 @@ fn write_summary_stats(
         "  <div class=\"stat failed\"><h2>Failed</h2><div class=\"value\">{}</div></div>",
         summary.failed_count()
     )?;
+    let skipped_count = summary.up_to_date_count()
+        + summary.prefailed_count()
+        + summary.indirect_failed_count()
+        + summary.indirect_prefailed_count();
     writeln!(
         file,
         "  <div class=\"stat skipped\"><h2>Skipped</h2><div class=\"value\">{}</div></div>",
-        summary.skipped_count()
+        skipped_count
     )?;
     if summary.scan_failed_count() > 0 {
         writeln!(
@@ -561,8 +570,15 @@ fn write_skipped_section(
 
         for result in skipped {
             let reason = match &result.outcome {
-                BuildOutcome::Skipped(r) => r.as_str(),
-                _ => "",
+                BuildOutcome::UpToDate => "up-to-date".to_string(),
+                BuildOutcome::PreFailed(r) => r.clone(),
+                BuildOutcome::IndirectFailed(dep) => {
+                    format!("Dependency {} failed", dep)
+                }
+                BuildOutcome::IndirectPreFailed(dep) => {
+                    format!("Dependency {} pre-failed", dep)
+                }
+                _ => String::new(),
             };
             let pkgpath = result
                 .pkgpath

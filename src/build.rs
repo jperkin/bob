@@ -90,8 +90,7 @@ fn format_scan_index(idx: &ResolvedIndex) -> String {
 ///
 /// Used in [`BuildResult`] to indicate whether the build succeeded, failed,
 /// or was skipped.
-#[derive(Clone, Debug)]
-#[allow(dead_code)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum BuildOutcome {
     /// Package built and packaged successfully.
     Success,
@@ -99,20 +98,28 @@ pub enum BuildOutcome {
     ///
     /// The string contains the failure reason (e.g., "Failed in build phase").
     Failed(String),
-    /// Package was not built.
+    /// Package did not need to be built - we already have a binary package
+    /// for this revision.
+    UpToDate,
+    /// Package is marked with PKG_SKIP_REASON or PKG_FAIL_REASON so cannot
+    /// be built.
     ///
-    /// The string contains the skip reason, which may be:
-    /// - "up-to-date" - Package already built
-    /// - "Dependency X failed" - A required dependency failed to build
-    /// - "PKG_SKIP_REASON: ..." - Package explicitly marked to skip
-    /// - "PKG_FAIL_REASON: ..." - Package expected to fail
-    Skipped(String),
+    /// The string contains the skip/fail reason.
+    PreFailed(String),
+    /// Package depends on a different package that has Failed.
+    ///
+    /// The string contains the name of the failed dependency.
+    IndirectFailed(String),
+    /// Package depends on a different package that has PreFailed.
+    ///
+    /// The string contains the name of the pre-failed dependency.
+    IndirectPreFailed(String),
 }
 
 /// Result of building a single package.
 ///
 /// Contains the outcome, timing, and log location for a package build.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BuildResult {
     /// Package name with version (e.g., `mutt-2.2.12`).
     pub pkgname: PkgName,
@@ -167,7 +174,7 @@ impl BuildSummary {
             .count()
     }
 
-    /// Count of failed packages.
+    /// Count of failed packages (direct build failures only).
     pub fn failed_count(&self) -> usize {
         self.results
             .iter()
@@ -175,11 +182,35 @@ impl BuildSummary {
             .count()
     }
 
-    /// Count of skipped packages.
-    pub fn skipped_count(&self) -> usize {
+    /// Count of up-to-date packages (already have binary package).
+    pub fn up_to_date_count(&self) -> usize {
         self.results
             .iter()
-            .filter(|r| matches!(r.outcome, BuildOutcome::Skipped(_)))
+            .filter(|r| matches!(r.outcome, BuildOutcome::UpToDate))
+            .count()
+    }
+
+    /// Count of pre-failed packages (PKG_SKIP_REASON/PKG_FAIL_REASON).
+    pub fn prefailed_count(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|r| matches!(r.outcome, BuildOutcome::PreFailed(_)))
+            .count()
+    }
+
+    /// Count of indirect failed packages (depend on Failed).
+    pub fn indirect_failed_count(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|r| matches!(r.outcome, BuildOutcome::IndirectFailed(_)))
+            .count()
+    }
+
+    /// Count of indirect pre-failed packages (depend on PreFailed).
+    pub fn indirect_prefailed_count(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|r| matches!(r.outcome, BuildOutcome::IndirectPreFailed(_)))
             .count()
     }
 
@@ -188,7 +219,7 @@ impl BuildSummary {
         self.scan_failed.len()
     }
 
-    /// Get all failed results.
+    /// Get all failed results (direct build failures only).
     pub fn failed(&self) -> Vec<&BuildResult> {
         self.results
             .iter()
@@ -204,29 +235,49 @@ impl BuildSummary {
             .collect()
     }
 
-    /// Get all skipped results.
-    pub fn skipped(&self) -> Vec<&BuildResult> {
+    /// Get all up-to-date results.
+    pub fn up_to_date(&self) -> Vec<&BuildResult> {
         self.results
             .iter()
-            .filter(|r| matches!(r.outcome, BuildOutcome::Skipped(_)))
+            .filter(|r| matches!(r.outcome, BuildOutcome::UpToDate))
+            .collect()
+    }
+
+    /// Get all pre-failed results.
+    pub fn prefailed(&self) -> Vec<&BuildResult> {
+        self.results
+            .iter()
+            .filter(|r| matches!(r.outcome, BuildOutcome::PreFailed(_)))
+            .collect()
+    }
+
+    /// Get all indirect failed results.
+    pub fn indirect_failed(&self) -> Vec<&BuildResult> {
+        self.results
+            .iter()
+            .filter(|r| matches!(r.outcome, BuildOutcome::IndirectFailed(_)))
+            .collect()
+    }
+
+    /// Get all indirect pre-failed results.
+    pub fn indirect_prefailed(&self) -> Vec<&BuildResult> {
+        self.results
+            .iter()
+            .filter(|r| matches!(r.outcome, BuildOutcome::IndirectPreFailed(_)))
             .collect()
     }
 }
 
 #[derive(Debug, Default)]
 pub struct Build {
-    /**
-     * Parsed [`Config`].
-     */
+    /// Parsed [`Config`].
     config: Config,
-    /**
-     * [`Sandbox`] configuration.
-     */
+    /// [`Sandbox`] configuration.
     sandbox: Sandbox,
-    /**
-     * List of packages to build, as input from Scan::resolve.
-     */
+    /// List of packages to build, as input from Scan::resolve.
     scanpkgs: IndexMap<PkgName, ResolvedIndex>,
+    /// Cached build results from previous run.
+    cached: IndexMap<PkgName, BuildResult>,
 }
 
 #[derive(Debug)]
@@ -821,6 +872,9 @@ struct BuildJobs {
     failed: HashSet<PkgName>,
     results: Vec<BuildResult>,
     logdir: PathBuf,
+    /// Number of packages loaded from cache.
+    #[allow(dead_code)]
+    cached_count: usize,
 }
 
 impl BuildJobs {
@@ -832,14 +886,10 @@ impl BuildJobs {
     }
 
     /**
-     * Mark a package as skipped (up-to-date) and remove it from pending dependencies.
+     * Mark a package as up-to-date and remove it from pending dependencies.
      */
-    fn mark_skipped(&mut self, pkgname: &PkgName) {
-        self.mark_done(
-            pkgname,
-            BuildOutcome::Skipped("up-to-date".to_string()),
-            Duration::ZERO,
-        );
+    fn mark_up_to_date(&mut self, pkgname: &PkgName) {
+        self.mark_done(pkgname, BuildOutcome::UpToDate, Duration::ZERO);
     }
 
     fn mark_done(
@@ -921,10 +971,7 @@ impl BuildJobs {
                 (BuildOutcome::Failed("Build failed".to_string()), duration)
             } else {
                 (
-                    BuildOutcome::Skipped(format!(
-                        "Dependency {} failed",
-                        pkgname.pkgname()
-                    )),
+                    BuildOutcome::IndirectFailed(pkgname.pkgname().to_string()),
                     Duration::ZERO,
                 )
             };
@@ -933,6 +980,53 @@ impl BuildJobs {
                 pkgpath: scanpkg.and_then(|s| s.pkg_location.clone()),
                 outcome,
                 duration: dur,
+                log_dir,
+            });
+        }
+    }
+
+    /**
+     * Recursively mark a package as pre-failed and its dependents as
+     * indirect-pre-failed.
+     */
+    #[allow(dead_code)]
+    fn mark_prefailed(&mut self, pkgname: &PkgName, reason: String) {
+        let mut broken: HashSet<PkgName> = HashSet::new();
+        let mut to_check: Vec<PkgName> = vec![];
+        to_check.push(pkgname.clone());
+
+        loop {
+            let Some(badpkg) = to_check.pop() else {
+                break;
+            };
+            if broken.contains(&badpkg) {
+                continue;
+            }
+            for (pkg, deps) in &self.incoming {
+                if deps.contains(&badpkg) {
+                    to_check.push(pkg.clone());
+                }
+            }
+            broken.insert(badpkg);
+        }
+
+        let is_original = |p: &PkgName| p == pkgname;
+        for pkg in broken {
+            self.incoming.remove(&pkg);
+            self.failed.insert(pkg.clone());
+
+            let scanpkg = self.scanpkgs.get(&pkg);
+            let log_dir = Some(self.logdir.join(pkg.pkgname()));
+            let outcome = if is_original(&pkg) {
+                BuildOutcome::PreFailed(reason.clone())
+            } else {
+                BuildOutcome::IndirectPreFailed(pkgname.pkgname().to_string())
+            };
+            self.results.push(BuildResult {
+                pkgname: pkg,
+                pkgpath: scanpkg.and_then(|s| s.pkg_location.clone()),
+                outcome,
+                duration: Duration::ZERO,
                 log_dir,
             });
         }
@@ -1011,7 +1105,38 @@ impl Build {
                 "Package in build queue"
             );
         }
-        Build { config: config.clone(), sandbox, scanpkgs }
+        Build {
+            config: config.clone(),
+            sandbox,
+            scanpkgs,
+            cached: IndexMap::new(),
+        }
+    }
+
+    /// Load cached build results.
+    ///
+    /// Returns the number of packages loaded from cache. Packages that have
+    /// not finished processing (Success, Failed, UpToDate, PreFailed, etc.)
+    /// are not loaded.
+    pub fn load_cached(
+        &mut self,
+        cached: IndexMap<PkgName, BuildResult>,
+    ) -> usize {
+        let mut count = 0;
+        for (pkgname, result) in cached {
+            // Only cache packages that are in our build queue
+            if self.scanpkgs.contains_key(&pkgname) {
+                self.cached.insert(pkgname, result);
+                count += 1;
+            }
+        }
+        info!(cached_count = count, "Loaded cached build results");
+        count
+    }
+
+    /// Access completed build results.
+    pub fn cached(&self) -> &IndexMap<PkgName, BuildResult> {
+        &self.cached
     }
 
     pub fn start(&mut self, ctx: &RunContext) -> anyhow::Result<BuildSummary> {
@@ -1040,16 +1165,52 @@ impl Build {
             incoming.insert(pkgname.clone(), deps);
         }
 
+        /*
+         * Process cached build results.
+         */
+        let mut done: HashSet<PkgName> = HashSet::new();
+        let mut failed: HashSet<PkgName> = HashSet::new();
+        let mut results: Vec<BuildResult> = Vec::new();
+        let mut cached_count = 0usize;
+
+        for (pkgname, result) in &self.cached {
+            match result.outcome {
+                BuildOutcome::Success | BuildOutcome::UpToDate => {
+                    // Completed package - remove from incoming, add to done
+                    incoming.remove(pkgname);
+                    done.insert(pkgname.clone());
+                    // Remove from deps of other packages
+                    for deps in incoming.values_mut() {
+                        deps.remove(pkgname);
+                    }
+                    results.push(result.clone());
+                    cached_count += 1;
+                }
+                BuildOutcome::Failed(_)
+                | BuildOutcome::PreFailed(_)
+                | BuildOutcome::IndirectFailed(_)
+                | BuildOutcome::IndirectPreFailed(_) => {
+                    // Failed package - remove from incoming, add to failed
+                    incoming.remove(pkgname);
+                    failed.insert(pkgname.clone());
+                    results.push(result.clone());
+                    cached_count += 1;
+                }
+            }
+        }
+
+        if cached_count > 0 {
+            println!("Loaded {} cached build results", cached_count);
+        }
+
         info!(
             incoming_count = incoming.len(),
             scanpkgs_count = self.scanpkgs.len(),
+            cached_count = cached_count,
             "BuildJobs populated"
         );
 
         let running: HashSet<PkgName> = HashSet::new();
-        let done: HashSet<PkgName> = HashSet::new();
-        let failed: HashSet<PkgName> = HashSet::new();
-        let results: Vec<BuildResult> = Vec::new();
         let logdir = self.config.logdir().clone();
         let jobs = BuildJobs {
             scanpkgs: self.scanpkgs.clone(),
@@ -1059,6 +1220,7 @@ impl Build {
             failed,
             results,
             logdir,
+            cached_count,
         };
 
         // Create sandboxes before starting progress display
@@ -1092,6 +1254,13 @@ impl Build {
             )
             .expect("Failed to initialize progress display"),
         ));
+
+        // Mark cached packages in progress display
+        if cached_count > 0 {
+            if let Ok(mut p) = progress.lock() {
+                p.state_mut().cached = cached_count;
+            }
+        }
 
         // Flag to stop the refresh thread
         let stop_refresh = Arc::new(AtomicBool::new(false));
@@ -1356,7 +1525,7 @@ impl Build {
                             );
                         }
 
-                        jobs.mark_skipped(&pkgname);
+                        jobs.mark_up_to_date(&pkgname);
                         jobs.running.remove(&pkgname);
 
                         // Find which thread completed and mark idle

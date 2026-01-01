@@ -14,14 +14,16 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-//! SQLite database for caching scan results.
+//! SQLite database for caching scan and build results.
 //!
-//! Stores [`ScanIndex`] data per pkgpath to enable resuming interrupted scan.
+//! Stores [`ScanIndex`] data per pkgpath to enable resuming interrupted scans.
+//! Stores [`BuildResult`] data per pkgname to enable resuming interrupted builds.
 //! Users should clear the database when pkgsrc is updated.
 
+use crate::build::BuildResult;
 use anyhow::{Context, Result};
 use indexmap::IndexMap;
-use pkgsrc::{PkgPath, ScanIndex};
+use pkgsrc::{PkgName, PkgPath, ScanIndex};
 use rusqlite::{Connection, params};
 use std::path::Path;
 use tracing::debug;
@@ -48,6 +50,10 @@ impl Database {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS scan (
                 pkgpath TEXT PRIMARY KEY,
+                data TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS build (
+                pkgname TEXT PRIMARY KEY,
                 data TEXT NOT NULL
             )",
         )?;
@@ -101,9 +107,61 @@ impl Database {
             .context("Failed to count scan")
     }
 
-    /// Clear all cached data.
+    /// Clear all cached scan data.
     pub fn clear_scan(&self) -> Result<()> {
         self.conn.execute("DELETE FROM scan", [])?;
+        Ok(())
+    }
+
+    /// Store build result for a pkgname.
+    pub fn store_build_pkgname(
+        &self,
+        pkgname: &str,
+        result: &BuildResult,
+    ) -> Result<()> {
+        let json = serde_json::to_string(result)?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO build (pkgname, data) VALUES (?1, ?2)",
+            params![pkgname, json],
+        )?;
+        debug!(pkgname, "Stored build result");
+        Ok(())
+    }
+
+    /// Load all cached build results, preserving insertion order.
+    pub fn get_all_build(&self) -> Result<IndexMap<PkgName, BuildResult>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT pkgname, data FROM build ORDER BY rowid")?;
+        let mut result = IndexMap::new();
+
+        let rows = stmt.query_map([], |row| {
+            let pkgname: String = row.get(0)?;
+            let json: String = row.get(1)?;
+            Ok((pkgname, json))
+        })?;
+
+        for row in rows {
+            let (pkgname_str, json) = row?;
+            let pkgname = PkgName::new(&pkgname_str);
+            let build_result: BuildResult = serde_json::from_str(&json)
+                .context("Failed to deserialize build data")?;
+            result.insert(pkgname, build_result);
+        }
+
+        Ok(result)
+    }
+
+    /// Count of cached build results.
+    pub fn count_build(&self) -> Result<i64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM build", [], |row| row.get(0))
+            .context("Failed to count build")
+    }
+
+    /// Clear all cached build data.
+    pub fn clear_build(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM build", [])?;
         Ok(())
     }
 }
