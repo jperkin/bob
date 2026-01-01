@@ -269,7 +269,7 @@ fn main() -> Result<()> {
             }
 
             // Handle scan errors
-            let scan_errors = scan.scan_errors();
+            let scan_errors: Vec<_> = scan.scan_errors().collect();
             if !scan_errors.is_empty() {
                 eprintln!();
                 for err in &scan_errors {
@@ -626,7 +626,7 @@ fn main() -> Result<()> {
             }
 
             // Handle scan errors
-            let scan_errors = scan.scan_errors();
+            let scan_errors: Vec<_> = scan.scan_errors().collect();
             if !scan_errors.is_empty() {
                 eprintln!();
                 for err in &scan_errors {

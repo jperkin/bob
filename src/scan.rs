@@ -553,10 +553,8 @@ impl Scan {
             /*
              * Convert the incoming HashSet into a Vec for parallel processing.
              */
-            let mut parpaths: Vec<(PkgPath, Result<Vec<ScanIndex>>)> = vec![];
-            for pkgpath in &self.incoming {
-                parpaths.push((pkgpath.clone(), Ok(vec![])));
-            }
+            let mut parpaths: Vec<(PkgPath, Result<Vec<ScanIndex>>)> =
+                self.incoming.iter().map(|p| (p.clone(), Ok(vec![]))).collect();
 
             let progress_clone = Arc::clone(&progress);
             let shutdown_clone = Arc::clone(&shutdown_flag);
@@ -624,7 +622,7 @@ impl Scan {
                     Ok(pkgs) => pkgs,
                     Err(e) => {
                         self.scan_failures
-                            .push((pkgpath.clone(), format!("{}", e)));
+                            .push((pkgpath.clone(), e.to_string()));
                         self.done.insert(pkgpath.clone(), vec![]);
                         continue;
                     }
@@ -716,8 +714,8 @@ impl Scan {
     }
 
     /// Returns scan failures as formatted error strings.
-    pub fn scan_errors(&self) -> Vec<String> {
-        self.scan_failures.iter().map(|(_, e)| e.clone()).collect()
+    pub fn scan_errors(&self) -> impl Iterator<Item = &str> {
+        self.scan_failures.iter().map(|(_, e)| e.as_str())
     }
 
     /// Returns scan failures with pkgpath information.
@@ -813,6 +811,9 @@ impl Scan {
      * `depends` for the package in question.
      *
      * Return a [`ScanResult`] containing buildable packages and skipped packages.
+     *
+     * Note: This method consumes the internal scan state. Calling it multiple
+     * times will return empty results on subsequent calls.
      */
     pub fn resolve(&mut self) -> Result<ScanResult> {
         info!(
@@ -1147,9 +1148,10 @@ pub fn find_cycle<'a>(
         if visited.contains(&node) {
             continue;
         }
-        let cycle = dfs(graph, node, &mut visited, &mut stack, &mut in_stack);
-        if cycle.is_some() {
-            return cycle;
+        if let Some(cycle) =
+            dfs(graph, node, &mut visited, &mut stack, &mut in_stack)
+        {
+            return Some(cycle);
         }
     }
     None
