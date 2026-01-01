@@ -486,6 +486,11 @@ impl Scan {
                     self.done.len()
                 );
             }
+
+            if self.sandbox.enabled() {
+                self.cleanup_sandbox(script_envs)?;
+            }
+
             return Ok(false);
         }
 
@@ -684,26 +689,7 @@ impl Scan {
         }
 
         if self.sandbox.enabled() {
-            // Run post-build script if defined
-            if let Some(post_build) = self.config.script("post-build") {
-                debug!("Running post-build script");
-                let child = self.sandbox.execute(
-                    0,
-                    post_build,
-                    script_envs,
-                    None,
-                    None,
-                )?;
-                let output = child
-                    .wait_with_output()
-                    .context("Failed to wait for post-build")?;
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    error!(exit_code = ?output.status.code(), stderr = %stderr, "post-build script failed");
-                }
-            }
-
-            self.sandbox.destroy(0)?;
+            self.cleanup_sandbox(script_envs)?;
         }
 
         if interrupted {
@@ -711,6 +697,22 @@ impl Scan {
         }
 
         Ok(false)
+    }
+
+    /// Run post-build cleanup and destroy the scan sandbox.
+    fn cleanup_sandbox(&self, envs: Vec<(String, String)>) -> anyhow::Result<()> {
+        if let Some(post_build) = self.config.script("post-build") {
+            debug!("Running post-build script");
+            let child = self.sandbox.execute(0, post_build, envs, None, None)?;
+            let output = child
+                .wait_with_output()
+                .context("Failed to wait for post-build")?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                error!(exit_code = ?output.status.code(), stderr = %stderr, "post-build script failed");
+            }
+        }
+        self.sandbox.destroy(0)
     }
 
     /// Returns scan failures as formatted error strings.
