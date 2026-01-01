@@ -700,10 +700,14 @@ impl Scan {
     }
 
     /// Run post-build cleanup and destroy the scan sandbox.
-    fn cleanup_sandbox(&self, envs: Vec<(String, String)>) -> anyhow::Result<()> {
+    fn cleanup_sandbox(
+        &self,
+        envs: Vec<(String, String)>,
+    ) -> anyhow::Result<()> {
         if let Some(post_build) = self.config.script("post-build") {
             debug!("Running post-build script");
-            let child = self.sandbox.execute(0, post_build, envs, None, None)?;
+            let child =
+                self.sandbox.execute(0, post_build, envs, None, None)?;
             let output = child
                 .wait_with_output()
                 .context("Failed to wait for post-build")?;
