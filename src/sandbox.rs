@@ -191,42 +191,80 @@ impl Sandbox {
      * Verify that a path is safely contained within the sandbox.
      * This prevents path traversal attacks via ".." or symlinks.
      * Returns error if the path escapes the sandbox boundary.
+     *
+     * Note: There is an inherent TOCTOU (time-of-check-time-of-use) window
+     * between this verification and subsequent operations. However, the
+     * sandbox environment is controlled by bob and not accessible to
+     * unprivileged users during builds, making this acceptable.
      */
     fn verify_path_in_sandbox(&self, id: usize, path: &Path) -> Result<()> {
         let sandbox_root = self.path(id);
-        // Canonicalize both paths to resolve any ".." or symlinks
-        // Note: canonicalize requires the path to exist, so we check
-        // the parent directory for paths that don't exist yet
         let canonical_sandbox =
             sandbox_root.canonicalize().unwrap_or(sandbox_root.clone());
 
-        // For the target path, try to canonicalize what exists
-        let canonical_path = if path.exists() {
-            path.canonicalize()?
-        } else {
-            // Path doesn't exist yet, check its parent
-            if let Some(parent) = path.parent() {
-                if parent.exists() {
-                    let canonical_parent = parent.canonicalize()?;
-                    if !canonical_parent.starts_with(&canonical_sandbox) {
+        // Use symlink_metadata to check path type without following symlinks
+        match fs::symlink_metadata(path) {
+            Ok(meta) => {
+                // For symlinks, verify the target is within the sandbox
+                if meta.is_symlink() {
+                    let target = fs::read_link(path)?;
+                    let resolved = if target.is_absolute() {
+                        target
+                    } else {
+                        path.parent()
+                            .map(|p| p.join(&target))
+                            .unwrap_or(target)
+                    };
+                    // Canonicalize the resolved target
+                    if let Ok(canonical_target) = resolved.canonicalize() {
+                        if !canonical_target.starts_with(&canonical_sandbox) {
+                            bail!(
+                                "Symlink escapes sandbox: {} -> {} is not within {}",
+                                path.display(),
+                                canonical_target.display(),
+                                canonical_sandbox.display()
+                            );
+                        }
+                    }
+                    // If target doesn't exist yet, verify the parent is safe
+                    else if let Some(parent) = resolved.parent() {
+                        if let Ok(canonical_parent) = parent.canonicalize() {
+                            if !canonical_parent.starts_with(&canonical_sandbox) {
+                                bail!(
+                                    "Symlink parent escapes sandbox: {} is not within {}",
+                                    path.display(),
+                                    sandbox_root.display()
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    // Regular file or directory - canonicalize and verify
+                    let canonical_path = path.canonicalize()?;
+                    if !canonical_path.starts_with(&canonical_sandbox) {
                         bail!(
-                            "Path escapes sandbox: {} is not within {}",
+                            "Path escapes sandbox: {} resolves to {} which is not within {}",
                             path.display(),
-                            sandbox_root.display()
+                            canonical_path.display(),
+                            canonical_sandbox.display()
                         );
                     }
                 }
             }
-            return Ok(());
-        };
-
-        if !canonical_path.starts_with(&canonical_sandbox) {
-            bail!(
-                "Path escapes sandbox: {} resolves to {} which is not within {}",
-                path.display(),
-                canonical_path.display(),
-                canonical_sandbox.display()
-            );
+            Err(_) => {
+                // Path doesn't exist yet, check its parent
+                if let Some(parent) = path.parent() {
+                    if let Ok(canonical_parent) = parent.canonicalize() {
+                        if !canonical_parent.starts_with(&canonical_sandbox) {
+                            bail!(
+                                "Path escapes sandbox: {} is not within {}",
+                                path.display(),
+                                sandbox_root.display()
+                            );
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
