@@ -448,30 +448,43 @@ impl<'a> PkgBuilder<'a> {
 
         let output_tx = self.output_tx.clone();
         let sandbox_id = self.sandbox_id;
-        let mut handles = Vec::new();
+
+        // Channel to track reader thread completion
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let mut reader_count = 0;
 
         if let Some(stdout) = child.stdout.take() {
-            handles.push(Self::spawn_log_reader(
-                stdout,
-                log.clone(),
-                output_tx.clone(),
-                sandbox_id,
-            ));
+            let done = done_tx.clone();
+            Self::spawn_log_reader(stdout, log.clone(), output_tx.clone(), sandbox_id, done);
+            reader_count += 1;
         }
 
         if let Some(stderr) = child.stderr.take() {
-            handles.push(Self::spawn_log_reader(
-                stderr,
-                log.clone(),
-                output_tx.clone(),
-                sandbox_id,
-            ));
+            let done = done_tx.clone();
+            Self::spawn_log_reader(stderr, log.clone(), output_tx.clone(), sandbox_id, done);
+            reader_count += 1;
         }
 
+        drop(done_tx); // Drop our sender so channel closes when all readers finish
+
         let status = child.wait()?;
-        for handle in handles {
-            let _ = handle.join();
+
+        // Wait for reader threads to finish draining output, with timeout.
+        // Readers may block indefinitely if grandchild processes inherited the pipes,
+        // so we use a timeout to avoid hanging. The threads will eventually finish
+        // when those processes exit, and resources are Arc'd so this is safe.
+        // 2 seconds is generous for draining pipe buffers (~64KB) but avoids
+        // long hangs when grandchildren hold pipes open.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut finished = 0;
+        while finished < reader_count && Instant::now() < deadline {
+            match done_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(()) => finished += 1,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            }
         }
+
         trace!(cmd = ?cmd, status = ?status, "Command completed");
         Ok(status)
     }
@@ -729,7 +742,8 @@ impl<'a> PkgBuilder<'a> {
         log: Arc<Mutex<File>>,
         output_tx: Option<Sender<ChannelCommand>>,
         sandbox_id: usize,
-    ) -> thread::JoinHandle<()> {
+        done: Sender<()>,
+    ) {
         thread::spawn(move || {
             let reader = BufReader::new(reader);
             for line in reader.lines().map_while(Result::ok) {
@@ -743,7 +757,8 @@ impl<'a> PkgBuilder<'a> {
                     ));
                 }
             }
-        })
+            let _ = done.send(());
+        });
     }
 
     fn shell_escape(value: &str) -> String {
