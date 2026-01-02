@@ -980,9 +980,6 @@ impl<'a> MakeQuery<'a> {
             cmd.env(key, value);
         }
 
-        // Redirect stderr to null - we only need stdout for the value.
-        // Use piped stdout so we can read it, but don't let grandchildren
-        // inherit pipes that could cause hangs.
         cmd.stderr(Stdio::null());
 
         let output = cmd.output().ok()?;
@@ -1129,15 +1126,27 @@ impl PackageBuild {
                 // Kill any orphaned processes in the sandbox before cleanup.
                 // Failed builds may leave processes running that would block
                 // subsequent commands like bmake show-var or bmake clean.
+                debug!(pkgname = %pkgname, "Calling kill_processes_by_id");
+                let kill_start = Instant::now();
                 self.sandbox.kill_processes_by_id(self.id);
+                debug!(pkgname = %pkgname, elapsed_ms = kill_start.elapsed().as_millis(), "kill_processes_by_id completed");
                 // Save wrkdir files matching configured patterns, then clean up
                 if !patterns.is_empty() {
+                    debug!(pkgname = %pkgname, "Calling save_wrkdir_files");
+                    let save_start = Instant::now();
                     self.save_wrkdir_files(
                         pkgname, pkgpath, logdir, patterns, &pkg_env,
                     );
+                    debug!(pkgname = %pkgname, elapsed_ms = save_start.elapsed().as_millis(), "save_wrkdir_files completed");
+                    debug!(pkgname = %pkgname, "Calling run_clean");
+                    let clean_start = Instant::now();
                     self.run_clean(pkgpath, &envs);
+                    debug!(pkgname = %pkgname, elapsed_ms = clean_start.elapsed().as_millis(), "run_clean completed");
                 } else {
+                    debug!(pkgname = %pkgname, "Calling run_clean (no patterns)");
+                    let clean_start = Instant::now();
                     self.run_clean(pkgpath, &envs);
+                    debug!(pkgname = %pkgname, elapsed_ms = clean_start.elapsed().as_millis(), "run_clean completed");
                 }
                 PackageBuildResult::Failed
             }
@@ -1485,6 +1494,8 @@ impl BuildJobs {
      * Recursively mark a package and its dependents as failed.
      */
     fn mark_failure(&mut self, pkgname: &PkgName, duration: Duration) {
+        debug!(pkgname = %pkgname.pkgname(), "mark_failure called");
+        let start = std::time::Instant::now();
         let mut broken: HashSet<PkgName> = HashSet::new();
         let mut to_check: Vec<PkgName> = vec![];
         to_check.push(pkgname.clone());
@@ -1508,6 +1519,7 @@ impl BuildJobs {
             }
             broken.insert(badpkg);
         }
+        debug!(pkgname = %pkgname.pkgname(), broken_count = broken.len(), elapsed_ms = start.elapsed().as_millis(), "mark_failure found broken packages");
         /*
          * We now have a full HashSet of affected packages.  Remove them from
          * incoming and move to failed.  The original failed package will
@@ -1538,6 +1550,7 @@ impl BuildJobs {
                 log_dir,
             });
         }
+        debug!(pkgname = %pkgname.pkgname(), total_results = self.results.len(), elapsed_ms = start.elapsed().as_millis(), "mark_failure completed");
     }
 
     /**
@@ -1882,10 +1895,14 @@ impl Build {
                         }
                         ChannelCommand::JobData(pkg) => {
                             let pkgname = pkg.pkginfo.pkgname.clone();
+                            trace!(pkgname = %pkgname.pkgname(), worker = i, "Worker starting build");
                             let build_start = Instant::now();
-                            match pkg.build(&manager_tx) {
+                            let result = pkg.build(&manager_tx);
+                            let duration = build_start.elapsed();
+                            trace!(pkgname = %pkgname.pkgname(), worker = i, elapsed_ms = duration.as_millis(), "Worker build() returned");
+                            match result {
                                 Ok(PackageBuildResult::Success) => {
-                                    let duration = build_start.elapsed();
+                                    trace!(pkgname = %pkgname.pkgname(), "Worker sending JobSuccess");
                                     let _ = manager_tx.send(
                                         ChannelCommand::JobSuccess(
                                             pkgname, duration,
@@ -1893,12 +1910,13 @@ impl Build {
                                     );
                                 }
                                 Ok(PackageBuildResult::Skipped) => {
+                                    trace!(pkgname = %pkgname.pkgname(), "Worker sending JobSkipped");
                                     let _ = manager_tx.send(
                                         ChannelCommand::JobSkipped(pkgname),
                                     );
                                 }
                                 Ok(PackageBuildResult::Failed) => {
-                                    let duration = build_start.elapsed();
+                                    trace!(pkgname = %pkgname.pkgname(), "Worker sending JobFailed");
                                     let _ = manager_tx.send(
                                         ChannelCommand::JobFailed(
                                             pkgname, duration,
@@ -1906,7 +1924,7 @@ impl Build {
                                     );
                                 }
                                 Err(e) => {
-                                    let duration = build_start.elapsed();
+                                    trace!(pkgname = %pkgname.pkgname(), "Worker sending JobError");
                                     let _ = manager_tx.send(
                                         ChannelCommand::JobError((
                                             pkgname, duration, e,
@@ -2209,14 +2227,24 @@ impl Build {
             }
 
             // Send results and interrupted status back
+            debug!(
+                result_count = jobs.results.len(),
+                "Manager sending results back"
+            );
             let _ = results_tx.send(jobs.results);
             let _ = interrupted_tx.send(was_interrupted);
         });
 
         threads.push(manager);
+        debug!("Waiting for worker threads to complete");
+        let join_start = Instant::now();
         for thread in threads {
             thread.join().expect("thread panicked");
         }
+        debug!(
+            elapsed_ms = join_start.elapsed().as_millis(),
+            "Worker threads completed"
+        );
 
         // Stop the refresh thread
         stop_refresh.store(true, Ordering::Relaxed);
@@ -2235,7 +2263,9 @@ impl Build {
         }
 
         // Collect results from manager
+        debug!("Collecting results from manager");
         let results = results_rx.recv().unwrap_or_default();
+        debug!(result_count = results.len(), "Collected results from manager");
         let summary = BuildSummary {
             duration: started.elapsed(),
             results,
@@ -2243,7 +2273,13 @@ impl Build {
         };
 
         if self.sandbox.enabled() {
+            debug!("Destroying sandboxes");
+            let destroy_start = Instant::now();
             self.sandbox.destroy_all(self.config.build_threads())?;
+            debug!(
+                elapsed_ms = destroy_start.elapsed().as_millis(),
+                "Sandboxes destroyed"
+            );
         }
 
         Ok(summary)

@@ -169,7 +169,13 @@ impl BuildRunner {
             build.load_cached(cached_build);
         }
 
+        tracing::debug!("Calling build.start()");
+        let build_start_time = std::time::Instant::now();
         let mut summary = build.start(&self.ctx)?;
+        tracing::debug!(
+            elapsed_ms = build_start_time.elapsed().as_millis(),
+            "build.start() returned"
+        );
 
         // Check if we were interrupted - don't store results for interrupted builds
         if self.ctx.shutdown.load(Ordering::SeqCst) {
@@ -181,9 +187,18 @@ impl BuildRunner {
         }
 
         // Store build results (only for non-interrupted builds)
+        tracing::debug!(
+            result_count = summary.results.len(),
+            "Storing build results to database"
+        );
+        let store_start = std::time::Instant::now();
         for result in &summary.results {
             self.db.store_build_pkgname(result.pkgname.pkgname(), result)?;
         }
+        tracing::debug!(
+            elapsed_ms = store_start.elapsed().as_millis(),
+            "Finished storing build results"
+        );
 
         self.flush_stats();
 
