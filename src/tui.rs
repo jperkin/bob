@@ -265,28 +265,50 @@ fn format_duration_short(d: Duration) -> String {
     if secs < 60.0 { format!("{:.1}s", secs) } else { format_duration(d) }
 }
 
-/// Calculate grid layout for N panels.
-/// If terminal width < 160, use vertical stack (full width panels).
-/// Otherwise use a roughly square grid.
-fn calculate_grid(area: Rect, num_panels: usize) -> Vec<Rect> {
+/// Calculate grid layout for N panels with height optimization.
+/// If terminal width < 160, use vertical stack with idle panels collapsed.
+/// Otherwise use a roughly square grid with equal sizing.
+fn calculate_panel_layout(
+    area: Rect,
+    num_panels: usize,
+    is_active: &[bool],
+) -> Vec<Rect> {
     if num_panels == 0 {
         return vec![];
     }
 
-    // For narrow terminals, stack panels vertically (full width each)
+    // For narrow terminals, stack vertically with height optimization
     if area.width < 160 {
-        let constraints: Vec<Constraint> = (0..num_panels)
-            .map(|_| Constraint::Ratio(1, num_panels as u32))
-            .collect();
+        let active_count = is_active.iter().filter(|&&a| a).count();
+        let idle_height = 2u16;
+        let idle_count = num_panels - active_count;
+        let total_idle_height = idle_count as u16 * idle_height;
+        let active_space = area.height.saturating_sub(total_idle_height);
 
-        return Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(constraints)
-            .split(area)
-            .to_vec();
+        // Build rects maintaining order: idle panels get 2 lines,
+        // active panels share remaining space equally
+        let mut rects = Vec::with_capacity(num_panels);
+        let mut y = area.y;
+
+        for &active in is_active {
+            let h = if active && active_count > 0 {
+                active_space / active_count as u16
+            } else {
+                idle_height
+            };
+            rects.push(Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height: h,
+            });
+            y += h;
+        }
+
+        return rects;
     }
 
-    // For wide terminals, use a roughly square grid
+    // For wide terminals, use a roughly square grid (equal sizing)
     let cols = (num_panels as f64).sqrt().ceil() as usize;
     let rows = num_panels.div_ceil(cols);
 
@@ -605,10 +627,13 @@ impl MultiProgress {
 
         self.state.update_timer_width();
 
-        // Pre-compute panel data to avoid borrowing issues with draw closure
+        // Pre-compute panel data and active status
         let num_workers = self.num_workers;
         let panel_data: Vec<_> = (0..num_workers)
             .map(|i| {
+                let is_active =
+                    self.state.workers.get(i).is_some_and(|w| w.package.is_some());
+
                 let title = if let Some(w) = self.state.workers.get(i) {
                     if let Some(pkg) = &w.package {
                         let stage = w.stage.as_deref().unwrap_or("");
@@ -635,17 +660,20 @@ impl MultiProgress {
                     .map(|buf| buf.last_n(100).cloned().collect::<Vec<_>>())
                     .unwrap_or_default();
 
-                (title, lines)
+                (title, lines, is_active)
             })
             .collect();
 
+        // Extract active flags for layout calculation
+        let is_active: Vec<bool> =
+            panel_data.iter().map(|(_, _, active)| *active).collect();
+
         self.terminal.draw(|frame| {
             let area = frame.area();
-            let panels = calculate_grid(area, num_workers);
+            let panels = calculate_panel_layout(area, num_workers, &is_active);
 
             for (i, panel_area) in panels.iter().enumerate() {
-                if let Some((title, lines)) = panel_data.get(i) {
-                    // Clear the panel area first to remove old content
+                if let Some((title, lines, _)) = panel_data.get(i) {
                     frame.render_widget(Clear, *panel_area);
 
                     let block = Block::default()
