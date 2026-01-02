@@ -45,15 +45,17 @@
 //! # Example
 //!
 //! ```no_run
-//! use bob::{Build, Config, RunContext, Scan};
+//! use bob::{Build, Config, Database, RunContext, Scan};
 //! use std::sync::Arc;
 //! use std::sync::atomic::AtomicBool;
 //!
 //! let config = Config::load(None, false)?;
+//! let db_path = config.logdir().join("bob").join("bob.db");
+//! let db = Database::open(&db_path)?;
 //! let mut scan = Scan::new(&config);
 //! // Add packages...
 //! let ctx = RunContext::new(Arc::new(AtomicBool::new(false)));
-//! scan.start(&ctx)?;
+//! scan.start(&ctx, &db)?;
 //! let result = scan.resolve()?;
 //!
 //! let mut build = Build::new(&config, result.buildable);
@@ -65,7 +67,6 @@
 
 use crate::scan::ResolvedIndex;
 use crate::scan::ScanFailure;
-use crate::status::{self, StatusMessage};
 use crate::tui::{MultiProgress, format_duration};
 use crate::{Config, RunContext, Sandbox};
 use anyhow::{Context, bail};
@@ -73,17 +74,712 @@ use glob::Pattern;
 use indexmap::IndexMap;
 use pkgsrc::{PkgName, PkgPath};
 use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc, mpsc::Sender};
+use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, trace, warn};
 
-/// Format a ResolvedIndex as pbulk-index output for piping to scripts.
-fn format_scan_index(idx: &ResolvedIndex) -> String {
-    idx.to_string()
+/// Build stages in order of execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    PreClean,
+    Depends,
+    Checksum,
+    Configure,
+    Build,
+    Install,
+    Package,
+    Deinstall,
+    Clean,
+}
+
+impl Stage {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Stage::PreClean => "pre-clean",
+            Stage::Depends => "depends",
+            Stage::Checksum => "checksum",
+            Stage::Configure => "configure",
+            Stage::Build => "build",
+            Stage::Install => "install",
+            Stage::Package => "package",
+            Stage::Deinstall => "deinstall",
+            Stage::Clean => "clean",
+        }
+    }
+}
+
+/// Result of a package build.
+#[derive(Debug)]
+enum PkgBuildResult {
+    Success,
+    Failed,
+    Skipped,
+}
+
+/// How to run a command.
+#[derive(Debug, Clone, Copy)]
+enum RunAs {
+    Root,
+    User,
+}
+
+/// Callback for status updates during build.
+trait BuildCallback: Send {
+    fn stage(&mut self, stage: &str);
+}
+
+/// Package builder that executes build stages.
+struct PkgBuilder<'a> {
+    config: &'a Config,
+    sandbox: &'a Sandbox,
+    sandbox_id: usize,
+    pkginfo: &'a ResolvedIndex,
+    logdir: PathBuf,
+    build_user: Option<String>,
+    pkg_up_to_date: Option<PathBuf>,
+    envs: Vec<(String, String)>,
+    output_tx: Option<Sender<ChannelCommand>>,
+}
+
+impl<'a> PkgBuilder<'a> {
+    fn new(
+        config: &'a Config,
+        sandbox: &'a Sandbox,
+        sandbox_id: usize,
+        pkginfo: &'a ResolvedIndex,
+        envs: Vec<(String, String)>,
+        output_tx: Option<Sender<ChannelCommand>>,
+    ) -> Self {
+        let logdir = config.logdir().join(pkginfo.pkgname.pkgname());
+        let build_user = config.build_user().map(|s| s.to_string());
+        let pkg_up_to_date = config.script("pkg-up-to-date").cloned();
+        Self {
+            config,
+            sandbox,
+            sandbox_id,
+            pkginfo,
+            logdir,
+            build_user,
+            pkg_up_to_date,
+            envs,
+            output_tx,
+        }
+    }
+
+    /// Check if the package is already up-to-date.
+    fn check_up_to_date(&self) -> bool {
+        let Some(script) = &self.pkg_up_to_date else {
+            return false;
+        };
+
+        let pkgname = self.pkginfo.pkgname.pkgname();
+        let deps: Vec<String> =
+            self.pkginfo.depends.iter().map(|d| d.to_string()).collect();
+
+        let mut cmd = if self.sandbox.enabled() {
+            let mut c = Command::new("/usr/sbin/chroot");
+            c.arg(self.sandbox.path(self.sandbox_id)).arg(script);
+            c
+        } else {
+            Command::new(script)
+        };
+
+        self.apply_envs(&mut cmd, &[]);
+
+        cmd.arg(pkgname);
+        for dep in &deps {
+            cmd.arg(dep);
+        }
+
+        match cmd.status() {
+            Ok(status) => status.success(),
+            Err(_) => false,
+        }
+    }
+
+    /// Run the full build process.
+    fn build<C: BuildCallback>(
+        &self,
+        callback: &mut C,
+    ) -> anyhow::Result<PkgBuildResult> {
+        let pkgname = self.pkginfo.pkgname.pkgname();
+        let Some(pkgpath) = &self.pkginfo.pkg_location else {
+            bail!("Could not get PKGPATH for {}", pkgname);
+        };
+
+        // Check if package is already up-to-date
+        if self.check_up_to_date() {
+            return Ok(PkgBuildResult::Skipped);
+        }
+
+        // Clean up and create log directory
+        if self.logdir.exists() {
+            fs::remove_dir_all(&self.logdir)?;
+        }
+        fs::create_dir_all(&self.logdir)?;
+
+        // Create work.log and chown to build_user if set
+        let work_log = self.logdir.join("work.log");
+        File::create(&work_log)?;
+        if let Some(ref user) = self.build_user {
+            // Use chown command to set ownership
+            let _ = Command::new("chown").arg(user).arg(&work_log).status();
+        }
+
+        let pkgdir = self.config.pkgsrc().join(pkgpath.as_path());
+
+        // Pre-clean
+        callback.stage(Stage::PreClean.as_str());
+        self.run_make_stage(
+            Stage::PreClean,
+            &pkgdir,
+            &["clean"],
+            RunAs::Root,
+            false,
+        )?;
+
+        // Install dependencies
+        if !self.pkginfo.depends.is_empty() {
+            callback.stage(Stage::Depends.as_str());
+            let _ = self.write_stage(Stage::Depends);
+            if !self.install_dependencies()? {
+                return Ok(PkgBuildResult::Failed);
+            }
+        }
+
+        // Checksum
+        callback.stage(Stage::Checksum.as_str());
+        if !self.run_make_stage(
+            Stage::Checksum,
+            &pkgdir,
+            &["checksum"],
+            RunAs::Root,
+            true,
+        )? {
+            return Ok(PkgBuildResult::Failed);
+        }
+
+        // Configure
+        callback.stage(Stage::Configure.as_str());
+        let configure_log = self.logdir.join("configure.log");
+        if !self.run_usergroup_if_needed(
+            Stage::Configure,
+            &pkgdir,
+            &configure_log,
+        )? {
+            return Ok(PkgBuildResult::Failed);
+        }
+        if !self.run_make_stage(
+            Stage::Configure,
+            &pkgdir,
+            &["configure"],
+            self.build_run_as(),
+            true,
+        )? {
+            return Ok(PkgBuildResult::Failed);
+        }
+
+        // Build
+        callback.stage(Stage::Build.as_str());
+        let build_log = self.logdir.join("build.log");
+        if !self.run_usergroup_if_needed(Stage::Build, &pkgdir, &build_log)? {
+            return Ok(PkgBuildResult::Failed);
+        }
+        if !self.run_make_stage(
+            Stage::Build,
+            &pkgdir,
+            &["all"],
+            self.build_run_as(),
+            true,
+        )? {
+            return Ok(PkgBuildResult::Failed);
+        }
+
+        // Install
+        callback.stage(Stage::Install.as_str());
+        let install_log = self.logdir.join("install.log");
+        if !self.run_usergroup_if_needed(
+            Stage::Install,
+            &pkgdir,
+            &install_log,
+        )? {
+            return Ok(PkgBuildResult::Failed);
+        }
+        if !self.run_make_stage(
+            Stage::Install,
+            &pkgdir,
+            &["stage-install"],
+            self.build_run_as(),
+            true,
+        )? {
+            return Ok(PkgBuildResult::Failed);
+        }
+
+        // Package
+        callback.stage(Stage::Package.as_str());
+        if !self.run_make_stage(
+            Stage::Package,
+            &pkgdir,
+            &["stage-package-create"],
+            RunAs::Root,
+            true,
+        )? {
+            return Ok(PkgBuildResult::Failed);
+        }
+
+        // Get the package file path
+        let pkgfile = self.get_make_var(&pkgdir, "STAGE_PKGFILE")?;
+
+        // Test package install (unless bootstrap package)
+        let is_bootstrap = self.pkginfo.bootstrap_pkg.as_deref() == Some("yes");
+        if !is_bootstrap {
+            if !self.pkg_add(&pkgfile)? {
+                return Ok(PkgBuildResult::Failed);
+            }
+
+            // Test package deinstall
+            callback.stage(Stage::Deinstall.as_str());
+            let _ = self.write_stage(Stage::Deinstall);
+            if !self.pkg_delete(pkgname)? {
+                return Ok(PkgBuildResult::Failed);
+            }
+        }
+
+        // Save package to packages directory
+        let packages_dir = self.config.packages().join("All");
+        fs::create_dir_all(&packages_dir)?;
+        let dest = packages_dir.join(
+            Path::new(&pkgfile)
+                .file_name()
+                .context("Invalid package file path")?,
+        );
+        fs::copy(&pkgfile, &dest)?;
+
+        // Clean
+        callback.stage(Stage::Clean.as_str());
+        let _ = self.run_make_stage(
+            Stage::Clean,
+            &pkgdir,
+            &["clean"],
+            RunAs::Root,
+            false,
+        );
+
+        // Remove log directory on success
+        let _ = fs::remove_dir_all(&self.logdir);
+
+        Ok(PkgBuildResult::Success)
+    }
+
+    /// Determine how to run build commands.
+    fn build_run_as(&self) -> RunAs {
+        if self.build_user.is_some() { RunAs::User } else { RunAs::Root }
+    }
+
+    /// Write the current stage to a .stage file.
+    fn write_stage(&self, stage: Stage) -> anyhow::Result<()> {
+        let stage_file = self.logdir.join(".stage");
+        fs::write(&stage_file, stage.as_str())?;
+        Ok(())
+    }
+
+    /// Run a make stage with output logging.
+    fn run_make_stage(
+        &self,
+        stage: Stage,
+        pkgdir: &Path,
+        targets: &[&str],
+        run_as: RunAs,
+        include_make_flags: bool,
+    ) -> anyhow::Result<bool> {
+        // Write stage to .stage file
+        let _ = self.write_stage(stage);
+
+        let logfile = self.logdir.join(format!("{}.log", stage.as_str()));
+        let work_log = self.logdir.join("work.log");
+
+        let owned_args =
+            self.make_args(pkgdir, targets, include_make_flags, &work_log);
+
+        // Convert to slice of &str for the command
+        let args: Vec<&str> = owned_args.iter().map(|s| s.as_str()).collect();
+
+        debug!(stage = stage.as_str(), targets = ?targets, "Running make stage");
+
+        let status = self.run_command_logged(
+            self.config.make(),
+            &args,
+            run_as,
+            &logfile,
+        )?;
+
+        Ok(status.success())
+    }
+
+    /// Run a command with output logged to a file.
+    fn run_command_logged(
+        &self,
+        cmd: &Path,
+        args: &[&str],
+        run_as: RunAs,
+        logfile: &Path,
+    ) -> anyhow::Result<ExitStatus> {
+        self.run_command_logged_with_env(cmd, args, run_as, logfile, &[])
+    }
+
+    fn run_command_logged_with_env(
+        &self,
+        cmd: &Path,
+        args: &[&str],
+        run_as: RunAs,
+        logfile: &Path,
+        extra_envs: &[(&str, &str)],
+    ) -> anyhow::Result<ExitStatus> {
+        let log = OpenOptions::new().create(true).append(true).open(logfile)?;
+        let log = Arc::new(Mutex::new(log));
+
+        let mut child = self.spawn_command(cmd, args, run_as, extra_envs)?;
+
+        let output_tx = self.output_tx.clone();
+        let sandbox_id = self.sandbox_id;
+        let mut handles = Vec::new();
+
+        if let Some(stdout) = child.stdout.take() {
+            handles.push(Self::spawn_log_reader(
+                stdout,
+                log.clone(),
+                output_tx.clone(),
+                sandbox_id,
+            ));
+        }
+
+        if let Some(stderr) = child.stderr.take() {
+            handles.push(Self::spawn_log_reader(
+                stderr,
+                log.clone(),
+                output_tx.clone(),
+                sandbox_id,
+            ));
+        }
+
+        let status = child.wait()?;
+        for handle in handles {
+            let _ = handle.join();
+        }
+        trace!(cmd = ?cmd, status = ?status, "Command completed");
+        Ok(status)
+    }
+
+    /// Spawn a command, optionally as unprivileged user.
+    fn spawn_command(
+        &self,
+        cmd: &Path,
+        args: &[&str],
+        run_as: RunAs,
+        extra_envs: &[(&str, &str)],
+    ) -> anyhow::Result<Child> {
+        match run_as {
+            RunAs::Root => {
+                if self.sandbox.enabled() {
+                    let sandbox_path = self.sandbox.path(self.sandbox_id);
+                    let mut full_args: Vec<String> = vec![
+                        sandbox_path.to_str().unwrap().to_string(),
+                        cmd.to_str().unwrap().to_string(),
+                    ];
+                    full_args.extend(args.iter().map(|s| s.to_string()));
+                    let mut command = Command::new("/usr/sbin/chroot");
+                    command.args(&full_args);
+                    self.apply_envs(&mut command, extra_envs);
+                    command
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .spawn()
+                        .context("Failed to spawn chroot command")
+                } else {
+                    let mut command = Command::new(cmd);
+                    command.args(args);
+                    self.apply_envs(&mut command, extra_envs);
+                    command
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .spawn()
+                        .with_context(|| {
+                            format!("Failed to spawn {}", cmd.display())
+                        })
+                }
+            }
+            RunAs::User => {
+                let user = self.build_user.as_ref().unwrap();
+                let mut parts = Vec::with_capacity(args.len() + 1);
+                parts.push(cmd.display().to_string());
+                parts.extend(args.iter().map(|arg| arg.to_string()));
+                let inner_cmd = parts
+                    .iter()
+                    .map(|part| Self::shell_escape(part))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if self.sandbox.enabled() {
+                    let sandbox_path = self.sandbox.path(self.sandbox_id);
+                    let mut command = Command::new("/usr/sbin/chroot");
+                    command
+                        .arg(&sandbox_path)
+                        .arg("su")
+                        .arg(user)
+                        .arg("-c")
+                        .arg(&inner_cmd);
+                    self.apply_envs(&mut command, extra_envs);
+                    command
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .spawn()
+                        .context("Failed to spawn chroot su command")
+                } else {
+                    let mut command = Command::new("su");
+                    command.arg(user).arg("-c").arg(&inner_cmd);
+                    self.apply_envs(&mut command, extra_envs);
+                    command
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .spawn()
+                        .context("Failed to spawn su command")
+                }
+            }
+        }
+    }
+
+    /// Get a make variable value.
+    fn get_make_var(
+        &self,
+        pkgdir: &Path,
+        varname: &str,
+    ) -> anyhow::Result<String> {
+        let mut cmd = if self.sandbox.enabled() {
+            let mut c = Command::new("/usr/sbin/chroot");
+            c.arg(self.sandbox.path(self.sandbox_id)).arg(self.config.make());
+            c
+        } else {
+            Command::new(self.config.make())
+        };
+
+        self.apply_envs(&mut cmd, &[]);
+
+        let work_log = self.logdir.join("work.log");
+        let make_args = self.make_args(
+            pkgdir,
+            &["show-var", &format!("VARNAME={}", varname)],
+            true,
+            &work_log,
+        );
+
+        let output = cmd.args(&make_args).output()?;
+
+        if !output.status.success() {
+            bail!("Failed to get make variable {}", varname);
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// Install package dependencies.
+    fn install_dependencies(&self) -> anyhow::Result<bool> {
+        let deps: Vec<String> =
+            self.pkginfo.depends.iter().map(|d| d.to_string()).collect();
+
+        let pkg_path = self.config.packages().join("All");
+        let logfile = self.logdir.join("depends.log");
+
+        let mut args = vec![];
+        for dep in &deps {
+            args.push(dep.as_str());
+        }
+
+        let status = self.run_pkg_add_with_path(&args, &pkg_path, &logfile)?;
+        Ok(status.success())
+    }
+
+    /// Run pkg_add with PKG_PATH set.
+    fn run_pkg_add_with_path(
+        &self,
+        packages: &[&str],
+        pkg_path: &Path,
+        logfile: &Path,
+    ) -> anyhow::Result<ExitStatus> {
+        let pkg_add = self.config.pkgtools().join("pkg_add");
+        let pkg_path_value = pkg_path.to_string_lossy().to_string();
+        let extra_envs = [("PKG_PATH", pkg_path_value.as_str())];
+
+        self.run_command_logged_with_env(
+            &pkg_add,
+            packages,
+            RunAs::Root,
+            logfile,
+            &extra_envs,
+        )
+    }
+
+    /// Install a package file.
+    fn pkg_add(&self, pkgfile: &str) -> anyhow::Result<bool> {
+        let pkg_add = self.config.pkgtools().join("pkg_add");
+        let logfile = self.logdir.join("package.log");
+
+        let status = self.run_command_logged(
+            &pkg_add,
+            &[pkgfile],
+            RunAs::Root,
+            &logfile,
+        )?;
+
+        Ok(status.success())
+    }
+
+    /// Delete an installed package.
+    fn pkg_delete(&self, pkgname: &str) -> anyhow::Result<bool> {
+        let pkg_delete = self.config.pkgtools().join("pkg_delete");
+        let logfile = self.logdir.join("deinstall.log");
+
+        let status = self.run_command_logged(
+            &pkg_delete,
+            &[pkgname],
+            RunAs::Root,
+            &logfile,
+        )?;
+
+        Ok(status.success())
+    }
+
+    /// Run create-usergroup if needed based on usergroup_phase.
+    fn run_usergroup_if_needed(
+        &self,
+        stage: Stage,
+        pkgdir: &Path,
+        logfile: &Path,
+    ) -> anyhow::Result<bool> {
+        let usergroup_phase =
+            self.pkginfo.usergroup_phase.as_deref().unwrap_or("");
+
+        let should_run = match stage {
+            Stage::Configure => usergroup_phase.ends_with("configure"),
+            Stage::Build => usergroup_phase.ends_with("build"),
+            Stage::Install => usergroup_phase == "pre-install",
+            _ => false,
+        };
+
+        if !should_run {
+            return Ok(true);
+        }
+
+        let mut args = vec!["-C", pkgdir.to_str().unwrap(), "create-usergroup"];
+        if stage == Stage::Configure {
+            args.push("clean");
+        }
+
+        let status = self.run_command_logged(
+            self.config.make(),
+            &args,
+            RunAs::Root,
+            logfile,
+        )?;
+        Ok(status.success())
+    }
+
+    fn make_args(
+        &self,
+        pkgdir: &Path,
+        targets: &[&str],
+        include_make_flags: bool,
+        work_log: &Path,
+    ) -> Vec<String> {
+        let mut owned_args: Vec<String> =
+            vec!["-C".to_string(), pkgdir.to_str().unwrap().to_string()];
+        owned_args.extend(targets.iter().map(|s| s.to_string()));
+
+        if include_make_flags {
+            owned_args.push("BATCH=1".to_string());
+            owned_args.push("DEPENDS_TARGET=/nonexistent".to_string());
+
+            if let Some(ref multi_version) = self.pkginfo.multi_version {
+                for flag in multi_version {
+                    owned_args.push(flag.clone());
+                }
+            }
+
+            owned_args.push(format!("WRKLOG={}", work_log.display()));
+        }
+
+        owned_args
+    }
+
+    fn apply_envs(&self, cmd: &mut Command, extra_envs: &[(&str, &str)]) {
+        for (key, value) in &self.envs {
+            cmd.env(key, value);
+        }
+        for (key, value) in extra_envs {
+            cmd.env(key, value);
+        }
+    }
+
+    fn spawn_log_reader<R: Read + Send + 'static>(
+        reader: R,
+        log: Arc<Mutex<File>>,
+        output_tx: Option<Sender<ChannelCommand>>,
+        sandbox_id: usize,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let reader = BufReader::new(reader);
+            for line in reader.lines().map_while(Result::ok) {
+                if let Ok(mut log) = log.lock() {
+                    let _ = writeln!(log, "{}", line);
+                }
+                if let Some(tx) = &output_tx {
+                    let _ = tx.send(ChannelCommand::OutputLines(
+                        sandbox_id,
+                        vec![line],
+                    ));
+                }
+            }
+        })
+    }
+
+    fn shell_escape(value: &str) -> String {
+        if value.is_empty() {
+            return "''".to_string();
+        }
+        if value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.,/:=+@".contains(c))
+        {
+            return value.to_string();
+        }
+        let escaped = value.replace('\'', "'\\''");
+        format!("'{}'", escaped)
+    }
+}
+
+/// Callback adapter that sends build updates through a channel.
+struct ChannelCallback<'a> {
+    sandbox_id: usize,
+    status_tx: &'a Sender<ChannelCommand>,
+}
+
+impl<'a> ChannelCallback<'a> {
+    fn new(sandbox_id: usize, status_tx: &'a Sender<ChannelCommand>) -> Self {
+        Self { sandbox_id, status_tx }
+    }
+}
+
+impl<'a> BuildCallback for ChannelCallback<'a> {
+    fn stage(&mut self, stage: &str) {
+        let _ = self.status_tx.send(ChannelCommand::StageUpdate(
+            self.sandbox_id,
+            Some(stage.to_string()),
+        ));
+    }
 }
 
 /// Outcome of a package build attempt.
@@ -147,7 +843,7 @@ pub struct BuildResult {
 /// # fn example(summary: &BuildSummary) {
 /// println!("Succeeded: {}", summary.success_count());
 /// println!("Failed: {}", summary.failed_count());
-/// println!("Skipped: {}", summary.skipped_count());
+/// println!("Up-to-date: {}", summary.up_to_date_count());
 /// println!("Duration: {:?}", summary.duration);
 ///
 /// for result in summary.failed() {
@@ -411,54 +1107,21 @@ impl PackageBuild {
 
         let logdir = self.config.logdir();
 
-        // Core environment vars
-        let mut envs = self.config.script_env();
-
-        // Add script paths
-        if let Some(path) = self.config.script("pkg-up-to-date") {
-            envs.push((
-                "PKG_UP_TO_DATE".to_string(),
-                format!("{}", path.display()),
-            ));
-        }
-
-        // Get env vars from Lua config (function or table)
+        // Get env vars from Lua config for wrkdir saving and build environment
         let pkg_env = match self.config.get_pkg_env(&self.pkginfo) {
-            Ok(env) => {
-                for (key, value) in &env {
-                    envs.push((key.clone(), value.clone()));
-                }
-                env
-            }
+            Ok(env) => env,
             Err(e) => {
                 error!(pkgname = %pkgname, error = %e, "Failed to get env from Lua config");
                 HashMap::new()
             }
         };
 
-        // If we have save_wrkdir_patterns, tell the script not to clean so we can save files
-        let patterns = self.config.save_wrkdir_patterns();
-        if !patterns.is_empty() {
-            envs.push(("SKIP_CLEAN".to_string(), "1".to_string()));
+        let mut envs = self.config.script_env();
+        for (key, value) in &pkg_env {
+            envs.push((key.clone(), value.clone()));
         }
 
-        let Some(pkg_build_script) = self.config.script("pkg-build") else {
-            error!(pkgname = %pkgname, "No pkg-build script defined");
-            bail!("No pkg-build script defined");
-        };
-
-        // Format ScanIndex as pbulk-index output for stdin
-        let stdin_data = format_scan_index(&self.pkginfo);
-
-        debug!(pkgname = %pkgname,
-            env_count = envs.len(),
-            "Executing build scripts"
-        );
-        trace!(pkgname = %pkgname,
-            envs = ?envs,
-            stdin = %stdin_data,
-            "Build environment variables"
-        );
+        let patterns = self.config.save_wrkdir_patterns();
 
         // Run pre-build script if defined (always runs)
         if let Some(pre_build) = self.config.script("pre-build") {
@@ -478,119 +1141,43 @@ impl PackageBuild {
             }
         }
 
-        // Run pkg-build with status and output channels
-        let (mut status_reader, status_writer) =
-            status::channel().context("Failed to create status channel")?;
-        let status_fd = status_writer.fd();
-
-        let (mut output_reader, output_writer) = status::output_channel()
-            .context("Failed to create output channel")?;
-        let output_fd = output_writer.fd();
-
-        // Pass the output fd to the script
-        envs.push(("bob_output_fd".to_string(), output_fd.to_string()));
-
-        let mut child = self.sandbox.execute(
+        // Run the build using PkgBuilder
+        let builder = PkgBuilder::new(
+            &self.config,
+            &self.sandbox,
             self.id,
-            pkg_build_script,
+            &self.pkginfo,
             envs.clone(),
-            Some(&stdin_data),
-            Some(status_fd),
-        )?;
+            Some(status_tx.clone()),
+        );
 
-        // Close write ends in parent so we get EOF when child exits
-        status_writer.close();
-        output_writer.close();
-
-        // Track if we received a "skipped" message
-        let mut was_skipped = false;
-
-        // Poll status/output channels and child process
-        loop {
-            // Read any available status messages
-            for msg in status_reader.read_all() {
-                match msg {
-                    StatusMessage::Stage(stage) => {
-                        let _ = status_tx.send(ChannelCommand::StageUpdate(
-                            self.id,
-                            Some(stage),
-                        ));
-                    }
-                    StatusMessage::Skipped => {
-                        was_skipped = true;
-                    }
-                }
-            }
-
-            // Read any available output lines
-            let output_lines = output_reader.read_all_lines();
-            if !output_lines.is_empty() {
-                let _ = status_tx
-                    .send(ChannelCommand::OutputLines(self.id, output_lines));
-            }
-
-            // Check if child has exited
-            match child.try_wait() {
-                Ok(Some(_status)) => break,
-                Ok(None) => {
-                    // Still running, sleep briefly
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(e) => {
-                    return Err(e).context("Failed to wait for pkg-build");
-                }
-            }
-        }
-
-        // Read any remaining output after child exits
-        let remaining = output_reader.read_all_lines();
-        if !remaining.is_empty() {
-            let _ =
-                status_tx.send(ChannelCommand::OutputLines(self.id, remaining));
-        }
+        let mut callback = ChannelCallback::new(self.id, status_tx);
+        let result = builder.build(&mut callback);
 
         // Clear stage display
         let _ = status_tx.send(ChannelCommand::StageUpdate(self.id, None));
 
-        // Get final exit status
-        let status =
-            child.wait().context("Failed to get pkg-build exit status")?;
-
-        let result = if was_skipped {
-            info!(pkgname = %pkgname,
-                "pkg-build skipped (up-to-date)"
-            );
-            PackageBuildResult::Skipped
-        } else {
-            match status.code() {
-                Some(0) => {
-                    info!(pkgname = %pkgname,
-                        "pkg-build completed successfully"
+        let result = match result {
+            Ok(PkgBuildResult::Success) => {
+                info!(pkgname = %pkgname, "pkg-build completed successfully");
+                PackageBuildResult::Success
+            }
+            Ok(PkgBuildResult::Skipped) => {
+                info!(pkgname = %pkgname, "pkg-build skipped (up-to-date)");
+                PackageBuildResult::Skipped
+            }
+            Ok(PkgBuildResult::Failed) | Err(_) => {
+                error!(pkgname = %pkgname, "pkg-build failed");
+                // Save wrkdir files matching configured patterns, then clean up
+                if !patterns.is_empty() {
+                    self.save_wrkdir_files(
+                        pkgname, pkgpath, logdir, patterns, &pkg_env,
                     );
-                    PackageBuildResult::Success
+                    self.run_clean(pkgpath, &envs);
+                } else {
+                    self.run_clean(pkgpath, &envs);
                 }
-                Some(code) => {
-                    error!(pkgname = %pkgname,
-                        exit_code = code,
-                        "pkg-build failed"
-                    );
-
-                    // Save wrkdir files matching configured patterns, then clean up
-                    if !patterns.is_empty() {
-                        self.save_wrkdir_files(
-                            pkgname, pkgpath, logdir, patterns, &pkg_env,
-                        );
-                        self.run_clean(pkgpath);
-                    }
-                    PackageBuildResult::Failed
-                }
-                None => {
-                    // Process was terminated by signal (e.g., Ctrl+C)
-                    warn!(pkgname = %pkgname,
-                        "pkg-build terminated by signal"
-                    );
-                    PackageBuildResult::Failed
-                }
+                PackageBuildResult::Failed
             }
         };
 
@@ -701,25 +1288,29 @@ impl PackageBuild {
     }
 
     /// Run bmake clean for a package.
-    fn run_clean(&self, pkgpath: &PkgPath) {
+    fn run_clean(&self, pkgpath: &PkgPath, envs: &[(String, String)]) {
         let pkgdir = self.config.pkgsrc().join(pkgpath.as_path());
 
         let result = if self.sandbox.enabled() {
-            Command::new("/usr/sbin/chroot")
-                .arg(self.sandbox.path(self.id))
+            let mut cmd = Command::new("/usr/sbin/chroot");
+            cmd.arg(self.sandbox.path(self.id))
                 .arg(self.config.make())
                 .arg("-C")
                 .arg(&pkgdir)
-                .arg("clean")
-                .stdout(std::process::Stdio::null())
+                .arg("clean");
+            for (key, value) in envs {
+                cmd.env(key, value);
+            }
+            cmd.stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
         } else {
-            Command::new(self.config.make())
-                .arg("-C")
-                .arg(&pkgdir)
-                .arg("clean")
-                .stdout(std::process::Stdio::null())
+            let mut cmd = Command::new(self.config.make());
+            cmd.arg("-C").arg(&pkgdir).arg("clean");
+            for (key, value) in envs {
+                cmd.env(key, value);
+            }
+            cmd.stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
         };
@@ -885,13 +1476,13 @@ impl BuildJobs {
         self.mark_done(pkgname, BuildOutcome::Success, duration);
     }
 
-    /**
-     * Mark a package as up-to-date and remove it from pending dependencies.
-     */
     fn mark_up_to_date(&mut self, pkgname: &PkgName) {
         self.mark_done(pkgname, BuildOutcome::UpToDate, Duration::ZERO);
     }
 
+    /**
+     * Mark a package as done and remove it from pending dependencies.
+     */
     fn mark_done(
         &mut self,
         pkgname: &PkgName,

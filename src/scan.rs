@@ -40,19 +40,21 @@
 //! # Example
 //!
 //! ```no_run
-//! use bob::{Config, RunContext, Scan};
+//! use bob::{Config, Database, RunContext, Scan};
 //! use pkgsrc::PkgPath;
 //! use std::sync::Arc;
 //! use std::sync::atomic::AtomicBool;
 //!
 //! let config = Config::load(None, false)?;
+//! let db_path = config.logdir().join("bob").join("bob.db");
+//! let db = Database::open(&db_path)?;
 //! let mut scan = Scan::new(&config);
 //!
 //! scan.add(&PkgPath::new("mail/mutt")?);
 //! scan.add(&PkgPath::new("www/curl")?);
 //!
 //! let ctx = RunContext::new(Arc::new(AtomicBool::new(false)));
-//! scan.start(&ctx)?;  // Discover dependencies
+//! scan.start(&ctx, &db)?;  // Discover dependencies
 //! let result = scan.resolve()?;
 //!
 //! println!("Buildable: {}", result.buildable.len());
@@ -197,17 +199,19 @@ pub struct ScanResult {
 /// # Example
 ///
 /// ```no_run
-/// # use bob::{Config, RunContext, Scan};
+/// # use bob::{Config, Database, RunContext, Scan};
 /// # use pkgsrc::PkgPath;
 /// # use std::sync::Arc;
 /// # use std::sync::atomic::AtomicBool;
 /// # fn example() -> anyhow::Result<()> {
 /// let config = Config::load(None, false)?;
+/// let db_path = config.logdir().join("bob").join("bob.db");
+/// let db = Database::open(&db_path)?;
 /// let mut scan = Scan::new(&config);
 ///
 /// scan.add(&PkgPath::new("mail/mutt")?);
 /// let ctx = RunContext::new(Arc::new(AtomicBool::new(false)));
-/// scan.start(&ctx)?;
+/// scan.start(&ctx, &db)?;
 ///
 /// let result = scan.resolve()?;
 /// println!("Found {} buildable packages", result.buildable.len());
