@@ -632,7 +632,6 @@ impl PackageBuild {
             pkg_env,
         );
 
-        // Get WRKDIR
         let wrkdir = match make.wrkdir() {
             Some(w) => w,
             None => {
@@ -641,7 +640,6 @@ impl PackageBuild {
             }
         };
 
-        // Resolve to actual filesystem path
         let wrkdir_path = make.resolve_path(&wrkdir);
 
         if !wrkdir_path.exists() {
@@ -749,7 +747,6 @@ fn walk_and_save(
         if path.is_dir() {
             walk_and_save(base, &path, save_dir, patterns, saved_count)?;
         } else if path.is_file() {
-            // Get relative path from base
             let rel_path = path.strip_prefix(base).unwrap_or(&path);
             let rel_str = rel_path.to_string_lossy();
 

@@ -88,7 +88,6 @@ impl BuildRunner {
 
     /// Run the scan phase, returning the resolved scan result.
     fn run_scan(&self, scan: &mut Scan) -> Result<bob::scan::ScanResult> {
-        // Load cached scans
         let cached = self.db.get_all_scan()?;
         if !cached.is_empty() {
             let loaded = scan.load_cached(cached);
@@ -99,7 +98,6 @@ impl BuildRunner {
 
         let interrupted = scan.start(&self.ctx)?;
 
-        // Store scan results
         for (pkgpath, indexes) in scan.completed() {
             if !indexes.is_empty() {
                 self.db.store_scan_pkgpath(&pkgpath.to_string(), indexes)?;
@@ -143,7 +141,6 @@ impl BuildRunner {
 
         let mut build = Build::new(&self.config, scan_result.buildable.clone());
 
-        // Load cached build results
         let cached_build = self.db.get_all_build()?;
         if !cached_build.is_empty() {
             build.load_cached(cached_build);
@@ -151,7 +148,6 @@ impl BuildRunner {
 
         let mut summary = build.start(&self.ctx)?;
 
-        // Store build results
         for result in &summary.results {
             self.db.store_build_pkgname(result.pkgname.pkgname(), result)?;
         }
@@ -416,7 +412,6 @@ fn scan_logdir_for_report(logdir: &Path) -> Result<build::BuildSummary> {
         let entry = entry?;
         let path = entry.path();
 
-        // Skip non-directories (report.html, etc.)
         if !path.is_dir() {
             continue;
         }

@@ -29,7 +29,6 @@ impl Sandbox {
     ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
         let cmd = "/bin/mount";
-        // Build mount options: start with "bind", add any user-specified opts
         let mut mount_opts = vec!["bind"];
         mount_opts.extend(opts.iter().copied());
         let opts_str = mount_opts.join(",");
@@ -72,7 +71,6 @@ impl Sandbox {
     ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
         let cmd = "/bin/mount";
-        // Build mount options: start with "bind", add any user-specified opts
         let mut mount_opts = vec!["bind"];
         mount_opts.extend(opts.iter().copied());
         let opts_str = mount_opts.join(",");
