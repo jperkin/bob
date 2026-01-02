@@ -171,14 +171,7 @@ impl BuildRunner {
 
         let mut summary = build.start(&self.ctx)?;
 
-        // Store build results
-        for result in &summary.results {
-            self.db.store_build_pkgname(result.pkgname.pkgname(), result)?;
-        }
-
-        self.flush_stats();
-
-        // Check if we were interrupted
+        // Check if we were interrupted - don't store results for interrupted builds
         if self.ctx.shutdown.load(Ordering::SeqCst) {
             let sandbox = Sandbox::new(&self.config);
             if sandbox.enabled() {
@@ -186,6 +179,13 @@ impl BuildRunner {
             }
             std::process::exit(EXIT_INTERRUPTED);
         }
+
+        // Store build results (only for non-interrupted builds)
+        for result in &summary.results {
+            self.db.store_build_pkgname(result.pkgname.pkgname(), result)?;
+        }
+
+        self.flush_stats();
 
         // Add pre-skipped packages from scan to summary
         for pkg in scan_result.skipped {

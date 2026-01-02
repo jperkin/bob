@@ -1761,7 +1761,7 @@ impl Build {
          */
         let mut done: HashSet<PkgName> = HashSet::new();
         let mut failed: HashSet<PkgName> = HashSet::new();
-        let mut results: Vec<BuildResult> = Vec::new();
+        let results: Vec<BuildResult> = Vec::new();
         let mut cached_count = 0usize;
 
         for (pkgname, result) in &self.cached {
@@ -1774,7 +1774,7 @@ impl Build {
                     for deps in incoming.values_mut() {
                         deps.remove(pkgname);
                     }
-                    results.push(result.clone());
+                    // Don't add to results - already in database
                     cached_count += 1;
                 }
                 BuildOutcome::Failed(_)
@@ -1784,7 +1784,7 @@ impl Build {
                     // Failed package - remove from incoming, add to failed
                     incoming.remove(pkgname);
                     failed.insert(pkgname.clone());
-                    results.push(result.clone());
+                    // Don't add to results - already in database
                     cached_count += 1;
                 }
             }
