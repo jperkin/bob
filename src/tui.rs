@@ -672,10 +672,7 @@ impl MultiProgress {
         // Extract active flags and elapsed times for layout calculation
         let is_active: Vec<bool> = (0..num_workers)
             .map(|i| {
-                self.state
-                    .workers
-                    .get(i)
-                    .is_some_and(|w| w.package.is_some())
+                self.state.workers.get(i).is_some_and(|w| w.package.is_some())
             })
             .collect();
         let elapsed_secs: Vec<u64> = (0..num_workers)
@@ -716,16 +713,19 @@ impl MultiProgress {
         // Calculate layout first to know how many lines each panel needs
         let size = self.terminal.size()?;
         let area = Rect::new(0, 0, size.width, size.height);
-        let panels =
-            calculate_panel_layout(area, num_workers, &is_active, &elapsed_secs);
+        let panels = calculate_panel_layout(
+            area,
+            num_workers,
+            &is_active,
+            &elapsed_secs,
+        );
 
         // Collect only the lines needed for each panel (height * 2 for wrapping)
         let panel_lines: Vec<Vec<String>> = panels
             .iter()
             .enumerate()
             .map(|(i, panel_area)| {
-                let inner_height =
-                    panel_area.height.saturating_sub(2) as usize;
+                let inner_height = panel_area.height.saturating_sub(2) as usize;
                 let lines_needed = (inner_height * 2).max(10);
                 self.output_buffers
                     .get(i)
@@ -745,8 +745,11 @@ impl MultiProgress {
                 let inner_width = panel_area.width.saturating_sub(2) as usize;
                 let inner_height = panel_area.height.saturating_sub(2) as usize;
 
-                let visible =
-                    build_visible_lines(&panel_lines[i], inner_width, inner_height);
+                let visible = build_visible_lines(
+                    &panel_lines[i],
+                    inner_width,
+                    inner_height,
+                );
 
                 let paragraph = Paragraph::new(visible).block(block);
 
