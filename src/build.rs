@@ -431,10 +431,8 @@ impl<'a> PkgBuilder<'a> {
                 }
 
                 if !lines.is_empty() {
-                    let _ = output_tx.send(ChannelCommand::OutputLines(
-                        sandbox_id,
-                        lines,
-                    ));
+                    let _ = output_tx
+                        .send(ChannelCommand::OutputLines(sandbox_id, lines));
                 }
 
                 std::thread::sleep(Duration::from_millis(100));
@@ -523,10 +521,17 @@ impl<'a> PkgBuilder<'a> {
         logfile: &Path,
         extra_envs: &[(&str, &str)],
     ) -> anyhow::Result<ExitStatus> {
+        use std::io::Write;
+
         // Redirect stdout/stderr directly to the log file, like the shell script did.
         // This avoids pipe inheritance issues where grandchild processes can block
         // readers waiting for EOF.
-        let log = OpenOptions::new().create(true).append(true).open(logfile)?;
+        let mut log =
+            OpenOptions::new().create(true).append(true).open(logfile)?;
+
+        // Write command being executed to the log file
+        let _ = writeln!(log, "=> {:?} {:?}", cmd, args);
+        let _ = log.flush();
 
         let status =
             self.spawn_command_to_file(cmd, args, run_as, extra_envs, log)?;
@@ -643,7 +648,9 @@ impl<'a> PkgBuilder<'a> {
         let output = cmd.args(&make_args).output()?;
 
         if !output.status.success() {
-            bail!("Failed to get make variable {}", varname);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            error!(varname, stderr = %stderr, "Failed to get make variable");
+            bail!("Failed to get make variable {}: {}", varname, stderr.trim());
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -1200,7 +1207,7 @@ impl PackageBuild {
         // Clear stage display
         let _ = status_tx.send(ChannelCommand::StageUpdate(self.id, None));
 
-        let result = match result {
+        let result = match &result {
             Ok(PkgBuildResult::Success) => {
                 info!(pkgname = %pkgname, "pkg-build completed successfully");
                 PackageBuildResult::Success
@@ -1209,8 +1216,42 @@ impl PackageBuild {
                 info!(pkgname = %pkgname, "pkg-build skipped (up-to-date)");
                 PackageBuildResult::Skipped
             }
-            Ok(PkgBuildResult::Failed) | Err(_) => {
+            Ok(PkgBuildResult::Failed) => {
                 error!(pkgname = %pkgname, "pkg-build failed");
+                // Show cleanup stage to user
+                let _ = status_tx.send(ChannelCommand::StageUpdate(
+                    self.id,
+                    Some("cleanup".to_string()),
+                ));
+                // Kill any orphaned processes in the sandbox before cleanup.
+                // Failed builds may leave processes running that would block
+                // subsequent commands like bmake show-var or bmake clean.
+                debug!(pkgname = %pkgname, "Calling kill_processes_by_id");
+                let kill_start = Instant::now();
+                self.sandbox.kill_processes_by_id(self.id);
+                debug!(pkgname = %pkgname, elapsed_ms = kill_start.elapsed().as_millis(), "kill_processes_by_id completed");
+                // Save wrkdir files matching configured patterns, then clean up
+                if !patterns.is_empty() {
+                    debug!(pkgname = %pkgname, "Calling save_wrkdir_files");
+                    let save_start = Instant::now();
+                    self.save_wrkdir_files(
+                        pkgname, pkgpath, logdir, patterns, &pkg_env,
+                    );
+                    debug!(pkgname = %pkgname, elapsed_ms = save_start.elapsed().as_millis(), "save_wrkdir_files completed");
+                    debug!(pkgname = %pkgname, "Calling run_clean");
+                    let clean_start = Instant::now();
+                    self.run_clean(pkgpath, &envs);
+                    debug!(pkgname = %pkgname, elapsed_ms = clean_start.elapsed().as_millis(), "run_clean completed");
+                } else {
+                    debug!(pkgname = %pkgname, "Calling run_clean (no patterns)");
+                    let clean_start = Instant::now();
+                    self.run_clean(pkgpath, &envs);
+                    debug!(pkgname = %pkgname, elapsed_ms = clean_start.elapsed().as_millis(), "run_clean completed");
+                }
+                PackageBuildResult::Failed
+            }
+            Err(e) => {
+                error!(pkgname = %pkgname, error = %e, "pkg-build error");
                 // Show cleanup stage to user
                 let _ = status_tx.send(ChannelCommand::StageUpdate(
                     self.id,
@@ -1822,7 +1863,8 @@ impl Build {
          */
         debug!("Populating BuildJobs from scanpkgs");
         let mut incoming: HashMap<PkgName, HashSet<PkgName>> = HashMap::new();
-        let mut reverse_deps: HashMap<PkgName, HashSet<PkgName>> = HashMap::new();
+        let mut reverse_deps: HashMap<PkgName, HashSet<PkgName>> =
+            HashMap::new();
         for (pkgname, index) in &self.scanpkgs {
             let mut deps: HashSet<PkgName> = HashSet::new();
             for dep in &index.depends {

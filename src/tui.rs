@@ -373,7 +373,10 @@ impl MultiProgress {
         self.view_mode
     }
 
-    pub fn output_buffer_mut(&mut self, id: usize) -> Option<&mut OutputBuffer> {
+    pub fn output_buffer_mut(
+        &mut self,
+        id: usize,
+    ) -> Option<&mut OutputBuffer> {
         self.output_buffers.get_mut(id)
     }
 
