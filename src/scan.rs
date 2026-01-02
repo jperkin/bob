@@ -1113,7 +1113,9 @@ impl Scan {
             for n in cycle.iter().rev() {
                 err.push_str(&format!("\t{}\n", n));
             }
-            err.push_str(&format!("\t{}", cycle.last().unwrap()));
+            if let Some(last) = cycle.last() {
+                err.push_str(&format!("\t{}", last));
+            }
             error!(cycle = ?cycle, "Circular dependency detected");
             err
         });

@@ -1054,17 +1054,13 @@ impl BuildJobs {
             .iter()
             .filter(|(_, v)| v.is_empty())
             .map(|(k, _)| {
-                (
-                    k.clone(),
-                    self.scanpkgs
-                        .get(k)
-                        .unwrap()
-                        .pbulk_weight
-                        .clone()
-                        .unwrap_or("100".to_string())
-                        .parse()
-                        .unwrap_or(100),
-                )
+                let weight = self
+                    .scanpkgs
+                    .get(k)
+                    .and_then(|pkg| pkg.pbulk_weight.as_ref())
+                    .and_then(|w| w.parse().ok())
+                    .unwrap_or(100);
+                (k.clone(), weight)
             })
             .collect();
 
@@ -1418,10 +1414,14 @@ impl Build {
 
                 match command {
                     ChannelCommand::ClientReady(c) => {
-                        let client = clients.get(&c).unwrap();
+                        let Some(client) = clients.get(&c) else {
+                            continue;
+                        };
                         match jobs.get_next_build() {
                             BuildStatus::Available(pkg) => {
-                                let pkginfo = jobs.scanpkgs.get(&pkg).unwrap();
+                                let Some(pkginfo) = jobs.scanpkgs.get(&pkg) else {
+                                    continue;
+                                };
                                 jobs.incoming.remove(&pkg);
                                 jobs.running.insert(pkg.clone());
 

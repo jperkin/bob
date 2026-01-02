@@ -139,9 +139,18 @@ impl Sandbox {
 
     /**
      * Return full path to a sandbox by id.
+     *
+     * # Panics
+     *
+     * Panics if sandboxes are not configured. Callers should check
+     * [`enabled()`](Self::enabled) first.
      */
     pub fn path(&self, id: usize) -> PathBuf {
-        let sandbox = &self.config.sandboxes().as_ref().unwrap();
+        let sandbox = self
+            .config
+            .sandboxes()
+            .as_ref()
+            .expect("path() called but sandboxes not configured");
         let mut p = PathBuf::from(&sandbox.basedir);
         p.push(id.to_string());
         p

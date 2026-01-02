@@ -67,14 +67,18 @@ impl Init {
 
         let confstr = confstr.replace("@INITDIR@", initdir_str);
         let conffile = initdir.join("config.lua");
-        fs::create_dir_all(conffile.parent().unwrap())?;
+        if let Some(parent) = conffile.parent() {
+            fs::create_dir_all(parent)?;
+        }
         fs::write(&conffile, confstr)?;
         println!("\t{}", conffile.display());
 
         for script in Scripts::iter() {
             if let Some(content) = Scripts::get(&script) {
                 let fp = initdir.join("scripts").join(&*script);
-                fs::create_dir_all(fp.parent().unwrap())?;
+                if let Some(parent) = fp.parent() {
+                    fs::create_dir_all(parent)?;
+                }
                 fs::write(&fp, content.data)?;
                 #[cfg(unix)]
                 {
