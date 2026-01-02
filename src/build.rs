@@ -75,12 +75,10 @@ use indexmap::IndexMap;
 use pkgsrc::{PkgName, PkgPath};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc, mpsc::Sender};
-use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, trace, warn};
 
@@ -144,7 +142,6 @@ struct PkgBuilder<'a> {
     build_user: Option<String>,
     pkg_up_to_date: Option<PathBuf>,
     envs: Vec<(String, String)>,
-    output_tx: Option<Sender<ChannelCommand>>,
 }
 
 impl<'a> PkgBuilder<'a> {
@@ -154,7 +151,6 @@ impl<'a> PkgBuilder<'a> {
         sandbox_id: usize,
         pkginfo: &'a ResolvedIndex,
         envs: Vec<(String, String)>,
-        output_tx: Option<Sender<ChannelCommand>>,
     ) -> Self {
         let logdir = config.logdir().join(pkginfo.pkgname.pkgname());
         let build_user = config.build_user().map(|s| s.to_string());
@@ -168,7 +164,6 @@ impl<'a> PkgBuilder<'a> {
             build_user,
             pkg_up_to_date,
             envs,
-            output_tx,
         }
     }
 
@@ -441,62 +436,30 @@ impl<'a> PkgBuilder<'a> {
         logfile: &Path,
         extra_envs: &[(&str, &str)],
     ) -> anyhow::Result<ExitStatus> {
+        // Redirect stdout/stderr directly to the log file, like the shell script did.
+        // This avoids pipe inheritance issues where grandchild processes can block
+        // readers waiting for EOF.
         let log = OpenOptions::new().create(true).append(true).open(logfile)?;
-        let log = Arc::new(Mutex::new(log));
 
-        let mut child = self.spawn_command(cmd, args, run_as, extra_envs)?;
-
-        let output_tx = self.output_tx.clone();
-        let sandbox_id = self.sandbox_id;
-
-        // Channel to track reader thread completion
-        let (done_tx, done_rx) = mpsc::channel::<()>();
-        let mut reader_count = 0;
-
-        if let Some(stdout) = child.stdout.take() {
-            let done = done_tx.clone();
-            Self::spawn_log_reader(stdout, log.clone(), output_tx.clone(), sandbox_id, done);
-            reader_count += 1;
-        }
-
-        if let Some(stderr) = child.stderr.take() {
-            let done = done_tx.clone();
-            Self::spawn_log_reader(stderr, log.clone(), output_tx.clone(), sandbox_id, done);
-            reader_count += 1;
-        }
-
-        drop(done_tx); // Drop our sender so channel closes when all readers finish
-
-        let status = child.wait()?;
-
-        // Wait for reader threads to finish draining output, with timeout.
-        // Readers may block indefinitely if grandchild processes inherited the pipes,
-        // so we use a timeout to avoid hanging. The threads will eventually finish
-        // when those processes exit, and resources are Arc'd so this is safe.
-        // 2 seconds is generous for draining pipe buffers (~64KB) but avoids
-        // long hangs when grandchildren hold pipes open.
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut finished = 0;
-        while finished < reader_count && Instant::now() < deadline {
-            match done_rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(()) => finished += 1,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            }
-        }
+        let status =
+            self.spawn_command_to_file(cmd, args, run_as, extra_envs, log)?;
 
         trace!(cmd = ?cmd, status = ?status, "Command completed");
         Ok(status)
     }
 
-    /// Spawn a command, optionally as unprivileged user.
-    fn spawn_command(
+    /// Spawn a command with stdout/stderr redirected to a file.
+    fn spawn_command_to_file(
         &self,
         cmd: &Path,
         args: &[&str],
         run_as: RunAs,
         extra_envs: &[(&str, &str)],
-    ) -> anyhow::Result<Child> {
+        log: File,
+    ) -> anyhow::Result<ExitStatus> {
+        // Clone file handle for stderr (stdout and stderr both go to same file)
+        let log_err = log.try_clone()?;
+
         match run_as {
             RunAs::Root => {
                 if self.sandbox.enabled() {
@@ -510,20 +473,20 @@ impl<'a> PkgBuilder<'a> {
                     command.args(&full_args);
                     self.apply_envs(&mut command, extra_envs);
                     command
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped())
-                        .spawn()
-                        .context("Failed to spawn chroot command")
+                        .stdout(Stdio::from(log))
+                        .stderr(Stdio::from(log_err))
+                        .status()
+                        .context("Failed to run chroot command")
                 } else {
                     let mut command = Command::new(cmd);
                     command.args(args);
                     self.apply_envs(&mut command, extra_envs);
                     command
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped())
-                        .spawn()
+                        .stdout(Stdio::from(log))
+                        .stderr(Stdio::from(log_err))
+                        .status()
                         .with_context(|| {
-                            format!("Failed to spawn {}", cmd.display())
+                            format!("Failed to run {}", cmd.display())
                         })
                 }
             }
@@ -548,19 +511,19 @@ impl<'a> PkgBuilder<'a> {
                         .arg(&inner_cmd);
                     self.apply_envs(&mut command, extra_envs);
                     command
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped())
-                        .spawn()
-                        .context("Failed to spawn chroot su command")
+                        .stdout(Stdio::from(log))
+                        .stderr(Stdio::from(log_err))
+                        .status()
+                        .context("Failed to run chroot su command")
                 } else {
                     let mut command = Command::new("su");
                     command.arg(user).arg("-c").arg(&inner_cmd);
                     self.apply_envs(&mut command, extra_envs);
                     command
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped())
-                        .spawn()
-                        .context("Failed to spawn su command")
+                        .stdout(Stdio::from(log))
+                        .stderr(Stdio::from(log_err))
+                        .status()
+                        .context("Failed to run su command")
                 }
             }
         }
@@ -735,30 +698,6 @@ impl<'a> PkgBuilder<'a> {
         for (key, value) in extra_envs {
             cmd.env(key, value);
         }
-    }
-
-    fn spawn_log_reader<R: Read + Send + 'static>(
-        reader: R,
-        log: Arc<Mutex<File>>,
-        output_tx: Option<Sender<ChannelCommand>>,
-        sandbox_id: usize,
-        done: Sender<()>,
-    ) {
-        thread::spawn(move || {
-            let reader = BufReader::new(reader);
-            for line in reader.lines().map_while(Result::ok) {
-                if let Ok(mut log) = log.lock() {
-                    let _ = writeln!(log, "{}", line);
-                }
-                if let Some(tx) = &output_tx {
-                    let _ = tx.send(ChannelCommand::OutputLines(
-                        sandbox_id,
-                        vec![line],
-                    ));
-                }
-            }
-            let _ = done.send(());
-        });
     }
 
     fn shell_escape(value: &str) -> String {
@@ -1041,6 +980,11 @@ impl<'a> MakeQuery<'a> {
             cmd.env(key, value);
         }
 
+        // Redirect stderr to null - we only need stdout for the value.
+        // Use piped stdout so we can read it, but don't let grandchildren
+        // inherit pipes that could cause hangs.
+        cmd.stderr(Stdio::null());
+
         let output = cmd.output().ok()?;
 
         if !output.status.success() {
@@ -1141,36 +1085,18 @@ impl PackageBuild {
         // Run pre-build script if defined (always runs)
         if let Some(pre_build) = self.config.script("pre-build") {
             debug!(pkgname = %pkgname, "Running pre-build script");
-            if let Ok(mut child) = self.sandbox.execute(
+            let child = self.sandbox.execute(
                 self.id,
                 pre_build,
                 envs.clone(),
                 None,
                 None,
-            ) {
-                // Wait with timeout - pre-build shouldn't block indefinitely
-                let deadline = Instant::now() + Duration::from_secs(30);
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(status)) => {
-                            if !status.success() {
-                                warn!(pkgname = %pkgname, exit_code = ?status.code(), "pre-build script failed");
-                            }
-                            break;
-                        }
-                        Ok(None) => {
-                            if Instant::now() >= deadline {
-                                warn!(pkgname = %pkgname, "pre-build script timed out, continuing");
-                                break;
-                            }
-                            thread::sleep(Duration::from_millis(100));
-                        }
-                        Err(e) => {
-                            warn!(pkgname = %pkgname, error = %e, "Failed to wait for pre-build");
-                            break;
-                        }
-                    }
-                }
+            )?;
+            let output = child
+                .wait_with_output()
+                .context("Failed to wait for pre-build")?;
+            if !output.status.success() {
+                warn!(pkgname = %pkgname, exit_code = ?output.status.code(), "pre-build script failed");
             }
         }
 
@@ -1181,7 +1107,6 @@ impl PackageBuild {
             self.id,
             &self.pkginfo,
             envs.clone(),
-            Some(status_tx.clone()),
         );
 
         let mut callback = ChannelCallback::new(self.id, status_tx);
@@ -1201,6 +1126,10 @@ impl PackageBuild {
             }
             Ok(PkgBuildResult::Failed) | Err(_) => {
                 error!(pkgname = %pkgname, "pkg-build failed");
+                // Kill any orphaned processes in the sandbox before cleanup.
+                // Failed builds may leave processes running that would block
+                // subsequent commands like bmake show-var or bmake clean.
+                self.sandbox.kill_processes_by_id(self.id);
                 // Save wrkdir files matching configured patterns, then clean up
                 if !patterns.is_empty() {
                     self.save_wrkdir_files(
@@ -1216,32 +1145,24 @@ impl PackageBuild {
 
         // Run post-build script if defined (always runs regardless of pkg-build result)
         if let Some(post_build) = self.config.script("post-build") {
-            debug!(pkgname = %pkgname, "Running post-build script");
-            if let Ok(mut child) =
-                self.sandbox.execute(self.id, post_build, envs, None, None)
-            {
-                // Wait with timeout - post-build shouldn't block the result indefinitely
-                let deadline = Instant::now() + Duration::from_secs(30);
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(status)) => {
-                            if !status.success() {
-                                warn!(pkgname = %pkgname, exit_code = ?status.code(), "post-build script failed");
+            debug!(pkgname = %pkgname, script = %post_build.display(), "Running post-build script");
+            match self.sandbox.execute(self.id, post_build, envs, None, None) {
+                Ok(child) => {
+                    debug!(pkgname = %pkgname, pid = ?child.id(), "post-build spawned, waiting");
+                    match child.wait_with_output() {
+                        Ok(output) => {
+                            debug!(pkgname = %pkgname, exit_code = ?output.status.code(), "post-build completed");
+                            if !output.status.success() {
+                                warn!(pkgname = %pkgname, exit_code = ?output.status.code(), "post-build script failed");
                             }
-                            break;
-                        }
-                        Ok(None) => {
-                            if Instant::now() >= deadline {
-                                warn!(pkgname = %pkgname, "post-build script timed out, continuing");
-                                break;
-                            }
-                            thread::sleep(Duration::from_millis(100));
                         }
                         Err(e) => {
                             warn!(pkgname = %pkgname, error = %e, "Failed to wait for post-build");
-                            break;
                         }
                     }
+                }
+                Err(e) => {
+                    warn!(pkgname = %pkgname, error = %e, "Failed to spawn post-build script");
                 }
             }
         }
@@ -1475,10 +1396,6 @@ enum ChannelCommand {
      * Client reporting a stage update for a build.
      */
     StageUpdate(usize, Option<String>),
-    /**
-     * Client reporting output lines from a build.
-     */
-    OutputLines(usize, Vec<String>),
 }
 
 /**
@@ -2285,15 +2202,6 @@ impl Build {
                             p.state_mut()
                                 .set_worker_stage(tid, stage.as_deref());
                             let _ = p.render_throttled();
-                        }
-                    }
-                    ChannelCommand::OutputLines(tid, lines) => {
-                        if let Ok(mut p) = progress_clone.lock() {
-                            if let Some(buf) = p.output_buffer_mut(tid) {
-                                for line in lines {
-                                    buf.push(line);
-                                }
-                            }
                         }
                     }
                     _ => {}

@@ -35,42 +35,15 @@ use std::io::{self, Stdout, stdout};
 use std::time::{Duration, Instant};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// Strip ANSI escape sequences and sanitize control characters.
-fn sanitize_output(s: &str) -> String {
-    let stripped = strip_ansi_escapes::strip(s);
-    let s = String::from_utf8_lossy(&stripped);
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '\t' => out.push_str("        "),
-            '\x00'..='\x1f' | '\x7f' => {}
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
 /// Ring buffer for build output with fixed line capacity.
 #[derive(Clone, Debug)]
 pub struct OutputBuffer {
     lines: VecDeque<String>,
-    capacity: usize,
 }
 
 impl OutputBuffer {
     pub fn new(capacity: usize) -> Self {
-        Self { lines: VecDeque::with_capacity(capacity), capacity }
-    }
-
-    pub fn push(&mut self, line: String) {
-        // Strip ANSI escapes and sanitize control characters before storing.
-        let clean_line = sanitize_output(&line);
-        // If carriage returns are present, keep only the final segment.
-        let clean_line = clean_line.rsplit('\r').next().unwrap_or("");
-        if self.lines.len() >= self.capacity {
-            self.lines.pop_front();
-        }
-        self.lines.push_back(clean_line.to_string());
+        Self { lines: VecDeque::with_capacity(capacity) }
     }
 
     pub fn last_n(&self, n: usize) -> impl Iterator<Item = &String> {
@@ -371,13 +344,6 @@ impl MultiProgress {
     #[allow(dead_code)]
     pub fn view_mode(&self) -> ViewMode {
         self.view_mode
-    }
-
-    pub fn output_buffer_mut(
-        &mut self,
-        id: usize,
-    ) -> Option<&mut OutputBuffer> {
-        self.output_buffers.get_mut(id)
     }
 
     pub fn clear_output_buffer(&mut self, id: usize) {
