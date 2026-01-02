@@ -1431,6 +1431,9 @@ enum BuildStatus {
 struct BuildJobs {
     scanpkgs: IndexMap<PkgName, ResolvedIndex>,
     incoming: HashMap<PkgName, HashSet<PkgName>>,
+    /// Reverse dependency map: package -> packages that depend on it.
+    /// Precomputed for O(1) lookup in mark_failure instead of O(n) scan.
+    reverse_deps: HashMap<PkgName, HashSet<PkgName>>,
     running: HashSet<PkgName>,
     done: HashSet<PkgName>,
     failed: HashSet<PkgName>,
@@ -1502,6 +1505,7 @@ impl BuildJobs {
         /*
          * Starting with the original failed package, recursively loop through
          * adding any packages that depend on it, adding them to broken.
+         * Uses precomputed reverse_deps for O(1) lookup instead of O(n) scan.
          */
         loop {
             /* No packages left to check, we're done. */
@@ -1512,8 +1516,9 @@ impl BuildJobs {
             if broken.contains(&badpkg) {
                 continue;
             }
-            for (pkg, deps) in &self.incoming {
-                if deps.contains(&badpkg) {
+            /* Add all packages that depend on this one. */
+            if let Some(dependents) = self.reverse_deps.get(&badpkg) {
+                for pkg in dependents {
                     to_check.push(pkg.clone());
                 }
             }
@@ -1720,10 +1725,16 @@ impl Build {
          */
         debug!("Populating BuildJobs from scanpkgs");
         let mut incoming: HashMap<PkgName, HashSet<PkgName>> = HashMap::new();
+        let mut reverse_deps: HashMap<PkgName, HashSet<PkgName>> = HashMap::new();
         for (pkgname, index) in &self.scanpkgs {
             let mut deps: HashSet<PkgName> = HashSet::new();
             for dep in &index.depends {
                 deps.insert(dep.clone());
+                // Build reverse dependency map: dep -> packages that depend on it
+                reverse_deps
+                    .entry(dep.clone())
+                    .or_default()
+                    .insert(pkgname.clone());
             }
             trace!(pkgname = %pkgname.pkgname(),
                 deps_count = deps.len(),
@@ -1791,6 +1802,7 @@ impl Build {
         let jobs = BuildJobs {
             scanpkgs: self.scanpkgs.clone(),
             incoming,
+            reverse_deps,
             running,
             done,
             failed,
