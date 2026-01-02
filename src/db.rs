@@ -111,10 +111,11 @@ impl Database {
             .context("Failed to count scan")
     }
 
-    /// Clear all cached scan data and the full scan complete marker.
+    /// Clear all cached scan data, resolve cache, and the full scan complete marker.
     pub fn clear_scan(&self) -> Result<()> {
         self.conn.execute("DELETE FROM scan", [])?;
         self.clear_full_scan_complete()?;
+        self.clear_resolve()?;
         Ok(())
     }
 
@@ -253,6 +254,46 @@ impl Database {
             "DELETE FROM metadata WHERE key = 'full_scan_complete'",
             [],
         )?;
+        Ok(())
+    }
+
+    /// Store resolved scan result.
+    pub fn store_resolve(
+        &self,
+        result: &crate::scan::ScanResult,
+    ) -> Result<()> {
+        let json = serde_json::to_string(result)?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('resolve_result', ?1)",
+            params![json],
+        )?;
+        debug!("Stored resolve result");
+        Ok(())
+    }
+
+    /// Load cached resolve result.
+    pub fn get_resolve(&self) -> Result<Option<crate::scan::ScanResult>> {
+        let result = self.conn.query_row(
+            "SELECT value FROM metadata WHERE key = 'resolve_result'",
+            [],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(json) => {
+                let scan_result: crate::scan::ScanResult =
+                    serde_json::from_str(&json)
+                        .context("Failed to deserialize resolve data")?;
+                Ok(Some(scan_result))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Clear cached resolve result.
+    pub fn clear_resolve(&self) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM metadata WHERE key = 'resolve_result'", [])?;
         Ok(())
     }
 }

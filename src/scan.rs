@@ -77,7 +77,7 @@ use tracing::{debug, error, info, trace};
 /// Reason why a package was excluded from the build.
 ///
 /// Packages with skip or fail reasons set in pkgsrc are not built.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum SkipReason {
     /// Package has `PKG_SKIP_REASON` set.
     ///
@@ -92,7 +92,7 @@ pub enum SkipReason {
 }
 
 /// Information about a package that was skipped during scanning.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SkippedPackage {
     /// Package name with version.
     pub pkgname: PkgName,
@@ -105,7 +105,7 @@ pub struct SkippedPackage {
 }
 
 /// Information about a package that failed to scan.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ScanFailure {
     /// Package path in pkgsrc (e.g., `games/plib`).
     pub pkgpath: PkgPath,
@@ -166,7 +166,7 @@ impl std::fmt::Display for ResolvedIndex {
 ///
 /// Returned by [`Scan::resolve`], contains the packages that can be built
 /// and those that were skipped.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ScanResult {
     /// Packages that can be built, indexed by package name.
     ///
@@ -531,6 +531,9 @@ impl Scan {
 
             return Ok(false);
         }
+
+        // Clear cached resolve since we're scanning new packages
+        db.clear_resolve()?;
 
         println!("Scanning packages...");
 

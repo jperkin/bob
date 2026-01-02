@@ -111,7 +111,8 @@ impl BuildRunner {
 
         // Handle scan errors
         let scan_errors: Vec<_> = scan.scan_errors().collect();
-        if !scan_errors.is_empty() {
+        let has_scan_errors = !scan_errors.is_empty();
+        if has_scan_errors {
             eprintln!();
             for err in &scan_errors {
                 eprintln!("{}", err);
@@ -128,9 +129,23 @@ impl BuildRunner {
             // Mark full tree scan as complete if no errors
             self.db.set_full_scan_complete()?;
         }
+        drop(scan_errors);
+
+        // Check for cached resolve result
+        if let Some(cached_resolve) = self.db.get_resolve()? {
+            println!("Loaded cached resolve result");
+            return Ok(cached_resolve);
+        }
 
         println!("Resolving dependencies...");
-        scan.resolve()
+        let result = scan.resolve()?;
+
+        // Cache resolve result if no scan errors
+        if !has_scan_errors {
+            self.db.store_resolve(&result)?;
+        }
+
+        Ok(result)
     }
 
     /// Run the build phase, returning the build summary.
