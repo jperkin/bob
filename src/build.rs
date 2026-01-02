@@ -502,7 +502,8 @@ impl<'a> PkgBuilder<'a> {
                     batch.push(line);
 
                     // Send batch if interval elapsed or batch is large
-                    if last_send.elapsed() >= send_interval || batch.len() >= 50 {
+                    if last_send.elapsed() >= send_interval || batch.len() >= 50
+                    {
                         let _ = output_tx.send(ChannelCommand::OutputLines(
                             sandbox_id,
                             std::mem::take(&mut batch),
@@ -513,10 +514,8 @@ impl<'a> PkgBuilder<'a> {
 
                 // Send remaining lines
                 if !batch.is_empty() {
-                    let _ = output_tx.send(ChannelCommand::OutputLines(
-                        sandbox_id,
-                        batch,
-                    ));
+                    let _ = output_tx
+                        .send(ChannelCommand::OutputLines(sandbox_id, batch));
                 }
             });
 
