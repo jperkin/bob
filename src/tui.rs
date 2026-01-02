@@ -300,14 +300,25 @@ fn calculate_panel_layout(
         };
 
         // Sort active panel indices by elapsed time (descending) to determine
-        // which panels get extra lines
+        // which panels get extra lines. Use worker ID as tiebreaker when times
+        // are within 10 seconds to avoid flickering when builds start together.
         let mut active_indices: Vec<usize> = is_active
             .iter()
             .enumerate()
             .filter(|&(_, &a)| a)
             .map(|(i, _)| i)
             .collect();
-        active_indices.sort_by(|&a, &b| elapsed_secs[b].cmp(&elapsed_secs[a]));
+        active_indices.sort_by(|&a, &b| {
+            let time_a = elapsed_secs[a];
+            let time_b = elapsed_secs[b];
+            // If times differ by more than 10 seconds, sort by time
+            if time_a.abs_diff(time_b) > 10 {
+                time_b.cmp(&time_a)
+            } else {
+                // Otherwise use worker ID for stability
+                a.cmp(&b)
+            }
+        });
 
         // Mark which panels get an extra line
         let mut extra_line = vec![false; num_panels];
