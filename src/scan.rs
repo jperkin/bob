@@ -506,8 +506,8 @@ impl Scan {
             }
         }
 
-        // For full tree scans, discover all packages
-        if self.full_tree && self.incoming.is_empty() {
+        // For full tree scans, always discover all packages
+        if self.full_tree {
             self.discover_packages()?;
             self.incoming.retain(|p| !self.done.contains_key(p));
         }
