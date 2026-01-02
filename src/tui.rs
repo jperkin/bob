@@ -296,12 +296,7 @@ fn calculate_panel_layout(
             } else {
                 idle_height
             };
-            rects.push(Rect {
-                x: area.x,
-                y,
-                width: area.width,
-                height: h,
-            });
+            rects.push(Rect { x: area.x, y, width: area.width, height: h });
             y += h;
         }
 
@@ -631,8 +626,11 @@ impl MultiProgress {
         let num_workers = self.num_workers;
         let panel_data: Vec<_> = (0..num_workers)
             .map(|i| {
-                let is_active =
-                    self.state.workers.get(i).is_some_and(|w| w.package.is_some());
+                let is_active = self
+                    .state
+                    .workers
+                    .get(i)
+                    .is_some_and(|w| w.package.is_some());
 
                 let title = if let Some(w) = self.state.workers.get(i) {
                     if let Some(pkg) = &w.package {
