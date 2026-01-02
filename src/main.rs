@@ -169,16 +169,15 @@ impl BuildRunner {
             build.load_cached(cached_build);
         }
 
-        let mut summary = build.start(&self.ctx)?;
+        tracing::debug!("Calling build.start()");
+        let build_start_time = std::time::Instant::now();
+        let mut summary = build.start(&self.ctx, &self.db)?;
+        tracing::debug!(
+            elapsed_ms = build_start_time.elapsed().as_millis(),
+            "build.start() returned"
+        );
 
-        // Store build results
-        for result in &summary.results {
-            self.db.store_build_pkgname(result.pkgname.pkgname(), result)?;
-        }
-
-        self.flush_stats();
-
-        // Check if we were interrupted
+        // Check if we were interrupted - results are already saved during build
         if self.ctx.shutdown.load(Ordering::SeqCst) {
             let sandbox = Sandbox::new(&self.config);
             if sandbox.enabled() {
@@ -186,6 +185,25 @@ impl BuildRunner {
             }
             std::process::exit(EXIT_INTERRUPTED);
         }
+
+        // Store any remaining build results (most are saved during build)
+        if !summary.results.is_empty() {
+            print!("Saving {} build results...", summary.results.len());
+            std::io::Write::flush(&mut std::io::stdout())?;
+            tracing::debug!(
+                result_count = summary.results.len(),
+                "Storing build results to database"
+            );
+            let store_start = std::time::Instant::now();
+            self.db.store_build_batch(&summary.results)?;
+            println!(" done ({:.1}s)", store_start.elapsed().as_secs_f32());
+            tracing::debug!(
+                elapsed_ms = store_start.elapsed().as_millis(),
+                "Finished storing build results"
+            );
+        }
+
+        self.flush_stats();
 
         // Add pre-skipped packages from scan to summary
         for pkg in scan_result.skipped {

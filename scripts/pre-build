@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# This script is executed immediately prior to pkg-build, and should perform
+# This script is executed immediately prior to package build and should perform
 # any sandbox setup work necessary for each build.
 #
 # Note that it is also executed once in each sandbox prior to the scan phase

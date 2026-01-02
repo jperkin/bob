@@ -98,7 +98,6 @@
 //! | Script | Required | Description |
 //! |--------|----------|-------------|
 //! | `pre-build` | no | Executed before each package build. Used for per-build sandbox setup (e.g., unpacking bootstrap kit). Receives environment variables listed in [Script Environment](#script-environment). |
-//! | `pkg-build` | yes | Main build script. Receives package metadata on stdin and environment variables. Must handle all build phases. |
 //! | `post-build` | no | Executed after each package build completes (success or failure). |
 //!
 //! ## Script Environment

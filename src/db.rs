@@ -134,6 +134,25 @@ impl Database {
         Ok(())
     }
 
+    /// Store multiple build results in a single transaction.
+    pub fn store_build_batch(&self, results: &[BuildResult]) -> Result<()> {
+        self.conn.execute("BEGIN", [])?;
+        for result in results {
+            let json = serde_json::to_string(result)?;
+            if let Err(e) = self.conn.execute(
+                "INSERT OR REPLACE INTO build (pkgname, data) VALUES (?1, ?2)",
+                params![result.pkgname.pkgname(), json],
+            ) {
+                // Rollback on error
+                let _ = self.conn.execute("ROLLBACK", []);
+                return Err(e.into());
+            }
+        }
+        self.conn.execute("COMMIT", [])?;
+        debug!(count = results.len(), "Stored build results batch");
+        Ok(())
+    }
+
     /// Load all cached build results, preserving insertion order.
     pub fn get_all_build(&self) -> Result<IndexMap<PkgName, BuildResult>> {
         let mut stmt = self

@@ -68,7 +68,6 @@ pub mod stats;
 // Internal modules - exposed for binary use but not primary API
 mod init;
 pub mod logging;
-mod status;
 mod tui;
 
 use std::sync::Arc;
