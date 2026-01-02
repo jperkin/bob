@@ -1149,10 +1149,7 @@ impl Build {
         // removed from these sets as they complete.
         let mut incoming: HashMap<PkgName, HashSet<PkgName>> = HashMap::new();
         for (pkgname, index) in &self.scanpkgs {
-            let mut deps: HashSet<PkgName> = HashSet::new();
-            for dep in &index.depends {
-                deps.insert(dep.clone());
-            }
+            let deps: HashSet<PkgName> = index.depends.iter().cloned().collect();
             trace!(pkgname = %pkgname.pkgname(),
                 deps_count = deps.len(),
                 deps = ?deps.iter().map(|d| d.pkgname()).collect::<Vec<_>>(),
@@ -1169,27 +1166,24 @@ impl Build {
         let mut results: Vec<BuildResult> = Vec::new();
         let mut cached_count = 0usize;
 
-        for (pkgname, result) in &self.cached {
+        for (pkgname, result) in std::mem::take(&mut self.cached) {
             match result.outcome {
                 BuildOutcome::Success | BuildOutcome::UpToDate => {
-                    // Completed package - remove from incoming, add to done
-                    incoming.remove(pkgname);
-                    done.insert(pkgname.clone());
-                    // Remove from deps of other packages
+                    incoming.remove(&pkgname);
                     for deps in incoming.values_mut() {
-                        deps.remove(pkgname);
+                        deps.remove(&pkgname);
                     }
-                    results.push(result.clone());
+                    done.insert(pkgname);
+                    results.push(result);
                     cached_count += 1;
                 }
                 BuildOutcome::Failed(_)
                 | BuildOutcome::PreFailed(_)
                 | BuildOutcome::IndirectFailed(_)
                 | BuildOutcome::IndirectPreFailed(_) => {
-                    // Failed package - remove from incoming, add to failed
-                    incoming.remove(pkgname);
-                    failed.insert(pkgname.clone());
-                    results.push(result.clone());
+                    incoming.remove(&pkgname);
+                    failed.insert(pkgname);
+                    results.push(result);
                     cached_count += 1;
                 }
             }
