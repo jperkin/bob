@@ -267,8 +267,27 @@ impl Database {
             "INSERT OR REPLACE INTO metadata (key, value) VALUES ('resolve_result', ?1)",
             params![json],
         )?;
+        // Store counts separately for quick access
+        self.conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('resolve_buildable_count', ?1)",
+            params![result.buildable.len().to_string()],
+        )?;
         debug!("Stored resolve result");
         Ok(())
+    }
+
+    /// Get just the buildable count without loading full resolve.
+    pub fn get_resolve_buildable_count(&self) -> Result<Option<usize>> {
+        let result = self.conn.query_row(
+            "SELECT value FROM metadata WHERE key = 'resolve_buildable_count'",
+            [],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(s) => Ok(Some(s.parse().unwrap_or(0))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Load cached resolve result.

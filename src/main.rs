@@ -88,8 +88,12 @@ impl BuildRunner {
 
     /// Run the scan phase, returning the resolved scan result.
     fn run_scan(&self, scan: &mut Scan) -> Result<bob::scan::ScanResult> {
-        // Check if a previous full scan completed
+        // Fast path: if full scan completed and resolve is cached, skip everything
         if scan.is_full_tree() && self.db.full_scan_complete() {
+            if let Some(cached_resolve) = self.db.get_resolve()? {
+                println!("Loaded cached resolve result");
+                return Ok(cached_resolve);
+            }
             scan.set_full_scan_complete();
         }
 
@@ -131,7 +135,7 @@ impl BuildRunner {
         }
         drop(scan_errors);
 
-        // Check for cached resolve result
+        // Check for cached resolve result (for non-full-tree scans)
         if let Some(cached_resolve) = self.db.get_resolve()? {
             println!("Loaded cached resolve result");
             return Ok(cached_resolve);
@@ -805,8 +809,20 @@ fn main() -> Result<()> {
                 }
             }
 
-            let result = runner.run_scan(&mut scan)?;
-            println!("Resolved {} buildable packages", result.buildable.len());
+            // Fast path: for full tree scans with everything cached, just get count
+            let buildable = if scan.is_full_tree()
+                && runner.db.full_scan_complete()
+                && let Some(count) = runner.db.get_resolve_buildable_count()?
+            {
+                count
+            } else {
+                runner.run_scan(&mut scan)?.buildable.len()
+            };
+            let pkgpaths = runner.db.count_scan()?;
+            println!(
+                "Resolved {} buildable packages from {} package paths",
+                buildable, pkgpaths
+            );
         }
     };
 
