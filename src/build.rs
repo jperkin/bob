@@ -147,7 +147,6 @@ pub struct BuildResult {
 /// # fn example(summary: &BuildSummary) {
 /// println!("Succeeded: {}", summary.success_count());
 /// println!("Failed: {}", summary.failed_count());
-/// println!("Skipped: {}", summary.skipped_count());
 /// println!("Duration: {:?}", summary.duration);
 ///
 /// for result in summary.failed() {

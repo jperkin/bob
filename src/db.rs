@@ -26,7 +26,7 @@ use indexmap::IndexMap;
 use pkgsrc::{PkgName, PkgPath, ScanIndex};
 use rusqlite::{Connection, params};
 use std::path::Path;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// SQLite database for scan result caching.
 pub struct Database {
@@ -54,9 +54,26 @@ impl Database {
             );
             CREATE TABLE IF NOT EXISTS build (
                 pkgname TEXT PRIMARY KEY,
+                pkgpath TEXT,
                 data TEXT NOT NULL
-            )",
+            );
+            CREATE INDEX IF NOT EXISTS build_pkgpath_idx ON build(pkgpath)",
         )?;
+
+        // Migration: add pkgpath column if missing from older database
+        let has_pkgpath: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('build') WHERE name = 'pkgpath'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_pkgpath {
+            debug!("Migrating build table: adding pkgpath column");
+            self.conn.execute_batch(
+                "ALTER TABLE build ADD COLUMN pkgpath TEXT;
+                 CREATE INDEX IF NOT EXISTS build_pkgpath_idx ON build(pkgpath)",
+            )?;
+        }
+
         Ok(())
     }
 
@@ -120,9 +137,10 @@ impl Database {
         result: &BuildResult,
     ) -> Result<()> {
         let json = serde_json::to_string(result)?;
+        let pkgpath = result.pkgpath.as_ref().map(|p| p.to_string());
         self.conn.execute(
-            "INSERT OR REPLACE INTO build (pkgname, data) VALUES (?1, ?2)",
-            params![pkgname, json],
+            "INSERT OR REPLACE INTO build (pkgname, pkgpath, data) VALUES (?1, ?2, ?3)",
+            params![pkgname, pkgpath, json],
         )?;
         debug!(pkgname, "Stored build result");
         Ok(())
@@ -175,49 +193,18 @@ impl Database {
     }
 
     /// Delete cached build results matching a pkgpath.
+    /// Uses indexed pkgpath column for O(1) lookup instead of scanning all rows.
     /// Returns the number of deleted entries.
     pub fn delete_build_by_pkgpath(&self, pkgpath: &str) -> Result<usize> {
         let normalized = PkgPath::new(pkgpath)
             .map(|pp| pp.to_string())
             .unwrap_or_else(|_| pkgpath.to_string());
-        // Build results store pkgpath in the JSON data, so we need to search
-        let mut stmt = self.conn.prepare("SELECT pkgname, data FROM build")?;
-        let rows = stmt.query_map([], |row| {
-            let pkgname: String = row.get(0)?;
-            let json: String = row.get(1)?;
-            Ok((pkgname, json))
-        })?;
 
-        let mut to_delete = Vec::new();
-        let mut corrupted = Vec::new();
-        for row in rows {
-            let (pkgname, json) = row?;
-            match serde_json::from_str::<BuildResult>(&json) {
-                Ok(result) => {
-                    if let Some(ref pp) = result.pkgpath {
-                        if pp.to_string() == normalized {
-                            to_delete.push(pkgname);
-                        }
-                    }
-                }
-                Err(err) => {
-                    warn!(
-                        pkgname,
-                        error = ?err,
-                        "Failed to parse cached build result; deleting entry"
-                    );
-                    corrupted.push(pkgname);
-                }
-            }
-        }
+        let deleted = self.conn.execute(
+            "DELETE FROM build WHERE pkgpath = ?1",
+            params![normalized],
+        )?;
 
-        for pkgname in to_delete.iter().chain(corrupted.iter()) {
-            self.conn.execute(
-                "DELETE FROM build WHERE pkgname = ?1",
-                params![pkgname],
-            )?;
-        }
-
-        Ok(to_delete.len() + corrupted.len())
+        Ok(deleted)
     }
 }

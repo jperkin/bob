@@ -930,6 +930,31 @@ impl Scan {
         let mut match_cache: HashMap<Depend, PkgName> = HashMap::new();
 
         /*
+         * Build an index from package base name to all versions of that package.
+         * This enables O(1) lookup of candidate packages instead of O(n) scan.
+         * Base name is extracted by removing the version suffix (e.g., "foo-1.0" -> "foo").
+         */
+        let mut base_name_index: HashMap<String, Vec<&PkgName>> = HashMap::new();
+        for pkgname in &pkgnames {
+            let name = pkgname.pkgname();
+            // Extract base name by finding the last hyphen followed by a digit
+            let base = name
+                .rfind(|c: char| c == '-')
+                .and_then(|pos| {
+                    if name[pos + 1..].starts_with(|c: char| c.is_ascii_digit()) {
+                        Some(&name[..pos])
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(name);
+            base_name_index
+                .entry(base.to_string())
+                .or_default()
+                .push(pkgname);
+        }
+
+        /*
          * Track packages to skip due to skipped dependencies, and truly
          * unresolved dependencies (errors).
          */
@@ -957,16 +982,42 @@ impl Scan {
                     }
                     continue;
                 }
-                /*
-                 * Find best DEPENDS match out of all known PKGNAME.
-                 * Collect all candidates that match the pattern.
-                 */
-                let mut candidates: Vec<&PkgName> = Vec::new();
-                for candidate in &pkgnames {
-                    if depend.pattern().matches(candidate.pkgname()) {
-                        candidates.push(candidate);
+
+                // Extract base name from pattern for indexed lookup.
+                // Fall back to full scan for complex patterns (alternations, etc.)
+                let pattern_str = depend.pattern().pattern();
+                let has_alternation =
+                    pattern_str.contains('{') || pattern_str.contains('[');
+
+                let candidates: Vec<&PkgName> = if has_alternation {
+                    // Complex pattern - must scan all packages
+                    pkgnames
+                        .iter()
+                        .filter(|c| depend.pattern().matches(c.pkgname()))
+                        .collect()
+                } else {
+                    // Simple pattern - extract base name for indexed lookup
+                    let pattern_base = pattern_str
+                        .find(|c: char| {
+                            !c.is_alphanumeric() && c != '-' && c != '_'
+                        })
+                        .map(|pos| &pattern_str[..pos])
+                        .unwrap_or(pattern_str);
+
+                    if let Some(indexed) = base_name_index.get(pattern_base) {
+                        indexed
+                            .iter()
+                            .filter(|c| depend.pattern().matches(c.pkgname()))
+                            .copied()
+                            .collect()
+                    } else {
+                        // Pattern base not in index, scan all packages
+                        pkgnames
+                            .iter()
+                            .filter(|c| depend.pattern().matches(c.pkgname()))
+                            .collect()
                     }
-                }
+                };
 
                 // Find best match among all candidates using pbulk algorithm:
                 // higher version wins, larger name on tie.
@@ -1027,36 +1078,37 @@ impl Scan {
         }
 
         /*
-         * Iteratively propagate skips: if A depends on B, and B is now
-         * marked to skip, then A should also be skipped.
+         * Propagate skips using BFS: if A depends on B, and B is skipped,
+         * then A should also be skipped. O(V + E) instead of O(k * V).
          */
-        loop {
-            let mut new_skips: HashMap<PkgName, String> = HashMap::new();
+        // Build reverse dependency map: pkgname -> packages that depend on it
+        let mut reverse_deps: HashMap<&PkgName, Vec<&PkgName>> = HashMap::new();
+        for pkg in self.resolved.values() {
+            for dep in &pkg.depends {
+                reverse_deps.entry(dep).or_default().push(&pkg.pkgname);
+            }
+        }
 
-            for pkg in self.resolved.values() {
-                if skip_due_to_dep.contains_key(&pkg.pkgname)
-                    || skip_reasons.contains_key(&pkg.pkgname)
-                {
-                    continue;
-                }
-                for dep in &pkg.depends {
-                    if skip_due_to_dep.contains_key(dep)
-                        || skip_reasons.contains_key(dep)
+        // BFS from initially skipped packages
+        let mut queue: std::collections::VecDeque<&PkgName> = skip_reasons
+            .keys()
+            .filter(|k| reverse_deps.contains_key(k))
+            .collect();
+
+        while let Some(skipped) = queue.pop_front() {
+            if let Some(dependents) = reverse_deps.get(skipped) {
+                for dependent in dependents {
+                    if !skip_due_to_dep.contains_key(*dependent)
+                        && !skip_reasons.contains_key(*dependent)
                     {
-                        // Our dependency is being skipped
-                        new_skips.insert(
-                            pkg.pkgname.clone(),
-                            format!("Dependency {} skipped", dep.pkgname()),
+                        skip_due_to_dep.insert(
+                            (*dependent).clone(),
+                            format!("Dependency {} skipped", skipped.pkgname()),
                         );
-                        break;
+                        queue.push_back(*dependent);
                     }
                 }
             }
-
-            if new_skips.is_empty() {
-                break;
-            }
-            skip_due_to_dep.extend(new_skips);
         }
 
         // Merge transitive skips, but don't overwrite explicit PKG_SKIP/FAIL_REASON
