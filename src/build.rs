@@ -387,77 +387,6 @@ impl<'a> PkgBuilder<'a> {
         Ok(())
     }
 
-    /// Spawn a thread to tail a log file and send lines to the output channel.
-    /// Returns a stop flag and join handle.
-    fn spawn_log_tailer(
-        logfile: &Path,
-        sandbox_id: usize,
-        output_tx: Sender<ChannelCommand>,
-    ) -> (Arc<AtomicBool>, std::thread::JoinHandle<()>) {
-        use std::io::{BufRead, BufReader};
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_clone = Arc::clone(&stop);
-        let logfile = logfile.to_path_buf();
-
-        let handle = std::thread::spawn(move || {
-            // Wait for file to exist
-            while !logfile.exists() && !stop_clone.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            if stop_clone.load(Ordering::Relaxed) {
-                return;
-            }
-
-            let Ok(file) = File::open(&logfile) else {
-                return;
-            };
-            let mut reader = BufReader::new(file);
-
-            while !stop_clone.load(Ordering::Relaxed) {
-                let mut lines = Vec::new();
-                let mut line = String::new();
-
-                // Read all available lines
-                loop {
-                    line.clear();
-                    match reader.read_line(&mut line) {
-                        Ok(0) => break, // EOF, will poll again
-                        Ok(_) => {
-                            lines.push(line.trim_end().to_string());
-                        }
-                        Err(_) => break,
-                    }
-                }
-
-                if !lines.is_empty() {
-                    let _ = output_tx
-                        .send(ChannelCommand::OutputLines(sandbox_id, lines));
-                }
-
-                std::thread::sleep(Duration::from_millis(100));
-            }
-
-            // Final read after stop signal
-            let mut lines = Vec::new();
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line) {
-                    Ok(0) => break,
-                    Ok(_) => lines.push(line.trim_end().to_string()),
-                    Err(_) => break,
-                }
-            }
-            if !lines.is_empty() {
-                let _ = output_tx
-                    .send(ChannelCommand::OutputLines(sandbox_id, lines));
-            }
-        });
-
-        (stop, handle)
-    }
-
     /// Run a make stage with output logging.
     fn run_make_stage(
         &self,
@@ -481,23 +410,12 @@ impl<'a> PkgBuilder<'a> {
 
         debug!(stage = stage.as_str(), targets = ?targets, "Running make stage");
 
-        // Start log tailer if we have an output channel
-        let tailer = self.output_tx.as_ref().map(|tx| {
-            Self::spawn_log_tailer(&logfile, self.sandbox_id, tx.clone())
-        });
-
         let status = self.run_command_logged(
             self.config.make(),
             &args,
             run_as,
             &logfile,
         )?;
-
-        // Stop the tailer
-        if let Some((stop, handle)) = tailer {
-            stop.store(true, Ordering::Relaxed);
-            let _ = handle.join();
-        }
 
         Ok(status.success())
     }
@@ -521,11 +439,8 @@ impl<'a> PkgBuilder<'a> {
         logfile: &Path,
         extra_envs: &[(&str, &str)],
     ) -> anyhow::Result<ExitStatus> {
-        use std::io::Write;
+        use std::io::{BufRead, BufReader, Write};
 
-        // Redirect stdout/stderr directly to the log file, like the shell script did.
-        // This avoids pipe inheritance issues where grandchild processes can block
-        // readers waiting for EOF.
         let mut log =
             OpenOptions::new().create(true).append(true).open(logfile)?;
 
@@ -533,11 +448,65 @@ impl<'a> PkgBuilder<'a> {
         let _ = writeln!(log, "=> {:?} {:?}", cmd, args);
         let _ = log.flush();
 
-        let status =
-            self.spawn_command_to_file(cmd, args, run_as, extra_envs, log)?;
+        // Use tee-style pipe handling when output_tx is available for live view.
+        // Otherwise use direct file redirection.
+        if let Some(ref output_tx) = self.output_tx {
+            // Wrap command in shell to merge stdout/stderr with 2>&1, like the
+            // shell script's run_log function does.
+            let shell_cmd =
+                self.build_shell_command(cmd, args, run_as, extra_envs);
+            let mut child = if self.sandbox.enabled() {
+                let sandbox_path = self.sandbox.path(self.sandbox_id);
+                Command::new("/usr/sbin/chroot")
+                    .arg(&sandbox_path)
+                    .arg("/bin/sh")
+                    .arg("-c")
+                    .arg(&shell_cmd)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .context("Failed to spawn shell command")?
+            } else {
+                Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg(&shell_cmd)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .context("Failed to spawn shell command")?
+            };
 
-        trace!(cmd = ?cmd, status = ?status, "Command completed");
-        Ok(status)
+            let stdout = child.stdout.take().unwrap();
+            let output_tx = output_tx.clone();
+            let sandbox_id = self.sandbox_id;
+
+            // Spawn thread to read from pipe and tee to file + output channel
+            let tee_handle = std::thread::spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines() {
+                    let Ok(line) = line else { break };
+                    let _ = writeln!(log, "{}", line);
+                    let _ = output_tx.send(ChannelCommand::OutputLines(
+                        sandbox_id,
+                        vec![line],
+                    ));
+                }
+            });
+
+            // Wait for command to exit
+            let status = child.wait()?;
+
+            // Reader thread will exit when pipe closes (process exits)
+            let _ = tee_handle.join();
+
+            trace!(cmd = ?cmd, status = ?status, "Command completed");
+            Ok(status)
+        } else {
+            let status =
+                self.spawn_command_to_file(cmd, args, run_as, extra_envs, log)?;
+            trace!(cmd = ?cmd, status = ?status, "Command completed");
+            Ok(status)
+        }
     }
 
     /// Spawn a command with stdout/stderr redirected to a file.
@@ -806,6 +775,52 @@ impl<'a> PkgBuilder<'a> {
         }
         let escaped = value.replace('\'', "'\\''");
         format!("'{}'", escaped)
+    }
+
+    /// Build a shell command string with environment, run_as handling, and 2>&1.
+    fn build_shell_command(
+        &self,
+        cmd: &Path,
+        args: &[&str],
+        run_as: RunAs,
+        extra_envs: &[(&str, &str)],
+    ) -> String {
+        let mut parts = Vec::new();
+
+        // Add environment variables
+        for (key, value) in &self.envs {
+            parts.push(format!("{}={}", key, Self::shell_escape(value)));
+        }
+        for (key, value) in extra_envs {
+            parts.push(format!("{}={}", key, Self::shell_escape(value)));
+        }
+
+        // Build the actual command
+        let cmd_str = Self::shell_escape(cmd.to_str().unwrap_or_default());
+        let args_str: Vec<String> =
+            args.iter().map(|a| Self::shell_escape(a)).collect();
+
+        match run_as {
+            RunAs::Root => {
+                parts.push(cmd_str);
+                parts.extend(args_str);
+            }
+            RunAs::User => {
+                let user = self.build_user.as_ref().unwrap();
+                let inner_cmd = std::iter::once(cmd_str)
+                    .chain(args_str)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                parts.push("su".to_string());
+                parts.push(Self::shell_escape(user));
+                parts.push("-c".to_string());
+                parts.push(Self::shell_escape(&inner_cmd));
+            }
+        }
+
+        // Merge stdout/stderr
+        parts.push("2>&1".to_string());
+        parts.join(" ")
     }
 }
 
