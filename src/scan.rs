@@ -431,7 +431,11 @@ impl Scan {
         Ok(())
     }
 
-    pub fn start(&mut self, ctx: &RunContext) -> anyhow::Result<bool> {
+    pub fn start(
+        &mut self,
+        ctx: &RunContext,
+        db: &crate::db::Database,
+    ) -> anyhow::Result<bool> {
         info!(
             incoming_count = self.incoming.len(),
             sandbox_enabled = self.sandbox.enabled(),
@@ -665,6 +669,10 @@ impl Scan {
                     }
                 };
                 self.done.insert(pkgpath.clone(), scanpkgs.clone());
+                // Save immediately to database
+                if !scanpkgs.is_empty() {
+                    db.store_scan_pkgpath(&pkgpath.to_string(), &scanpkgs)?;
+                }
 
                 // Skip dependency discovery if interrupted
                 if was_interrupted {

@@ -102,14 +102,7 @@ impl BuildRunner {
             }
         }
 
-        let interrupted = scan.start(&self.ctx)?;
-
-        // Store scan results
-        for (pkgpath, indexes) in scan.completed() {
-            if !indexes.is_empty() {
-                self.db.store_scan_pkgpath(&pkgpath.to_string(), indexes)?;
-            }
-        }
+        let interrupted = scan.start(&self.ctx, &self.db)?;
 
         if interrupted {
             self.flush_stats();
