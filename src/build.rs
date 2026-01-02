@@ -1141,18 +1141,36 @@ impl PackageBuild {
         // Run pre-build script if defined (always runs)
         if let Some(pre_build) = self.config.script("pre-build") {
             debug!(pkgname = %pkgname, "Running pre-build script");
-            let child = self.sandbox.execute(
+            if let Ok(mut child) = self.sandbox.execute(
                 self.id,
                 pre_build,
                 envs.clone(),
                 None,
                 None,
-            )?;
-            let output = child
-                .wait_with_output()
-                .context("Failed to wait for pre-build")?;
-            if !output.status.success() {
-                warn!(pkgname = %pkgname, exit_code = ?output.status.code(), "pre-build script failed");
+            ) {
+                // Wait with timeout - pre-build shouldn't block indefinitely
+                let deadline = Instant::now() + Duration::from_secs(30);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            if !status.success() {
+                                warn!(pkgname = %pkgname, exit_code = ?status.code(), "pre-build script failed");
+                            }
+                            break;
+                        }
+                        Ok(None) => {
+                            if Instant::now() >= deadline {
+                                warn!(pkgname = %pkgname, "pre-build script timed out, continuing");
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(100));
+                        }
+                        Err(e) => {
+                            warn!(pkgname = %pkgname, error = %e, "Failed to wait for pre-build");
+                            break;
+                        }
+                    }
+                }
             }
         }
 
@@ -1199,17 +1217,31 @@ impl PackageBuild {
         // Run post-build script if defined (always runs regardless of pkg-build result)
         if let Some(post_build) = self.config.script("post-build") {
             debug!(pkgname = %pkgname, "Running post-build script");
-            if let Ok(child) =
+            if let Ok(mut child) =
                 self.sandbox.execute(self.id, post_build, envs, None, None)
             {
-                match child.wait_with_output() {
-                    Ok(output) if !output.status.success() => {
-                        warn!(pkgname = %pkgname, exit_code = ?output.status.code(), "post-build script failed");
+                // Wait with timeout - post-build shouldn't block the result indefinitely
+                let deadline = Instant::now() + Duration::from_secs(30);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            if !status.success() {
+                                warn!(pkgname = %pkgname, exit_code = ?status.code(), "post-build script failed");
+                            }
+                            break;
+                        }
+                        Ok(None) => {
+                            if Instant::now() >= deadline {
+                                warn!(pkgname = %pkgname, "post-build script timed out, continuing");
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(100));
+                        }
+                        Err(e) => {
+                            warn!(pkgname = %pkgname, error = %e, "Failed to wait for post-build");
+                            break;
+                        }
                     }
-                    Err(e) => {
-                        warn!(pkgname = %pkgname, error = %e, "Failed to wait for post-build");
-                    }
-                    _ => {}
                 }
             }
         }
