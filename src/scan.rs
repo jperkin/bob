@@ -440,6 +440,21 @@ impl Scan {
          */
         let script_envs = self.config.script_env();
 
+        // For non-full-tree scans, prune already-cached packages from incoming
+        // before sandbox creation to avoid unnecessary setup/teardown.
+        if !self.full_tree {
+            self.incoming.retain(|p| !self.done.contains_key(p));
+            if self.incoming.is_empty() {
+                if !self.done.is_empty() {
+                    println!(
+                        "All {} package paths already scanned",
+                        self.done.len()
+                    );
+                }
+                return Ok(false);
+            }
+        }
+
         if self.sandbox.enabled() {
             println!("Creating sandbox...");
             if let Err(e) = self.sandbox.create(0) {
