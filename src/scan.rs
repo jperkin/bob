@@ -226,6 +226,8 @@ pub struct Scan {
     /// Full tree scan - discover all packages, skip recursive dependency discovery.
     /// Defaults to true; set to false when packages are explicitly added.
     full_tree: bool,
+    /// A previous full tree scan completed successfully.
+    full_scan_complete: bool,
     /// Packages that failed to scan (pkgpath, error message).
     scan_failures: Vec<(PkgPath, String)>,
 }
@@ -250,6 +252,16 @@ impl Scan {
         info!(pkgpath = %pkgpath.as_path().display(), "Adding package to scan queue");
         self.full_tree = false;
         self.incoming.insert(pkgpath.clone());
+    }
+
+    /// Returns true if this is a full tree scan.
+    pub fn is_full_tree(&self) -> bool {
+        self.full_tree
+    }
+
+    /// Mark that a previous full tree scan completed successfully.
+    pub fn set_full_scan_complete(&mut self) {
+        self.full_scan_complete = true;
     }
 
     /// Load previously cached scan results.
@@ -439,6 +451,13 @@ impl Scan {
          * run in parallel inside one sandbox.
          */
         let script_envs = self.config.script_env();
+
+        // For full tree scans where a previous scan completed, all packages
+        // are already cached - nothing to do.
+        if self.full_tree && self.full_scan_complete && !self.done.is_empty() {
+            println!("All {} package paths already scanned", self.done.len());
+            return Ok(false);
+        }
 
         // For non-full-tree scans, prune already-cached packages from incoming
         // before sandbox creation to avoid unnecessary setup/teardown.

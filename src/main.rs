@@ -88,6 +88,11 @@ impl BuildRunner {
 
     /// Run the scan phase, returning the resolved scan result.
     fn run_scan(&self, scan: &mut Scan) -> Result<bob::scan::ScanResult> {
+        // Check if a previous full scan completed
+        if scan.is_full_tree() && self.db.full_scan_complete() {
+            scan.set_full_scan_complete();
+        }
+
         // Load cached scans
         let cached = self.db.get_all_scan()?;
         if !cached.is_empty() {
@@ -126,6 +131,9 @@ impl BuildRunner {
                 scan_errors.len()
             );
             eprintln!();
+        } else if scan.is_full_tree() {
+            // Mark full tree scan as complete if no errors
+            self.db.set_full_scan_complete()?;
         }
 
         println!("Resolving dependencies...");

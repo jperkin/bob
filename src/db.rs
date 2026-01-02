@@ -55,6 +55,10 @@ impl Database {
             CREATE TABLE IF NOT EXISTS build (
                 pkgname TEXT PRIMARY KEY,
                 data TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             )",
         )?;
         Ok(())
@@ -107,9 +111,10 @@ impl Database {
             .context("Failed to count scan")
     }
 
-    /// Clear all cached scan data.
+    /// Clear all cached scan data and the full scan complete marker.
     pub fn clear_scan(&self) -> Result<()> {
         self.conn.execute("DELETE FROM scan", [])?;
+        self.clear_full_scan_complete()?;
         Ok(())
     }
 
@@ -219,5 +224,35 @@ impl Database {
         }
 
         Ok(to_delete.len() + corrupted.len())
+    }
+
+    /// Check if a full tree scan has been completed.
+    pub fn full_scan_complete(&self) -> bool {
+        self.conn
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'full_scan_complete'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map(|v| v == "true")
+            .unwrap_or(false)
+    }
+
+    /// Mark a full tree scan as complete.
+    pub fn set_full_scan_complete(&self) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('full_scan_complete', 'true')",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Clear the full tree scan complete marker.
+    pub fn clear_full_scan_complete(&self) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM metadata WHERE key = 'full_scan_complete'",
+            [],
+        )?;
+        Ok(())
     }
 }
