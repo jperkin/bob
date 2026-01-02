@@ -142,6 +142,7 @@ struct PkgBuilder<'a> {
     build_user: Option<String>,
     pkg_up_to_date: Option<PathBuf>,
     envs: Vec<(String, String)>,
+    output_tx: Option<Sender<ChannelCommand>>,
 }
 
 impl<'a> PkgBuilder<'a> {
@@ -151,6 +152,7 @@ impl<'a> PkgBuilder<'a> {
         sandbox_id: usize,
         pkginfo: &'a ResolvedIndex,
         envs: Vec<(String, String)>,
+        output_tx: Option<Sender<ChannelCommand>>,
     ) -> Self {
         let logdir = config.logdir().join(pkginfo.pkgname.pkgname());
         let build_user = config.build_user().map(|s| s.to_string());
@@ -164,6 +166,7 @@ impl<'a> PkgBuilder<'a> {
             build_user,
             pkg_up_to_date,
             envs,
+            output_tx,
         }
     }
 
@@ -384,6 +387,79 @@ impl<'a> PkgBuilder<'a> {
         Ok(())
     }
 
+    /// Spawn a thread to tail a log file and send lines to the output channel.
+    /// Returns a stop flag and join handle.
+    fn spawn_log_tailer(
+        logfile: &Path,
+        sandbox_id: usize,
+        output_tx: Sender<ChannelCommand>,
+    ) -> (Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+        use std::io::{BufRead, BufReader};
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+        let logfile = logfile.to_path_buf();
+
+        let handle = std::thread::spawn(move || {
+            // Wait for file to exist
+            while !logfile.exists() && !stop_clone.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            if stop_clone.load(Ordering::Relaxed) {
+                return;
+            }
+
+            let Ok(file) = File::open(&logfile) else {
+                return;
+            };
+            let mut reader = BufReader::new(file);
+
+            while !stop_clone.load(Ordering::Relaxed) {
+                let mut lines = Vec::new();
+                let mut line = String::new();
+
+                // Read all available lines
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) => break, // EOF, will poll again
+                        Ok(_) => {
+                            lines.push(line.trim_end().to_string());
+                        }
+                        Err(_) => break,
+                    }
+                }
+
+                if !lines.is_empty() {
+                    let _ = output_tx.send(ChannelCommand::OutputLines(
+                        sandbox_id,
+                        lines,
+                    ));
+                }
+
+                std::thread::sleep(Duration::from_millis(100));
+            }
+
+            // Final read after stop signal
+            let mut lines = Vec::new();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => lines.push(line.trim_end().to_string()),
+                    Err(_) => break,
+                }
+            }
+            if !lines.is_empty() {
+                let _ = output_tx
+                    .send(ChannelCommand::OutputLines(sandbox_id, lines));
+            }
+        });
+
+        (stop, handle)
+    }
+
     /// Run a make stage with output logging.
     fn run_make_stage(
         &self,
@@ -407,12 +483,23 @@ impl<'a> PkgBuilder<'a> {
 
         debug!(stage = stage.as_str(), targets = ?targets, "Running make stage");
 
+        // Start log tailer if we have an output channel
+        let tailer = self.output_tx.as_ref().map(|tx| {
+            Self::spawn_log_tailer(&logfile, self.sandbox_id, tx.clone())
+        });
+
         let status = self.run_command_logged(
             self.config.make(),
             &args,
             run_as,
             &logfile,
         )?;
+
+        // Stop the tailer
+        if let Some((stop, handle)) = tailer {
+            stop.store(true, Ordering::Relaxed);
+            let _ = handle.join();
+        }
 
         Ok(status.success())
     }
@@ -1104,6 +1191,7 @@ impl PackageBuild {
             self.id,
             &self.pkginfo,
             envs.clone(),
+            Some(status_tx.clone()),
         );
 
         let mut callback = ChannelCallback::new(self.id, status_tx);
@@ -1410,6 +1498,10 @@ enum ChannelCommand {
      * Client reporting a stage update for a build.
      */
     StageUpdate(usize, Option<String>),
+    /**
+     * Client reporting output lines from a build.
+     */
+    OutputLines(usize, Vec<String>),
 }
 
 /**
@@ -2237,6 +2329,15 @@ impl Build {
                             p.state_mut()
                                 .set_worker_stage(tid, stage.as_deref());
                             let _ = p.render_throttled();
+                        }
+                    }
+                    ChannelCommand::OutputLines(tid, lines) => {
+                        if let Ok(mut p) = progress_clone.lock() {
+                            if let Some(buf) = p.output_buffer_mut(tid) {
+                                for line in lines {
+                                    buf.push(line);
+                                }
+                            }
                         }
                     }
                     _ => {}
