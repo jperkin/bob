@@ -1360,7 +1360,10 @@ impl Build {
                         ChannelCommand::Quit | ChannelCommand::Shutdown => {
                             break;
                         }
-                        _ => todo!(),
+                        _ => {
+                            // Client should only receive ComeBackLater, JobData, Quit, or Shutdown.
+                            // Any other message is a bug in the manager - ignore it.
+                        }
                     }
                 }
             });
