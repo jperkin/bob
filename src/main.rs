@@ -294,6 +294,7 @@ impl BuildRunner {
 
 #[derive(Debug, Parser)]
 #[command(
+    name = "bob",
     author,
     version,
     about,
