@@ -1210,6 +1210,14 @@ impl Build {
             "BuildJobs populated"
         );
 
+        if incoming.is_empty() {
+            return Ok(BuildSummary {
+                duration: started.elapsed(),
+                results,
+                scan_failed: Vec::new(),
+            });
+        }
+
         let running: HashSet<PkgName> = HashSet::new();
         let logdir = self.config.logdir().clone();
         let jobs = BuildJobs {
