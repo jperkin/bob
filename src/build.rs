@@ -488,15 +488,34 @@ impl<'a> PkgBuilder<'a> {
             let output_tx = output_tx.clone();
             let sandbox_id = self.sandbox_id;
 
-            // Spawn thread to read from pipe and tee to file + output channel
+            // Spawn thread to read from pipe and tee to file + output channel.
+            // Batch lines and throttle sends to reduce channel overhead.
             let tee_handle = std::thread::spawn(move || {
                 let reader = BufReader::new(stdout);
+                let mut batch = Vec::with_capacity(50);
+                let mut last_send = Instant::now();
+                let send_interval = Duration::from_millis(100);
+
                 for line in reader.lines() {
                     let Ok(line) = line else { break };
                     let _ = writeln!(log, "{}", line);
+                    batch.push(line);
+
+                    // Send batch if interval elapsed or batch is large
+                    if last_send.elapsed() >= send_interval || batch.len() >= 50 {
+                        let _ = output_tx.send(ChannelCommand::OutputLines(
+                            sandbox_id,
+                            std::mem::take(&mut batch),
+                        ));
+                        last_send = Instant::now();
+                    }
+                }
+
+                // Send remaining lines
+                if !batch.is_empty() {
                     let _ = output_tx.send(ChannelCommand::OutputLines(
                         sandbox_id,
-                        vec![line],
+                        batch,
                     ));
                 }
             });
