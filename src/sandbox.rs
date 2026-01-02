@@ -402,7 +402,7 @@ impl Sandbox {
             Ok(())
         } else {
             Err(anyhow::anyhow!(
-                "Failed to destroy {} sandbox{}. Fix, then run 'bob sandbox destroy'",
+                "Failed to destroy {} sandbox{}\nRemove unexpected files, then run 'bob util sandbox destroy'",
                 failed,
                 if failed == 1 { "" } else { "es" }
             ))
