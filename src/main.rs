@@ -171,13 +171,13 @@ impl BuildRunner {
 
         tracing::debug!("Calling build.start()");
         let build_start_time = std::time::Instant::now();
-        let mut summary = build.start(&self.ctx)?;
+        let mut summary = build.start(&self.ctx, &self.db)?;
         tracing::debug!(
             elapsed_ms = build_start_time.elapsed().as_millis(),
             "build.start() returned"
         );
 
-        // Check if we were interrupted - don't store results for interrupted builds
+        // Check if we were interrupted - results are already saved during build
         if self.ctx.shutdown.load(Ordering::SeqCst) {
             let sandbox = Sandbox::new(&self.config);
             if sandbox.enabled() {
@@ -186,7 +186,7 @@ impl BuildRunner {
             std::process::exit(EXIT_INTERRUPTED);
         }
 
-        // Store build results (only for non-interrupted builds)
+        // Store any remaining build results (most are saved during build)
         if !summary.results.is_empty() {
             print!("Saving {} build results...", summary.results.len());
             std::io::Write::flush(&mut std::io::stdout())?;

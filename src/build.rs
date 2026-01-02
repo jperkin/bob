@@ -1891,7 +1891,11 @@ impl Build {
         &self.cached
     }
 
-    pub fn start(&mut self, ctx: &RunContext) -> anyhow::Result<BuildSummary> {
+    pub fn start(
+        &mut self,
+        ctx: &RunContext,
+        db: &crate::db::Database,
+    ) -> anyhow::Result<BuildSummary> {
         let started = Instant::now();
 
         info!(package_count = self.scanpkgs.len(), "Build::start() called");
@@ -2147,6 +2151,8 @@ impl Build {
         let stats_for_manager = stats.clone();
         let (results_tx, results_rx) = mpsc::channel::<Vec<BuildResult>>();
         let (interrupted_tx, interrupted_rx) = mpsc::channel::<bool>();
+        // Channel for completed results to save immediately
+        let (completed_tx, completed_rx) = mpsc::channel::<BuildResult>();
         let manager = std::thread::spawn(move || {
             let mut clients = clients.clone();
             let config = config.clone();
@@ -2232,12 +2238,7 @@ impl Build {
                         };
                     }
                     ChannelCommand::JobSuccess(pkgname, duration) => {
-                        // Don't report if we're shutting down
-                        if shutdown_for_manager.load(Ordering::SeqCst) {
-                            continue;
-                        }
-
-                        // Record stats
+                        // Record stats even if shutting down
                         if let Some(ref s) = stats {
                             let pkgpath = jobs
                                 .scanpkgs
@@ -2256,6 +2257,16 @@ impl Build {
 
                         jobs.mark_success(&pkgname, duration);
                         jobs.running.remove(&pkgname);
+
+                        // Send result for immediate saving
+                        if let Some(result) = jobs.results.last() {
+                            let _ = completed_tx.send(result.clone());
+                        }
+
+                        // Don't update UI if we're shutting down
+                        if shutdown_for_manager.load(Ordering::SeqCst) {
+                            continue;
+                        }
 
                         // Find which thread completed and mark idle
                         if let Ok(mut p) = progress_clone.lock() {
@@ -2276,12 +2287,7 @@ impl Build {
                         }
                     }
                     ChannelCommand::JobSkipped(pkgname) => {
-                        // Don't report if we're shutting down
-                        if shutdown_for_manager.load(Ordering::SeqCst) {
-                            continue;
-                        }
-
-                        // Record stats
+                        // Record stats even if shutting down
                         if let Some(ref s) = stats {
                             let pkgpath = jobs
                                 .scanpkgs
@@ -2301,6 +2307,16 @@ impl Build {
                         jobs.mark_up_to_date(&pkgname);
                         jobs.running.remove(&pkgname);
 
+                        // Send result for immediate saving
+                        if let Some(result) = jobs.results.last() {
+                            let _ = completed_tx.send(result.clone());
+                        }
+
+                        // Don't update UI if we're shutting down
+                        if shutdown_for_manager.load(Ordering::SeqCst) {
+                            continue;
+                        }
+
                         // Find which thread completed and mark idle
                         if let Ok(mut p) = progress_clone.lock() {
                             let _ = p.print_status(&format!(
@@ -2319,12 +2335,7 @@ impl Build {
                         }
                     }
                     ChannelCommand::JobFailed(pkgname, duration) => {
-                        // Don't report if we're shutting down
-                        if shutdown_for_manager.load(Ordering::SeqCst) {
-                            continue;
-                        }
-
-                        // Record stats
+                        // Record stats even if shutting down
                         if let Some(ref s) = stats {
                             let pkgpath = jobs
                                 .scanpkgs
@@ -2341,8 +2352,19 @@ impl Build {
                             );
                         }
 
+                        let results_before = jobs.results.len();
                         jobs.mark_failure(&pkgname, duration);
                         jobs.running.remove(&pkgname);
+
+                        // Send all new results for immediate saving
+                        for result in jobs.results.iter().skip(results_before) {
+                            let _ = completed_tx.send(result.clone());
+                        }
+
+                        // Don't update UI if we're shutting down
+                        if shutdown_for_manager.load(Ordering::SeqCst) {
+                            continue;
+                        }
 
                         // Find which thread failed and mark idle
                         if let Ok(mut p) = progress_clone.lock() {
@@ -2363,12 +2385,7 @@ impl Build {
                         }
                     }
                     ChannelCommand::JobError((pkgname, duration, e)) => {
-                        // Don't report if we're shutting down
-                        if shutdown_for_manager.load(Ordering::SeqCst) {
-                            continue;
-                        }
-
-                        // Record stats
+                        // Record stats even if shutting down
                         if let Some(ref s) = stats {
                             let pkgpath = jobs
                                 .scanpkgs
@@ -2385,8 +2402,20 @@ impl Build {
                             );
                         }
 
+                        let results_before = jobs.results.len();
                         jobs.mark_failure(&pkgname, duration);
                         jobs.running.remove(&pkgname);
+
+                        // Send all new results for immediate saving
+                        for result in jobs.results.iter().skip(results_before) {
+                            let _ = completed_tx.send(result.clone());
+                        }
+
+                        // Don't update UI if we're shutting down
+                        if shutdown_for_manager.load(Ordering::SeqCst) {
+                            tracing::error!(error = %e, pkgname = %pkgname.pkgname(), "Build error");
+                            continue;
+                        }
 
                         // Find which thread errored and mark idle
                         if let Ok(mut p) = progress_clone.lock() {
@@ -2446,6 +2475,25 @@ impl Build {
             elapsed_ms = join_start.elapsed().as_millis(),
             "Worker threads completed"
         );
+
+        // Save all completed results to database immediately
+        let mut saved_count = 0;
+        while let Ok(result) = completed_rx.try_recv() {
+            if let Err(e) =
+                db.store_build_pkgname(result.pkgname.pkgname(), &result)
+            {
+                warn!(
+                    pkgname = %result.pkgname.pkgname(),
+                    error = %e,
+                    "Failed to save build result"
+                );
+            } else {
+                saved_count += 1;
+            }
+        }
+        if saved_count > 0 {
+            debug!(saved_count, "Saved build results to database");
+        }
 
         // Stop the refresh thread
         stop_refresh.store(true, Ordering::Relaxed);
