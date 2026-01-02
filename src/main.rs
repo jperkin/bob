@@ -187,16 +187,21 @@ impl BuildRunner {
         }
 
         // Store build results (only for non-interrupted builds)
-        tracing::debug!(
-            result_count = summary.results.len(),
-            "Storing build results to database"
-        );
-        let store_start = std::time::Instant::now();
-        self.db.store_build_batch(&summary.results)?;
-        tracing::debug!(
-            elapsed_ms = store_start.elapsed().as_millis(),
-            "Finished storing build results"
-        );
+        if !summary.results.is_empty() {
+            print!("Saving {} build results...", summary.results.len());
+            std::io::Write::flush(&mut std::io::stdout())?;
+            tracing::debug!(
+                result_count = summary.results.len(),
+                "Storing build results to database"
+            );
+            let store_start = std::time::Instant::now();
+            self.db.store_build_batch(&summary.results)?;
+            println!(" done ({:.1}s)", store_start.elapsed().as_secs_f32());
+            tracing::debug!(
+                elapsed_ms = store_start.elapsed().as_millis(),
+                "Finished storing build results"
+            );
+        }
 
         self.flush_stats();
 

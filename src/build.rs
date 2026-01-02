@@ -1123,6 +1123,11 @@ impl PackageBuild {
             }
             Ok(PkgBuildResult::Failed) | Err(_) => {
                 error!(pkgname = %pkgname, "pkg-build failed");
+                // Show cleanup stage to user
+                let _ = status_tx.send(ChannelCommand::StageUpdate(
+                    self.id,
+                    Some("cleanup".to_string()),
+                ));
                 // Kill any orphaned processes in the sandbox before cleanup.
                 // Failed builds may leave processes running that would block
                 // subsequent commands like bmake show-var or bmake clean.
