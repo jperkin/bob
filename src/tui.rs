@@ -376,6 +376,8 @@ pub struct MultiProgress {
     num_workers: usize,
     /// Messages buffered while in fullscreen mode, printed when returning to inline.
     pending_messages: Vec<String>,
+    /// Last render timestamp for throttling.
+    last_render: Instant,
 }
 
 impl MultiProgress {
@@ -411,6 +413,7 @@ impl MultiProgress {
             output_buffers,
             num_workers,
             pending_messages: Vec::new(),
+            last_render: Instant::now(),
         })
     }
 
@@ -564,6 +567,15 @@ impl MultiProgress {
     }
 
     pub fn render_throttled(&mut self) -> io::Result<()> {
+        // Throttle renders to ~30fps for inline, ~20fps for multipanel
+        let min_interval = match self.view_mode {
+            ViewMode::Inline => Duration::from_millis(33),
+            ViewMode::MultiPanel => Duration::from_millis(50),
+        };
+        if self.last_render.elapsed() < min_interval {
+            return Ok(());
+        }
+        self.last_render = Instant::now();
         match self.view_mode {
             ViewMode::Inline => self.render(),
             ViewMode::MultiPanel => self.render_multipanel(),
@@ -655,17 +667,32 @@ impl MultiProgress {
 
         self.state.update_timer_width();
 
-        // Pre-compute panel data and active status
         let num_workers = self.num_workers;
-        let panel_data: Vec<_> = (0..num_workers)
+
+        // Extract active flags and elapsed times for layout calculation
+        let is_active: Vec<bool> = (0..num_workers)
             .map(|i| {
-                let is_active = self
-                    .state
+                self.state
                     .workers
                     .get(i)
-                    .is_some_and(|w| w.package.is_some());
+                    .is_some_and(|w| w.package.is_some())
+            })
+            .collect();
+        let elapsed_secs: Vec<u64> = (0..num_workers)
+            .map(|i| {
+                self.state
+                    .workers
+                    .get(i)
+                    .and_then(|w| w.elapsed())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            })
+            .collect();
 
-                let title = if let Some(w) = self.state.workers.get(i) {
+        // Pre-compute titles
+        let titles: Vec<String> = (0..num_workers)
+            .map(|i| {
+                if let Some(w) = self.state.workers.get(i) {
                     if let Some(pkg) = &w.package {
                         let stage = w.stage.as_deref().unwrap_or("");
                         let elapsed = w
@@ -682,62 +709,48 @@ impl MultiProgress {
                     }
                 } else {
                     format!("[{}]", i)
-                };
-
-                // Capture last 100 logical lines; draw will trim to fit panel.
-                let lines = self
-                    .output_buffers
-                    .get(i)
-                    .map(|buf| buf.last_n(100).cloned().collect::<Vec<_>>())
-                    .unwrap_or_default();
-
-                (title, lines, is_active)
+                }
             })
             .collect();
 
-        // Extract active flags and elapsed times for layout calculation
-        let is_active: Vec<bool> =
-            panel_data.iter().map(|(_, _, active)| *active).collect();
-        let elapsed_secs: Vec<u64> = (0..num_workers)
-            .map(|i| {
-                self.state
-                    .workers
+        // Calculate layout first to know how many lines each panel needs
+        let size = self.terminal.size()?;
+        let area = Rect::new(0, 0, size.width, size.height);
+        let panels =
+            calculate_panel_layout(area, num_workers, &is_active, &elapsed_secs);
+
+        // Collect only the lines needed for each panel (height * 2 for wrapping)
+        let panel_lines: Vec<Vec<String>> = panels
+            .iter()
+            .enumerate()
+            .map(|(i, panel_area)| {
+                let inner_height =
+                    panel_area.height.saturating_sub(2) as usize;
+                let lines_needed = (inner_height * 2).max(10);
+                self.output_buffers
                     .get(i)
-                    .and_then(|w| w.elapsed())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0)
+                    .map(|buf| buf.last_n(lines_needed).cloned().collect())
+                    .unwrap_or_default()
             })
             .collect();
 
         self.terminal.draw(|frame| {
-            let area = frame.area();
-            let panels = calculate_panel_layout(
-                area,
-                num_workers,
-                &is_active,
-                &elapsed_secs,
-            );
-
             for (i, panel_area) in panels.iter().enumerate() {
-                if let Some((title, lines, _)) = panel_data.get(i) {
-                    frame.render_widget(Clear, *panel_area);
+                frame.render_widget(Clear, *panel_area);
 
-                    let block = Block::default()
-                        .title(title.as_str())
-                        .borders(Borders::ALL);
+                let block = Block::default()
+                    .title(titles[i].as_str())
+                    .borders(Borders::ALL);
 
-                    let inner_width =
-                        panel_area.width.saturating_sub(2) as usize;
-                    let inner_height =
-                        panel_area.height.saturating_sub(2) as usize;
+                let inner_width = panel_area.width.saturating_sub(2) as usize;
+                let inner_height = panel_area.height.saturating_sub(2) as usize;
 
-                    let visible =
-                        build_visible_lines(lines, inner_width, inner_height);
+                let visible =
+                    build_visible_lines(&panel_lines[i], inner_width, inner_height);
 
-                    let paragraph = Paragraph::new(visible).block(block);
+                let paragraph = Paragraph::new(visible).block(block);
 
-                    frame.render_widget(paragraph, *panel_area);
-                }
+                frame.render_widget(paragraph, *panel_area);
             }
         })?;
 
