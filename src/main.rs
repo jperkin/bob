@@ -292,13 +292,13 @@ impl BuildRunner {
     long_about = "\
 A pkgsrc package builder
 
-\x1b[1;4mFirst time setup:\x1b[0m
+First time setup:
 
   bob init <dir>   Create new configuration directory
   cd <dir>         Bob looks for config.lua in current directory by default
   vi config.lua    Configure packages to build, customise sandboxes, etc.
 
-\x1b[1;4mBuild all packages:\x1b[0m
+Build all packages:
 
   bob build
 
