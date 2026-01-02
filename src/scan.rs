@@ -639,20 +639,18 @@ impl Scan {
             });
 
             // Check if we were interrupted during parallel processing
-            if shutdown_flag.load(Ordering::Relaxed) {
-                // Immediately show interrupted message
+            let was_interrupted = shutdown_flag.load(Ordering::Relaxed);
+            if was_interrupted {
                 stop_refresh.store(true, Ordering::Relaxed);
                 if let Ok(mut p) = progress.lock() {
                     let _ = p.finish_interrupted();
                 }
                 interrupted = true;
-                break;
             }
 
             /*
-             * Look through the results we just processed for any new PKGPATH
-             * entries in DEPENDS that we have not seen before (neither in
-             * done nor incoming).
+             * Process results - always save completed scans, even if
+             * interrupted, so progress is preserved on restart.
              */
             let mut new_incoming: HashSet<PkgPath> = HashSet::new();
             let mut loaded_from_cache = 0usize;
@@ -667,6 +665,12 @@ impl Scan {
                     }
                 };
                 self.done.insert(pkgpath.clone(), scanpkgs.clone());
+
+                // Skip dependency discovery if interrupted
+                if was_interrupted {
+                    continue;
+                }
+
                 // Discover dependencies not yet seen
                 for pkg in scanpkgs {
                     if let Some(ref all_deps) = pkg.all_depends {
@@ -692,6 +696,12 @@ impl Scan {
                     }
                 }
             }
+
+            // Exit after saving results if interrupted
+            if was_interrupted {
+                break;
+            }
+
             if loaded_from_cache > 0 {
                 if let Ok(mut p) = progress.lock() {
                     p.state_mut().total += loaded_from_cache;
