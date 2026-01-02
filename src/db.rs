@@ -26,7 +26,7 @@ use indexmap::IndexMap;
 use pkgsrc::{PkgName, PkgPath, ScanIndex};
 use rusqlite::{Connection, params};
 use std::path::Path;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// SQLite database for scan result caching.
 pub struct Database {
@@ -163,5 +163,61 @@ impl Database {
     pub fn clear_build(&self) -> Result<()> {
         self.conn.execute("DELETE FROM build", [])?;
         Ok(())
+    }
+
+    /// Delete cached build result for a specific pkgname.
+    pub fn delete_build_pkgname(&self, pkgname: &str) -> Result<bool> {
+        let rows = self.conn.execute(
+            "DELETE FROM build WHERE pkgname = ?1",
+            params![pkgname],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Delete cached build results matching a pkgpath.
+    /// Returns the number of deleted entries.
+    pub fn delete_build_by_pkgpath(&self, pkgpath: &str) -> Result<usize> {
+        let normalized = PkgPath::new(pkgpath)
+            .map(|pp| pp.to_string())
+            .unwrap_or_else(|_| pkgpath.to_string());
+        // Build results store pkgpath in the JSON data, so we need to search
+        let mut stmt = self.conn.prepare("SELECT pkgname, data FROM build")?;
+        let rows = stmt.query_map([], |row| {
+            let pkgname: String = row.get(0)?;
+            let json: String = row.get(1)?;
+            Ok((pkgname, json))
+        })?;
+
+        let mut to_delete = Vec::new();
+        let mut corrupted = Vec::new();
+        for row in rows {
+            let (pkgname, json) = row?;
+            match serde_json::from_str::<BuildResult>(&json) {
+                Ok(result) => {
+                    if let Some(ref pp) = result.pkgpath {
+                        if pp.to_string() == normalized {
+                            to_delete.push(pkgname);
+                        }
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        pkgname,
+                        error = ?err,
+                        "Failed to parse cached build result; deleting entry"
+                    );
+                    corrupted.push(pkgname);
+                }
+            }
+        }
+
+        for pkgname in to_delete.iter().chain(corrupted.iter()) {
+            self.conn.execute(
+                "DELETE FROM build WHERE pkgname = ?1",
+                params![pkgname],
+            )?;
+        }
+
+        Ok(to_delete.len() + corrupted.len())
     }
 }

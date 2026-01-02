@@ -33,6 +33,257 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Exit code when interrupted.  We do not know what exact signal this was.
 const EXIT_INTERRUPTED: i32 = 128 + libc::SIGINT;
 
+/// Common context for build operations.
+struct BuildRunner {
+    config: Config,
+    db: Database,
+    ctx: RunContext,
+}
+
+impl BuildRunner {
+    /// Set up the build environment: config, logging, validation, db, signals.
+    fn new(
+        config_path: Option<&Path>,
+        verbose: bool,
+        for_build: bool,
+    ) -> Result<Self> {
+        let config = Config::load(config_path, verbose)?;
+        let logs_dir = config.logdir().join("bob");
+
+        logging::init(&logs_dir, config.verbose())?;
+
+        if let Err(errors) = config.validate() {
+            eprintln!("Configuration errors:");
+            for e in &errors {
+                eprintln!("  - {}", e);
+            }
+            bail!("{} configuration error(s) found", errors.len());
+        }
+
+        let db_path = logs_dir.join("bob.db");
+        let db = Database::open(&db_path)?;
+
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let shutdown_for_handler = Arc::clone(&shutdown_flag);
+        let sandbox_for_handler = Sandbox::new(&config);
+        let sandbox_count = if for_build { config.build_threads() } else { 1 };
+
+        ctrlc::set_handler(move || {
+            shutdown_for_handler.store(true, Ordering::SeqCst);
+            if sandbox_for_handler.enabled() {
+                for i in 0..sandbox_count {
+                    sandbox_for_handler.kill_processes_by_id(i);
+                }
+            }
+        })
+        .expect("Error setting signal handler");
+
+        let stats_path = logs_dir.join("stats.jsonl");
+        let stats = Stats::new(&stats_path)?;
+        let ctx = RunContext::new(Arc::clone(&shutdown_flag))
+            .with_stats(Arc::new(stats));
+
+        Ok(Self { config, db, ctx })
+    }
+
+    /// Run the scan phase, returning the resolved scan result.
+    fn run_scan(&self, scan: &mut Scan) -> Result<bob::scan::ScanResult> {
+        // Load cached scans
+        let cached = self.db.get_all_scan()?;
+        if !cached.is_empty() {
+            let loaded = scan.load_cached(cached);
+            if loaded > 0 {
+                println!("Loaded {} cached package paths", loaded);
+            }
+        }
+
+        let interrupted = scan.start(&self.ctx)?;
+
+        // Store scan results
+        for (pkgpath, indexes) in scan.completed() {
+            if !indexes.is_empty() {
+                self.db.store_scan_pkgpath(&pkgpath.to_string(), indexes)?;
+            }
+        }
+
+        if interrupted {
+            self.flush_stats();
+            std::process::exit(EXIT_INTERRUPTED);
+        }
+
+        // Handle scan errors
+        let scan_errors: Vec<_> = scan.scan_errors().collect();
+        if !scan_errors.is_empty() {
+            eprintln!();
+            for err in &scan_errors {
+                eprintln!("{}", err);
+            }
+            if self.config.strict_scan() {
+                bail!("{} package(s) failed to scan", scan_errors.len());
+            }
+            eprintln!(
+                "Warning: {} package(s) failed to scan, continuing anyway",
+                scan_errors.len()
+            );
+            eprintln!();
+        }
+
+        println!("Resolving dependencies...");
+        scan.resolve()
+    }
+
+    /// Run the build phase, returning the build summary.
+    fn run_build(
+        &self,
+        scan_result: bob::scan::ScanResult,
+    ) -> Result<build::BuildSummary> {
+        if scan_result.buildable.is_empty() {
+            bail!("No packages to build");
+        }
+
+        let mut build = Build::new(&self.config, scan_result.buildable.clone());
+
+        // Load cached build results
+        let cached_build = self.db.get_all_build()?;
+        if !cached_build.is_empty() {
+            build.load_cached(cached_build);
+        }
+
+        let mut summary = build.start(&self.ctx)?;
+
+        // Store build results
+        for result in &summary.results {
+            self.db.store_build_pkgname(result.pkgname.pkgname(), result)?;
+        }
+
+        self.flush_stats();
+
+        // Check if we were interrupted
+        if self.ctx.shutdown.load(Ordering::SeqCst) {
+            let sandbox = Sandbox::new(&self.config);
+            if sandbox.enabled() {
+                let _ = sandbox.destroy_all(self.config.build_threads());
+            }
+            std::process::exit(EXIT_INTERRUPTED);
+        }
+
+        // Add pre-skipped packages from scan to summary
+        for pkg in scan_result.skipped {
+            let reason = match pkg.reason {
+                SkipReason::PkgSkipReason(r) => {
+                    format!("PKG_SKIP_REASON: {}", r)
+                }
+                SkipReason::PkgFailReason(r) => {
+                    format!("PKG_FAIL_REASON: {}", r)
+                }
+            };
+            summary.results.push(build::BuildResult {
+                pkgname: pkg.pkgname,
+                pkgpath: pkg.pkgpath,
+                outcome: build::BuildOutcome::PreFailed(reason),
+                duration: std::time::Duration::ZERO,
+                log_dir: None,
+            });
+        }
+
+        summary.scan_failed = scan_result.scan_failed;
+        Ok(summary)
+    }
+
+    /// Flush stats if available.
+    fn flush_stats(&self) {
+        if let Some(ref s) = self.ctx.stats {
+            s.flush();
+        }
+    }
+
+    /// Generate and print the HTML report.
+    fn generate_report(&self, summary: &build::BuildSummary) {
+        println!("Generating reports...");
+        let logdir = self.config.logdir();
+        let report_path = logdir.join("report.html");
+        if let Err(e) = report::write_html_report(summary, &report_path) {
+            eprintln!("Warning: Failed to write HTML report: {}", e);
+        } else {
+            println!("HTML report written to: {}", report_path.display());
+        }
+    }
+
+    /// Look up pkgpath for a pkgname from scan cache.
+    fn find_pkgpath_for_pkgname(
+        &self,
+        pkgname: &str,
+    ) -> Result<Option<pkgsrc::PkgPath>> {
+        let cached = self.db.get_all_scan()?;
+        for (_pkgpath, indexes) in &cached {
+            for idx in indexes {
+                if idx.pkgname.pkgname() == pkgname {
+                    if let Some(ref loc) = idx.pkg_location {
+                        return Ok(Some(loc.clone()));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Find all packages that depend on the given pkgpaths (reverse dependencies).
+    /// Returns pkgnames of packages that should be rebuilt.
+    fn find_dependents(
+        &self,
+        pkgpaths: &[&str],
+    ) -> Result<(Vec<String>, std::collections::HashMap<String, String>)> {
+        use std::collections::{HashMap, HashSet, VecDeque};
+
+        let cached = self.db.get_all_scan()?;
+
+        // Build reverse dependency map: pkgpath -> packages that depend on it
+        let mut rev_deps: HashMap<String, Vec<String>> = HashMap::new();
+        let mut pkgname_to_pkgpath: HashMap<String, String> = HashMap::new();
+
+        for (_pkgpath, indexes) in &cached {
+            for idx in indexes {
+                let pkgname = idx.pkgname.pkgname().to_string();
+                if let Some(ref loc) = idx.pkg_location {
+                    pkgname_to_pkgpath
+                        .entry(pkgname.clone())
+                        .or_insert_with(|| loc.to_string());
+                }
+                if let Some(ref all_deps) = idx.all_depends {
+                    for dep in all_deps {
+                        rev_deps
+                            .entry(dep.pkgpath().to_string())
+                            .or_default()
+                            .push(pkgname.clone());
+                    }
+                }
+            }
+        }
+
+        // BFS to find all transitive dependents
+        let mut to_clear: HashSet<String> = HashSet::new();
+        let mut queue: VecDeque<String> =
+            pkgpaths.iter().map(|s| s.to_string()).collect();
+
+        while let Some(pkgpath) = queue.pop_front() {
+            if let Some(dependents) = rev_deps.get(&pkgpath) {
+                for dep_pkgname in dependents {
+                    if to_clear.insert(dep_pkgname.clone()) {
+                        // Find the pkgpath for this dependent to continue traversal
+                        if let Some(dep_path) =
+                            pkgname_to_pkgpath.get(dep_pkgname)
+                        {
+                            queue.push_back(dep_path.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((to_clear.into_iter().collect(), pkgname_to_pkgpath))
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(
     author,
@@ -71,13 +322,19 @@ pub struct Args {
 enum Cmd {
     /// Create a new configuration area
     Init { dir: PathBuf },
-    /// Scan packages as defined by the configuration file
+    /// Perform recursive scan of packages to calculate dependencies
     Scan,
-    /// Build packages (uses config pkgpaths if none specified)
+    /// Build all scanned packages
     Build {
         /// Package paths to build (overrides config pkgpaths)
         #[arg(value_name = "PKGPATH")]
         pkgpaths: Vec<String>,
+    },
+    /// Rebuild specific packages, clearing cached results
+    Rebuild {
+        /// Package paths or package names to rebuild
+        #[arg(required = true, value_name = "PKGPATH|PKGNAME")]
+        packages: Vec<String>,
     },
     /// Clear all cached scan and build state from the database
     Clean,
@@ -202,59 +459,18 @@ fn main() -> Result<()> {
 
     match args.cmd {
         Cmd::Build { pkgpaths: cmdline_pkgs } => {
-            let config = Config::load(args.config.as_deref(), args.verbose)?;
-
-            // Initialize logging in logdir/bob/
-            let logs_dir = config.logdir().join("bob");
-            logging::init(&logs_dir, config.verbose())?;
-
+            let runner =
+                BuildRunner::new(args.config.as_deref(), args.verbose, true)?;
             tracing::info!("Build command started");
 
-            // Validate configuration
-            if let Err(errors) = config.validate() {
-                eprintln!("Configuration errors:");
-                for e in &errors {
-                    eprintln!("  - {}", e);
-                }
-                bail!("{} configuration error(s) found", errors.len());
-            }
-
-            let db_path = logs_dir.join("bob.db");
-            let db = Database::open(&db_path)?;
-
-            // Set up signal handler for graceful shutdown (SIGINT and SIGTERM)
-            let shutdown_flag = Arc::new(AtomicBool::new(false));
-            let shutdown_for_handler = Arc::clone(&shutdown_flag);
-            let sandbox_for_handler = Sandbox::new(&config);
-            let build_threads = config.build_threads();
-
-            ctrlc::set_handler(move || {
-                shutdown_for_handler.store(true, Ordering::SeqCst);
-                // Kill processes in sandboxes to stop running builds
-                if sandbox_for_handler.enabled() {
-                    for i in 0..build_threads {
-                        sandbox_for_handler.kill_processes_by_id(i);
-                    }
-                }
-            })
-            .expect("Error setting signal handler");
-
-            // Create stats collector
-            let stats_path = logs_dir.join("stats.jsonl");
-            let stats = Stats::new(&stats_path)?;
-            let ctx = RunContext::new(Arc::clone(&shutdown_flag))
-                .with_stats(Arc::new(stats));
-
-            let mut scan = Scan::new(&config);
+            let mut scan = Scan::new(&runner.config);
             if cmdline_pkgs.is_empty() {
-                // No command-line pkgpaths, use config
-                if let Some(pkgs) = config.pkgpaths() {
+                if let Some(pkgs) = runner.config.pkgpaths() {
                     for p in pkgs {
                         scan.add(p);
                     }
                 }
             } else {
-                // Command-line pkgpaths override config
                 for p in &cmdline_pkgs {
                     match pkgsrc::PkgPath::new(p) {
                         Ok(pkgpath) => scan.add(&pkgpath),
@@ -263,123 +479,76 @@ fn main() -> Result<()> {
                 }
             }
 
-            // Load cached scans
-            let cached = db.get_all_scan()?;
-            if !cached.is_empty() {
-                let loaded = scan.load_cached(cached);
-                if loaded > 0 {
-                    println!("Loaded {} cached package paths", loaded);
-                }
-            }
-
-            let interrupted = scan.start(&ctx)?;
-
-            // Store scan results (including partial progress on interrupt)
-            for (pkgpath, indexes) in scan.completed() {
-                if !indexes.is_empty() {
-                    db.store_scan_pkgpath(&pkgpath.to_string(), indexes)?;
-                }
-            }
-
-            if interrupted {
-                if let Some(ref s) = ctx.stats {
-                    s.flush();
-                }
-                std::process::exit(EXIT_INTERRUPTED);
-            }
-
-            // Handle scan errors
-            let scan_errors: Vec<_> = scan.scan_errors().collect();
-            if !scan_errors.is_empty() {
-                eprintln!();
-                for err in &scan_errors {
-                    eprintln!("{}", err);
-                }
-                if config.strict_scan() {
-                    bail!("{} package(s) failed to scan", scan_errors.len());
-                }
-                eprintln!(
-                    "Warning: {} package(s) failed to scan, continuing anyway",
-                    scan_errors.len()
-                );
-                eprintln!();
-            }
-
-            println!("Resolving dependencies...");
-            let scan_result = scan.resolve()?;
-
-            tracing::info!(
-                buildable = scan_result.buildable.len(),
-                skipped = scan_result.skipped.len(),
-                "Scan complete"
-            );
-
-            if scan_result.buildable.is_empty() {
-                bail!("No packages to build");
-            }
-
-            let mut build = Build::new(&config, scan_result.buildable.clone());
-
-            // Load cached build results
-            let cached_build = db.get_all_build()?;
-            if !cached_build.is_empty() {
-                build.load_cached(cached_build);
-            }
-
-            let mut summary = build.start(&ctx)?;
-
-            // Store build results (including partial progress on interrupt)
-            for result in &summary.results {
-                db.store_build_pkgname(result.pkgname.pkgname(), result)?;
-            }
-
-            // Flush stats before checking for interruption
-            if let Some(ref s) = ctx.stats {
-                s.flush();
-            }
-
-            // Check if we were interrupted
-            if ctx.shutdown.load(Ordering::SeqCst) {
-                let sandbox = Sandbox::new(&config);
-                if sandbox.enabled() {
-                    let _ = sandbox.destroy_all(config.build_threads());
-                }
-                std::process::exit(EXIT_INTERRUPTED);
-            }
-
-            // Add pre-skipped packages from scan to summary
-            for pkg in scan_result.skipped {
-                let reason = match pkg.reason {
-                    SkipReason::PkgSkipReason(r) => {
-                        format!("PKG_SKIP_REASON: {}", r)
-                    }
-                    SkipReason::PkgFailReason(r) => {
-                        format!("PKG_FAIL_REASON: {}", r)
-                    }
-                };
-                summary.results.push(build::BuildResult {
-                    pkgname: pkg.pkgname,
-                    pkgpath: pkg.pkgpath,
-                    outcome: build::BuildOutcome::PreFailed(reason),
-                    duration: std::time::Duration::ZERO,
-                    log_dir: None,
-                });
-            }
-
-            // Add scan failures to summary
-            summary.scan_failed = scan_result.scan_failed;
-
+            let scan_result = runner.run_scan(&mut scan)?;
+            let summary = runner.run_build(scan_result)?;
             print_summary(&summary);
+            runner.generate_report(&summary);
+        }
+        Cmd::Rebuild { packages } => {
+            let runner =
+                BuildRunner::new(args.config.as_deref(), args.verbose, true)?;
 
-            // Generate HTML report in logdir directory
-            println!("Generating reports...");
-            let logdir = config.logdir();
-            let report_path = logdir.join("report.html");
-            if let Err(e) = report::write_html_report(&summary, &report_path) {
-                eprintln!("Warning: Failed to write HTML report: {}", e);
-            } else {
-                println!("HTML report written to: {}", report_path.display());
+            // Convert packages to pkgpaths and collect for dependent lookup
+            let mut pkgpaths_to_rebuild: Vec<String> = Vec::new();
+            let mut scan = Scan::new(&runner.config);
+
+            for pkg in &packages {
+                if pkg.contains('/') {
+                    match pkgsrc::PkgPath::new(pkg) {
+                        Ok(pkgpath) => {
+                            pkgpaths_to_rebuild.push(pkgpath.to_string());
+                            scan.add(&pkgpath);
+                        }
+                        Err(e) => bail!("Invalid PKGPATH '{}': {}", pkg, e),
+                    }
+                } else {
+                    match runner.find_pkgpath_for_pkgname(pkg)? {
+                        Some(pkgpath) => {
+                            pkgpaths_to_rebuild.push(pkgpath.to_string());
+                            scan.add(&pkgpath);
+                        }
+                        None => bail!(
+                            "Package '{}' not found in scan cache. \
+                             Run 'bob scan' first or specify the full PKGPATH.",
+                            pkg
+                        ),
+                    }
+                }
             }
+
+            // Clear cached build results for specified packages
+            let mut cleared = 0;
+            for pkg in &packages {
+                if pkg.contains('/') {
+                    cleared += runner.db.delete_build_by_pkgpath(pkg)?;
+                } else if runner.db.delete_build_pkgname(pkg)? {
+                    cleared += 1;
+                }
+            }
+
+            // Also clear dependents (packages that depend on what we're rebuilding)
+            let pkgpath_refs: Vec<&str> =
+                pkgpaths_to_rebuild.iter().map(|s| s.as_str()).collect();
+            let (dependents, pkgname_to_pkgpath) =
+                runner.find_dependents(&pkgpath_refs)?;
+            for dep in &dependents {
+                if runner.db.delete_build_pkgname(dep)? {
+                    cleared += 1;
+                }
+                if let Some(pkgpath) = pkgname_to_pkgpath.get(dep) {
+                    if let Ok(pkgpath) = pkgsrc::PkgPath::new(pkgpath) {
+                        scan.add(&pkgpath);
+                    }
+                }
+            }
+
+            if cleared > 0 {
+                println!("Cleared {} cached build result(s)", cleared);
+            }
+
+            let scan_result = runner.run_scan(&mut scan)?;
+            let summary = runner.run_build(scan_result)?;
+            print_summary(&summary);
         }
         Cmd::Util { cmd: UtilCmd::GenerateReport } => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
@@ -609,96 +778,18 @@ fn main() -> Result<()> {
             sandbox.list_all(config.build_threads());
         }
         Cmd::Scan => {
-            let config = Config::load(args.config.as_deref(), args.verbose)?;
-            let logs_dir = config.logdir().join("bob");
-            logging::init(&logs_dir, config.verbose())?;
-            if let Err(errors) = config.validate() {
-                eprintln!("Configuration errors:");
-                for e in &errors {
-                    eprintln!("  - {}", e);
-                }
-                bail!("{} configuration error(s) found", errors.len());
-            }
+            let runner =
+                BuildRunner::new(args.config.as_deref(), args.verbose, false)?;
 
-            let db_path = logs_dir.join("bob.db");
-            let db = Database::open(&db_path)?;
-
-            // Set up signal handler for graceful shutdown
-            let shutdown_flag = Arc::new(AtomicBool::new(false));
-            let shutdown_for_handler = Arc::clone(&shutdown_flag);
-            let sandbox_for_handler = Sandbox::new(&config);
-
-            ctrlc::set_handler(move || {
-                shutdown_for_handler.store(true, Ordering::SeqCst);
-                if sandbox_for_handler.enabled() {
-                    sandbox_for_handler.kill_processes_by_id(0);
-                }
-            })
-            .expect("Error setting signal handler");
-
-            // Create stats collector
-            let stats_path = logs_dir.join("stats.jsonl");
-            let stats = Stats::new(&stats_path)?;
-            let ctx = RunContext::new(Arc::clone(&shutdown_flag))
-                .with_stats(Arc::new(stats));
-
-            let mut scan = Scan::new(&config);
-            if let Some(pkgs) = config.pkgpaths() {
+            let mut scan = Scan::new(&runner.config);
+            if let Some(pkgs) = runner.config.pkgpaths() {
                 for p in pkgs {
                     scan.add(p);
                 }
             }
 
-            // Load cached scans
-            let cached = db.get_all_scan()?;
-            if !cached.is_empty() {
-                let loaded = scan.load_cached(cached);
-                if loaded > 0 {
-                    println!("Loaded {} cached package paths", loaded);
-                }
-            }
-
-            let interrupted = scan.start(&ctx)?;
-
-            // Store scan results (including partial progress on interrupt)
-            for (pkgpath, indexes) in scan.completed() {
-                if !indexes.is_empty() {
-                    db.store_scan_pkgpath(&pkgpath.to_string(), indexes)?;
-                }
-            }
-
-            if interrupted {
-                if let Some(ref s) = ctx.stats {
-                    s.flush();
-                }
-                std::process::exit(EXIT_INTERRUPTED);
-            }
-
-            // Handle scan errors
-            let scan_errors: Vec<_> = scan.scan_errors().collect();
-            if !scan_errors.is_empty() {
-                eprintln!();
-                for err in &scan_errors {
-                    eprintln!("{}", err);
-                }
-                if config.strict_scan() {
-                    bail!("{} package(s) failed to scan", scan_errors.len());
-                }
-                eprintln!(
-                    "Warning: {} package(s) failed to scan, continuing anyway",
-                    scan_errors.len()
-                );
-                eprintln!();
-            }
-
-            // Flush stats
-            if let Some(ref s) = ctx.stats {
-                s.flush();
-            }
-
-            println!("Resolving dependencies...");
-            let result = scan.resolve()?;
-            println!("Resolved {} buildable packages", result.buildable.len(),);
+            let result = runner.run_scan(&mut scan)?;
+            println!("Resolved {} buildable packages", result.buildable.len());
         }
     };
 
