@@ -357,7 +357,15 @@ impl<'a> PkgBuilder<'a> {
                 .file_name()
                 .context("Invalid package file path")?,
         );
-        fs::copy(&pkgfile, &dest)?;
+        // pkgfile is a path inside the sandbox; prepend sandbox path for host access
+        let host_pkgfile = if self.sandbox.enabled() {
+            self.sandbox
+                .path(self.sandbox_id)
+                .join(pkgfile.trim_start_matches('/'))
+        } else {
+            PathBuf::from(&pkgfile)
+        };
+        fs::copy(&host_pkgfile, &dest)?;
 
         // Clean
         callback.stage(Stage::Clean.as_str());
