@@ -268,10 +268,12 @@ fn format_duration_short(d: Duration) -> String {
 /// Calculate grid layout for N panels with height optimization.
 /// If terminal width < 160, use vertical stack with idle panels collapsed.
 /// Otherwise use a roughly square grid with equal sizing.
+/// Elapsed times are used to prioritize extra lines to longer-running panels.
 fn calculate_panel_layout(
     area: Rect,
     num_panels: usize,
     is_active: &[bool],
+    elapsed_secs: &[u64],
 ) -> Vec<Rect> {
     if num_panels == 0 {
         return vec![];
@@ -285,14 +287,41 @@ fn calculate_panel_layout(
         let total_idle_height = idle_count as u16 * idle_height;
         let active_space = area.height.saturating_sub(total_idle_height);
 
-        // Build rects maintaining order: idle panels get 2 lines,
-        // active panels share remaining space equally
+        // Base height for each active panel, plus remainder to distribute
+        let base_height = if active_count > 0 {
+            active_space / active_count as u16
+        } else {
+            0
+        };
+        let remainder = if active_count > 0 {
+            (active_space % active_count as u16) as usize
+        } else {
+            0
+        };
+
+        // Sort active panel indices by elapsed time (descending) to determine
+        // which panels get extra lines
+        let mut active_indices: Vec<usize> = is_active
+            .iter()
+            .enumerate()
+            .filter(|&(_, &a)| a)
+            .map(|(i, _)| i)
+            .collect();
+        active_indices.sort_by(|&a, &b| elapsed_secs[b].cmp(&elapsed_secs[a]));
+
+        // Mark which panels get an extra line
+        let mut extra_line = vec![false; num_panels];
+        for &idx in active_indices.iter().take(remainder) {
+            extra_line[idx] = true;
+        }
+
+        // Build rects maintaining order
         let mut rects = Vec::with_capacity(num_panels);
         let mut y = area.y;
 
-        for &active in is_active {
+        for (i, &active) in is_active.iter().enumerate() {
             let h = if active && active_count > 0 {
-                active_space / active_count as u16
+                base_height + if extra_line[i] { 1 } else { 0 }
             } else {
                 idle_height
             };
@@ -303,8 +332,12 @@ fn calculate_panel_layout(
         return rects;
     }
 
-    // For wide terminals, use a roughly square grid (equal sizing)
-    let cols = (num_panels as f64).sqrt().ceil() as usize;
+    // For wide terminals, use grid layout.
+    // Scale columns based on width: require ~80 chars per column minimum.
+    // This prefers 2x4 over 3x3 until the terminal is very wide.
+    let max_cols_by_count = (num_panels as f64).sqrt().ceil() as usize;
+    let max_cols_by_width = (area.width as usize) / 80;
+    let cols = max_cols_by_count.min(max_cols_by_width).max(1);
     let rows = num_panels.div_ceil(cols);
 
     let row_constraints: Vec<Constraint> =
@@ -662,13 +695,28 @@ impl MultiProgress {
             })
             .collect();
 
-        // Extract active flags for layout calculation
+        // Extract active flags and elapsed times for layout calculation
         let is_active: Vec<bool> =
             panel_data.iter().map(|(_, _, active)| *active).collect();
+        let elapsed_secs: Vec<u64> = (0..num_workers)
+            .map(|i| {
+                self.state
+                    .workers
+                    .get(i)
+                    .and_then(|w| w.elapsed())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            })
+            .collect();
 
         self.terminal.draw(|frame| {
             let area = frame.area();
-            let panels = calculate_panel_layout(area, num_workers, &is_active);
+            let panels = calculate_panel_layout(
+                area,
+                num_workers,
+                &is_active,
+                &elapsed_secs,
+            );
 
             for (i, panel_area) in panels.iter().enumerate() {
                 if let Some((title, lines, _)) = panel_data.get(i) {
