@@ -63,9 +63,9 @@ impl OutputBuffer {
     }
 
     pub fn push(&mut self, line: String) {
-        // Strip ANSI escapes and sanitize control characters before storing.
         let clean_line = sanitize_output(&line);
-        // If carriage returns are present, keep only the final segment.
+        // Carriage returns are used by tools to overwrite the current line
+        // (e.g., progress updates). Keep only the final segment for cleaner output.
         let clean_line = clean_line.rsplit('\r').next().unwrap_or("");
         if self.lines.len() >= self.capacity {
             self.lines.pop_front();

@@ -1144,6 +1144,9 @@ impl Build {
          * Populate BuildJobs.
          */
         debug!("Populating BuildJobs from scanpkgs");
+        // Maps each package to its pending dependencies. A package is ready
+        // to build when its dependency set becomes empty. Dependencies are
+        // removed from these sets as they complete.
         let mut incoming: HashMap<PkgName, HashSet<PkgName>> = HashMap::new();
         for (pkgname, index) in &self.scanpkgs {
             let mut deps: HashSet<PkgName> = HashSet::new();

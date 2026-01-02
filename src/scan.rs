@@ -283,6 +283,8 @@ impl Scan {
                     for pkg in indexes {
                         if let Some(ref all_deps) = pkg.all_depends {
                             for dep in all_deps {
+                                // insert() returns true only for new entries,
+                                // preventing re-processing of already-seen paths
                                 if relevant.insert(dep.pkgpath().clone()) {
                                     to_process.push(dep.pkgpath().clone());
                                 }
@@ -1057,7 +1059,8 @@ impl Scan {
             skip_due_to_dep.extend(new_skips);
         }
 
-        // Merge skip_due_to_dep into skip_reasons
+        // Merge transitive skips, but don't overwrite explicit PKG_SKIP/FAIL_REASON
+        // since those are more informative than "Dependency X skipped"
         for (pkgname, reason) in skip_due_to_dep.iter() {
             if !skip_reasons.contains_key(pkgname) {
                 skip_reasons.insert(
