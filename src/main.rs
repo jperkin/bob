@@ -95,9 +95,12 @@ impl BuildRunner {
         }
 
         // Initialize scan from database (checks what's already scanned)
-        let cached_count = scan.init_from_db(&self.db)?;
+        let (cached_count, pending_count) = scan.init_from_db(&self.db)?;
         if cached_count > 0 {
             println!("Found {} cached package paths", cached_count);
+            if pending_count > 0 {
+                println!("Resuming scan with {} pending dependencies", pending_count);
+            }
         }
 
         let interrupted = scan.start(&self.ctx, &self.db)?;

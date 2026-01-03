@@ -68,7 +68,7 @@ fn setup_scan_with_db(packages: Vec<ScanIndex>) -> Result<(Scan, Database)> {
             scan.add(path);
         }
     }
-    scan.init_from_db(&db)?;
+    let _ = scan.init_from_db(&db)?;
 
     // Leak the tempdir to keep it alive for the duration of the test
     std::mem::forget(tmp);

@@ -412,6 +412,19 @@ impl Database {
         rows.collect::<Result<HashSet<_>, _>>().map_err(Into::into)
     }
 
+    /// Get pkgpaths that are referenced as dependencies but haven't been scanned yet.
+    /// These are dependencies that were discovered during scanning but the scan was
+    /// interrupted before they could be processed.
+    pub fn get_unscanned_dependencies(&self) -> Result<HashSet<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT d.depend_pkgpath
+             FROM depends d
+             WHERE d.depend_pkgpath NOT IN (SELECT pkgpath FROM packages)"
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<HashSet<_>, _>>().map_err(Into::into)
+    }
+
     /// Count of scanned packages.
     pub fn count_packages(&self) -> Result<i64> {
         self.conn.query_row("SELECT COUNT(*) FROM packages", [], |row| row.get(0))

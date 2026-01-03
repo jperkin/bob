@@ -268,13 +268,15 @@ impl Scan {
     }
 
     /// Initialize scan from database, checking what's already scanned.
-    /// Returns the count of already-scanned pkgpaths.
-    pub fn init_from_db(&mut self, db: &crate::db::Database) -> Result<usize> {
+    /// Returns (cached_count, pending_deps_count) where pending_deps_count is the
+    /// number of dependencies discovered but not yet scanned (from interrupted scans).
+    pub fn init_from_db(&mut self, db: &crate::db::Database) -> Result<(usize, usize)> {
         let scanned = db.get_scanned_pkgpaths()?;
-        let count = scanned.len();
+        let cached_count = scanned.len();
+        let mut pending_count = 0;
 
-        if count > 0 {
-            info!(cached_count = count, "Found cached scan results in database");
+        if cached_count > 0 {
+            info!(cached_count = cached_count, "Found cached scan results in database");
 
             // For full tree scans with full_scan_complete, we'll skip scanning
             // For limited scans, remove already-scanned from incoming
@@ -283,14 +285,32 @@ impl Scan {
             }
 
             // Add scanned pkgpaths to done set
-            for pkgpath_str in scanned {
-                if let Ok(pkgpath) = PkgPath::new(&pkgpath_str) {
+            for pkgpath_str in &scanned {
+                if let Ok(pkgpath) = PkgPath::new(pkgpath_str) {
                     self.done.insert(pkgpath);
+                }
+            }
+
+            // Check for dependencies that were discovered but not yet scanned.
+            // This handles the case where a scan was interrupted partway through.
+            let unscanned = db.get_unscanned_dependencies()?;
+            if !unscanned.is_empty() {
+                info!(
+                    unscanned_count = unscanned.len(),
+                    "Found unscanned dependencies from interrupted scan"
+                );
+                for pkgpath_str in unscanned {
+                    if let Ok(pkgpath) = PkgPath::new(&pkgpath_str) {
+                        if !self.done.contains(&pkgpath) {
+                            self.incoming.insert(pkgpath);
+                            pending_count += 1;
+                        }
+                    }
                 }
             }
         }
 
-        Ok(count)
+        Ok((cached_count, pending_count))
     }
 
     /// Discover all packages in pkgsrc tree.
