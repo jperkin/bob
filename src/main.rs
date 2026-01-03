@@ -231,11 +231,13 @@ impl BuildRunner {
     }
 
     /// Generate and print the HTML report.
-    fn generate_report(&self, summary: &build::BuildSummary) {
+    fn generate_report(&self) {
         println!("Generating reports...");
         let logdir = self.config.logdir();
         let report_path = logdir.join("report.html");
-        if let Err(e) = report::write_html_report(summary, &report_path) {
+        if let Err(e) =
+            report::write_html_report(&self.db, logdir, &report_path)
+        {
             eprintln!("Warning: Failed to write HTML report: {}", e);
         } else {
             println!("HTML report written to: {}", report_path.display());
@@ -421,55 +423,6 @@ fn print_summary(summary: &build::BuildSummary) {
     println!();
 }
 
-/// Scan the logdir directory to reconstruct build results for report generation.
-fn scan_logdir_for_report(logdir: &Path) -> Result<build::BuildSummary> {
-    use std::fs;
-    use std::time::Duration;
-
-    let mut results = Vec::new();
-
-    for entry in fs::read_dir(logdir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        // Skip non-directories (report.html, etc.)
-        if !path.is_dir() {
-            continue;
-        }
-
-        let pkg_name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(name) => name.to_string(),
-            None => continue,
-        };
-
-        // Check for .stage file to determine failure phase
-        let stage_file = path.join(".stage");
-        let failed_reason = if stage_file.exists() {
-            fs::read_to_string(&stage_file)
-                .ok()
-                .map(|s| format!("Failed in {} phase", s.trim()))
-                .unwrap_or_else(|| "Build failed".to_string())
-        } else {
-            "Build failed (no phase marker)".to_string()
-        };
-
-        // Any directory in logdir = failed build (successful builds clean up)
-        results.push(build::BuildResult {
-            pkgname: pkgsrc::PkgName::new(&pkg_name),
-            pkgpath: None,
-            outcome: build::BuildOutcome::Failed(failed_reason),
-            duration: Duration::ZERO,
-            log_dir: Some(path),
-        });
-    }
-
-    Ok(build::BuildSummary {
-        duration: Duration::ZERO,
-        results,
-        scan_failed: Vec::new(),
-    })
-}
-
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -498,7 +451,7 @@ fn main() -> Result<()> {
             let scan_result = runner.run_scan(&mut scan)?;
             let summary = runner.run_build(scan_result)?;
             print_summary(&summary);
-            runner.generate_report(&summary);
+            runner.generate_report();
         }
         Cmd::Rebuild { force, packages } => {
             let runner =
@@ -570,16 +523,20 @@ fn main() -> Result<()> {
         Cmd::Util { cmd: UtilCmd::GenerateReport } => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
             let logdir = config.logdir();
+            let logs_dir = logdir.join("bob");
+            let db_path = logs_dir.join("bob.db");
 
-            if !logdir.exists() {
-                bail!("logdir directory does not exist: {}", logdir.display());
+            if !db_path.exists() {
+                bail!(
+                    "No database found at {}. Run a build first.",
+                    db_path.display()
+                );
             }
 
             println!("Generating reports...");
-            let summary = scan_logdir_for_report(logdir)?;
+            let db = Database::open(&db_path)?;
             let report_path = logdir.join("report.html");
-
-            report::write_html_report(&summary, &report_path)?;
+            report::write_html_report(&db, logdir, &report_path)?;
             println!("HTML report written to: {}", report_path.display());
         }
         Cmd::Init { dir: ref arg } => {

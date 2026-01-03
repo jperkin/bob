@@ -846,6 +846,89 @@ impl Database {
         Ok(rows)
     }
 
+    /// Get all build results from the database.
+    pub fn get_all_build_results(&self) -> Result<Vec<BuildResult>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.pkgname, p.pkgpath, b.outcome, b.outcome_detail, b.duration_ms, b.log_dir
+             FROM builds b
+             JOIN packages p ON b.package_id = p.id
+             ORDER BY p.pkgname"
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let pkgname: String = row.get(0)?;
+            let pkgpath: Option<String> = row.get(1)?;
+            let outcome: String = row.get(2)?;
+            let detail: Option<String> = row.get(3)?;
+            let duration_ms: i64 = row.get(4)?;
+            let log_dir: Option<String> = row.get(5)?;
+            Ok((pkgname, pkgpath, outcome, detail, duration_ms, log_dir))
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            let (pkgname, pkgpath, outcome, detail, duration_ms, log_dir) =
+                row?;
+            let build_outcome = db_outcome_to_build(&outcome, detail);
+            results.push(BuildResult {
+                pkgname: PkgName::new(&pkgname),
+                pkgpath: pkgpath.and_then(|p| PkgPath::new(&p).ok()),
+                outcome: build_outcome,
+                duration: Duration::from_millis(duration_ms as u64),
+                log_dir: log_dir.map(std::path::PathBuf::from),
+            });
+        }
+
+        Ok(results)
+    }
+
+    /// Count how many packages are broken by each failed package.
+    /// Returns a map from pkgname to the count of packages that depend on it.
+    pub fn count_breaks_for_failed(
+        &self,
+    ) -> Result<std::collections::HashMap<String, usize>> {
+        use std::collections::HashMap;
+
+        let mut counts: HashMap<String, usize> = HashMap::new();
+
+        // Get all failed package IDs and their names
+        let mut stmt = self.conn.prepare(
+            "SELECT p.id, p.pkgname FROM builds b
+             JOIN packages p ON b.package_id = p.id
+             WHERE b.outcome = 'failed'",
+        )?;
+
+        let failed: Vec<(i64, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // For each failed package, count indirect failures that reference it
+        for (_pkg_id, pkgname) in failed {
+            let count: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM builds b
+                 JOIN packages p ON b.package_id = p.id
+                 WHERE b.outcome = 'indirect_failed'
+                 AND b.outcome_detail LIKE ?1",
+                params![format!("%{}", pkgname)],
+                |row| row.get(0),
+            )?;
+            counts.insert(pkgname, count as usize);
+        }
+
+        Ok(counts)
+    }
+
+    /// Get total build duration from all builds.
+    pub fn get_total_build_duration(&self) -> Result<Duration> {
+        let total_ms: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(duration_ms), 0) FROM builds",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(Duration::from_millis(total_ms as u64))
+    }
+
     /// Mark a package and all its transitive reverse dependencies as failed.
     /// Returns the count of packages marked.
     pub fn mark_failure_cascade(

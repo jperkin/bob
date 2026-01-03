@@ -26,11 +26,12 @@
 //! # Usage
 //!
 //! ```no_run
-//! use bob::{write_html_report, BuildSummary};
+//! use bob::{write_html_report, Database};
 //! use std::path::Path;
 //!
-//! # fn example(summary: &BuildSummary) -> anyhow::Result<()> {
-//! write_html_report(summary, Path::new("/data/bob/logs/report.html"))?;
+//! # fn example(db: &Database) -> anyhow::Result<()> {
+//! let logdir = Path::new("/data/bob/logs");
+//! write_html_report(db, logdir, &logdir.join("report.html"))?;
 //! # Ok(())
 //! # }
 //! ```
@@ -60,6 +61,7 @@
 //! Shows all successfully built packages with their build duration.
 
 use crate::build::{BuildOutcome, BuildResult, BuildSummary};
+use crate::db::Database;
 use crate::scan::ScanFailure;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -76,6 +78,7 @@ const BUILD_PHASES: &[(&str, &str)] = &[
     ("build", "build.log"),
     ("install", "install.log"),
     ("package", "package.log"),
+    ("deinstall", "deinstall.log"),
     ("clean", "clean.log"),
 ];
 
@@ -84,29 +87,7 @@ struct FailedPackageInfo<'a> {
     result: &'a BuildResult,
     breaks_count: usize,
     failed_phase: Option<String>,
-}
-
-/// Count how many packages each failed package breaks.
-fn count_broken_packages(summary: &BuildSummary) -> HashMap<String, usize> {
-    let mut counts: HashMap<String, usize> = HashMap::new();
-
-    // Initialize counts for all failed packages
-    for result in &summary.results {
-        if matches!(result.outcome, BuildOutcome::Failed(_)) {
-            counts.insert(result.pkgname.pkgname().to_string(), 0);
-        }
-    }
-
-    // Count indirect failed packages that reference each failed package
-    for result in &summary.results {
-        if let BuildOutcome::IndirectFailed(dep_name) = &result.outcome {
-            if let Some(count) = counts.get_mut(dep_name.as_str()) {
-                *count += 1;
-            }
-        }
-    }
-
-    counts
+    failed_log: Option<String>,
 }
 
 /// Read the failed phase from the .stage file in the log directory.
@@ -115,20 +96,39 @@ fn read_failed_phase(log_dir: &Path) -> Option<String> {
     fs::read_to_string(stage_file).ok().map(|s| s.trim().to_string())
 }
 
-/// Generate an HTML build report.
-pub fn write_html_report(summary: &BuildSummary, path: &Path) -> Result<()> {
+/// Generate an HTML build report from database.
+///
+/// Reads build results from the database, ensuring accurate duration and
+/// breaks counts even for interrupted or resumed builds.
+pub fn write_html_report(
+    db: &Database,
+    logdir: &Path,
+    path: &Path,
+) -> Result<()> {
+    let results = db.get_all_build_results()?;
+    let breaks_counts = db.count_breaks_for_failed()?;
+    let duration = db.get_total_build_duration()?;
+
+    let summary = BuildSummary { duration, results, scan_failed: Vec::new() };
+
+    write_report_impl(&summary, &breaks_counts, logdir, path)
+}
+
+/// Internal implementation for report generation.
+fn write_report_impl(
+    summary: &BuildSummary,
+    breaks_counts: &HashMap<String, usize>,
+    logdir: &Path,
+    path: &Path,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
 
     let mut file = fs::File::create(path)?;
 
-    // Calculate broken package counts
-    let broken_counts = count_broken_packages(summary);
-
     // Collect and sort results
     let mut succeeded: Vec<&BuildResult> = summary.succeeded();
-    // Collect all "skipped" variants (everything except Success and Failed)
     let mut skipped: Vec<&BuildResult> = summary
         .results
         .iter()
@@ -148,13 +148,19 @@ pub fn write_html_report(summary: &BuildSummary, path: &Path) -> Result<()> {
         .failed()
         .into_iter()
         .map(|result| {
-            let breaks_count = broken_counts
+            let breaks_count = breaks_counts
                 .get(result.pkgname.pkgname())
                 .copied()
                 .unwrap_or(0);
-            let failed_phase =
-                result.log_dir.as_ref().and_then(|dir| read_failed_phase(dir));
-            FailedPackageInfo { result, breaks_count, failed_phase }
+            let pkg_log_dir = logdir.join(result.pkgname.pkgname());
+            let failed_phase = read_failed_phase(&pkg_log_dir);
+            let failed_log = failed_phase.as_ref().and_then(|phase| {
+                BUILD_PHASES
+                    .iter()
+                    .find(|(name, _)| *name == phase)
+                    .map(|(_, log)| (*log).to_string())
+            });
+            FailedPackageInfo { result, breaks_count, failed_phase, failed_log }
         })
         .collect();
 
@@ -177,21 +183,27 @@ pub fn write_html_report(summary: &BuildSummary, path: &Path) -> Result<()> {
         file,
         "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
     )?;
-    writeln!(file, "  <title>Bob Build Report</title>")?;
+    writeln!(file, "  <title>pkgsrc Build Report</title>")?;
     write_styles(&mut file)?;
     write_sort_script(&mut file)?;
     writeln!(file, "</head>")?;
     writeln!(file, "<body>")?;
     writeln!(file, "<div class=\"container\">")?;
 
-    // Header
-    writeln!(file, "<h1>Bob Build Report</h1>")?;
+    // Header with pkgsrc logo
+    writeln!(file, "<div class=\"header\">")?;
+    writeln!(
+        file,
+        "  <img src=\"https://www.pkgsrc.org/img/pkgsrc-square.png\" alt=\"pkgsrc\" class=\"logo\">"
+    )?;
+    writeln!(file, "  <h1>Build Report</h1>")?;
+    writeln!(file, "</div>")?;
 
     // Summary stats
     write_summary_stats(&mut file, summary)?;
 
     // Failed packages section
-    write_failed_section(&mut file, &failed_info)?;
+    write_failed_section(&mut file, &failed_info, logdir)?;
 
     // Scan failed section (if any)
     if !summary.scan_failed.is_empty() {
@@ -202,7 +214,7 @@ pub fn write_html_report(summary: &BuildSummary, path: &Path) -> Result<()> {
     write_skipped_section(&mut file, &skipped)?;
 
     // Successful packages section
-    write_success_section(&mut file, &succeeded)?;
+    write_success_section(&mut file, &succeeded, logdir)?;
 
     // Footer
     writeln!(
@@ -226,10 +238,15 @@ fn write_styles(file: &mut fs::File) -> Result<()> {
     writeln!(file, "  <style>")?;
     writeln!(
         file,
-        "    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background: #f5f5f5; }}"
+        "    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background: #fff; }}"
     )?;
     writeln!(file, "    .container {{ max-width: 1400px; margin: 0 auto; }}")?;
-    writeln!(file, "    h1 {{ color: #333; }}")?;
+    writeln!(
+        file,
+        "    .header {{ display: flex; align-items: center; gap: 20px; margin-bottom: 20px; padding-bottom: 20px; border-bottom: 3px solid #f37021; }}"
+    )?;
+    writeln!(file, "    .logo {{ height: 48px; }}")?;
+    writeln!(file, "    h1 {{ color: #f37021; margin: 0; }}")?;
     writeln!(
         file,
         "    .summary {{ display: flex; gap: 20px; margin-bottom: 30px; flex-wrap: wrap; }}"
@@ -278,16 +295,19 @@ fn write_styles(file: &mut fs::File) -> Result<()> {
         file,
         "    .section.scan-failed h2 {{ color: #fd7e14; border-color: #fd7e14; }}"
     )?;
-    writeln!(file, "    table {{ width: 100%; border-collapse: collapse; }}")?;
+    writeln!(
+        file,
+        "    table {{ width: 100%; border-collapse: collapse; font-size: 0.9em; }}"
+    )?;
     writeln!(
         file,
         "    th, td {{ text-align: left; padding: 12px 8px; border-bottom: 1px solid #eee; }}"
     )?;
     writeln!(
         file,
-        "    th {{ background: #f8f9fa; font-weight: 600; cursor: pointer; user-select: none; }}"
+        "    th {{ background: #ffeee6; font-weight: 600; cursor: pointer; user-select: none; }}"
     )?;
-    writeln!(file, "    th:hover {{ background: #e9ecef; }}")?;
+    writeln!(file, "    th:hover {{ background: #ffddc9; }}")?;
     writeln!(
         file,
         "    th .sort-indicator {{ margin-left: 5px; color: #999; }}"
@@ -300,21 +320,21 @@ fn write_styles(file: &mut fs::File) -> Result<()> {
         file,
         "    th.sort-desc .sort-indicator::after {{ content: ' ▼'; }}"
     )?;
-    writeln!(file, "    tr:hover {{ background: #f8f9fa; }}")?;
-    writeln!(file, "    a {{ color: #007bff; text-decoration: none; }}")?;
+    writeln!(file, "    tr:hover {{ background: #fef6f3; }}")?;
+    writeln!(file, "    a {{ color: #d35400; text-decoration: none; }}")?;
     writeln!(file, "    a:hover {{ text-decoration: underline; }}")?;
     writeln!(file, "    .reason {{ color: #666; font-size: 0.9em; }}")?;
     writeln!(file, "    .duration {{ color: #666; font-size: 0.9em; }}")?;
     writeln!(file, "    .empty {{ color: #666; font-style: italic; }}")?;
     writeln!(
         file,
-        "    .phase-links {{ display: flex; gap: 8px; flex-wrap: wrap; }}"
+        "    .phase-links {{ display: flex; gap: 6px; flex-wrap: wrap; }}"
     )?;
     writeln!(
         file,
-        "    .phase-link {{ padding: 2px 8px; border-radius: 4px; font-size: 0.85em; background: #e9ecef; }}"
+        "    .phase-link {{ padding: 2px 8px; border-radius: 4px; font-size: 0.85em; background: #ffeee6; }}"
     )?;
-    writeln!(file, "    .phase-link:hover {{ background: #dee2e6; }}")?;
+    writeln!(file, "    .phase-link:hover {{ background: #ffddc9; }}")?;
     writeln!(
         file,
         "    .phase-link.failed {{ background: #f8d7da; color: #721c24; font-weight: bold; }}"
@@ -431,9 +451,39 @@ fn write_summary_stats(
     Ok(())
 }
 
+fn generate_phase_links(
+    pkg_name: &str,
+    log_dir: &Path,
+    failed_phase: Option<&str>,
+) -> String {
+    if !log_dir.exists() {
+        return "-".to_string();
+    }
+
+    let mut links = Vec::new();
+    for (phase_name, log_file) in BUILD_PHASES {
+        let log_path = log_dir.join(log_file);
+        if log_path.exists() {
+            let is_failed = failed_phase == Some(*phase_name);
+            let class =
+                if is_failed { "phase-link failed" } else { "phase-link" };
+            links.push(format!(
+                "<a href=\"{}/{}\" class=\"{}\">{}</a>",
+                pkg_name, log_file, class, phase_name
+            ));
+        }
+    }
+    if links.is_empty() {
+        "-".to_string()
+    } else {
+        format!("<div class=\"phase-links\">{}</div>", links.join(""))
+    }
+}
+
 fn write_failed_section(
     file: &mut fs::File,
     failed_info: &[FailedPackageInfo],
+    logdir: &Path,
 ) -> Result<()> {
     writeln!(file, "<div class=\"section failed\">")?;
     writeln!(file, "  <h2>Failed Packages ({})</h2>", failed_info.len())?;
@@ -457,13 +507,14 @@ fn write_failed_section(
         )?;
         writeln!(
             file,
-            "      <th onclick=\"sortTable(document.getElementById('failed-table'), 3, 'str')\">Failed Phase<span class=\"sort-indicator\"></span></th>"
+            "      <th onclick=\"sortTable(document.getElementById('failed-table'), 3, 'num')\">Duration<span class=\"sort-indicator\"></span></th>"
         )?;
         writeln!(file, "      <th>Build Logs</th>")?;
         writeln!(file, "    </tr></thead>")?;
         writeln!(file, "    <tbody>")?;
 
         for info in failed_info {
+            let pkg_name = info.result.pkgname.pkgname();
             let pkgpath = info
                 .result
                 .pkgpath
@@ -477,59 +528,38 @@ fn write_failed_section(
                 "breaks-zero"
             };
 
-            let failed_phase = info.failed_phase.as_deref().unwrap_or("-");
-
-            // Generate phase links (relative paths)
-            let phase_links = if let Some(log_dir) = &info.result.log_dir {
-                // Get the package name for relative path
-                let pkg_name = info.result.pkgname.pkgname();
-                let mut links = Vec::new();
-                for (phase_name, log_file) in BUILD_PHASES {
-                    let log_path = log_dir.join(log_file);
-                    if log_path.exists() {
-                        let is_failed =
-                            info.failed_phase.as_deref() == Some(*phase_name);
-                        let class = if is_failed {
-                            "phase-link failed"
-                        } else {
-                            "phase-link"
-                        };
-                        // Relative link from report.html to pkg/logfile
-                        links.push(format!(
-                            "<a href=\"{}/{}\" class=\"{}\">{}</a>",
-                            pkg_name, log_file, class, phase_name
-                        ));
-                    }
-                }
-                // Also add work.log if it exists
-                let work_log = log_dir.join("work.log");
-                if work_log.exists() {
-                    links.push(format!(
-                        "<a href=\"{}/work.log\" class=\"phase-link\">work</a>",
-                        pkg_name
-                    ));
-                }
-                if links.is_empty() {
-                    "-".to_string()
-                } else {
-                    format!(
-                        "<div class=\"phase-links\">{}</div>",
-                        links.join("")
-                    )
-                }
+            let dur_secs = info.result.duration.as_secs();
+            let duration = if dur_secs >= 60 {
+                format!("{}m {}s", dur_secs / 60, dur_secs % 60)
             } else {
-                "-".to_string()
+                format!("{}s", dur_secs)
             };
+
+            // Package name links to the failed log if available
+            let pkg_link = match &info.failed_log {
+                Some(log) => {
+                    format!("<a href=\"{}/{}\">{}</a>", pkg_name, log, pkg_name)
+                }
+                None => pkg_name.to_string(),
+            };
+
+            let log_dir = logdir.join(pkg_name);
+            let phase_links = generate_phase_links(
+                pkg_name,
+                &log_dir,
+                info.failed_phase.as_deref(),
+            );
 
             writeln!(
                 file,
-                "    <tr><td>{}</td><td>{}</td><td class=\"{}\" data-sort=\"{}\">{}</td><td>{}</td><td>{}</td></tr>",
-                info.result.pkgname.pkgname(),
+                "    <tr><td>{}</td><td>{}</td><td class=\"{}\" data-sort=\"{}\">{}</td><td class=\"duration\" data-sort=\"{}\">{}</td><td>{}</td></tr>",
+                pkg_link,
                 pkgpath,
                 breaks_class,
                 info.breaks_count,
                 info.breaks_count,
-                failed_phase,
+                dur_secs,
+                duration,
                 phase_links
             )?;
         }
@@ -604,6 +634,7 @@ fn write_skipped_section(
 fn write_success_section(
     file: &mut fs::File,
     succeeded: &[&BuildResult],
+    logdir: &Path,
 ) -> Result<()> {
     writeln!(file, "<div class=\"section success\">")?;
     writeln!(file, "  <h2>Successful Packages ({})</h2>", succeeded.len())?;
@@ -625,10 +656,12 @@ fn write_success_section(
             file,
             "      <th onclick=\"sortTable(document.getElementById('success-table'), 2, 'num')\">Duration<span class=\"sort-indicator\"></span></th>"
         )?;
+        writeln!(file, "      <th>Build Logs</th>")?;
         writeln!(file, "    </tr></thead>")?;
         writeln!(file, "    <tbody>")?;
 
         for result in succeeded {
+            let pkg_name = result.pkgname.pkgname();
             let pkgpath = result
                 .pkgpath
                 .as_ref()
@@ -640,13 +673,14 @@ fn write_success_section(
             } else {
                 format!("{}s", dur_secs)
             };
+
+            let log_dir = logdir.join(pkg_name);
+            let phase_links = generate_phase_links(pkg_name, &log_dir, None);
+
             writeln!(
                 file,
-                "    <tr><td>{}</td><td>{}</td><td class=\"duration\" data-sort=\"{}\">{}</td></tr>",
-                result.pkgname.pkgname(),
-                pkgpath,
-                dur_secs,
-                duration
+                "    <tr><td>{}</td><td>{}</td><td class=\"duration\" data-sort=\"{}\">{}</td><td>{}</td></tr>",
+                pkg_name, pkgpath, dur_secs, duration, phase_links
             )?;
         }
 
