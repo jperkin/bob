@@ -61,6 +61,7 @@
 
 use crate::build::{BuildOutcome, BuildResult, BuildSummary};
 use crate::scan::ScanFailure;
+use crate::tui::format_duration;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::fs;
@@ -383,17 +384,7 @@ fn write_summary_stats(
     file: &mut fs::File,
     summary: &BuildSummary,
 ) -> Result<()> {
-    let duration_secs = summary.duration.as_secs();
-    let hours = duration_secs / 3600;
-    let minutes = (duration_secs % 3600) / 60;
-    let seconds = duration_secs % 60;
-    let duration_str = if hours > 0 {
-        format!("{}h {}m {}s", hours, minutes, seconds)
-    } else if minutes > 0 {
-        format!("{}m {}s", minutes, seconds)
-    } else {
-        format!("{}s", seconds)
-    };
+    let duration_str = format_duration(summary.duration);
 
     writeln!(file, "<div class=\"summary\">")?;
     writeln!(
