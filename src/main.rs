@@ -15,7 +15,7 @@
  */
 
 use anyhow::{Result, bail};
-use bob::Init;
+use bob::init;
 use bob::build::{self, Build};
 use bob::config::Config;
 use bob::db::Database;
@@ -570,7 +570,7 @@ fn main() -> Result<()> {
             println!("HTML report written to: {}", report_path.display());
         }
         Cmd::Init { dir: ref arg } => {
-            Init::create(arg)?;
+            init(arg)?;
         }
         Cmd::Clean => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;

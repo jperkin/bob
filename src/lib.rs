@@ -105,4 +105,4 @@ pub use scan::{
 pub use stats::Stats;
 
 // Re-export init for CLI use
-pub use init::Init;
+pub use init::init;
