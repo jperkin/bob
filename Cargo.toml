@@ -51,3 +51,6 @@ mlua = { version = "0.10", features = ["lua54", "vendored", "send"] }
 # Use system Lua on illumos (lua-src doesn't support it)
 [target.'cfg(target_os = "illumos")'.dependencies]
 mlua = { version = "0.10", features = ["lua54", "send"] }
+
+[dev-dependencies]
+tempfile = "3.24.0"

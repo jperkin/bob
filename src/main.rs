@@ -88,21 +88,21 @@ impl BuildRunner {
 
     /// Run the scan phase, returning the resolved scan result.
     fn run_scan(&self, scan: &mut Scan) -> Result<bob::scan::ScanResult> {
-        // Fast path: if full scan completed and resolve is cached, skip everything
+        // For full tree scans with full_scan_complete, we might be able to
+        // skip scanning entirely
         if scan.is_full_tree() && self.db.full_scan_complete() {
-            if let Some(cached_resolve) = self.db.get_resolve()? {
-                println!("Loaded cached resolve result");
-                return Ok(cached_resolve);
-            }
             scan.set_full_scan_complete();
         }
 
-        // Load cached scans
-        let cached = self.db.get_all_scan()?;
-        if !cached.is_empty() {
-            let loaded = scan.load_cached(cached);
-            if loaded > 0 {
-                println!("Loaded {} cached package paths", loaded);
+        // Initialize scan from database (checks what's already scanned)
+        let (cached_count, pending_count) = scan.init_from_db(&self.db)?;
+        if cached_count > 0 {
+            println!("Found {} cached package paths", cached_count);
+            if pending_count > 0 {
+                println!(
+                    "Resuming scan with {} pending dependencies",
+                    pending_count
+                );
             }
         }
 
@@ -135,19 +135,8 @@ impl BuildRunner {
         }
         drop(scan_errors);
 
-        // Check for cached resolve result (for non-full-tree scans)
-        if let Some(cached_resolve) = self.db.get_resolve()? {
-            println!("Loaded cached resolve result");
-            return Ok(cached_resolve);
-        }
-
         println!("Resolving dependencies...");
-        let result = scan.resolve()?;
-
-        // Cache resolve result if no scan errors
-        if !has_scan_errors {
-            self.db.store_resolve(&result)?;
-        }
+        let result = scan.resolve(&self.db)?;
 
         Ok(result)
     }
@@ -163,11 +152,8 @@ impl BuildRunner {
 
         let mut build = Build::new(&self.config, scan_result.buildable.clone());
 
-        // Load cached build results
-        let cached_build = self.db.get_all_build()?;
-        if !cached_build.is_empty() {
-            build.load_cached(cached_build);
-        }
+        // Load cached build results from database
+        build.load_cached_from_db(&self.db)?;
 
         tracing::debug!("Calling build.start()");
         let build_start_time = std::time::Instant::now();
@@ -247,20 +233,13 @@ impl BuildRunner {
         }
     }
 
-    /// Look up pkgpath for a pkgname from scan cache.
+    /// Look up pkgpath for a pkgname from database.
     fn find_pkgpath_for_pkgname(
         &self,
         pkgname: &str,
     ) -> Result<Option<pkgsrc::PkgPath>> {
-        let cached = self.db.get_all_scan()?;
-        for (_pkgpath, indexes) in &cached {
-            for idx in indexes {
-                if idx.pkgname.pkgname() == pkgname {
-                    if let Some(ref loc) = idx.pkg_location {
-                        return Ok(Some(loc.clone()));
-                    }
-                }
-            }
+        if let Some(pkg) = self.db.get_package_by_name(pkgname)? {
+            return Ok(Some(pkgsrc::PkgPath::new(&pkg.pkgpath)?));
         }
         Ok(None)
     }
@@ -271,54 +250,40 @@ impl BuildRunner {
         &self,
         pkgpaths: &[&str],
     ) -> Result<(Vec<String>, std::collections::HashMap<String, String>)> {
-        use std::collections::{HashMap, HashSet, VecDeque};
+        use std::collections::HashMap;
 
-        let cached = self.db.get_all_scan()?;
-
-        // Build reverse dependency map: pkgpath -> packages that depend on it
-        let mut rev_deps: HashMap<String, Vec<String>> = HashMap::new();
+        // Get all packages for pkgname -> pkgpath mapping
+        let all_packages = self.db.get_all_packages()?;
         let mut pkgname_to_pkgpath: HashMap<String, String> = HashMap::new();
+        let mut pkgname_to_id: HashMap<String, i64> = HashMap::new();
 
-        for (_pkgpath, indexes) in &cached {
-            for idx in indexes {
-                let pkgname = idx.pkgname.pkgname().to_string();
-                if let Some(ref loc) = idx.pkg_location {
-                    pkgname_to_pkgpath
-                        .entry(pkgname.clone())
-                        .or_insert_with(|| loc.to_string());
-                }
-                if let Some(ref all_deps) = idx.all_depends {
-                    for dep in all_deps {
-                        rev_deps
-                            .entry(dep.pkgpath().to_string())
-                            .or_default()
-                            .push(pkgname.clone());
-                    }
+        for pkg in &all_packages {
+            pkgname_to_pkgpath.insert(pkg.pkgname.clone(), pkg.pkgpath.clone());
+            pkgname_to_id.insert(pkg.pkgname.clone(), pkg.id);
+        }
+
+        // Find package IDs for the given pkgpaths
+        let mut seed_ids: Vec<i64> = Vec::new();
+        for pkgpath in pkgpaths {
+            let packages = self.db.get_packages_by_path(pkgpath)?;
+            for pkg in packages {
+                seed_ids.push(pkg.id);
+            }
+        }
+
+        // Use database to get all transitive reverse dependencies
+        let mut to_clear: Vec<String> = Vec::new();
+        for seed_id in seed_ids {
+            let rev_deps = self.db.get_transitive_reverse_deps(seed_id)?;
+            for dep_id in rev_deps {
+                let pkgname = self.db.get_pkgname(dep_id)?;
+                if !to_clear.contains(&pkgname) {
+                    to_clear.push(pkgname);
                 }
             }
         }
 
-        // BFS to find all transitive dependents
-        let mut to_clear: HashSet<String> = HashSet::new();
-        let mut queue: VecDeque<String> =
-            pkgpaths.iter().map(|s| s.to_string()).collect();
-
-        while let Some(pkgpath) = queue.pop_front() {
-            if let Some(dependents) = rev_deps.get(&pkgpath) {
-                for dep_pkgname in dependents {
-                    if to_clear.insert(dep_pkgname.clone()) {
-                        // Find the pkgpath for this dependent to continue traversal
-                        if let Some(dep_path) =
-                            pkgname_to_pkgpath.get(dep_pkgname)
-                        {
-                            queue.push_back(dep_path.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok((to_clear.into_iter().collect(), pkgname_to_pkgpath))
+        Ok((to_clear, pkgname_to_pkgpath))
     }
 }
 
@@ -560,7 +525,7 @@ fn main() -> Result<()> {
             for pkg in &packages {
                 if pkg.contains('/') {
                     cleared += runner.db.delete_build_by_pkgpath(pkg)?;
-                } else if runner.db.delete_build_pkgname(pkg)? {
+                } else if runner.db.delete_build_by_name(pkg)? {
                     cleared += 1;
                 }
             }
@@ -571,7 +536,7 @@ fn main() -> Result<()> {
             let (dependents, pkgname_to_pkgpath) =
                 runner.find_dependents(&pkgpath_refs)?;
             for dep in &dependents {
-                if runner.db.delete_build_pkgname(dep)? {
+                if runner.db.delete_build_by_name(dep)? {
                     cleared += 1;
                 }
                 if let Some(pkgpath) = pkgname_to_pkgpath.get(dep) {
@@ -630,15 +595,15 @@ fn main() -> Result<()> {
             let db_path = logs_dir.join("bob.db");
             let db = Database::open(&db_path)?;
 
-            let cached = db.get_all_scan()?;
-            if cached.is_empty() {
+            let count = db.count_packages()?;
+            if count == 0 {
                 bail!("No cached scan data found. Run 'bob scan' first.");
             }
 
             let mut scan = Scan::new(&config);
-            scan.load_cached(cached);
+            scan.init_from_db(&db)?;
 
-            let result = scan.resolve()?;
+            let result = scan.resolve(&db)?;
 
             // Build DAG output
             let mut edges: std::collections::BTreeSet<String> =
@@ -666,15 +631,15 @@ fn main() -> Result<()> {
             let db_path = logs_dir.join("bob.db");
             let db = Database::open(&db_path)?;
 
-            let cached = db.get_all_scan()?;
-            if cached.is_empty() {
+            let count = db.count_packages()?;
+            if count == 0 {
                 bail!("No cached scan data found. Run 'bob scan' first.");
             }
 
             let mut scan = Scan::new(&config);
-            scan.load_cached(cached);
+            scan.init_from_db(&db)?;
 
-            let result = scan.resolve()?;
+            let result = scan.resolve(&db)?;
 
             // Build presolve output in original order
             let mut out = String::new();
@@ -757,31 +722,27 @@ fn main() -> Result<()> {
             let db_path = logs_dir.join("bob.db");
             let db = Database::open(&db_path)?;
 
-            let cached = db.get_all_scan()?;
-            if cached.is_empty() {
+            let packages = db.get_all_packages()?;
+            if packages.is_empty() {
                 bail!(
                     "No cached scan data found. Run 'bob scan' or 'bob util import-pscan' first."
                 );
             }
 
             // Collect all ScanIndex entries
-            let all_indexes: Vec<_> =
-                cached.values().flat_map(|v| v.iter()).collect();
-
-            // Build output
             let mut out = String::new();
-            for idx in &all_indexes {
-                out.push_str(&idx.to_string());
+            let mut count = 0;
+            for pkg in &packages {
+                if let Ok(idx) = db.get_full_scan_index(pkg.id) {
+                    out.push_str(&idx.to_string());
+                    count += 1;
+                }
             }
 
             // Write to file or stdout
             if let Some(path) = output {
                 std::fs::write(&path, &out)?;
-                println!(
-                    "Wrote {} packages to {}",
-                    all_indexes.len(),
-                    path.display()
-                );
+                println!("Wrote {} packages to {}", count, path.display());
             } else {
                 print!("{}", out);
             }
@@ -830,9 +791,9 @@ fn main() -> Result<()> {
             // Fast path: for full tree scans with everything cached, just get count
             let buildable = if scan.is_full_tree()
                 && runner.db.full_scan_complete()
-                && let Some(count) = runner.db.get_resolve_buildable_count()?
+                && runner.db.is_resolved()?
             {
-                count
+                runner.db.get_buildable_count()? as usize
             } else {
                 runner.run_scan(&mut scan)?.buildable.len()
             };

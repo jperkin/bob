@@ -55,7 +55,7 @@
 //!
 //! let ctx = RunContext::new(Arc::new(AtomicBool::new(false)));
 //! scan.start(&ctx, &db)?;  // Discover dependencies
-//! let result = scan.resolve()?;
+//! let result = scan.resolve(&db)?;
 //!
 //! println!("Buildable: {}", result.buildable.len());
 //! println!("Skipped: {}", result.skipped.len());
@@ -74,7 +74,7 @@ use std::io::BufReader;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 /// Reason why a package was excluded from the build.
 ///
@@ -213,7 +213,7 @@ pub struct ScanResult {
 /// let ctx = RunContext::new(Arc::new(AtomicBool::new(false)));
 /// scan.start(&ctx, &db)?;
 ///
-/// let result = scan.resolve()?;
+/// let result = scan.resolve(&db)?;
 /// println!("Found {} buildable packages", result.buildable.len());
 /// # Ok(())
 /// # }
@@ -223,9 +223,8 @@ pub struct Scan {
     config: Config,
     sandbox: Sandbox,
     incoming: HashSet<PkgPath>,
-    done: IndexMap<PkgPath, Vec<ScanIndex>>,
-    /// Full cache from database for on-demand loading of dependencies.
-    cache: IndexMap<PkgPath, Vec<ScanIndex>>,
+    /// Pkgpaths we've completed scanning (in this session).
+    done: HashSet<PkgPath>,
     resolved: IndexMap<PkgName, ResolvedIndex>,
     /// Full tree scan - discover all packages, skip recursive dependency discovery.
     /// Defaults to true; set to false when packages are explicitly added.
@@ -268,103 +267,56 @@ impl Scan {
         self.full_scan_complete = true;
     }
 
-    /// Load previously cached scan results.
-    ///
-    /// For limited scans, only loads cached packages reachable from the
-    /// configured pkgpaths initially, but keeps the full cache available
-    /// for on-demand loading when new dependencies are discovered.
-    ///
-    /// Returns the number of cached packages initially loaded.
-    pub fn load_cached(
+    /// Initialize scan from database, checking what's already scanned.
+    /// Returns (cached_count, pending_deps_count) where pending_deps_count is the
+    /// number of dependencies discovered but not yet scanned (from interrupted scans).
+    pub fn init_from_db(
         &mut self,
-        cached: IndexMap<PkgPath, Vec<ScanIndex>>,
-    ) -> usize {
-        info!(cached_count = cached.len(), "Loading cached scan results");
+        db: &crate::db::Database,
+    ) -> Result<(usize, usize)> {
+        let scanned = db.get_scanned_pkgpaths()?;
+        let cached_count = scanned.len();
+        let mut pending_count = 0;
 
-        // Keep full cache for on-demand loading during scan
-        self.cache = cached.clone();
+        if cached_count > 0 {
+            info!(
+                cached_count = cached_count,
+                "Found cached scan results in database"
+            );
 
-        if self.full_tree {
-            // For full tree scans, load everything
-            self.done = cached;
-        } else {
-            // For limited scans, only load cached data reachable from incoming
-            let mut relevant: HashSet<PkgPath> = self.incoming.clone();
-            let mut to_process: Vec<PkgPath> =
-                self.incoming.iter().cloned().collect();
+            // For full tree scans with full_scan_complete, we'll skip scanning
+            // For limited scans, remove already-scanned from incoming
+            if !self.full_tree {
+                self.incoming.retain(|p| !scanned.contains(&p.to_string()));
+            }
 
-            // Walk dependency tree to find all relevant pkgpaths
-            while let Some(pkgpath) = to_process.pop() {
-                if let Some(indexes) = cached.get(&pkgpath) {
-                    for pkg in indexes {
-                        if let Some(ref all_deps) = pkg.all_depends {
-                            for dep in all_deps {
-                                if relevant.insert(dep.pkgpath().clone()) {
-                                    to_process.push(dep.pkgpath().clone());
-                                }
-                            }
-                        }
-                    }
+            // Add scanned pkgpaths to done set
+            for pkgpath_str in &scanned {
+                if let Ok(pkgpath) = PkgPath::new(pkgpath_str) {
+                    self.done.insert(pkgpath);
                 }
             }
 
-            // Only load relevant cached data
-            for (pkgpath, indexes) in cached {
-                if relevant.contains(&pkgpath) {
-                    self.done.insert(pkgpath, indexes);
-                }
-            }
-        }
-
-        // Rediscover dependencies that aren't cached
-        for indexes in self.done.values() {
-            for pkg in indexes {
-                if let Some(ref all_deps) = pkg.all_depends {
-                    for dep in all_deps {
-                        if !self.done.contains_key(dep.pkgpath()) {
-                            self.incoming.insert(dep.pkgpath().clone());
+            // Check for dependencies that were discovered but not yet scanned.
+            // This handles the case where a scan was interrupted partway through.
+            let unscanned = db.get_unscanned_dependencies()?;
+            if !unscanned.is_empty() {
+                info!(
+                    unscanned_count = unscanned.len(),
+                    "Found unscanned dependencies from interrupted scan"
+                );
+                for pkgpath_str in unscanned {
+                    if let Ok(pkgpath) = PkgPath::new(&pkgpath_str) {
+                        if !self.done.contains(&pkgpath) {
+                            self.incoming.insert(pkgpath);
+                            pending_count += 1;
                         }
                     }
                 }
             }
         }
 
-        self.incoming.retain(|p| !self.done.contains_key(p));
-        self.done.len()
-    }
-
-    /// Access completed scan results.
-    pub fn completed(&self) -> &IndexMap<PkgPath, Vec<ScanIndex>> {
-        &self.done
-    }
-
-    /// Recursively load a pkgpath and all its cached dependencies.
-    /// Returns the count of packages loaded.
-    fn load_cached_recursive(&mut self, pkgpath: PkgPath) -> usize {
-        let mut count = 0;
-        let mut to_load = vec![pkgpath];
-
-        while let Some(path) = to_load.pop() {
-            if self.done.contains_key(&path) {
-                continue;
-            }
-            if let Some(indexes) = self.cache.get(&path).cloned() {
-                // Discover dependencies before inserting
-                for pkg in &indexes {
-                    if let Some(ref all_deps) = pkg.all_depends {
-                        for dep in all_deps {
-                            if !self.done.contains_key(dep.pkgpath()) {
-                                to_load.push(dep.pkgpath().clone());
-                            }
-                        }
-                    }
-                }
-                self.done.insert(path, indexes);
-                count += 1;
-            }
-        }
-
-        count
+        Ok((cached_count, pending_count))
     }
 
     /// Discover all packages in pkgsrc tree.
@@ -470,7 +422,7 @@ impl Scan {
         // For non-full-tree scans, prune already-cached packages from incoming
         // before sandbox creation to avoid unnecessary setup/teardown.
         if !self.full_tree {
-            self.incoming.retain(|p| !self.done.contains_key(p));
+            self.incoming.retain(|p| !self.done.contains(p));
             if self.incoming.is_empty() {
                 if !self.done.is_empty() {
                     println!(
@@ -517,7 +469,7 @@ impl Scan {
         // For full tree scans, always discover all packages
         if self.full_tree {
             self.discover_packages()?;
-            self.incoming.retain(|p| !self.done.contains_key(p));
+            self.incoming.retain(|p| !self.done.contains(p));
         }
 
         // Nothing to scan - all packages are cached
@@ -536,8 +488,8 @@ impl Scan {
             return Ok(false);
         }
 
-        // Clear cached resolve since we're scanning new packages
-        db.clear_resolve()?;
+        // Clear resolved dependencies since we're scanning new packages
+        db.clear_resolved_depends()?;
 
         println!("Scanning packages...");
 
@@ -664,18 +616,17 @@ impl Scan {
              * interrupted, so progress is preserved on restart.
              */
             let mut new_incoming: HashSet<PkgPath> = HashSet::new();
-            let mut loaded_from_cache = 0usize;
             for (pkgpath, scanpkgs) in parpaths.drain(..) {
                 let scanpkgs = match scanpkgs {
                     Ok(pkgs) => pkgs,
                     Err(e) => {
                         self.scan_failures
                             .push((pkgpath.clone(), e.to_string()));
-                        self.done.insert(pkgpath.clone(), vec![]);
+                        self.done.insert(pkgpath.clone());
                         continue;
                     }
                 };
-                self.done.insert(pkgpath.clone(), scanpkgs.clone());
+                self.done.insert(pkgpath.clone());
                 // Save immediately to database
                 if !scanpkgs.is_empty() {
                     db.store_scan_pkgpath(&pkgpath.to_string(), &scanpkgs)?;
@@ -691,16 +642,19 @@ impl Scan {
                     if let Some(ref all_deps) = pkg.all_depends {
                         for dep in all_deps {
                             let dep_path = dep.pkgpath();
-                            if self.done.contains_key(dep_path)
+                            if self.done.contains(dep_path)
                                 || self.incoming.contains(dep_path)
                                 || new_incoming.contains(dep_path)
                             {
                                 continue;
                             }
-                            // Check cache first - load on-demand if available
-                            if self.cache.contains_key(dep_path) {
-                                loaded_from_cache += self
-                                    .load_cached_recursive(dep_path.clone());
+                            // Check database for cached dependency
+                            if db.is_pkgpath_scanned(&dep_path.to_string())? {
+                                self.done.insert(dep_path.clone());
+                                if let Ok(mut p) = progress.lock() {
+                                    p.state_mut().total += 1;
+                                    p.state_mut().cached += 1;
+                                }
                             } else {
                                 new_incoming.insert(dep_path.clone());
                                 if let Ok(mut p) = progress.lock() {
@@ -715,13 +669,6 @@ impl Scan {
             // Exit after saving results if interrupted
             if was_interrupted {
                 break;
-            }
-
-            if loaded_from_cache > 0 {
-                if let Ok(mut p) = progress.lock() {
-                    p.state_mut().total += loaded_from_cache;
-                    p.state_mut().cached += loaded_from_cache;
-                }
             }
 
             /*
@@ -864,11 +811,6 @@ impl Scan {
         Ok(index)
     }
 
-    /// Get all scanned packages (before resolution).
-    pub fn scanned(&self) -> impl Iterator<Item = &ScanIndex> {
-        self.done.values().flatten()
-    }
-
     /**
      * Resolve the list of scanned packages, by ensuring all of the [`Depend`]
      * patterns in `all_depends` match a found package, and that there are no
@@ -877,22 +819,21 @@ impl Scan {
      *
      * Return a [`ScanResult`] containing buildable packages and skipped packages.
      *
-     * Note: This method consumes the internal scan state. Calling it multiple
-     * times will return empty results on subsequent calls.
+     * Also stores resolved dependencies in the database for fast reverse lookups.
      */
-    pub fn resolve(&mut self) -> Result<ScanResult> {
+    pub fn resolve(&mut self, db: &crate::db::Database) -> Result<ScanResult> {
         info!(
             done_pkgpaths = self.done.len(),
             "Starting dependency resolution"
         );
 
+        // Load all packages from database
+        let all_packages = db.get_all_packages()?;
+
         /*
          * Populate the resolved hash with ALL packages first, including those
          * with skip/fail reasons. This allows us to resolve dependencies for
          * all packages before separating them.
-         *
-         * self.done must no longer be used after this point, as its ScanIndex
-         * entries are out of date (do not have depends set, for example).
          */
         let mut pkgnames: indexmap::IndexSet<PkgName> =
             indexmap::IndexSet::new();
@@ -900,63 +841,72 @@ impl Scan {
         // Track which packages have skip/fail reasons
         let mut skip_reasons: HashMap<PkgName, SkipReason> = HashMap::new();
 
-        // Log what we have in self.done
-        for (pkgpath, index) in &self.done {
-            debug!(pkgpath = %pkgpath.as_path().display(),
-                packages_in_index = index.len(),
-                "Processing done entry"
-            );
-        }
+        // Track package_id for storing resolved dependencies
+        let mut pkgname_to_id: HashMap<PkgName, i64> = HashMap::new();
 
-        for index in self.done.values() {
-            for pkg in index {
-                // Skip duplicate PKGNAMEs - keep only the first (preferred)
-                // variant for multi-version packages.
-                if pkgnames.contains(&pkg.pkgname) {
-                    debug!(pkgname = %pkg.pkgname.pkgname(),
-                        multi_version = ?pkg.multi_version,
-                        "Skipping duplicate PKGNAME"
-                    );
+        // Load full scan data for each package
+        for pkg_row in &all_packages {
+            let pkg = match db.get_full_scan_index(pkg_row.id) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(pkgname = %pkg_row.pkgname, error = %e, "Failed to load scan data");
                     continue;
                 }
+            };
 
-                // Track skip/fail reasons but still add to resolved
-                if let Some(reason) = &pkg.pkg_skip_reason {
-                    if !reason.is_empty() {
-                        info!(pkgname = %pkg.pkgname.pkgname(),
-                            reason = %reason,
-                            "Package has PKG_SKIP_REASON"
-                        );
-                        skip_reasons.insert(
-                            pkg.pkgname.clone(),
-                            SkipReason::PkgSkipReason(reason.clone()),
-                        );
-                    }
-                }
-                if let Some(reason) = &pkg.pkg_fail_reason {
-                    if !reason.is_empty()
-                        && !skip_reasons.contains_key(&pkg.pkgname)
-                    {
-                        info!(pkgname = %pkg.pkgname.pkgname(),
-                            reason = %reason,
-                            "Package has PKG_FAIL_REASON"
-                        );
-                        skip_reasons.insert(
-                            pkg.pkgname.clone(),
-                            SkipReason::PkgFailReason(reason.clone()),
-                        );
-                    }
-                }
+            pkgname_to_id.insert(pkg.pkgname.clone(), pkg_row.id);
 
+            debug!(pkgpath = %pkg_row.pkgpath,
+                pkgname = %pkg.pkgname.pkgname(),
+                "Processing package"
+            );
+
+            // Skip duplicate PKGNAMEs - keep only the first (preferred)
+            // variant for multi-version packages.
+            if pkgnames.contains(&pkg.pkgname) {
                 debug!(pkgname = %pkg.pkgname.pkgname(),
-                    "Adding package to resolved set"
+                    multi_version = ?pkg.multi_version,
+                    "Skipping duplicate PKGNAME"
                 );
-                pkgnames.insert(pkg.pkgname.clone());
-                self.resolved.insert(
-                    pkg.pkgname.clone(),
-                    ResolvedIndex::from_scan_index(pkg.clone()),
-                );
+                continue;
             }
+
+            // Track skip/fail reasons but still add to resolved
+            if let Some(reason) = &pkg.pkg_skip_reason {
+                if !reason.is_empty() {
+                    info!(pkgname = %pkg.pkgname.pkgname(),
+                        reason = %reason,
+                        "Package has PKG_SKIP_REASON"
+                    );
+                    skip_reasons.insert(
+                        pkg.pkgname.clone(),
+                        SkipReason::PkgSkipReason(reason.clone()),
+                    );
+                }
+            }
+            if let Some(reason) = &pkg.pkg_fail_reason {
+                if !reason.is_empty()
+                    && !skip_reasons.contains_key(&pkg.pkgname)
+                {
+                    info!(pkgname = %pkg.pkgname.pkgname(),
+                        reason = %reason,
+                        "Package has PKG_FAIL_REASON"
+                    );
+                    skip_reasons.insert(
+                        pkg.pkgname.clone(),
+                        SkipReason::PkgFailReason(reason.clone()),
+                    );
+                }
+            }
+
+            debug!(pkgname = %pkg.pkgname.pkgname(),
+                "Adding package to resolved set"
+            );
+            pkgnames.insert(pkg.pkgname.clone());
+            self.resolved.insert(
+                pkg.pkgname.clone(),
+                ResolvedIndex::from_scan_index(pkg.clone()),
+            );
         }
 
         info!(
@@ -1196,6 +1146,22 @@ impl Scan {
 
         if let Some(err) = cycle_error {
             bail!(err);
+        }
+
+        // Store resolved dependencies in database for fast reverse lookups
+        let mut resolved_deps: Vec<(i64, i64)> = Vec::new();
+        for (pkgname, index) in &result.buildable {
+            if let Some(&pkg_id) = pkgname_to_id.get(pkgname) {
+                for dep in &index.depends {
+                    if let Some(&dep_id) = pkgname_to_id.get(dep) {
+                        resolved_deps.push((pkg_id, dep_id));
+                    }
+                }
+            }
+        }
+        if !resolved_deps.is_empty() {
+            db.store_resolved_dependencies_batch(&resolved_deps)?;
+            debug!(count = resolved_deps.len(), "Stored resolved dependencies");
         }
 
         Ok(result)

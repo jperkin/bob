@@ -56,10 +56,10 @@
 //! // Add packages...
 //! let ctx = RunContext::new(Arc::new(AtomicBool::new(false)));
 //! scan.start(&ctx, &db)?;
-//! let result = scan.resolve()?;
+//! let result = scan.resolve(&db)?;
 //!
 //! let mut build = Build::new(&config, result.buildable);
-//! let summary = build.start(&ctx)?;
+//! let summary = build.start(&ctx, &db)?;
 //!
 //! println!("Built {} packages", summary.success_count());
 //! # Ok::<(), anyhow::Error>(())
@@ -1875,25 +1875,30 @@ impl Build {
         }
     }
 
-    /// Load cached build results.
+    /// Load cached build results from database.
     ///
-    /// Returns the number of packages loaded from cache. Packages that have
-    /// not finished processing (Success, Failed, UpToDate, PreFailed, etc.)
-    /// are not loaded.
-    pub fn load_cached(
+    /// Returns the number of packages loaded from cache. Only loads results
+    /// for packages that are in our build queue.
+    pub fn load_cached_from_db(
         &mut self,
-        cached: IndexMap<PkgName, BuildResult>,
-    ) -> usize {
+        db: &crate::db::Database,
+    ) -> anyhow::Result<usize> {
         let mut count = 0;
-        for (pkgname, result) in cached {
-            // Only cache packages that are in our build queue
-            if self.scanpkgs.contains_key(&pkgname) {
-                self.cached.insert(pkgname, result);
-                count += 1;
+        for pkgname in self.scanpkgs.keys() {
+            if let Some(pkg) = db.get_package_by_name(pkgname.pkgname())? {
+                if let Some(result) = db.get_build_result(pkg.id)? {
+                    self.cached.insert(pkgname.clone(), result);
+                    count += 1;
+                }
             }
         }
-        info!(cached_count = count, "Loaded cached build results");
-        count
+        if count > 0 {
+            info!(
+                cached_count = count,
+                "Loaded cached build results from database"
+            );
+        }
+        Ok(count)
     }
 
     /// Access completed build results.
@@ -2489,9 +2494,7 @@ impl Build {
         // Save all completed results to database immediately
         let mut saved_count = 0;
         while let Ok(result) = completed_rx.try_recv() {
-            if let Err(e) =
-                db.store_build_pkgname(result.pkgname.pkgname(), &result)
-            {
+            if let Err(e) = db.store_build_by_name(&result) {
                 warn!(
                     pkgname = %result.pkgname.pkgname(),
                     error = %e,

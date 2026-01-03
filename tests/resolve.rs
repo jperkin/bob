@@ -1,7 +1,8 @@
 use anyhow::Result;
 use bob::Scan;
-use indexmap::IndexMap;
+use bob::db::Database;
 use pkgsrc::{Depend, PkgName, PkgPath, ScanIndex};
+use tempfile::tempdir;
 
 fn make_pkg(name: &str, path: &str) -> Result<ScanIndex> {
     Ok(ScanIndex {
@@ -49,36 +50,39 @@ fn make_pkg_failed(name: &str, path: &str, reason: &str) -> Result<ScanIndex> {
     })
 }
 
-fn build_cache(
-    packages: Vec<ScanIndex>,
-) -> Result<IndexMap<PkgPath, Vec<ScanIndex>>> {
-    let mut cache: IndexMap<PkgPath, Vec<ScanIndex>> = IndexMap::new();
-    for pkg in packages {
-        let path = pkg.pkg_location.clone().ok_or_else(|| {
+fn setup_scan_with_db(packages: Vec<ScanIndex>) -> Result<(Scan, Database)> {
+    let tmp = tempdir()?;
+    let db_path = tmp.path().join("test.db");
+    let db = Database::open(&db_path)?;
+
+    // Store packages in database
+    for pkg in &packages {
+        let pkgpath = pkg.pkg_location.as_ref().ok_or_else(|| {
             anyhow::anyhow!("test package missing pkg_location")
         })?;
-        cache.entry(path).or_default().push(pkg);
+        db.store_package(&pkgpath.to_string(), pkg)?;
     }
-    Ok(cache)
-}
 
-fn setup_scan(packages: Vec<ScanIndex>) -> Result<Scan> {
     let mut scan = Scan::default();
     for pkg in &packages {
         if let Some(ref path) = pkg.pkg_location {
             scan.add(path);
         }
     }
-    scan.load_cached(build_cache(packages)?);
-    Ok(scan)
+    let _ = scan.init_from_db(&db)?;
+
+    // Leak the tempdir to keep it alive for the duration of the test
+    std::mem::forget(tmp);
+
+    Ok((scan, db))
 }
 
 #[test]
 fn single_package_no_deps() -> Result<()> {
     let pkg1 = make_pkg("libnbcompat-20251029", "pkgtools/libnbcompat")?;
 
-    let mut scan = setup_scan(vec![pkg1])?;
-    let res = scan.resolve()?;
+    let (mut scan, db) = setup_scan_with_db(vec![pkg1])?;
+    let res = scan.resolve(&db)?;
 
     assert_eq!(res.buildable.len(), 1);
     assert!(res.buildable.contains_key(&PkgName::new("libnbcompat-20251029")));
@@ -95,8 +99,8 @@ fn single_package_dep() -> Result<()> {
         vec!["libnbcompat>=20221013:../../pkgtools/libnbcompat"],
     )?;
 
-    let mut scan = setup_scan(vec![pkg1, pkg2])?;
-    let res = scan.resolve()?;
+    let (mut scan, db) = setup_scan_with_db(vec![pkg1, pkg2])?;
+    let res = scan.resolve(&db)?;
 
     assert_eq!(res.buildable.len(), 2);
     let resolved = res
@@ -118,8 +122,8 @@ fn best_match_highest_version() -> Result<()> {
         vec!["bar-[0-9]*:../../cat/bar"],
     )?;
 
-    let mut scan = setup_scan(vec![pkg1, pkg2, pkg3])?;
-    let res = scan.resolve()?;
+    let (mut scan, db) = setup_scan_with_db(vec![pkg1, pkg2, pkg3])?;
+    let res = scan.resolve(&db)?;
 
     assert_eq!(res.buildable.len(), 3);
     let resolved = res
@@ -142,8 +146,8 @@ fn best_match_prefers_larger_name_on_tie() -> Result<()> {
         vec!["mpg123{,-esound,-nas}>=0.59.18:../../audio/mpg123"],
     )?;
 
-    let mut scan = setup_scan(vec![pkg1, pkg2, pkg3, pkg4])?;
-    let res = scan.resolve()?;
+    let (mut scan, db) = setup_scan_with_db(vec![pkg1, pkg2, pkg3, pkg4])?;
+    let res = scan.resolve(&db)?;
 
     let resolved = res
         .buildable
@@ -162,8 +166,8 @@ fn skip_propagation_from_skip_reason() -> Result<()> {
         vec!["bar-[0-9]*:../../cat/bar"],
     )?;
 
-    let mut scan = setup_scan(vec![pkg1, pkg2])?;
-    let res = scan.resolve()?;
+    let (mut scan, db) = setup_scan_with_db(vec![pkg1, pkg2])?;
+    let res = scan.resolve(&db)?;
 
     assert!(res.buildable.is_empty());
     assert_eq!(res.skipped.len(), 2);
@@ -179,8 +183,8 @@ fn skip_propagation_from_fail_reason() -> Result<()> {
         vec!["bar-[0-9]*:../../cat/bar"],
     )?;
 
-    let mut scan = setup_scan(vec![pkg1, pkg2])?;
-    let res = scan.resolve()?;
+    let (mut scan, db) = setup_scan_with_db(vec![pkg1, pkg2])?;
+    let res = scan.resolve(&db)?;
 
     assert!(res.buildable.is_empty());
     assert_eq!(res.skipped.len(), 2);
@@ -195,8 +199,8 @@ fn unresolvable_dependency() -> Result<()> {
         vec!["bar-[0-9]*:../../cat/bar"],
     )?;
 
-    let mut scan = setup_scan(vec![pkg1])?;
-    let res = scan.resolve();
+    let (mut scan, db) = setup_scan_with_db(vec![pkg1])?;
+    let res = scan.resolve(&db);
 
     assert!(res.is_err());
     let err = res.unwrap_err().to_string();
@@ -217,8 +221,8 @@ fn circular_dependency() -> Result<()> {
         vec!["foo-[0-9]*:../../cat/foo"],
     )?;
 
-    let mut scan = setup_scan(vec![pkg1, pkg2])?;
-    let res = scan.resolve();
+    let (mut scan, db) = setup_scan_with_db(vec![pkg1, pkg2])?;
+    let res = scan.resolve(&db);
 
     assert!(res.is_err());
     let err = res.unwrap_err().to_string();
@@ -240,8 +244,8 @@ fn transitive_skip_propagation() -> Result<()> {
         vec!["bar-[0-9]*:../../cat/bar"],
     )?;
 
-    let mut scan = setup_scan(vec![pkg1, pkg2, pkg3])?;
-    let res = scan.resolve()?;
+    let (mut scan, db) = setup_scan_with_db(vec![pkg1, pkg2, pkg3])?;
+    let res = scan.resolve(&db)?;
 
     assert!(res.buildable.is_empty());
     assert_eq!(res.skipped.len(), 3);
@@ -253,8 +257,8 @@ fn mixed_buildable_and_skipped() -> Result<()> {
     let pkg1 = make_pkg("good-1.0", "cat/good")?;
     let pkg2 = make_pkg_skipped("bad-1.0", "cat/bad", "broken")?;
 
-    let mut scan = setup_scan(vec![pkg1, pkg2])?;
-    let res = scan.resolve()?;
+    let (mut scan, db) = setup_scan_with_db(vec![pkg1, pkg2])?;
+    let res = scan.resolve(&db)?;
 
     assert_eq!(res.buildable.len(), 1);
     assert!(res.buildable.contains_key(&PkgName::new("good-1.0")));
@@ -281,8 +285,8 @@ fn diamond_dependency() -> Result<()> {
         vec!["left-[0-9]*:../../cat/left", "right-[0-9]*:../../cat/right"],
     )?;
 
-    let mut scan = setup_scan(vec![pkg1, pkg2, pkg3, pkg4])?;
-    let res = scan.resolve()?;
+    let (mut scan, db) = setup_scan_with_db(vec![pkg1, pkg2, pkg3, pkg4])?;
+    let res = scan.resolve(&db)?;
 
     assert_eq!(res.buildable.len(), 4);
     let resolved = res
@@ -303,8 +307,8 @@ fn resolve_reports_pattern_error_on_overflow_version() -> Result<()> {
         vec!["lib-[0-9]*:../../libs/lib"],
     )?;
 
-    let mut scan = setup_scan(vec![pkg1, pkg2, pkg3])?;
-    let res = scan.resolve();
+    let (mut scan, db) = setup_scan_with_db(vec![pkg1, pkg2, pkg3])?;
+    let res = scan.resolve(&db);
 
     assert!(res.is_err());
     let err = res.unwrap_err().to_string();
