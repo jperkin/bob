@@ -140,7 +140,6 @@ struct PkgBuilder<'a> {
     pkginfo: &'a ResolvedIndex,
     logdir: PathBuf,
     build_user: Option<String>,
-    pkg_up_to_date: Option<PathBuf>,
     envs: Vec<(String, String)>,
     output_tx: Option<Sender<ChannelCommand>>,
 }
@@ -156,7 +155,6 @@ impl<'a> PkgBuilder<'a> {
     ) -> Self {
         let logdir = config.logdir().join(pkginfo.pkgname.pkgname());
         let build_user = config.build_user().map(|s| s.to_string());
-        let pkg_up_to_date = config.script("pkg-up-to-date").cloned();
         Self {
             config,
             sandbox,
@@ -164,41 +162,172 @@ impl<'a> PkgBuilder<'a> {
             pkginfo,
             logdir,
             build_user,
-            pkg_up_to_date,
             envs,
             output_tx,
         }
     }
 
+    /// Run a command in the sandbox and capture its stdout.
+    fn run_cmd(&self, cmd: &Path, args: &[&str]) -> Option<String> {
+        let mut command = self.sandbox.command(self.sandbox_id, cmd);
+        command.args(args);
+        self.apply_envs(&mut command, &[]);
+        match command.output() {
+            Ok(output) if output.status.success() => {
+                Some(String::from_utf8_lossy(&output.stdout).into_owned())
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                debug!(
+                    cmd = %cmd.display(),
+                    exit_code = ?output.status.code(),
+                    stderr = %stderr.trim(),
+                    "command failed"
+                );
+                None
+            }
+            Err(e) => {
+                debug!(cmd = %cmd.display(), error = %e, "command execution error");
+                None
+            }
+        }
+    }
+
     /// Check if the package is already up-to-date.
     fn check_up_to_date(&self) -> bool {
-        let Some(script) = &self.pkg_up_to_date else {
+        let pkgname = self.pkginfo.pkgname.pkgname();
+        let pkgfile =
+            self.config.packages().join("All").join(format!("{}.tgz", pkgname));
+
+        // Check if package file exists
+        if !pkgfile.exists() {
+            debug!(pkgname, path = %pkgfile.display(), "package file not found");
+            return false;
+        }
+
+        let pkgfile_str = pkgfile.to_string_lossy();
+        let pkg_info = self.config.pkgtools().join("pkg_info");
+        let pkg_admin = self.config.pkgtools().join("pkg_admin");
+
+        // Get BUILD_INFO and verify source files
+        let Some(build_info) = self.run_cmd(&pkg_info, &["-qb", &pkgfile_str])
+        else {
+            debug!(pkgname, "pkg_info -qb failed or returned empty");
+            return false;
+        };
+        debug!(pkgname, lines = build_info.lines().count(), "checking BUILD_INFO");
+
+        for line in build_info.lines() {
+            let Some((file, file_id)) = line.split_once(':') else {
+                continue;
+            };
+            let file_id = file_id.trim();
+            if file.is_empty() || file_id.is_empty() {
+                continue;
+            }
+
+            let src_file = self.config.pkgsrc().join(file);
+            if !src_file.exists() {
+                debug!(pkgname, file, "source file missing");
+                return false;
+            }
+
+            if file_id.starts_with("$NetBSD") {
+                // CVS ID comparison - extract $NetBSD...$ from actual file
+                let Ok(content) = std::fs::read_to_string(&src_file) else {
+                    return false;
+                };
+                let id = content.lines().find_map(|line| {
+                    if let Some(start) = line.find("$NetBSD") {
+                        if let Some(end) = line[start + 1..].find('$') {
+                            return Some(&line[start..start + 1 + end + 1]);
+                        }
+                    }
+                    None
+                });
+                if id != Some(file_id) {
+                    debug!(pkgname, file, "CVS ID mismatch");
+                    return false;
+                }
+            } else {
+                // Hash comparison
+                let src_file_str = src_file.to_string_lossy();
+                let Some(hash) =
+                    self.run_cmd(&pkg_admin, &["digest", &src_file_str])
+                else {
+                    debug!(pkgname, file, "pkg_admin digest failed");
+                    return false;
+                };
+                let hash = hash.trim();
+                if hash != file_id {
+                    debug!(
+                        pkgname,
+                        file,
+                        path = %src_file.display(),
+                        expected = file_id,
+                        actual = hash,
+                        "hash mismatch"
+                    );
+                    return false;
+                }
+            }
+        }
+
+        // Get package dependencies and verify
+        let Some(pkg_deps) = self.run_cmd(&pkg_info, &["-qN", &pkgfile_str])
+        else {
             return false;
         };
 
-        let pkgname = self.pkginfo.pkgname.pkgname();
-        let deps: Vec<String> =
-            self.pkginfo.depends.iter().map(|d| d.to_string()).collect();
+        // Build sets of recorded vs expected dependencies
+        let recorded_deps: HashSet<&str> = pkg_deps
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect();
+        let expected_deps: HashSet<&str> =
+            self.pkginfo.depends.iter().map(|d| d.pkgname()).collect();
 
-        let mut cmd = if self.sandbox.enabled() {
-            let mut c = Command::new("/usr/sbin/chroot");
-            c.arg(self.sandbox.path(self.sandbox_id)).arg(script);
-            c
-        } else {
-            Command::new(script)
+        // If dependency list has changed in any way, rebuild
+        if recorded_deps != expected_deps {
+            debug!(
+                pkgname,
+                recorded = recorded_deps.len(),
+                expected = expected_deps.len(),
+                "dependency list changed"
+            );
+            return false;
+        }
+
+        let pkgfile_mtime = match pkgfile.metadata().and_then(|m| m.modified())
+        {
+            Ok(t) => t,
+            Err(_) => return false,
         };
 
-        self.apply_envs(&mut cmd, &[]);
+        // Check each dependency package exists and is not newer
+        for dep in &recorded_deps {
+            let dep_pkg =
+                self.config.packages().join("All").join(format!("{}.tgz", dep));
+            if !dep_pkg.exists() {
+                debug!(pkgname, dep, "dependency package missing");
+                return false;
+            }
 
-        cmd.arg(pkgname);
-        for dep in &deps {
-            cmd.arg(dep);
+            let dep_mtime = match dep_pkg.metadata().and_then(|m| m.modified())
+            {
+                Ok(t) => t,
+                Err(_) => return false,
+            };
+
+            if dep_mtime > pkgfile_mtime {
+                debug!(pkgname, dep, "dependency is newer");
+                return false;
+            }
         }
 
-        match cmd.status() {
-            Ok(status) => status.success(),
-            Err(_) => false,
-        }
+        debug!(pkgname, "package is up-to-date");
+        true
     }
 
     /// Run the full build process.
@@ -463,26 +592,15 @@ impl<'a> PkgBuilder<'a> {
             // shell script's run_log function does.
             let shell_cmd =
                 self.build_shell_command(cmd, args, run_as, extra_envs);
-            let mut child = if self.sandbox.enabled() {
-                let sandbox_path = self.sandbox.path(self.sandbox_id);
-                Command::new("/usr/sbin/chroot")
-                    .arg(&sandbox_path)
-                    .arg("/bin/sh")
-                    .arg("-c")
-                    .arg(&shell_cmd)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .context("Failed to spawn shell command")?
-            } else {
-                Command::new("/bin/sh")
-                    .arg("-c")
-                    .arg(&shell_cmd)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .context("Failed to spawn shell command")?
-            };
+            let mut child = self
+                .sandbox
+                .command(self.sandbox_id, Path::new("/bin/sh"))
+                .arg("-c")
+                .arg(&shell_cmd)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .context("Failed to spawn shell command")?;
 
             let stdout = child.stdout.take().unwrap();
             let output_tx = output_tx.clone();
@@ -559,33 +677,14 @@ impl<'a> PkgBuilder<'a> {
 
         match run_as {
             RunAs::Root => {
-                if self.sandbox.enabled() {
-                    let sandbox_path = self.sandbox.path(self.sandbox_id);
-                    let mut full_args: Vec<String> = vec![
-                        sandbox_path.to_str().unwrap().to_string(),
-                        cmd.to_str().unwrap().to_string(),
-                    ];
-                    full_args.extend(args.iter().map(|s| s.to_string()));
-                    let mut command = Command::new("/usr/sbin/chroot");
-                    command.args(&full_args);
-                    self.apply_envs(&mut command, extra_envs);
-                    command
-                        .stdout(Stdio::from(log))
-                        .stderr(Stdio::from(log_err))
-                        .status()
-                        .context("Failed to run chroot command")
-                } else {
-                    let mut command = Command::new(cmd);
-                    command.args(args);
-                    self.apply_envs(&mut command, extra_envs);
-                    command
-                        .stdout(Stdio::from(log))
-                        .stderr(Stdio::from(log_err))
-                        .status()
-                        .with_context(|| {
-                            format!("Failed to run {}", cmd.display())
-                        })
-                }
+                let mut command = self.sandbox.command(self.sandbox_id, cmd);
+                command.args(args);
+                self.apply_envs(&mut command, extra_envs);
+                command
+                    .stdout(Stdio::from(log))
+                    .stderr(Stdio::from(log_err))
+                    .status()
+                    .with_context(|| format!("Failed to run {}", cmd.display()))
             }
             RunAs::User => {
                 let user = self.build_user.as_ref().unwrap();
@@ -597,31 +696,15 @@ impl<'a> PkgBuilder<'a> {
                     .map(|part| Self::shell_escape(part))
                     .collect::<Vec<_>>()
                     .join(" ");
-                if self.sandbox.enabled() {
-                    let sandbox_path = self.sandbox.path(self.sandbox_id);
-                    let mut command = Command::new("/usr/sbin/chroot");
-                    command
-                        .arg(&sandbox_path)
-                        .arg("su")
-                        .arg(user)
-                        .arg("-c")
-                        .arg(&inner_cmd);
-                    self.apply_envs(&mut command, extra_envs);
-                    command
-                        .stdout(Stdio::from(log))
-                        .stderr(Stdio::from(log_err))
-                        .status()
-                        .context("Failed to run chroot su command")
-                } else {
-                    let mut command = Command::new("su");
-                    command.arg(user).arg("-c").arg(&inner_cmd);
-                    self.apply_envs(&mut command, extra_envs);
-                    command
-                        .stdout(Stdio::from(log))
-                        .stderr(Stdio::from(log_err))
-                        .status()
-                        .context("Failed to run su command")
-                }
+                let mut command =
+                    self.sandbox.command(self.sandbox_id, Path::new("su"));
+                command.arg(user).arg("-c").arg(&inner_cmd);
+                self.apply_envs(&mut command, extra_envs);
+                command
+                    .stdout(Stdio::from(log))
+                    .stderr(Stdio::from(log_err))
+                    .status()
+                    .context("Failed to run su command")
             }
         }
     }
@@ -632,14 +715,7 @@ impl<'a> PkgBuilder<'a> {
         pkgdir: &Path,
         varname: &str,
     ) -> anyhow::Result<String> {
-        let mut cmd = if self.sandbox.enabled() {
-            let mut c = Command::new("/usr/sbin/chroot");
-            c.arg(self.sandbox.path(self.sandbox_id)).arg(self.config.make());
-            c
-        } else {
-            Command::new(self.config.make())
-        };
-
+        let mut cmd = self.sandbox.command(self.sandbox_id, self.config.make());
         self.apply_envs(&mut cmd, &[]);
 
         let work_log = self.logdir.join("work.log");
@@ -1107,14 +1183,7 @@ impl<'a> MakeQuery<'a> {
     fn var(&self, name: &str) -> Option<String> {
         let pkgdir = self.config.pkgsrc().join(self.pkgpath.as_path());
 
-        let mut cmd = if self.sandbox.enabled() {
-            let mut c = Command::new("/usr/sbin/chroot");
-            c.arg(self.sandbox.path(self.sandbox_id)).arg(self.config.make());
-            c
-        } else {
-            Command::new(self.config.make())
-        };
-
+        let mut cmd = self.sandbox.command(self.sandbox_id, self.config.make());
         cmd.arg("-C")
             .arg(&pkgdir)
             .arg("show-var")
@@ -1453,29 +1522,15 @@ impl PackageBuild {
     fn run_clean(&self, pkgpath: &PkgPath, envs: &[(String, String)]) {
         let pkgdir = self.config.pkgsrc().join(pkgpath.as_path());
 
-        let result = if self.sandbox.enabled() {
-            let mut cmd = Command::new("/usr/sbin/chroot");
-            cmd.arg(self.sandbox.path(self.id))
-                .arg(self.config.make())
-                .arg("-C")
-                .arg(&pkgdir)
-                .arg("clean");
-            for (key, value) in envs {
-                cmd.env(key, value);
-            }
-            cmd.stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-        } else {
-            let mut cmd = Command::new(self.config.make());
-            cmd.arg("-C").arg(&pkgdir).arg("clean");
-            for (key, value) in envs {
-                cmd.env(key, value);
-            }
-            cmd.stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-        };
+        let mut cmd = self.sandbox.command(self.id, self.config.make());
+        cmd.arg("-C").arg(&pkgdir).arg("clean");
+        for (key, value) in envs {
+            cmd.env(key, value);
+        }
+        let result = cmd
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
 
         if let Err(e) = result {
             debug!(error = %e, "Failed to run bmake clean");
@@ -2006,11 +2061,8 @@ impl Build {
             .keys()
             .map(|p| (p, reverse_deps.get(p).map_or(0, |s| s.len())))
             .collect();
-        let mut queue: VecDeque<&PkgName> = pending
-            .iter()
-            .filter(|(_, c)| **c == 0)
-            .map(|(&p, _)| p)
-            .collect();
+        let mut queue: VecDeque<&PkgName> =
+            pending.iter().filter(|(_, c)| **c == 0).map(|(&p, _)| p).collect();
         while let Some(pkg) = queue.pop_front() {
             let mut total = get_weight(pkg);
             if let Some(dependents) = reverse_deps.get(pkg) {
