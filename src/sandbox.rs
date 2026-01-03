@@ -148,6 +148,20 @@ impl Sandbox {
     }
 
     /**
+     * Create a Command that runs in the sandbox (via chroot) if enabled,
+     * or directly if sandboxes are disabled.
+     */
+    pub fn command(&self, id: usize, cmd: &Path) -> Command {
+        if self.enabled() {
+            let mut c = Command::new("/usr/sbin/chroot");
+            c.arg(self.path(id)).arg(cmd);
+            c
+        } else {
+            Command::new(cmd)
+        }
+    }
+
+    /**
      * Kill all processes in a sandbox by id.
      * This is used for graceful shutdown on Ctrl+C.
      */
@@ -280,13 +294,8 @@ impl Sandbox {
     ) -> Result<Child> {
         use std::io::Write;
 
-        let mut cmd = if self.enabled() {
-            let mut c = Command::new("/usr/sbin/chroot");
-            c.current_dir("/").arg(self.path(id)).arg(script);
-            c
-        } else {
-            Command::new(script)
-        };
+        let mut cmd = self.command(id, script);
+        cmd.current_dir("/");
 
         if let Some(fd) = status_fd {
             envs.push(("bob_status_fd".to_string(), fd.to_string()));
@@ -325,15 +334,8 @@ impl Sandbox {
     ) -> Result<Child> {
         use std::io::Write;
 
-        let mut cmd = if self.enabled() {
-            let mut c = Command::new("/usr/sbin/chroot");
-            c.current_dir("/").arg(self.path(id)).arg("/bin/sh").arg("-s");
-            c
-        } else {
-            let mut c = Command::new("/bin/sh");
-            c.arg("-s");
-            c
-        };
+        let mut cmd = self.command(id, Path::new("/bin/sh"));
+        cmd.current_dir("/").arg("-s");
 
         for (key, val) in envs {
             cmd.env(key, val);
