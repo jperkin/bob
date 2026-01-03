@@ -491,14 +491,24 @@ impl<'a> PkgBuilder<'a> {
             // Spawn thread to read from pipe and tee to file + output channel.
             // Batch lines and throttle sends to reduce channel overhead.
             let tee_handle = std::thread::spawn(move || {
-                let reader = BufReader::new(stdout);
+                let mut reader = BufReader::new(stdout);
+                let mut buf = Vec::new();
                 let mut batch = Vec::with_capacity(50);
                 let mut last_send = Instant::now();
                 let send_interval = Duration::from_millis(100);
 
-                for line in reader.lines() {
-                    let Ok(line) = line else { break };
-                    let _ = writeln!(log, "{}", line);
+                loop {
+                    buf.clear();
+                    match reader.read_until(b'\n', &mut buf) {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(_) => break,
+                    };
+                    // Write raw bytes to log file to preserve original output
+                    let _ = log.write_all(&buf);
+                    // Convert to lossy UTF-8 for live view
+                    let line = String::from_utf8_lossy(&buf);
+                    let line = line.trim_end_matches('\n').to_string();
                     batch.push(line);
 
                     // Send batch if interval elapsed or batch is large
@@ -822,7 +832,7 @@ impl<'a> PkgBuilder<'a> {
         }
 
         // Build the actual command
-        let cmd_str = Self::shell_escape(cmd.to_str().unwrap_or_default());
+        let cmd_str = Self::shell_escape(&cmd.to_string_lossy());
         let args_str: Vec<String> =
             args.iter().map(|a| Self::shell_escape(a)).collect();
 
