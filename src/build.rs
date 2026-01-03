@@ -2182,7 +2182,7 @@ impl Build {
                         ChannelCommand::Quit | ChannelCommand::Shutdown => {
                             break;
                         }
-                        _ => todo!(),
+                        _ => unreachable!("workers only receive ComeBackLater, JobData, Quit, or Shutdown"),
                     }
                 }
             });
