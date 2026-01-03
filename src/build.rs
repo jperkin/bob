@@ -73,7 +73,7 @@ use anyhow::{Context, bail};
 use glob::Pattern;
 use indexmap::IndexMap;
 use pkgsrc::{PkgName, PkgPath};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -1623,6 +1623,9 @@ struct BuildJobs {
     /// Reverse dependency map: package -> packages that depend on it.
     /// Precomputed for O(1) lookup in mark_failure instead of O(n) scan.
     reverse_deps: HashMap<PkgName, HashSet<PkgName>>,
+    /// Effective weight: package's PBULK_WEIGHT + sum of weights of all
+    /// transitive dependents. Precomputed for efficient build ordering.
+    effective_weights: HashMap<PkgName, usize>,
     running: HashSet<PkgName>,
     done: HashSet<PkgName>,
     failed: HashSet<PkgName>,
@@ -1807,26 +1810,14 @@ impl BuildJobs {
 
         /*
          * Get all packages in incoming that are cleared for building, ordered
-         * by weighting.
-         *
-         * TODO: weighting should be the sum of all transitive dependencies.
+         * by effective weight (own weight + transitive dependents' weights).
          */
         let mut pkgs: Vec<(PkgName, usize)> = self
             .incoming
             .iter()
             .filter(|(_, v)| v.is_empty())
             .map(|(k, _)| {
-                (
-                    k.clone(),
-                    self.scanpkgs
-                        .get(k)
-                        .unwrap()
-                        .pbulk_weight
-                        .clone()
-                        .unwrap_or("100".to_string())
-                        .parse()
-                        .unwrap_or(100),
-                )
+                (k.clone(), *self.effective_weights.get(k).unwrap_or(&100))
             })
             .collect();
 
@@ -1996,12 +1987,55 @@ impl Build {
             });
         }
 
+        /*
+         * Compute effective weights for build ordering.  The effective weight
+         * is the package's own PBULK_WEIGHT plus the sum of weights of all
+         * packages that transitively depend on it.  This prioritises building
+         * packages that unblock the most downstream work.
+         */
+        let get_weight = |pkg: &PkgName| -> usize {
+            self.scanpkgs
+                .get(pkg)
+                .and_then(|idx| idx.pbulk_weight.as_ref())
+                .and_then(|w| w.parse().ok())
+                .unwrap_or(100)
+        };
+
+        let mut effective_weights: HashMap<PkgName, usize> = HashMap::new();
+        let mut pending: HashMap<&PkgName, usize> = incoming
+            .keys()
+            .map(|p| (p, reverse_deps.get(p).map_or(0, |s| s.len())))
+            .collect();
+        let mut queue: VecDeque<&PkgName> = pending
+            .iter()
+            .filter(|(_, c)| **c == 0)
+            .map(|(&p, _)| p)
+            .collect();
+        while let Some(pkg) = queue.pop_front() {
+            let mut total = get_weight(pkg);
+            if let Some(dependents) = reverse_deps.get(pkg) {
+                for dep in dependents {
+                    total += effective_weights.get(dep).unwrap_or(&0);
+                }
+            }
+            effective_weights.insert(pkg.clone(), total);
+            for dep in incoming.get(pkg).iter().flat_map(|s| s.iter()) {
+                if let Some(c) = pending.get_mut(dep) {
+                    *c -= 1;
+                    if *c == 0 {
+                        queue.push_back(dep);
+                    }
+                }
+            }
+        }
+
         let running: HashSet<PkgName> = HashSet::new();
         let logdir = self.config.logdir().clone();
         let jobs = BuildJobs {
             scanpkgs: self.scanpkgs.clone(),
             incoming,
             reverse_deps,
+            effective_weights,
             running,
             done,
             failed,
