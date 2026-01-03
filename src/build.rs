@@ -2044,6 +2044,29 @@ impl Build {
             }
         }
 
+        /*
+         * Propagate cached failures: any package in incoming that depends on
+         * a failed package must also be marked as failed.
+         */
+        loop {
+            let mut newly_failed: Vec<PkgName> = Vec::new();
+            for (pkgname, deps) in &incoming {
+                for dep in deps {
+                    if failed.contains(dep) {
+                        newly_failed.push(pkgname.clone());
+                        break;
+                    }
+                }
+            }
+            if newly_failed.is_empty() {
+                break;
+            }
+            for pkgname in newly_failed {
+                incoming.remove(&pkgname);
+                failed.insert(pkgname);
+            }
+        }
+
         if cached_count > 0 {
             println!("Loaded {} cached build results", cached_count);
         }
