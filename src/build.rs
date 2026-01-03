@@ -1988,6 +1988,13 @@ impl Build {
         for (pkgname, index) in &self.scanpkgs {
             let mut deps: HashSet<PkgName> = HashSet::new();
             for dep in &index.depends {
+                // Only track dependencies that are in our build queue.
+                // Dependencies outside scanpkgs are assumed to already be
+                // installed (from a previous build) or will cause the build
+                // to fail at runtime.
+                if !self.scanpkgs.contains_key(dep) {
+                    continue;
+                }
                 deps.insert(dep.clone());
                 // Build reverse dependency map: dep -> packages that depend on it
                 reverse_deps
