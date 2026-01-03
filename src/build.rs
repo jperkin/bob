@@ -221,7 +221,8 @@ impl<'a> PkgBuilder<'a> {
             let Some((file, file_id)) = line.split_once(':') else {
                 continue;
             };
-            if file.is_empty() {
+            let file_id = file_id.trim();
+            if file.is_empty() || file_id.is_empty() {
                 continue;
             }
 
@@ -254,10 +255,19 @@ impl<'a> PkgBuilder<'a> {
                 let Some(hash) =
                     self.run_cmd(&pkg_admin, &["digest", &src_file_str])
                 else {
+                    debug!(pkgname, file, "pkg_admin digest failed");
                     return false;
                 };
-                if hash.trim() != file_id {
-                    debug!(pkgname, file, "hash mismatch");
+                let hash = hash.trim();
+                if hash != file_id {
+                    debug!(
+                        pkgname,
+                        file,
+                        path = %src_file.display(),
+                        expected = file_id,
+                        actual = hash,
+                        "hash mismatch"
+                    );
                     return false;
                 }
             }
@@ -269,8 +279,25 @@ impl<'a> PkgBuilder<'a> {
             return false;
         };
 
+        // Build sets of recorded vs expected dependencies
+        let recorded_deps: HashSet<&str> = pkg_deps
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect();
         let expected_deps: HashSet<&str> =
             self.pkginfo.depends.iter().map(|d| d.pkgname()).collect();
+
+        // If dependency list has changed in any way, rebuild
+        if recorded_deps != expected_deps {
+            debug!(
+                pkgname,
+                recorded = recorded_deps.len(),
+                expected = expected_deps.len(),
+                "dependency list changed"
+            );
+            return false;
+        }
 
         let pkgfile_mtime = match pkgfile.metadata().and_then(|m| m.modified())
         {
@@ -278,18 +305,8 @@ impl<'a> PkgBuilder<'a> {
             Err(_) => return false,
         };
 
-        for dep in pkg_deps.lines() {
-            if dep.is_empty() {
-                continue;
-            }
-
-            // Check dependency is in expected list
-            if !expected_deps.contains(dep) {
-                debug!(pkgname, dep, "unexpected dependency");
-                return false;
-            }
-
-            // Check dependency package exists and is older
+        // Check each dependency package exists and is not newer
+        for dep in &recorded_deps {
             let dep_pkg =
                 self.config.packages().join("All").join(format!("{}.tgz", dep));
             if !dep_pkg.exists() {
