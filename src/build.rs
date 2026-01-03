@@ -2044,6 +2044,81 @@ impl Build {
             }
         }
 
+        /*
+         * Propagate cached failures: any package in incoming that depends on
+         * a failed package must also be marked as failed.
+         */
+        loop {
+            let mut newly_failed: Vec<PkgName> = Vec::new();
+            for (pkgname, deps) in &incoming {
+                for dep in deps {
+                    if failed.contains(dep) {
+                        newly_failed.push(pkgname.clone());
+                        break;
+                    }
+                }
+            }
+            if newly_failed.is_empty() {
+                break;
+            }
+            for pkgname in newly_failed {
+                incoming.remove(&pkgname);
+                failed.insert(pkgname);
+            }
+        }
+
+        /*
+         * Sanity check: verify all dependencies are in a valid state.
+         * Each dep must be in incoming, done, or failed.
+         */
+        let mut invalid_deps: Vec<(String, String)> = Vec::new();
+        for (pkgname, deps) in &incoming {
+            for dep in deps {
+                if !incoming.contains_key(dep)
+                    && !done.contains(dep)
+                    && !failed.contains(dep)
+                {
+                    invalid_deps.push((
+                        pkgname.pkgname().to_string(),
+                        dep.pkgname().to_string(),
+                    ));
+                }
+            }
+        }
+        if !invalid_deps.is_empty() {
+            error!(
+                count = invalid_deps.len(),
+                "Found dependencies in invalid state (not in incoming/done/failed)"
+            );
+            for (pkg, dep) in &invalid_deps {
+                error!(pkg = %pkg, dep = %dep, "Invalid dependency state");
+            }
+        }
+
+        /*
+         * Check for packages that can never be built (all deps unsatisfiable).
+         * Also detect if we'd be stuck from the start.
+         */
+        let initially_buildable: Vec<_> = incoming
+            .iter()
+            .filter(|(_, deps)| deps.is_empty())
+            .map(|(k, _)| k.pkgname())
+            .collect();
+        if initially_buildable.is_empty() && !incoming.is_empty() {
+            error!(
+                incoming_count = incoming.len(),
+                "No packages are initially buildable - possible dependency cycle"
+            );
+            // Log up to 10 packages and what they're waiting on
+            for (pkg, deps) in incoming.iter().take(10) {
+                error!(
+                    pkg = %pkg.pkgname(),
+                    waiting_on = ?deps.iter().map(|d| d.pkgname()).collect::<Vec<_>>(),
+                    "Package waiting on dependencies"
+                );
+            }
+        }
+
         if cached_count > 0 {
             println!("Loaded {} cached build results", cached_count);
         }
@@ -2286,6 +2361,9 @@ impl Build {
             // Track which thread is building which package
             let mut thread_packages: HashMap<usize, PkgName> = HashMap::new();
 
+            // Deadlock detection: track consecutive idle cycles
+            let mut deadlock_reported = false;
+
             loop {
                 // Check shutdown flag periodically
                 if shutdown_for_manager.load(Ordering::SeqCst) {
@@ -2344,6 +2422,57 @@ impl Build {
                                 }
                                 let _ =
                                     client.send(ChannelCommand::ComeBackLater);
+
+                                // Deadlock detection: if nothing running and
+                                // packages still waiting, we're stuck
+                                if !deadlock_reported
+                                    && jobs.running.is_empty()
+                                    && !jobs.incoming.is_empty()
+                                {
+                                    deadlock_reported = true;
+                                    error!(
+                                        incoming = jobs.incoming.len(),
+                                        done = jobs.done.len(),
+                                        failed = jobs.failed.len(),
+                                        "BUILD DEADLOCK DETECTED"
+                                    );
+                                    for (pkg, deps) in &jobs.incoming {
+                                        let dep_states: Vec<String> = deps
+                                            .iter()
+                                            .map(|d| {
+                                                if jobs.incoming.contains_key(d)
+                                                {
+                                                    format!(
+                                                        "{}(incoming)",
+                                                        d.pkgname()
+                                                    )
+                                                } else if jobs.done.contains(d)
+                                                {
+                                                    format!(
+                                                        "{}(done)",
+                                                        d.pkgname()
+                                                    )
+                                                } else if jobs.failed.contains(d)
+                                                {
+                                                    format!(
+                                                        "{}(failed)",
+                                                        d.pkgname()
+                                                    )
+                                                } else {
+                                                    format!(
+                                                        "{}(UNKNOWN)",
+                                                        d.pkgname()
+                                                    )
+                                                }
+                                            })
+                                            .collect();
+                                        error!(
+                                            pkg = %pkg.pkgname(),
+                                            deps = ?dep_states,
+                                            "Stuck package"
+                                        );
+                                    }
+                                }
                             }
                             BuildStatus::Done => {
                                 if let Ok(mut p) = progress_clone.lock() {
