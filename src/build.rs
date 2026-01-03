@@ -176,7 +176,20 @@ impl<'a> PkgBuilder<'a> {
             Ok(output) if output.status.success() => {
                 Some(String::from_utf8_lossy(&output.stdout).into_owned())
             }
-            _ => None,
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                debug!(
+                    cmd = %cmd.display(),
+                    exit_code = ?output.status.code(),
+                    stderr = %stderr.trim(),
+                    "command failed"
+                );
+                None
+            }
+            Err(e) => {
+                debug!(cmd = %cmd.display(), error = %e, "command execution error");
+                None
+            }
         }
     }
 
@@ -188,6 +201,7 @@ impl<'a> PkgBuilder<'a> {
 
         // Check if package file exists
         if !pkgfile.exists() {
+            debug!(pkgname, path = %pkgfile.display(), "package file not found");
             return false;
         }
 
@@ -198,8 +212,10 @@ impl<'a> PkgBuilder<'a> {
         // Get BUILD_INFO and verify source files
         let Some(build_info) = self.run_cmd(&pkg_info, &["-qb", &pkgfile_str])
         else {
+            debug!(pkgname, "pkg_info -qb failed or returned empty");
             return false;
         };
+        debug!(pkgname, lines = build_info.lines().count(), "checking BUILD_INFO");
 
         for line in build_info.lines() {
             let Some((file, file_id)) = line.split_once(':') else {
