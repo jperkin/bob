@@ -1,5 +1,18 @@
 # Changelog
 
+## Version 0.4.0 (2026-01-03)
+
+* Rewrite pkg-build and pkg-up-to-date scripts in native Rust to improve
+  reliability.  Fixes various issues with exit status not being tracked
+  correctly.
+
+* Overhaul database architecture and improve scan caching, including fast
+  path for completed full scans and better support for resuming builds.
+
+* Add `rebuild` command and pkgpath argument support for `build`.
+
+* Various bug fixes plus improvements to the log viewer and report.
+
 ## Version 0.3.0 (2026-01-01)
 
 * Package resolver is now 100% bug-for-bug compatible with pbulk, generating
