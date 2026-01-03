@@ -45,7 +45,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use bob::{Build, Config, Database, RunContext, Scan};
+//! use bob::{Build, BuildOptions, Config, Database, RunContext, Scan};
 //! use std::sync::Arc;
 //! use std::sync::atomic::AtomicBool;
 //!
@@ -58,7 +58,7 @@
 //! scan.start(&ctx, &db)?;
 //! let result = scan.resolve(&db)?;
 //!
-//! let mut build = Build::new(&config, result.buildable);
+//! let mut build = Build::new(&config, result.buildable, BuildOptions::default());
 //! let summary = build.start(&ctx, &db)?;
 //!
 //! println!("Built {} packages", summary.success_count());
@@ -142,6 +142,7 @@ struct PkgBuilder<'a> {
     build_user: Option<String>,
     envs: Vec<(String, String)>,
     output_tx: Option<Sender<ChannelCommand>>,
+    options: &'a BuildOptions,
 }
 
 impl<'a> PkgBuilder<'a> {
@@ -152,6 +153,7 @@ impl<'a> PkgBuilder<'a> {
         pkginfo: &'a ResolvedIndex,
         envs: Vec<(String, String)>,
         output_tx: Option<Sender<ChannelCommand>>,
+        options: &'a BuildOptions,
     ) -> Self {
         let logdir = config.logdir().join(pkginfo.pkgname.pkgname());
         let build_user = config.build_user().map(|s| s.to_string());
@@ -164,6 +166,7 @@ impl<'a> PkgBuilder<'a> {
             build_user,
             envs,
             output_tx,
+            options,
         }
     }
 
@@ -215,7 +218,11 @@ impl<'a> PkgBuilder<'a> {
             debug!(pkgname, "pkg_info -qb failed or returned empty");
             return false;
         };
-        debug!(pkgname, lines = build_info.lines().count(), "checking BUILD_INFO");
+        debug!(
+            pkgname,
+            lines = build_info.lines().count(),
+            "checking BUILD_INFO"
+        );
 
         for line in build_info.lines() {
             let Some((file, file_id)) = line.split_once(':') else {
@@ -340,8 +347,8 @@ impl<'a> PkgBuilder<'a> {
             bail!("Could not get PKGPATH for {}", pkgname);
         };
 
-        // Check if package is already up-to-date
-        if self.check_up_to_date() {
+        // Check if package is already up-to-date (skip check if force rebuild)
+        if !self.options.force_rebuild && self.check_up_to_date() {
             return Ok(PkgBuildResult::Skipped);
         }
 
@@ -739,10 +746,8 @@ impl<'a> PkgBuilder<'a> {
             .create(true)
             .append(true)
             .open(self.logdir.join("bob.log"))?;
-        let output = cmd
-            .args(&make_args)
-            .stderr(Stdio::from(bob_log))
-            .output()?;
+        let output =
+            cmd.args(&make_args).stderr(Stdio::from(bob_log)).output()?;
 
         if !output.status.success() {
             bail!("Failed to get make variable {}", varname);
@@ -1153,6 +1158,13 @@ impl BuildSummary {
     }
 }
 
+/// Options that control build behavior.
+#[derive(Clone, Debug, Default)]
+pub struct BuildOptions {
+    /// Force rebuild even if package is up-to-date.
+    pub force_rebuild: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct Build {
     /// Parsed [`Config`].
@@ -1163,6 +1175,8 @@ pub struct Build {
     scanpkgs: IndexMap<PkgName, ResolvedIndex>,
     /// Cached build results from previous run.
     cached: IndexMap<PkgName, BuildResult>,
+    /// Build options.
+    options: BuildOptions,
 }
 
 #[derive(Debug)]
@@ -1171,6 +1185,7 @@ struct PackageBuild {
     config: Config,
     pkginfo: ResolvedIndex,
     sandbox: Sandbox,
+    options: BuildOptions,
 }
 
 /// Helper for querying bmake variables with the correct environment.
@@ -1333,6 +1348,7 @@ impl PackageBuild {
             &self.pkginfo,
             envs.clone(),
             Some(status_tx.clone()),
+            &self.options,
         );
 
         let mut callback = ChannelCallback::new(self.id, status_tx);
@@ -1911,12 +1927,14 @@ impl Build {
     pub fn new(
         config: &Config,
         scanpkgs: IndexMap<PkgName, ResolvedIndex>,
+        options: BuildOptions,
     ) -> Build {
         let sandbox = Sandbox::new(config);
         info!(
             package_count = scanpkgs.len(),
             sandbox_enabled = sandbox.enabled(),
             build_threads = config.build_threads(),
+            ?options,
             "Creating new Build instance"
         );
         for (pkgname, index) in &scanpkgs {
@@ -1932,6 +1950,7 @@ impl Build {
             sandbox,
             scanpkgs,
             cached: IndexMap::new(),
+            options,
         }
     }
 
@@ -2291,6 +2310,7 @@ impl Build {
          */
         let config = self.config.clone();
         let sandbox = self.sandbox.clone();
+        let options = self.options.clone();
         let progress_clone = Arc::clone(&progress);
         let shutdown_for_manager = Arc::clone(&shutdown_flag);
         let stats_for_manager = stats.clone();
@@ -2356,6 +2376,7 @@ impl Build {
                                         config: config.clone(),
                                         pkginfo: pkginfo.clone(),
                                         sandbox: sandbox.clone(),
+                                        options: options.clone(),
                                     }),
                                 ));
                             }

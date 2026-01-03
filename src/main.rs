@@ -146,11 +146,20 @@ impl BuildRunner {
         &self,
         scan_result: bob::scan::ScanResult,
     ) -> Result<build::BuildSummary> {
+        self.run_build_with(scan_result, build::BuildOptions::default())
+    }
+
+    fn run_build_with(
+        &self,
+        scan_result: bob::scan::ScanResult,
+        options: build::BuildOptions,
+    ) -> Result<build::BuildSummary> {
         if scan_result.buildable.is_empty() {
             bail!("No packages to build");
         }
 
-        let mut build = Build::new(&self.config, scan_result.buildable.clone());
+        let mut build =
+            Build::new(&self.config, scan_result.buildable.clone(), options);
 
         // Load cached build results from database
         build.load_cached_from_db(&self.db)?;
@@ -336,6 +345,9 @@ enum Cmd {
     },
     /// Rebuild specific packages, clearing cached results
     Rebuild {
+        /// Force rebuild even if package is up-to-date
+        #[arg(short, long)]
+        force: bool,
         /// Package paths or package names to rebuild
         #[arg(required = true, value_name = "PKGPATH|PKGNAME")]
         packages: Vec<String>,
@@ -488,7 +500,7 @@ fn main() -> Result<()> {
             print_summary(&summary);
             runner.generate_report(&summary);
         }
-        Cmd::Rebuild { packages } => {
+        Cmd::Rebuild { force, packages } => {
             let runner =
                 BuildRunner::new(args.config.as_deref(), args.verbose, true)?;
 
@@ -551,7 +563,8 @@ fn main() -> Result<()> {
             }
 
             let scan_result = runner.run_scan(&mut scan)?;
-            let summary = runner.run_build(scan_result)?;
+            let options = build::BuildOptions { force_rebuild: force };
+            let summary = runner.run_build_with(scan_result, options)?;
             print_summary(&summary);
         }
         Cmd::Util { cmd: UtilCmd::GenerateReport } => {
