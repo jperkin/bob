@@ -432,11 +432,6 @@ impl MultiProgress {
         &mut self.state
     }
 
-    #[allow(dead_code)]
-    pub fn view_mode(&self) -> ViewMode {
-        self.view_mode
-    }
-
     pub fn output_buffer_mut(
         &mut self,
         id: usize,
