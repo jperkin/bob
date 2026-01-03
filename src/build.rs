@@ -355,8 +355,17 @@ impl<'a> PkgBuilder<'a> {
         let work_log = self.logdir.join("work.log");
         File::create(&work_log)?;
         if let Some(ref user) = self.build_user {
-            // Use chown command to set ownership
-            let _ = Command::new("chown").arg(user).arg(&work_log).status();
+            let bob_log = File::options()
+                .create(true)
+                .append(true)
+                .open(self.logdir.join("bob.log"))?;
+            let bob_log_err = bob_log.try_clone()?;
+            let _ = Command::new("chown")
+                .arg(user)
+                .arg(&work_log)
+                .stdout(bob_log)
+                .stderr(bob_log_err)
+                .status();
         }
 
         let pkgdir = self.config.pkgsrc().join(pkgpath.as_path());
@@ -726,12 +735,17 @@ impl<'a> PkgBuilder<'a> {
             &work_log,
         );
 
-        let output = cmd.args(&make_args).output()?;
+        let bob_log = File::options()
+            .create(true)
+            .append(true)
+            .open(self.logdir.join("bob.log"))?;
+        let output = cmd
+            .args(&make_args)
+            .stderr(Stdio::from(bob_log))
+            .output()?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            error!(varname, stderr = %stderr, "Failed to get make variable");
-            bail!("Failed to get make variable {}: {}", varname, stderr.trim());
+            bail!("Failed to get make variable {}", varname);
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
