@@ -30,9 +30,8 @@
 //! - `builds` - Build results with indexed outcome
 //! - `metadata` - Key-value store for flags and cached data
 
-use crate::build::BuildResult;
+use crate::build::{BuildOutcome, BuildResult};
 use anyhow::{Context, Result};
-use indexmap::IndexMap;
 use pkgsrc::{PkgName, PkgPath, ScanIndex};
 use rusqlite::{Connection, params};
 use std::collections::HashSet;
@@ -53,59 +52,6 @@ pub struct PackageRow {
     pub fail_reason: Option<String>,
     pub is_bootstrap: bool,
     pub pbulk_weight: i32,
-}
-
-/// Minimal build info for scheduling.
-#[derive(Clone, Debug)]
-pub struct BuildInfo {
-    pub package_id: i64,
-    pub pkgname: String,
-    pub pkgpath: String,
-    pub depends_on: Vec<i64>,
-}
-
-/// Build outcome for database storage.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DbBuildOutcome {
-    Success,
-    Failed,
-    UpToDate,
-    PreFailed,
-    IndirectFailed,
-    IndirectPreFailed,
-}
-
-impl DbBuildOutcome {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            DbBuildOutcome::Success => "success",
-            DbBuildOutcome::Failed => "failed",
-            DbBuildOutcome::UpToDate => "up_to_date",
-            DbBuildOutcome::PreFailed => "pre_failed",
-            DbBuildOutcome::IndirectFailed => "indirect_failed",
-            DbBuildOutcome::IndirectPreFailed => "indirect_pre_failed",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "success" => Some(DbBuildOutcome::Success),
-            "failed" => Some(DbBuildOutcome::Failed),
-            "up_to_date" => Some(DbBuildOutcome::UpToDate),
-            "pre_failed" => Some(DbBuildOutcome::PreFailed),
-            "indirect_failed" => Some(DbBuildOutcome::IndirectFailed),
-            "indirect_pre_failed" => Some(DbBuildOutcome::IndirectPreFailed),
-            _ => None,
-        }
-    }
-
-    pub fn is_complete(&self) -> bool {
-        matches!(self, DbBuildOutcome::Success | DbBuildOutcome::UpToDate)
-    }
-
-    pub fn is_failed(&self) -> bool {
-        !self.is_complete()
-    }
 }
 
 /// SQLite database for scan and build caching.
@@ -313,22 +259,6 @@ impl Database {
             }
         }
 
-        // Migrate metadata
-        let metadata_keys = ["full_scan_complete", "resolve_result", "resolve_buildable_count"];
-        for key in metadata_keys {
-            if let Ok(value) = self.conn.query_row(
-                "SELECT value FROM metadata WHERE key = ?1",
-                [key],
-                |row| row.get::<_, String>(0),
-            ) {
-                // Already in new metadata table or will be re-added
-                let _ = self.conn.execute(
-                    "INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)",
-                    params![key, value],
-                );
-            }
-        }
-
         // Drop old tables
         self.conn.execute_batch(
             "DROP TABLE IF EXISTS scan;
@@ -389,7 +319,7 @@ impl Database {
         Ok(package_id)
     }
 
-    /// Store scan results for a pkgpath (compatibility wrapper).
+    /// Store scan results for a pkgpath.
     pub fn store_scan_pkgpath(&self, pkgpath: &str, indexes: &[ScanIndex]) -> Result<()> {
         for index in indexes {
             self.store_package(pkgpath, index)?;
@@ -488,22 +418,33 @@ impl Database {
             .context("Failed to count packages")
     }
 
-    /// Count of scanned pkgpaths (for compatibility).
+    /// Count of scanned pkgpaths.
     pub fn count_scan(&self) -> Result<i64> {
         self.conn.query_row("SELECT COUNT(DISTINCT pkgpath) FROM packages", [], |row| row.get(0))
             .context("Failed to count scan")
     }
 
-    /// Get all buildable package IDs (no skip/fail reason).
-    pub fn get_buildable_package_ids(&self) -> Result<Vec<i64>> {
+    /// Get all packages (lightweight).
+    pub fn get_all_packages(&self) -> Result<Vec<PackageRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id FROM packages WHERE skip_reason IS NULL AND fail_reason IS NULL"
+            "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight
+             FROM packages ORDER BY id"
         )?;
-        let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+
+        let rows = stmt.query_map([], |row| Ok(PackageRow {
+            id: row.get(0)?,
+            pkgname: row.get(1)?,
+            pkgpath: row.get(2)?,
+            skip_reason: row.get(3)?,
+            fail_reason: row.get(4)?,
+            is_bootstrap: row.get::<_, i32>(5)? != 0,
+            pbulk_weight: row.get(6)?,
+        }))?;
+
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    /// Get all buildable packages (lightweight).
+    /// Get all buildable packages (no skip/fail reason).
     pub fn get_buildable_packages(&self) -> Result<Vec<PackageRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight
@@ -533,34 +474,30 @@ impl Database {
         serde_json::from_str(&json).context("Failed to deserialize scan data")
     }
 
-    /// Load all scan data (compatibility wrapper for migration period).
-    pub fn get_all_scan(&self) -> Result<IndexMap<PkgPath, Vec<ScanIndex>>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT pkgpath, scan_data FROM packages ORDER BY id"
-        )?;
+    /// Load full ScanIndex by pkgname.
+    pub fn get_scan_index_by_name(&self, pkgname: &str) -> Result<Option<ScanIndex>> {
+        let result = self.conn.query_row(
+            "SELECT scan_data FROM packages WHERE pkgname = ?1",
+            [pkgname],
+            |row| row.get::<_, String>(0),
+        );
 
-        let mut result: IndexMap<PkgPath, Vec<ScanIndex>> = IndexMap::new();
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-
-        for row in rows {
-            let (pkgpath_str, json) = row?;
-            let pkgpath = PkgPath::new(&pkgpath_str)
-                .context("Invalid pkgpath in database")?;
-            let index: ScanIndex = serde_json::from_str(&json)
-                .context("Failed to deserialize scan data")?;
-            result.entry(pkgpath).or_default().push(index);
+        match result {
+            Ok(json) => {
+                let index: ScanIndex = serde_json::from_str(&json)
+                    .context("Failed to deserialize scan data")?;
+                Ok(Some(index))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
         }
-
-        Ok(result)
     }
 
     /// Clear all scan data.
     pub fn clear_scan(&self) -> Result<()> {
         self.conn.execute("DELETE FROM packages", [])?;
         self.clear_full_scan_complete()?;
-        self.clear_resolve()?;
+        self.clear_resolved_depends()?;
         Ok(())
     }
 
@@ -577,11 +514,19 @@ impl Database {
         Ok(())
     }
 
-    /// Store multiple resolved dependencies.
-    pub fn store_resolved_dependencies(&self, package_id: i64, depends_on_ids: &[i64]) -> Result<()> {
-        for &dep_id in depends_on_ids {
-            self.store_resolved_dependency(package_id, dep_id)?;
+    /// Store resolved dependencies in batch.
+    pub fn store_resolved_dependencies_batch(
+        &self,
+        deps: &[(i64, i64)],
+    ) -> Result<()> {
+        self.conn.execute("BEGIN TRANSACTION", [])?;
+        for (package_id, depends_on_id) in deps {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO resolved_depends (package_id, depends_on_id) VALUES (?1, ?2)",
+                params![package_id, depends_on_id],
+            )?;
         }
+        self.conn.execute("COMMIT", [])?;
         Ok(())
     }
 
@@ -650,7 +595,7 @@ impl Database {
     // BUILD QUERIES
     // ========================================================================
 
-    /// Store a build result.
+    /// Store a build result by package ID.
     pub fn store_build_result(&self, package_id: i64, result: &BuildResult) -> Result<()> {
         let (outcome, detail) = build_outcome_to_db(&result.outcome);
         let duration_ms = result.duration.as_millis() as i64;
@@ -670,14 +615,12 @@ impl Database {
         Ok(())
     }
 
-    /// Store build result by pkgname (compatibility wrapper).
-    pub fn store_build_pkgname(&self, pkgname: &str, result: &BuildResult) -> Result<()> {
-        if let Some(pkg) = self.get_package_by_name(pkgname)? {
+    /// Store a build result by pkgname.
+    pub fn store_build_by_name(&self, result: &BuildResult) -> Result<()> {
+        if let Some(pkg) = self.get_package_by_name(result.pkgname.pkgname())? {
             self.store_build_result(pkg.id, result)
         } else {
-            // Package not in scan database - store minimally
-            // This can happen during migration or if build runs before scan
-            warn!(pkgname = %pkgname, "Package not found in database for build result");
+            warn!(pkgname = %result.pkgname.pkgname(), "Package not found in database for build result");
             Ok(())
         }
     }
@@ -686,7 +629,7 @@ impl Database {
     pub fn store_build_batch(&self, results: &[BuildResult]) -> Result<()> {
         self.conn.execute("BEGIN TRANSACTION", [])?;
         for result in results {
-            if let Err(e) = self.store_build_pkgname(result.pkgname.pkgname(), result) {
+            if let Err(e) = self.store_build_by_name(result) {
                 let _ = self.conn.execute("ROLLBACK", []);
                 return Err(e);
             }
@@ -696,8 +639,43 @@ impl Database {
         Ok(())
     }
 
-    /// Get build status for a package.
-    pub fn get_build_status(&self, package_id: i64) -> Result<Option<DbBuildOutcome>> {
+    /// Get build result for a package.
+    pub fn get_build_result(&self, package_id: i64) -> Result<Option<BuildResult>> {
+        let result = self.conn.query_row(
+            "SELECT p.pkgname, p.pkgpath, b.outcome, b.outcome_detail, b.duration_ms, b.log_dir
+             FROM builds b
+             JOIN packages p ON b.package_id = p.id
+             WHERE b.package_id = ?1",
+            [package_id],
+            |row| {
+                let pkgname: String = row.get(0)?;
+                let pkgpath: Option<String> = row.get(1)?;
+                let outcome: String = row.get(2)?;
+                let detail: Option<String> = row.get(3)?;
+                let duration_ms: i64 = row.get(4)?;
+                let log_dir: Option<String> = row.get(5)?;
+                Ok((pkgname, pkgpath, outcome, detail, duration_ms, log_dir))
+            },
+        );
+
+        match result {
+            Ok((pkgname, pkgpath, outcome, detail, duration_ms, log_dir)) => {
+                let build_outcome = db_outcome_to_build(&outcome, detail);
+                Ok(Some(BuildResult {
+                    pkgname: PkgName::new(&pkgname),
+                    pkgpath: pkgpath.and_then(|p| PkgPath::new(&p).ok()),
+                    outcome: build_outcome,
+                    duration: Duration::from_millis(duration_ms as u64),
+                    log_dir: log_dir.map(std::path::PathBuf::from),
+                }))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Check if a package is already built (success or up_to_date).
+    pub fn is_package_complete(&self, package_id: i64) -> Result<bool> {
         let result = self.conn.query_row(
             "SELECT outcome FROM builds WHERE package_id = ?1",
             [package_id],
@@ -705,8 +683,23 @@ impl Database {
         );
 
         match result {
-            Ok(s) => Ok(DbBuildOutcome::parse(&s)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Ok(outcome) => Ok(outcome == "success" || outcome == "up_to_date"),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Check if a package build has failed.
+    pub fn is_package_failed(&self, package_id: i64) -> Result<bool> {
+        let result = self.conn.query_row(
+            "SELECT outcome FROM builds WHERE package_id = ?1",
+            [package_id],
+            |row| row.get::<_, String>(0),
+        );
+
+        match result {
+            Ok(outcome) => Ok(outcome != "success" && outcome != "up_to_date"),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
             Err(e) => Err(e.into()),
         }
     }
@@ -729,42 +722,6 @@ impl Database {
         rows.collect::<Result<HashSet<_>, _>>().map_err(Into::into)
     }
 
-    /// Load all build results (compatibility wrapper).
-    pub fn get_all_build(&self) -> Result<IndexMap<PkgName, BuildResult>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT p.pkgname, p.pkgpath, b.outcome, b.outcome_detail, b.duration_ms, b.log_dir
-             FROM builds b
-             JOIN packages p ON b.package_id = p.id
-             ORDER BY b.id"
-        )?;
-
-        let mut result = IndexMap::new();
-        let rows = stmt.query_map([], |row| {
-            let pkgname: String = row.get(0)?;
-            let pkgpath: Option<String> = row.get(1)?;
-            let outcome: String = row.get(2)?;
-            let detail: Option<String> = row.get(3)?;
-            let duration_ms: i64 = row.get(4)?;
-            let log_dir: Option<String> = row.get(5)?;
-            Ok((pkgname, pkgpath, outcome, detail, duration_ms, log_dir))
-        })?;
-
-        for row in rows {
-            let (pkgname, pkgpath, outcome, detail, duration_ms, log_dir) = row?;
-            let build_outcome = db_outcome_to_build(&outcome, detail);
-            let build_result = BuildResult {
-                pkgname: PkgName::new(&pkgname),
-                pkgpath: pkgpath.and_then(|p| PkgPath::new(&p).ok()),
-                outcome: build_outcome,
-                duration: Duration::from_millis(duration_ms as u64),
-                log_dir: log_dir.map(std::path::PathBuf::from),
-            };
-            result.insert(PkgName::new(&pkgname), build_result);
-        }
-
-        Ok(result)
-    }
-
     /// Count of build results.
     pub fn count_build(&self) -> Result<i64> {
         self.conn.query_row("SELECT COUNT(*) FROM builds", [], |row| row.get(0))
@@ -778,7 +735,7 @@ impl Database {
     }
 
     /// Delete build result for a pkgname.
-    pub fn delete_build_pkgname(&self, pkgname: &str) -> Result<bool> {
+    pub fn delete_build_by_name(&self, pkgname: &str) -> Result<bool> {
         let rows = self.conn.execute(
             "DELETE FROM builds WHERE package_id IN (SELECT id FROM packages WHERE pkgname = ?1)",
             params![pkgname],
@@ -883,75 +840,13 @@ impl Database {
         Ok(())
     }
 
-    /// Store resolved scan result (compatibility).
-    pub fn store_resolve(&self, result: &crate::scan::ScanResult) -> Result<()> {
-        // Store resolved dependencies
-        for (pkgname, index) in &result.buildable {
-            if let Some(pkg) = self.get_package_by_name(pkgname.pkgname())? {
-                for dep in &index.depends {
-                    if let Some(dep_pkg) = self.get_package_by_name(dep.pkgname())? {
-                        self.store_resolved_dependency(pkg.id, dep_pkg.id)?;
-                    }
-                }
-            }
-        }
-
-        // Store counts for quick access
-        self.conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('resolve_buildable_count', ?1)",
-            params![result.buildable.len().to_string()],
-        )?;
-
-        // Store full result as JSON for compatibility during migration
-        let json = serde_json::to_string(result)?;
-        self.conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('resolve_result', ?1)",
-            params![json],
-        )?;
-
-        debug!("Stored resolve result");
-        Ok(())
-    }
-
-    /// Get just the buildable count without loading full resolve.
-    pub fn get_resolve_buildable_count(&self) -> Result<Option<usize>> {
-        let result = self.conn.query_row(
-            "SELECT value FROM metadata WHERE key = 'resolve_buildable_count'",
+    /// Get the buildable package count.
+    pub fn get_buildable_count(&self) -> Result<i64> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM packages WHERE skip_reason IS NULL AND fail_reason IS NULL",
             [],
-            |row| row.get::<_, String>(0),
-        );
-        match result {
-            Ok(s) => Ok(Some(s.parse().unwrap_or(0))),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Load cached resolve result.
-    pub fn get_resolve(&self) -> Result<Option<crate::scan::ScanResult>> {
-        let result = self.conn.query_row(
-            "SELECT value FROM metadata WHERE key = 'resolve_result'",
-            [],
-            |row| row.get::<_, String>(0),
-        );
-        match result {
-            Ok(json) => {
-                let scan_result: crate::scan::ScanResult =
-                    serde_json::from_str(&json)
-                        .context("Failed to deserialize resolve data")?;
-                Ok(Some(scan_result))
-            }
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Clear cached resolve result.
-    pub fn clear_resolve(&self) -> Result<()> {
-        self.conn.execute("DELETE FROM metadata WHERE key = 'resolve_result'", [])?;
-        self.conn.execute("DELETE FROM metadata WHERE key = 'resolve_buildable_count'", [])?;
-        self.clear_resolved_depends()?;
-        Ok(())
+            |row| row.get(0),
+        ).context("Failed to count buildable packages")
     }
 
     // ========================================================================
@@ -1011,8 +906,7 @@ fn split_pkgname(pkgname: &str) -> (String, String) {
 }
 
 /// Convert BuildOutcome to database format.
-fn build_outcome_to_db(outcome: &crate::build::BuildOutcome) -> (&'static str, Option<String>) {
-    use crate::build::BuildOutcome;
+fn build_outcome_to_db(outcome: &BuildOutcome) -> (&'static str, Option<String>) {
     match outcome {
         BuildOutcome::Success => ("success", None),
         BuildOutcome::UpToDate => ("up_to_date", None),
@@ -1024,8 +918,7 @@ fn build_outcome_to_db(outcome: &crate::build::BuildOutcome) -> (&'static str, O
 }
 
 /// Convert database format to BuildOutcome.
-fn db_outcome_to_build(outcome: &str, detail: Option<String>) -> crate::build::BuildOutcome {
-    use crate::build::BuildOutcome;
+fn db_outcome_to_build(outcome: &str, detail: Option<String>) -> BuildOutcome {
     match outcome {
         "success" => BuildOutcome::Success,
         "up_to_date" => BuildOutcome::UpToDate,
