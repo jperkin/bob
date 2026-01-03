@@ -59,7 +59,7 @@
 //! let result = scan.resolve()?;
 //!
 //! let mut build = Build::new(&config, result.buildable);
-//! let summary = build.start(&ctx)?;
+//! let summary = build.start(&ctx, &db)?;
 //!
 //! println!("Built {} packages", summary.success_count());
 //! # Ok::<(), anyhow::Error>(())

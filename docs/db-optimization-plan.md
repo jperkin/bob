@@ -102,7 +102,7 @@ CREATE INDEX idx_packages_status ON packages(skip_reason, fail_reason);
 -- ============================================================
 
 -- Raw dependency patterns from scan (ALL_DEPENDS)
-CREATE TABLE raw_dependencies (
+CREATE TABLE depends (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
     depend_pattern TEXT NOT NULL,           -- e.g., "gtk2>=2.12.0"
@@ -111,11 +111,11 @@ CREATE TABLE raw_dependencies (
     UNIQUE(package_id, depend_pattern)
 );
 
-CREATE INDEX idx_raw_deps_package ON raw_dependencies(package_id);
-CREATE INDEX idx_raw_deps_pkgpath ON raw_dependencies(depend_pkgpath);
+CREATE INDEX idx_depends_package ON depends(package_id);
+CREATE INDEX idx_depends_pkgpath ON depends(depend_pkgpath);
 
 -- Resolved dependencies (after pattern matching)
-CREATE TABLE resolved_dependencies (
+CREATE TABLE resolved_depends (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
     depends_on_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
@@ -123,8 +123,8 @@ CREATE TABLE resolved_dependencies (
     UNIQUE(package_id, depends_on_id)
 );
 
-CREATE INDEX idx_resolved_deps_package ON resolved_dependencies(package_id);
-CREATE INDEX idx_resolved_deps_depends_on ON resolved_dependencies(depends_on_id);
+CREATE INDEX idx_resolved_depends_package ON resolved_depends(package_id);
+CREATE INDEX idx_resolved_depends_depends_on ON resolved_depends(depends_on_id);
 
 -- ============================================================
 -- BUILD TABLES
@@ -185,10 +185,10 @@ The `scan_data` column stores remaining ScanIndex fields as JSON for lazy loadin
 
 #### 2. Normalized Dependency Tables
 
-Raw dependencies (`raw_dependencies`) and resolved dependencies (`resolved_dependencies`) are stored in normalized form with proper foreign keys and indexes.
+Raw dependencies (`depends`) and resolved dependencies (`resolved_depends`) are stored in normalized form with proper foreign keys and indexes.
 
 **Benefits**:
-- O(1) reverse dependency lookup via `idx_resolved_deps_depends_on`
+- O(1) reverse dependency lookup via `idx_resolved_depends_depends_on`
 - No need to load all packages to find dependents
 - Incremental updates possible
 
@@ -349,7 +349,7 @@ SELECT
 FROM scan, json_each(scan.data);
 
 -- Step 3: Migrate raw dependencies
-INSERT INTO raw_dependencies (package_id, depend_pattern, depend_pkgpath)
+INSERT INTO depends (package_id, depend_pattern, depend_pkgpath)
 SELECT
     p.id,
     json_extract(dep.value, '$.pattern'),
@@ -447,7 +447,7 @@ impl Database {
                 UNION
                 -- Recursive case: packages that depend on affected ones
                 SELECT rd.package_id
-                FROM resolved_dependencies rd
+                FROM resolved_depends rd
                 JOIN affected a ON rd.depends_on_id = a.id
             )
             SELECT id FROM affected"
@@ -846,7 +846,7 @@ This architecture addresses all requirements:
 | Resumability | Immediate saves, WAL mode, atomic cascades |
 | pkgpath list changes | Change detection, incremental updates |
 | Full tree scan flag | `full_scan_complete` metadata |
-| Fast reverse deps | Indexed `resolved_dependencies` table, recursive CTE |
+| Fast reverse deps | Indexed `resolved_depends` table, recursive CTE |
 | Avoid struct duplication | Columns for hot fields, JSON for cold data |
 | Low memory | Lazy loading, IDs instead of full objects |
 | Fast startup | No full data load, query only what's needed |
