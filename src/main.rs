@@ -592,7 +592,7 @@ fn main() -> Result<()> {
             // Build the command arguments
             let mut cmd_args = vec![
                 format!("--make-jobs={}", make_jobs),
-                format!("--binary-kit={}", bootstrap_kit.display()),
+                format!("--gzip-binary-kit={}", bootstrap_kit.display()),
             ];
 
             // Add user-provided extra arguments
