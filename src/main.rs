@@ -14,7 +14,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-use anyhow::{Result, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use bob::Init;
 use bob::build::{self, Build};
 use bob::config::Config;
@@ -356,6 +356,12 @@ enum Cmd {
     },
     /// Clear all cached scan and build state from the database
     Clean,
+    /// Run pkgsrc bootstrap to create a bootstrap kit
+    Bootstrap {
+        /// Extra arguments to pass to the bootstrap script
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Utility commands for debugging and data import/export
     Util {
         #[command(subcommand)]
@@ -558,6 +564,67 @@ fn main() -> Result<()> {
                 "Cleared {} cached scan entries and {} cached build entries",
                 scan_count, build_count
             );
+        }
+        Cmd::Bootstrap { args: extra_args } => {
+            let config = Config::load(args.config.as_deref(), args.verbose)?;
+
+            // Get the initdir (directory containing config.lua)
+            let config_path = config.config_path()
+                .ok_or_else(|| anyhow!("Unable to determine config path"))?;
+            let initdir = config_path.parent()
+                .ok_or_else(|| anyhow!("Unable to determine config directory"))?;
+
+            // Build the bootstrap script path
+            let bootstrap_script = config.pkgsrc().join("bootstrap").join("bootstrap");
+            if !bootstrap_script.exists() {
+                bail!(
+                    "Bootstrap script not found at {}. Is pkgsrc.basedir configured correctly?",
+                    bootstrap_script.display()
+                );
+            }
+
+            // Determine --make-jobs value (default to scan_threads)
+            let make_jobs = config.scan_threads();
+
+            // Build path for the bootstrap kit
+            let bootstrap_kit = initdir.join("bootstrap.tar.gz");
+
+            // Build the command arguments
+            let mut cmd_args = vec![
+                format!("--make-jobs={}", make_jobs),
+                format!("--binary-kit={}", bootstrap_kit.display()),
+            ];
+
+            // Add user-provided extra arguments
+            cmd_args.extend(extra_args.iter().cloned());
+
+            println!("Running pkgsrc bootstrap...");
+            println!("  Script:       {}", bootstrap_script.display());
+            println!("  Make jobs:    {}", make_jobs);
+            println!("  Binary kit:   {}", bootstrap_kit.display());
+            if !extra_args.is_empty() {
+                println!("  Extra args:   {}", extra_args.join(" "));
+            }
+            println!();
+
+            // Execute the bootstrap script
+            use std::process::Command;
+            let status = Command::new(&bootstrap_script)
+                .args(&cmd_args)
+                .current_dir(config.pkgsrc())
+                .status()
+                .with_context(|| {
+                    format!("Failed to execute bootstrap script at {}", bootstrap_script.display())
+                })?;
+
+            if !status.success() {
+                bail!("Bootstrap script failed with exit code: {}",
+                      status.code().unwrap_or(-1));
+            }
+
+            println!();
+            println!("Bootstrap completed successfully!");
+            println!("Bootstrap kit saved to: {}", bootstrap_kit.display());
         }
         Cmd::Util { cmd: UtilCmd::PrintDepGraph { output } } => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
