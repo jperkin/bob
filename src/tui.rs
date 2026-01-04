@@ -772,9 +772,9 @@ impl MultiProgress {
     }
 
     pub fn finish(&mut self) -> io::Result<()> {
-        // If in multi-panel mode, leave alternate screen first
+        // If in multi-panel mode, switch back to inline first to restore output
         if self.view_mode == ViewMode::MultiPanel {
-            let _ = stdout().execute(LeaveAlternateScreen);
+            self.switch_to_inline()?;
         }
 
         // Disable raw mode (always enabled during TUI)
@@ -811,9 +811,9 @@ impl MultiProgress {
         // Suppress any further output
         self.state.suppressed = true;
 
-        // If in multi-panel mode, leave alternate screen first
+        // If in multi-panel mode, switch back to inline first to restore output
         if self.view_mode == ViewMode::MultiPanel {
-            let _ = stdout().execute(LeaveAlternateScreen);
+            let _ = self.switch_to_inline();
         }
 
         // Disable raw mode (always enabled during TUI)
