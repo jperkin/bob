@@ -356,6 +356,12 @@ enum Cmd {
     },
     /// Clear all cached scan and build state from the database
     Clean,
+    /// Run SQL commands against the database
+    Db {
+        /// SQL command to execute (omit for interactive mode)
+        #[arg(value_name = "SQL")]
+        sql: Option<String>,
+    },
     /// Utility commands for debugging and data import/export
     Util {
         #[command(subcommand)]
@@ -558,6 +564,17 @@ fn main() -> Result<()> {
                 "Cleared {} cached scan entries and {} cached build entries",
                 scan_count, build_count
             );
+        }
+        Cmd::Db { sql } => {
+            let config = Config::load(args.config.as_deref(), args.verbose)?;
+            let db_path = config.logdir().join("bob").join("bob.db");
+            let db = Database::open(&db_path)?;
+
+            let Some(sql) = sql else {
+                bail!("SQL command required");
+            };
+
+            db.execute_raw(&sql)?;
         }
         Cmd::Util { cmd: UtilCmd::PrintDepGraph { output } } => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;

@@ -1138,6 +1138,61 @@ impl Database {
         }
         Ok(count)
     }
+
+    /// Execute arbitrary SQL and print results.
+    pub fn execute_raw(&self, sql: &str) -> Result<()> {
+        let mut stmt = self.conn.prepare(sql)?;
+        let column_count = stmt.column_count();
+
+        if column_count == 0 {
+            // Non-query statement (INSERT, UPDATE, DELETE, etc.)
+            let affected = stmt.execute([])?;
+            if affected > 0 {
+                println!("{} row(s) affected", affected);
+            }
+        } else {
+            // Query statement (SELECT, PRAGMA, etc.)
+            let column_names: Vec<String> =
+                stmt.column_names().iter().map(|s| s.to_string()).collect();
+
+            let mut rows = stmt.query([])?;
+            let mut first = true;
+
+            while let Some(row) = rows.next()? {
+                if first {
+                    println!("{}", column_names.join("|"));
+                    first = false;
+                }
+
+                let values: Vec<String> = (0..column_count)
+                    .map(|i| {
+                        row.get_ref(i)
+                            .map(|v| match v {
+                                rusqlite::types::ValueRef::Null => {
+                                    String::new()
+                                }
+                                rusqlite::types::ValueRef::Integer(i) => {
+                                    i.to_string()
+                                }
+                                rusqlite::types::ValueRef::Real(f) => {
+                                    f.to_string()
+                                }
+                                rusqlite::types::ValueRef::Text(s) => {
+                                    String::from_utf8_lossy(s).to_string()
+                                }
+                                rusqlite::types::ValueRef::Blob(b) => {
+                                    format!("<blob:{} bytes>", b.len())
+                                }
+                            })
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                println!("{}", values.join("|"));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 // ============================================================================
