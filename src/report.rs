@@ -109,6 +109,17 @@ pub fn write_html_report(
     let breaks_counts = db.count_breaks_for_failed()?;
     let duration = db.get_total_build_duration()?;
 
+    // Add pre-failed packages (those with skip_reason or fail_reason)
+    for (pkgname, pkgpath, reason) in db.get_prefailed_packages()? {
+        results.push(BuildResult {
+            pkgname: pkgsrc::PkgName::new(&pkgname),
+            pkgpath: pkgpath.and_then(|p| pkgsrc::PkgPath::new(&p).ok()),
+            outcome: BuildOutcome::PreFailed(reason),
+            duration: std::time::Duration::ZERO,
+            log_dir: None,
+        });
+    }
+
     // Add calculated indirect failures for packages without build results
     for (pkgname, pkgpath, failed_dep) in db.get_indirect_failures()? {
         results.push(BuildResult {

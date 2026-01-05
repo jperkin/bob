@@ -929,12 +929,33 @@ impl Database {
         Ok(Duration::from_millis(total_ms as u64))
     }
 
+    /// Get pre-failed packages (those with skip_reason or fail_reason but no build result).
+    /// Returns (pkgname, pkgpath, reason).
+    pub fn get_prefailed_packages(&self) -> Result<Vec<(String, Option<String>, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.pkgname, p.pkgpath,
+                    COALESCE(p.fail_reason, p.skip_reason) as reason
+             FROM packages p
+             WHERE (p.skip_reason IS NOT NULL OR p.fail_reason IS NOT NULL)
+               AND NOT EXISTS (SELECT 1 FROM builds b WHERE b.package_id = p.id)
+             ORDER BY p.pkgname",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Get packages without build results that depend on failed packages.
     /// Returns (pkgname, pkgpath, failed_deps) where failed_deps is comma-separated.
+    /// Excludes packages that have skip_reason or fail_reason (they're pre-failed).
     pub fn get_indirect_failures(&self) -> Result<Vec<(String, Option<String>, String)>> {
         // Find packages that:
         // 1. Have no build result
-        // 2. Depend (transitively) on a package with a failed build result
+        // 2. Have no skip_reason or fail_reason (not pre-failed)
+        // 3. Depend (transitively) on a package with a failed build result
         // Group by package and aggregate failed deps into comma-separated string
         let mut stmt = self.conn.prepare(
             "WITH RECURSIVE
@@ -958,6 +979,8 @@ impl Database {
              JOIN packages fp ON a.root_id = fp.id
              WHERE a.id != a.root_id
                AND NOT EXISTS (SELECT 1 FROM builds b WHERE b.package_id = a.id)
+               AND p.skip_reason IS NULL
+               AND p.fail_reason IS NULL
              GROUP BY p.id, p.pkgname, p.pkgpath
              ORDER BY p.pkgname",
         )?;
