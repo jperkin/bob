@@ -613,11 +613,19 @@ fn write_skipped_section(
             let reason = match &result.outcome {
                 BuildOutcome::UpToDate => "up-to-date".to_string(),
                 BuildOutcome::PreFailed(r) => r.clone(),
-                BuildOutcome::IndirectFailed(dep) => {
-                    format!("Dependency {} failed", dep)
+                BuildOutcome::IndirectFailed(deps) => {
+                    if deps.contains(',') {
+                        format!("Dependencies {} failed", deps.replace(',', ", "))
+                    } else {
+                        format!("Dependency {} failed", deps)
+                    }
                 }
-                BuildOutcome::IndirectPreFailed(dep) => {
-                    format!("Dependency {} pre-failed", dep)
+                BuildOutcome::IndirectPreFailed(deps) => {
+                    if deps.contains(',') {
+                        format!("Dependencies {} pre-failed", deps.replace(',', ", "))
+                    } else {
+                        format!("Dependency {} pre-failed", deps)
+                    }
                 }
                 _ => String::new(),
             };

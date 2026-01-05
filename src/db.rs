@@ -930,11 +930,12 @@ impl Database {
     }
 
     /// Get packages without build results that depend on failed packages.
-    /// Returns (pkgname, pkgpath, failed_dep_pkgname) for each indirect failure.
+    /// Returns (pkgname, pkgpath, failed_deps) where failed_deps is comma-separated.
     pub fn get_indirect_failures(&self) -> Result<Vec<(String, Option<String>, String)>> {
         // Find packages that:
         // 1. Have no build result
         // 2. Depend (transitively) on a package with a failed build result
+        // Group by package and aggregate failed deps into comma-separated string
         let mut stmt = self.conn.prepare(
             "WITH RECURSIVE
              -- All packages with failed builds
@@ -951,12 +952,13 @@ impl Database {
                  JOIN affected a ON rd.depends_on_id = a.id
                  WHERE rd.package_id NOT IN (SELECT id FROM failed_pkgs)
              )
-             SELECT DISTINCT p.pkgname, p.pkgpath, fp.pkgname as failed_dep
+             SELECT p.pkgname, p.pkgpath, GROUP_CONCAT(DISTINCT fp.pkgname) as failed_deps
              FROM affected a
              JOIN packages p ON a.id = p.id
              JOIN packages fp ON a.root_id = fp.id
              WHERE a.id != a.root_id
                AND NOT EXISTS (SELECT 1 FROM builds b WHERE b.package_id = a.id)
+             GROUP BY p.id, p.pkgname, p.pkgpath
              ORDER BY p.pkgname",
         )?;
 
