@@ -929,6 +929,44 @@ impl Database {
         Ok(Duration::from_millis(total_ms as u64))
     }
 
+    /// Get packages without build results that depend on failed packages.
+    /// Returns (pkgname, pkgpath, failed_dep_pkgname) for each indirect failure.
+    pub fn get_indirect_failures(&self) -> Result<Vec<(String, Option<String>, String)>> {
+        // Find packages that:
+        // 1. Have no build result
+        // 2. Depend (transitively) on a package with a failed build result
+        let mut stmt = self.conn.prepare(
+            "WITH RECURSIVE
+             -- All packages with failed builds
+             failed_pkgs(id) AS (
+                 SELECT package_id FROM builds
+                 WHERE outcome IN ('failed', 'indirect_failed', 'prefailed', 'indirect_prefailed')
+             ),
+             -- Packages affected by failures (transitive closure)
+             affected(id, root_id) AS (
+                 SELECT id, id FROM failed_pkgs
+                 UNION
+                 SELECT rd.package_id, a.root_id
+                 FROM resolved_depends rd
+                 JOIN affected a ON rd.depends_on_id = a.id
+                 WHERE rd.package_id NOT IN (SELECT id FROM failed_pkgs)
+             )
+             SELECT DISTINCT p.pkgname, p.pkgpath, fp.pkgname as failed_dep
+             FROM affected a
+             JOIN packages p ON a.id = p.id
+             JOIN packages fp ON a.root_id = fp.id
+             WHERE a.id != a.root_id
+               AND NOT EXISTS (SELECT 1 FROM builds b WHERE b.package_id = a.id)
+             ORDER BY p.pkgname",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Mark a package and all its transitive reverse dependencies as failed.
     /// Returns the count of packages marked.
     pub fn mark_failure_cascade(

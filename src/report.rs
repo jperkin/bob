@@ -105,9 +105,20 @@ pub fn write_html_report(
     logdir: &Path,
     path: &Path,
 ) -> Result<()> {
-    let results = db.get_all_build_results()?;
+    let mut results = db.get_all_build_results()?;
     let breaks_counts = db.count_breaks_for_failed()?;
     let duration = db.get_total_build_duration()?;
+
+    // Add calculated indirect failures for packages without build results
+    for (pkgname, pkgpath, failed_dep) in db.get_indirect_failures()? {
+        results.push(BuildResult {
+            pkgname: pkgsrc::PkgName::new(&pkgname),
+            pkgpath: pkgpath.and_then(|p| pkgsrc::PkgPath::new(&p).ok()),
+            outcome: BuildOutcome::IndirectFailed(failed_dep),
+            duration: std::time::Duration::ZERO,
+            log_dir: None,
+        });
+    }
 
     let summary = BuildSummary { duration, results, scan_failed: Vec::new() };
 
