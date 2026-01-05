@@ -615,30 +615,42 @@ fn write_skipped_section(
         )?;
         writeln!(
             file,
-            "      <th onclick=\"sortTable(document.getElementById('skipped-table'), 2, 'str')\">Reason<span class=\"sort-indicator\"></span></th>"
+            "      <th onclick=\"sortTable(document.getElementById('skipped-table'), 2, 'str')\">Status<span class=\"sort-indicator\"></span></th>"
+        )?;
+        writeln!(
+            file,
+            "      <th onclick=\"sortTable(document.getElementById('skipped-table'), 3, 'str')\">Reason<span class=\"sort-indicator\"></span></th>"
         )?;
         writeln!(file, "    </tr></thead>")?;
         writeln!(file, "    <tbody>")?;
 
         for result in skipped {
-            let reason = match &result.outcome {
-                BuildOutcome::UpToDate => "up-to-date".to_string(),
-                BuildOutcome::PreFailed(r) => r.clone(),
+            let (status, reason) = match &result.outcome {
+                BuildOutcome::UpToDate => ("up-to-date", String::new()),
+                BuildOutcome::PreFailed(r) => ("pre-failed", r.clone()),
                 BuildOutcome::IndirectFailed(deps) => {
-                    if deps.contains(',') {
-                        format!("Dependencies {} failed", deps.replace(',', ", "))
+                    let reason = if deps.contains(',') {
+                        format!(
+                            "Dependencies {} failed",
+                            deps.replace(',', ", ")
+                        )
                     } else {
                         format!("Dependency {} failed", deps)
-                    }
+                    };
+                    ("indirect-failed", reason)
                 }
                 BuildOutcome::IndirectPreFailed(deps) => {
-                    if deps.contains(',') {
-                        format!("Dependencies {} pre-failed", deps.replace(',', ", "))
+                    let reason = if deps.contains(',') {
+                        format!(
+                            "Dependencies {} pre-failed",
+                            deps.replace(',', ", ")
+                        )
                     } else {
                         format!("Dependency {} pre-failed", deps)
-                    }
+                    };
+                    ("indirect-prefailed", reason)
                 }
-                _ => String::new(),
+                _ => ("", String::new()),
             };
             let pkgpath = result
                 .pkgpath
@@ -647,9 +659,10 @@ fn write_skipped_section(
                 .unwrap_or_default();
             writeln!(
                 file,
-                "    <tr><td>{}</td><td>{}</td><td class=\"reason\">{}</td></tr>",
+                "    <tr><td>{}</td><td>{}</td><td>{}</td><td class=\"reason\">{}</td></tr>",
                 result.pkgname.pkgname(),
                 pkgpath,
+                status,
                 reason
             )?;
         }

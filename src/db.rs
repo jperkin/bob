@@ -931,7 +931,9 @@ impl Database {
 
     /// Get pre-failed packages (those with skip_reason or fail_reason but no build result).
     /// Returns (pkgname, pkgpath, reason).
-    pub fn get_prefailed_packages(&self) -> Result<Vec<(String, Option<String>, String)>> {
+    pub fn get_prefailed_packages(
+        &self,
+    ) -> Result<Vec<(String, Option<String>, String)>> {
         let mut stmt = self.conn.prepare(
             "SELECT p.pkgname, p.pkgpath,
                     COALESCE(p.fail_reason, p.skip_reason) as reason
@@ -941,9 +943,8 @@ impl Database {
              ORDER BY p.pkgname",
         )?;
 
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -952,7 +953,9 @@ impl Database {
     /// Returns (pkgname, pkgpath, failed_deps) where failed_deps is comma-separated.
     /// Excludes packages that have skip_reason or fail_reason (they're pre-failed).
     /// Only lists root failures (direct failures), not indirect failures.
-    pub fn get_indirect_failures(&self) -> Result<Vec<(String, Option<String>, String)>> {
+    pub fn get_indirect_failures(
+        &self,
+    ) -> Result<Vec<(String, Option<String>, String)>> {
         // Find packages that:
         // 1. Have no build result
         // 2. Have no skip_reason or fail_reason (not pre-failed)
@@ -987,9 +990,8 @@ impl Database {
              ORDER BY p.pkgname",
         )?;
 
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
