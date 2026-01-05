@@ -20,6 +20,7 @@ use bob::build::{self, Build};
 use bob::config::Config;
 use bob::db::Database;
 use bob::logging;
+use bob::pbulk_report;
 use bob::report;
 use bob::sandbox::Sandbox;
 use bob::scan::{Scan, SkipReason};
@@ -235,12 +236,63 @@ impl BuildRunner {
         println!("Generating reports...");
         let logdir = self.config.logdir();
         let report_path = logdir.join("report.html");
+
+        // Generate HTML report
         if let Err(e) =
             report::write_html_report(&self.db, logdir, &report_path)
         {
             eprintln!("Warning: Failed to write HTML report: {}", e);
         } else {
             println!("HTML report written to: {}", report_path.display());
+        }
+
+        // Generate pbulk-compatible text report
+        let pkgsrc = self.config.pkgsrc_config();
+        let report_config = pbulk_report::ReportConfig {
+            base_url: pkgsrc.report_base_url.clone(),
+            platform: pkgsrc.platform.clone(),
+            compiler: pkgsrc.compiler.clone(),
+        };
+
+        if let Err(e) = pbulk_report::write_pbulk_report(
+            &self.db,
+            logdir,
+            Some(&report_config),
+        ) {
+            eprintln!("Warning: Failed to write pbulk report.txt: {}", e);
+        } else {
+            println!("pbulk report written to: {}", logdir.join("report.txt").display());
+        }
+
+        // Send email report if configured
+        if let (Some(from_addr), Some(recipients)) = (
+            &pkgsrc.report_from_addr,
+            &pkgsrc.report_recipients,
+        ) {
+            let from_name = pkgsrc.report_from_name.as_deref()
+                .unwrap_or("Build Bot");
+            let subject_prefix = pkgsrc.report_subject_prefix.as_deref()
+                .unwrap_or("pkgsrc");
+            let smtp_server = pkgsrc.smtp_server.as_deref();
+
+            // Send to each recipient
+            for recipient in recipients.split(',') {
+                let recipient = recipient.trim();
+                if let Err(e) = pbulk_report::send_pbulk_email(
+                    &self.db,
+                    logdir,
+                    from_addr,
+                    from_name,
+                    recipient,
+                    subject_prefix,
+                    smtp_server,
+                    Some(&report_config),
+                ) {
+                    eprintln!("Warning: Failed to send email to {}: {}", recipient, e);
+                } else {
+                    println!("Email report sent to: {}", recipient);
+                }
+            }
         }
     }
 
@@ -541,9 +593,50 @@ fn main() -> Result<()> {
 
             println!("Generating reports...");
             let db = Database::open(&db_path)?;
+
+            // Generate HTML report
             let report_path = logdir.join("report.html");
             report::write_html_report(&db, logdir, &report_path)?;
             println!("HTML report written to: {}", report_path.display());
+
+            // Generate pbulk-compatible text report
+            let pkgsrc = config.pkgsrc_config();
+            let report_config = pbulk_report::ReportConfig {
+                base_url: pkgsrc.report_base_url.clone(),
+                platform: pkgsrc.platform.clone(),
+                compiler: pkgsrc.compiler.clone(),
+            };
+
+            pbulk_report::write_pbulk_report(&db, logdir, Some(&report_config))?;
+            println!("pbulk report written to: {}", logdir.join("report.txt").display());
+
+            // Send email report if configured
+            if let (Some(from_addr), Some(recipients)) = (
+                &pkgsrc.report_from_addr,
+                &pkgsrc.report_recipients,
+            ) {
+                let from_name = pkgsrc.report_from_name.as_deref()
+                    .unwrap_or("Build Bot");
+                let subject_prefix = pkgsrc.report_subject_prefix.as_deref()
+                    .unwrap_or("pkgsrc");
+                let smtp_server = pkgsrc.smtp_server.as_deref();
+
+                // Send to each recipient
+                for recipient in recipients.split(',') {
+                    let recipient = recipient.trim();
+                    pbulk_report::send_pbulk_email(
+                        &db,
+                        logdir,
+                        from_addr,
+                        from_name,
+                        recipient,
+                        subject_prefix,
+                        smtp_server,
+                        Some(&report_config),
+                    )?;
+                    println!("Email report sent to: {}", recipient);
+                }
+            }
         }
         Cmd::Init { dir: ref arg } => {
             Init::create(arg)?;

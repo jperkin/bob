@@ -43,6 +43,8 @@ thiserror = "1.0.64"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+lettre = { version = "0.11", default-features = false, features = ["sendmail-transport", "builder"] }
+chrono = "0.4"
 
 # Use vendored Lua on platforms where lua-src supports building
 [target.'cfg(not(target_os = "illumos"))'.dependencies]

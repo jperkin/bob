@@ -929,6 +929,17 @@ impl Database {
         Ok(Duration::from_millis(total_ms as u64))
     }
 
+    /// Get build start and end timestamps.
+    /// Returns (start_timestamp, end_timestamp) or None if no builds exist.
+    pub fn get_build_timestamps(&self) -> Result<(Option<i64>, Option<i64>)> {
+        let result: (Option<i64>, Option<i64>) = self.conn.query_row(
+            "SELECT MIN(built_at), MAX(built_at) FROM builds",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok(result)
+    }
+
     /// Get pre-failed packages (those with skip_reason or fail_reason but no build result).
     /// Returns (pkgname, pkgpath, reason).
     pub fn get_prefailed_packages(

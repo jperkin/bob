@@ -20,6 +20,7 @@ pub mod action;
 pub mod build;
 pub mod config;
 pub mod db;
+pub mod pbulk_report;
 pub mod report;
 pub mod sandbox;
 pub mod scan;
@@ -57,6 +58,7 @@ pub use action::{Action, ActionType, FSType};
 pub use build::{Build, BuildOptions, BuildOutcome, BuildResult, BuildSummary};
 pub use config::{Config, Options, Pkgsrc, Sandboxes};
 pub use db::Database;
+pub use pbulk_report::{write_pbulk_report, send_pbulk_email, ReportConfig};
 pub use report::write_html_report;
 pub use sandbox::Sandbox;
 pub use scan::{

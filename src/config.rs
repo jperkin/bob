@@ -65,6 +65,14 @@
 //! | `report_dir` | string | `logdir` | Directory for HTML build reports. Defaults to the `logdir` directory. |
 //! | `save_wrkdir_patterns` | table | `{}` | Glob patterns for files to preserve from WRKDIR on build failure (e.g., `{"**/config.log"}`). |
 //! | `env` | function or table | `{}` | Environment variables for builds. Can be a table of key-value pairs, or a function receiving package metadata and returning a table. See [Environment Function](#environment-function). |
+//! | `report_base_url` | string | none | Base URL for pbulk reports (e.g., `"https://reports.example.com/2025Q1"`). Used in report.txt and email. |
+//! | `report_from_addr` | string | none | Sender email address for pbulk reports (e.g., `"builds@example.com"`). |
+//! | `report_from_name` | string | none | Sender display name for pbulk reports (e.g., `"Build Bot"`). |
+//! | `report_recipients` | string | none | Comma-separated recipient emails for pbulk reports (e.g., `"dev@example.com,qa@example.com"`). |
+//! | `report_subject_prefix` | string | none | Subject line prefix for pbulk email reports (e.g., `"pkgsrc-trunk"`). |
+//! | `smtp_server` | string | none | SMTP server for sending email (e.g., `"localhost:25"`). If not set, uses sendmail. |
+//! | `platform` | string | auto-detected | Platform string for reports (e.g., `"Darwin 23.6.0/aarch64"`). Auto-detected if not set. |
+//! | `compiler` | string | none | Compiler string for reports (e.g., `"clang"`, `"gcc"`). Not included if not set. |
 //!
 //! ## Environment Function
 //!
@@ -458,6 +466,22 @@ pub struct Pkgsrc {
     pub scanenv: HashMap<String, String>,
     /// Path to tar binary.
     pub tar: PathBuf,
+    /// Base URL for pbulk reports (e.g., "https://reports.example.com/2025Q1").
+    pub report_base_url: Option<String>,
+    /// Sender email address for pbulk reports.
+    pub report_from_addr: Option<String>,
+    /// Sender name for pbulk reports.
+    pub report_from_name: Option<String>,
+    /// Recipient email addresses for pbulk reports (comma-separated).
+    pub report_recipients: Option<String>,
+    /// Subject prefix for pbulk email reports (e.g., "pkgsrc-trunk").
+    pub report_subject_prefix: Option<String>,
+    /// SMTP server for sending email (e.g., "localhost:25"). If not set, uses sendmail.
+    pub smtp_server: Option<String>,
+    /// Platform string for reports (e.g., "Darwin 23.6.0/aarch64"). If not set, auto-detected.
+    pub platform: Option<String>,
+    /// Compiler string for reports (e.g., "clang", "gcc"). If not set, not included.
+    pub compiler: Option<String>,
 }
 
 /// Sandbox configuration from the `sandboxes` section.
@@ -609,6 +633,10 @@ impl Config {
 
     pub fn pkgsrc(&self) -> &PathBuf {
         &self.file.pkgsrc.basedir
+    }
+
+    pub fn pkgsrc_config(&self) -> &Pkgsrc {
+        &self.file.pkgsrc
     }
 
     pub fn sandboxes(&self) -> &Option<Sandboxes> {
@@ -911,6 +939,16 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
             _ => HashMap::new(),
         };
 
+    // Email and report configuration (all optional)
+    let report_base_url: Option<String> = pkgsrc.get("report_base_url")?;
+    let report_from_addr: Option<String> = pkgsrc.get("report_from_addr")?;
+    let report_from_name: Option<String> = pkgsrc.get("report_from_name")?;
+    let report_recipients: Option<String> = pkgsrc.get("report_recipients")?;
+    let report_subject_prefix: Option<String> = pkgsrc.get("report_subject_prefix")?;
+    let smtp_server: Option<String> = pkgsrc.get("smtp_server")?;
+    let platform: Option<String> = pkgsrc.get("platform")?;
+    let compiler: Option<String> = pkgsrc.get("compiler")?;
+
     Ok(Pkgsrc {
         basedir: PathBuf::from(basedir),
         bootstrap,
@@ -925,6 +963,14 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         save_wrkdir_patterns,
         scanenv,
         tar: PathBuf::from(tar),
+        report_base_url,
+        report_from_addr,
+        report_from_name,
+        report_recipients,
+        report_subject_prefix,
+        smtp_server,
+        platform,
+        compiler,
     })
 }
 
