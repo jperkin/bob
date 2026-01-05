@@ -583,27 +583,74 @@ fn main() -> Result<()> {
                 );
             }
 
-            // Determine --make-jobs value (default to scan_threads)
-            let make_jobs = config.scan_threads();
+            // Helper to check if an argument is overridden by user
+            let has_arg = |prefix: &str| -> bool {
+                extra_args.iter().any(|arg| arg.starts_with(prefix))
+            };
 
-            // Build path for the bootstrap kit
-            let bootstrap_kit = initdir.join("bootstrap.tar.gz");
+            // Helper to extract value from argument like "--make-jobs=4"
+            let get_arg_value = |prefix: &str| -> Option<String> {
+                extra_args.iter()
+                    .find(|arg| arg.starts_with(prefix))
+                    .and_then(|arg| arg.split('=').nth(1))
+                    .map(|s| s.to_string())
+            };
 
-            // Build the command arguments
-            let mut cmd_args = vec![
-                format!("--make-jobs={}", make_jobs),
-                format!("--prefix={}", config.prefix().display()),
-                format!("--gzip-binary-kit={}", bootstrap_kit.display()),
-            ];
+            // Determine actual values, checking for user overrides
+            let default_make_jobs = config.scan_threads();
+            let make_jobs_value = if has_arg("--make-jobs") {
+                get_arg_value("--make-jobs")
+                    .unwrap_or_else(|| default_make_jobs.to_string())
+            } else {
+                default_make_jobs.to_string()
+            };
 
-            // Add user-provided extra arguments
+            let default_prefix = config.prefix().display().to_string();
+            let prefix_value = if has_arg("--prefix") {
+                get_arg_value("--prefix")
+                    .unwrap_or_else(|| default_prefix.clone())
+            } else {
+                default_prefix.clone()
+            };
+
+            let default_kit = initdir.join("bootstrap.tar.gz");
+            let kit_value = if has_arg("--gzip-binary-kit") {
+                get_arg_value("--gzip-binary-kit")
+                    .unwrap_or_else(|| default_kit.display().to_string())
+            } else if has_arg("--binary-kit") {
+                get_arg_value("--binary-kit")
+                    .unwrap_or_else(|| default_kit.display().to_string())
+            } else {
+                default_kit.display().to_string()
+            };
+
+            let kit_arg = if has_arg("--binary-kit") || has_arg("--gzip-binary-kit") {
+                None // User provided their own
+            } else {
+                Some(format!("--gzip-binary-kit={}", default_kit.display()))
+            };
+
+            // Build command arguments with defaults only if not overridden
+            let mut cmd_args = Vec::new();
+
+            if !has_arg("--make-jobs") {
+                cmd_args.push(format!("--make-jobs={}", default_make_jobs));
+            }
+            if !has_arg("--prefix") {
+                cmd_args.push(format!("--prefix={}", default_prefix));
+            }
+            if let Some(kit) = kit_arg {
+                cmd_args.push(kit);
+            }
+
+            // Add all user-provided arguments
             cmd_args.extend(extra_args.iter().cloned());
 
             println!("Running pkgsrc bootstrap...");
             println!("  Script:       {}", bootstrap_script.display());
-            println!("  Make jobs:    {}", make_jobs);
-            println!("  Prefix:       {}", config.prefix().display());
-            println!("  Binary kit:   {}", bootstrap_kit.display());
+            println!("  Make jobs:    {}", make_jobs_value);
+            println!("  Prefix:       {}", prefix_value);
+            println!("  Binary kit:   {}", kit_value);
             if !extra_args.is_empty() {
                 println!("  Extra args:   {}", extra_args.join(" "));
             }
@@ -626,7 +673,7 @@ fn main() -> Result<()> {
 
             println!();
             println!("Bootstrap completed successfully!");
-            println!("Bootstrap kit saved to: {}", bootstrap_kit.display());
+            println!("Bootstrap kit saved to: {}", kit_value);
         }
         Cmd::Util { cmd: UtilCmd::PrintDepGraph { output } } => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
