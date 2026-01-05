@@ -592,6 +592,7 @@ fn main() -> Result<()> {
             // Build the command arguments
             let mut cmd_args = vec![
                 format!("--make-jobs={}", make_jobs),
+                format!("--prefix={}", config.prefix().display()),
                 format!("--gzip-binary-kit={}", bootstrap_kit.display()),
             ];
 
@@ -601,6 +602,7 @@ fn main() -> Result<()> {
             println!("Running pkgsrc bootstrap...");
             println!("  Script:       {}", bootstrap_script.display());
             println!("  Make jobs:    {}", make_jobs);
+            println!("  Prefix:       {}", config.prefix().display());
             println!("  Binary kit:   {}", bootstrap_kit.display());
             if !extra_args.is_empty() {
                 println!("  Extra args:   {}", extra_args.join(" "));
