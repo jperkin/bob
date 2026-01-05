@@ -951,18 +951,20 @@ impl Database {
     /// Get packages without build results that depend on failed packages.
     /// Returns (pkgname, pkgpath, failed_deps) where failed_deps is comma-separated.
     /// Excludes packages that have skip_reason or fail_reason (they're pre-failed).
+    /// Only lists root failures (direct failures), not indirect failures.
     pub fn get_indirect_failures(&self) -> Result<Vec<(String, Option<String>, String)>> {
         // Find packages that:
         // 1. Have no build result
         // 2. Have no skip_reason or fail_reason (not pre-failed)
-        // 3. Depend (transitively) on a package with a failed build result
+        // 3. Depend (transitively) on a package with a direct failure
         // Group by package and aggregate failed deps into comma-separated string
+        // Only 'failed' and 'prefailed' are root causes, not 'indirect_*'
         let mut stmt = self.conn.prepare(
             "WITH RECURSIVE
-             -- All packages with failed builds
+             -- Only direct failures are root causes
              failed_pkgs(id) AS (
                  SELECT package_id FROM builds
-                 WHERE outcome IN ('failed', 'indirect_failed', 'prefailed', 'indirect_prefailed')
+                 WHERE outcome IN ('failed', 'prefailed')
              ),
              -- Packages affected by failures (transitive closure)
              affected(id, root_id) AS (
