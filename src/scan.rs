@@ -979,10 +979,11 @@ impl Scan {
 
         /*
          * Track packages to skip due to skipped dependencies, and truly
-         * unresolved dependencies (errors).
+         * unresolved dependencies (errors) when strict_scan is enabled.
          */
         let mut skip_due_to_dep: HashMap<PkgName, String> = HashMap::new();
-        let mut errors: Vec<(PkgName, String)> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+        let strict_scan = self.config.strict_scan();
 
         // Helper to check if a dependency pattern is already satisfied
         let is_satisfied = |depends: &[PkgName], pattern: &pkgsrc::Pattern| {
@@ -1041,15 +1042,23 @@ impl Scan {
                     };
                 }
                 if let Some(e) = match_error {
-                    errors.push((
-                        pkg.index.pkgname.clone(),
-                        format!(
-                            "Pattern error for {} in {}: {}",
-                            depend.pattern().pattern(),
-                            pkg.index.pkgname.pkgname(),
-                            e
-                        ),
-                    ));
+                    let reason = format!(
+                        "pattern error for {}: {}",
+                        depend.pattern().pattern(),
+                        e
+                    );
+                    if strict_scan {
+                        errors.push(format!(
+                            "{} in {}",
+                            reason,
+                            pkg.pkgname.pkgname()
+                        ));
+                    } else if !skip_reasons.contains_key(&pkg.pkgname) {
+                        skip_reasons.insert(
+                            pkg.pkgname.clone(),
+                            SkipReason::PkgFailReason(reason),
+                        );
+                    }
                     continue;
                 }
                 // If found, save to cache and add to depends (if not already satisfied)
@@ -1062,14 +1071,22 @@ impl Scan {
                     match_cache.insert(depend.clone(), pkgname.clone());
                 } else {
                     // No matching package exists
-                    errors.push((
-                        pkg.index.pkgname.clone(),
-                        format!(
+                    let reason = format!(
+                        "could not resolve dependency \"{}\"",
+                        depend.pattern().pattern()
+                    );
+                    if strict_scan {
+                        errors.push(format!(
                             "No match found for {} in {}",
                             depend.pattern().pattern(),
-                            pkg.index.pkgname.pkgname()
-                        ),
-                    ));
+                            pkg.pkgname.pkgname()
+                        ));
+                    } else if !skip_reasons.contains_key(&pkg.pkgname) {
+                        skip_reasons.insert(
+                            pkg.pkgname.clone(),
+                            SkipReason::PkgFailReason(reason),
+                        );
+                    }
                 }
             }
         }
@@ -1116,13 +1133,6 @@ impl Scan {
                 );
             }
         }
-
-        // Filter out errors for packages that are being skipped anyway
-        let errors: Vec<String> = errors
-            .into_iter()
-            .filter(|(pkgname, _)| !skip_reasons.contains_key(pkgname))
-            .map(|(_, message)| message)
-            .collect();
 
         // Build all_ordered first to preserve original order, then separate
         let mut all_ordered: Vec<(ResolvedIndex, Option<SkipReason>)> =
@@ -1192,7 +1202,7 @@ impl Scan {
         let result =
             ScanResult { buildable, skipped, scan_failed, all_ordered };
 
-        // Now check for errors
+        // Check for unresolved dependency errors (only in strict_scan mode)
         if !errors.is_empty() {
             for err in &errors {
                 error!(error = %err, "Unresolved dependency");
