@@ -824,16 +824,16 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
 
     // Parse each section
     let options = parse_options(&globals)
-        .map_err(|e| format!("Error parsing options table: {}", e))?;
+        .map_err(|e| format!("Error parsing options config: {}", e))?;
     let pkgsrc_table: Table = globals
         .get("pkgsrc")
-        .map_err(|e| format!("Error getting pkgsrc table: {}", e))?;
+        .map_err(|e| format!("Error getting pkgsrc config: {}", e))?;
     let pkgsrc = parse_pkgsrc(&globals)
-        .map_err(|e| format!("Error parsing pkgsrc table: {}", e))?;
+        .map_err(|e| format!("Error parsing pkgsrc config: {}", e))?;
     let scripts = parse_scripts(&globals)
-        .map_err(|e| format!("Error parsing scripts table: {}", e))?;
+        .map_err(|e| format!("Error parsing scripts config: {}", e))?;
     let sandboxes = parse_sandboxes(&globals)
-        .map_err(|e| format!("Error parsing sandboxes table: {}", e))?;
+        .map_err(|e| format!("Error parsing sandboxes config: {}", e))?;
 
     // Store env function/table in registry if it exists
     let env_key = if let Ok(env_value) = pkgsrc_table.get::<Value>("env") {
@@ -864,7 +864,11 @@ fn parse_options(globals: &Table) -> LuaResult<Option<Options>> {
 
     let table = options
         .as_table()
-        .ok_or_else(|| mlua::Error::runtime("options must be a table"))?;
+        .ok_or_else(|| mlua::Error::runtime("'options' must be a table"))?;
+
+    const KNOWN_KEYS: &[&str] =
+        &["build_threads", "scan_threads", "strict_scan", "verbose"];
+    warn_unknown_keys(table, "options", KNOWN_KEYS);
 
     Ok(Some(Options {
         build_threads: table.get("build_threads").ok(),
@@ -872,6 +876,17 @@ fn parse_options(globals: &Table) -> LuaResult<Option<Options>> {
         strict_scan: table.get("strict_scan").ok(),
         verbose: table.get("verbose").ok(),
     }))
+}
+
+/// Warn about unknown keys in a Lua table.
+fn warn_unknown_keys(table: &Table, table_name: &str, known_keys: &[&str]) {
+    for pair in table.pairs::<String, Value>() {
+        if let Ok((key, _)) = pair {
+            if !known_keys.contains(&key.as_str()) {
+                eprintln!("Warning: unknown config key '{}.{}'", table_name, key);
+            }
+        }
+    }
 }
 
 fn get_required_string(table: &Table, field: &str) -> LuaResult<String> {
@@ -894,6 +909,24 @@ fn get_required_string(table: &Table, field: &str) -> LuaResult<String> {
 
 fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
     let pkgsrc: Table = globals.get("pkgsrc")?;
+
+    const KNOWN_KEYS: &[&str] = &[
+        "basedir",
+        "bootstrap",
+        "build_user",
+        "env",
+        "logdir",
+        "make",
+        "packages",
+        "pkgpaths",
+        "pkgtools",
+        "prefix",
+        "report_dir",
+        "save_wrkdir_patterns",
+        "scanenv",
+        "tar",
+    ];
+    warn_unknown_keys(&pkgsrc, "pkgsrc", KNOWN_KEYS);
 
     let basedir = get_required_string(&pkgsrc, "basedir")?;
     let bootstrap: Option<PathBuf> =
@@ -971,7 +1004,7 @@ fn parse_scripts(globals: &Table) -> LuaResult<HashMap<String, PathBuf>> {
 
     let table = scripts
         .as_table()
-        .ok_or_else(|| mlua::Error::runtime("scripts must be a table"))?;
+        .ok_or_else(|| mlua::Error::runtime("'scripts' must be a table"))?;
 
     let mut result = HashMap::new();
     for pair in table.pairs::<String, String>() {
@@ -990,7 +1023,10 @@ fn parse_sandboxes(globals: &Table) -> LuaResult<Option<Sandboxes>> {
 
     let table = sandboxes
         .as_table()
-        .ok_or_else(|| mlua::Error::runtime("sandboxes must be a table"))?;
+        .ok_or_else(|| mlua::Error::runtime("'sandboxes' must be a table"))?;
+
+    const KNOWN_KEYS: &[&str] = &["actions", "basedir"];
+    warn_unknown_keys(table, "sandboxes", KNOWN_KEYS);
 
     let basedir: String = table.get("basedir")?;
 
@@ -999,7 +1035,7 @@ fn parse_sandboxes(globals: &Table) -> LuaResult<Option<Sandboxes>> {
         Vec::new()
     } else {
         let actions_table = actions_value.as_table().ok_or_else(|| {
-            mlua::Error::runtime("sandboxes.actions must be a table")
+            mlua::Error::runtime("'sandboxes.actions' must be a table")
         })?;
         parse_actions(actions_table)?
     };
