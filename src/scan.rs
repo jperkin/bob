@@ -74,7 +74,7 @@ use std::io::BufReader;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, trace};
 
 /// Reason why a package was excluded from the build.
 ///
@@ -534,16 +534,24 @@ impl Scan {
             }
         });
 
+        // Start transaction for all writes
+        db.begin_transaction()?;
+
+        let mut interrupted = false;
+
+        // Borrow config and sandbox separately for use in scanner thread,
+        // allowing main thread to mutate self.done, self.incoming, etc.
+        let config = &self.config;
+        let sandbox = &self.sandbox;
+
         /*
          * Continuously iterate over incoming queue, moving to done once
          * processed, and adding any dependencies to incoming to be processed
          * next.
          */
-        let mut interrupted = false;
         loop {
             // Check for shutdown signal
             if shutdown_flag.load(Ordering::Relaxed) {
-                // Immediately show interrupted message
                 stop_refresh.store(true, Ordering::Relaxed);
                 if let Ok(mut p) = progress.lock() {
                     let _ = p.finish_interrupted();
@@ -555,119 +563,152 @@ impl Scan {
             /*
              * Convert the incoming HashSet into a Vec for parallel processing.
              */
-            let mut parpaths: Vec<(PkgPath, Result<Vec<ScanIndex>>)> =
-                self.incoming.iter().map(|p| (p.clone(), Ok(vec![]))).collect();
+            let pkgpaths: Vec<PkgPath> = self.incoming.drain().collect();
+            if pkgpaths.is_empty() {
+                break;
+            }
 
-            let progress_clone = Arc::clone(&progress);
-            let shutdown_clone = Arc::clone(&shutdown_flag);
-            let stats_clone = stats.clone();
-            pool.install(|| {
-                parpaths.par_iter_mut().for_each(|pkg| {
-                    // Check for shutdown before starting each package
-                    if shutdown_clone.load(Ordering::Relaxed) {
-                        return;
-                    }
+            // Create bounded channel for streaming results
+            const CHANNEL_BUFFER_SIZE: usize = 128;
+            let (tx, rx) = std::sync::mpsc::sync_channel::<(
+                PkgPath,
+                Result<Vec<ScanIndex>>,
+            )>(CHANNEL_BUFFER_SIZE);
 
-                    let (pkgpath, result) = pkg;
-                    let pathname =
-                        pkgpath.as_path().to_string_lossy().to_string();
+            let mut new_incoming: HashSet<PkgPath> = HashSet::new();
 
-                    // Get rayon thread index for progress tracking
-                    let thread_id = rayon::current_thread_index().unwrap_or(0);
+            std::thread::scope(|s| {
+                // Spawn scanning thread
+                let progress_clone = Arc::clone(&progress);
+                let shutdown_clone = Arc::clone(&shutdown_flag);
+                let stats_clone = stats.clone();
+                let pool_ref = &pool;
 
-                    // Update progress - show current package for this thread
-                    if let Ok(mut p) = progress_clone.lock() {
-                        p.state_mut().set_worker_active(thread_id, &pathname);
-                    }
+                s.spawn(move || {
+                    pool_ref.install(|| {
+                        pkgpaths.par_iter().for_each(|pkgpath| {
+                            // Check for shutdown before starting
+                            if shutdown_clone.load(Ordering::Relaxed) {
+                                return;
+                            }
 
-                    let scan_start = Instant::now();
-                    *result = self.scan_pkgpath(pkgpath);
-                    let scan_duration = scan_start.elapsed();
+                            let pathname =
+                                pkgpath.as_path().to_string_lossy().to_string();
+                            let thread_id =
+                                rayon::current_thread_index().unwrap_or(0);
 
-                    // Record stats if enabled
-                    if let Some(ref s) = stats_clone {
-                        s.scan(&pathname, scan_duration, result.is_ok());
-                    }
+                            // Update progress - show current package
+                            if let Ok(mut p) = progress_clone.lock() {
+                                p.state_mut()
+                                    .set_worker_active(thread_id, &pathname);
+                            }
 
-                    // Update counter immediately after each package
-                    if let Ok(mut p) = progress_clone.lock() {
-                        p.state_mut().set_worker_idle(thread_id);
-                        if result.is_ok() {
-                            p.state_mut().increment_completed();
-                        } else {
-                            p.state_mut().increment_failed();
+                            let scan_start = Instant::now();
+                            let result = Self::scan_pkgpath_with(
+                                config, sandbox, pkgpath,
+                            );
+                            let scan_duration = scan_start.elapsed();
+
+                            // Record stats
+                            if let Some(ref st) = stats_clone {
+                                st.scan(
+                                    &pathname,
+                                    scan_duration,
+                                    result.is_ok(),
+                                );
+                            }
+
+                            // Update progress counter
+                            if let Ok(mut p) = progress_clone.lock() {
+                                p.state_mut().set_worker_idle(thread_id);
+                                if result.is_ok() {
+                                    p.state_mut().increment_completed();
+                                } else {
+                                    p.state_mut().increment_failed();
+                                }
+                            }
+
+                            // Send result (blocks if buffer full = backpressure)
+                            let _ = tx.send((pkgpath.clone(), result));
+                        });
+                    });
+                    drop(tx);
+                });
+
+                // Check if we were interrupted during parallel processing
+                let was_interrupted = shutdown_flag.load(Ordering::Relaxed);
+
+                /*
+                 * Process results - write to DB and extract dependencies.
+                 */
+                for (pkgpath, result) in rx {
+                    let scanpkgs = match result {
+                        Ok(pkgs) => pkgs,
+                        Err(e) => {
+                            self.scan_failures
+                                .push((pkgpath.clone(), e.to_string()));
+                            self.done.insert(pkgpath);
+                            continue;
+                        }
+                    };
+                    self.done.insert(pkgpath.clone());
+
+                    // Save to database
+                    if !scanpkgs.is_empty() {
+                        if let Err(e) = db
+                            .store_scan_pkgpath(&pkgpath.to_string(), &scanpkgs)
+                        {
+                            error!(error = %e, "Failed to store scan results");
                         }
                     }
-                });
+
+                    // Skip dependency discovery if interrupted
+                    if was_interrupted {
+                        continue;
+                    }
+
+                    // Discover dependencies not yet seen
+                    for pkg in &scanpkgs {
+                        if let Some(ref all_deps) = pkg.all_depends {
+                            for dep in all_deps {
+                                let dep_path = dep.pkgpath();
+                                if self.done.contains(dep_path)
+                                    || new_incoming.contains(dep_path)
+                                {
+                                    continue;
+                                }
+                                // Check database for cached dependency
+                                match db
+                                    .is_pkgpath_scanned(&dep_path.to_string())
+                                {
+                                    Ok(true) => {
+                                        self.done.insert(dep_path.clone());
+                                        if let Ok(mut p) = progress.lock() {
+                                            p.state_mut().total += 1;
+                                            p.state_mut().cached += 1;
+                                        }
+                                    }
+                                    Ok(false) => {
+                                        new_incoming.insert(dep_path.clone());
+                                        if let Ok(mut p) = progress.lock() {
+                                            p.state_mut().total += 1;
+                                        }
+                                    }
+                                    Err(_) => {}
+                                }
+                            }
+                        }
+                    }
+                }
             });
 
-            // Check if we were interrupted during parallel processing
-            let was_interrupted = shutdown_flag.load(Ordering::Relaxed);
-            if was_interrupted {
+            // Check for interruption after batch
+            if shutdown_flag.load(Ordering::Relaxed) {
                 stop_refresh.store(true, Ordering::Relaxed);
                 if let Ok(mut p) = progress.lock() {
                     let _ = p.finish_interrupted();
                 }
                 interrupted = true;
-            }
-
-            /*
-             * Process results - always save completed scans, even if
-             * interrupted, so progress is preserved on restart.
-             */
-            let mut new_incoming: HashSet<PkgPath> = HashSet::new();
-            for (pkgpath, scanpkgs) in parpaths.drain(..) {
-                let scanpkgs = match scanpkgs {
-                    Ok(pkgs) => pkgs,
-                    Err(e) => {
-                        self.scan_failures
-                            .push((pkgpath.clone(), e.to_string()));
-                        self.done.insert(pkgpath.clone());
-                        continue;
-                    }
-                };
-                self.done.insert(pkgpath.clone());
-                // Save immediately to database
-                if !scanpkgs.is_empty() {
-                    db.store_scan_pkgpath(&pkgpath.to_string(), &scanpkgs)?;
-                }
-
-                // Skip dependency discovery if interrupted
-                if was_interrupted {
-                    continue;
-                }
-
-                // Discover dependencies not yet seen
-                for pkg in scanpkgs {
-                    if let Some(ref all_deps) = pkg.all_depends {
-                        for dep in all_deps {
-                            let dep_path = dep.pkgpath();
-                            if self.done.contains(dep_path)
-                                || self.incoming.contains(dep_path)
-                                || new_incoming.contains(dep_path)
-                            {
-                                continue;
-                            }
-                            // Check database for cached dependency
-                            if db.is_pkgpath_scanned(&dep_path.to_string())? {
-                                self.done.insert(dep_path.clone());
-                                if let Ok(mut p) = progress.lock() {
-                                    p.state_mut().total += 1;
-                                    p.state_mut().cached += 1;
-                                }
-                            } else {
-                                new_incoming.insert(dep_path.clone());
-                                if let Ok(mut p) = progress.lock() {
-                                    p.state_mut().total += 1;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Exit after saving results if interrupted
-            if was_interrupted {
                 break;
             }
 
@@ -677,10 +718,10 @@ impl Scan {
              * all known PKGPATHs and are done.
              */
             self.incoming = new_incoming;
-            if self.incoming.is_empty() {
-                break;
-            }
         }
+
+        // Commit transaction (partial on interrupt, full on success)
+        db.commit()?;
 
         // Stop the refresh thread and print final summary
         stop_refresh.store(true, Ordering::Relaxed);
@@ -743,23 +784,33 @@ impl Scan {
         &self,
         pkgpath: &PkgPath,
     ) -> anyhow::Result<Vec<ScanIndex>> {
+        Self::scan_pkgpath_with(&self.config, &self.sandbox, pkgpath)
+    }
+
+    /// Scan a single PKGPATH using provided config and sandbox references.
+    /// This allows scanning without borrowing all of `self`.
+    fn scan_pkgpath_with(
+        config: &Config,
+        sandbox: &Sandbox,
+        pkgpath: &PkgPath,
+    ) -> anyhow::Result<Vec<ScanIndex>> {
         let pkgpath_str = pkgpath.as_path().display().to_string();
         debug!(pkgpath = %pkgpath_str, "Scanning package");
 
-        let bmake = self.config.make().display().to_string();
-        let pkgsrcdir = self.config.pkgsrc().display().to_string();
+        let bmake = config.make().display().to_string();
+        let pkgsrcdir = config.pkgsrc().display().to_string();
         let script = format!(
             "cd {}/{} && {} pbulk-index\n",
             pkgsrcdir, pkgpath_str, bmake
         );
 
-        let scan_env = self.config.scan_env();
+        let scan_env = config.scan_env();
         trace!(pkgpath = %pkgpath_str,
             script = %script,
             scan_env = ?scan_env,
             "Executing pkg-scan"
         );
-        let child = self.sandbox.execute_script(0, &script, scan_env)?;
+        let child = sandbox.execute_script(0, &script, scan_env)?;
         let output = child.wait_with_output()?;
 
         if !output.status.success() {
@@ -827,8 +878,8 @@ impl Scan {
             "Starting dependency resolution"
         );
 
-        // Load all packages from database
-        let all_packages = db.get_all_packages()?;
+        // Load all scan data in one query
+        let all_scan_data = db.get_all_scan_indexes()?;
 
         /*
          * Populate the resolved hash with ALL packages first, including those
@@ -844,19 +895,11 @@ impl Scan {
         // Track package_id for storing resolved dependencies
         let mut pkgname_to_id: HashMap<PkgName, i64> = HashMap::new();
 
-        // Load full scan data for each package
-        for pkg_row in &all_packages {
-            let pkg = match db.get_full_scan_index(pkg_row.id) {
-                Ok(p) => p,
-                Err(e) => {
-                    warn!(pkgname = %pkg_row.pkgname, error = %e, "Failed to load scan data");
-                    continue;
-                }
-            };
+        // Process all scan data
+        for (pkg_id, pkg) in &all_scan_data {
+            pkgname_to_id.insert(pkg.pkgname.clone(), *pkg_id);
 
-            pkgname_to_id.insert(pkg.pkgname.clone(), pkg_row.id);
-
-            debug!(pkgpath = %pkg_row.pkgpath,
+            debug!(pkgpath = ?pkg.pkg_location,
                 pkgname = %pkg.pkgname.pkgname(),
                 "Processing package"
             );

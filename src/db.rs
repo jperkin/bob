@@ -73,6 +73,24 @@ impl Database {
         Ok(db)
     }
 
+    /// Begin a transaction.
+    pub fn begin_transaction(&self) -> Result<()> {
+        self.conn.execute("BEGIN TRANSACTION", [])?;
+        Ok(())
+    }
+
+    /// Commit the current transaction.
+    pub fn commit(&self) -> Result<()> {
+        self.conn.execute("COMMIT", [])?;
+        Ok(())
+    }
+
+    /// Rollback the current transaction.
+    pub fn rollback(&self) -> Result<()> {
+        self.conn.execute("ROLLBACK", [])?;
+        Ok(())
+    }
+
     /// Configure SQLite for performance.
     fn configure_pragmas(&self) -> Result<()> {
         self.conn.execute_batch(
@@ -311,12 +329,14 @@ impl Database {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
 
-        self.conn.execute(
-            "INSERT OR REPLACE INTO packages
-             (pkgname, pkgpath, pkgname_base, version, skip_reason, fail_reason,
-              is_bootstrap, pbulk_weight, scan_data, scanned_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
+        {
+            let mut stmt = self.conn.prepare_cached(
+                "INSERT OR REPLACE INTO packages
+                 (pkgname, pkgpath, pkgname_base, version, skip_reason, fail_reason,
+                  is_bootstrap, pbulk_weight, scan_data, scanned_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            )?;
+            stmt.execute(params![
                 pkgname,
                 pkgpath,
                 base,
@@ -327,19 +347,23 @@ impl Database {
                 pbulk_weight,
                 scan_data,
                 now
-            ],
-        )?;
+            ])?;
+        }
 
         let package_id = self.conn.last_insert_rowid();
 
         // Store raw dependencies
         if let Some(ref deps) = index.all_depends {
+            let mut stmt = self.conn.prepare_cached(
+                "INSERT OR IGNORE INTO depends (package_id, depend_pattern, depend_pkgpath)
+                 VALUES (?1, ?2, ?3)",
+            )?;
             for dep in deps {
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO depends (package_id, depend_pattern, depend_pkgpath)
-                     VALUES (?1, ?2, ?3)",
-                    params![package_id, dep.pattern().pattern(), dep.pkgpath().to_string()],
-                )?;
+                stmt.execute(params![
+                    package_id,
+                    dep.pattern().pattern(),
+                    dep.pkgpath().to_string()
+                ])?;
             }
         }
 
@@ -540,6 +564,31 @@ impl Database {
         serde_json::from_str(&json).context("Failed to deserialize scan data")
     }
 
+    /// Load all ScanIndex data in one query.
+    pub fn get_all_scan_indexes(&self) -> Result<Vec<(i64, ScanIndex)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, scan_data FROM packages ORDER BY id")?;
+        let rows = stmt.query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            let json: String = row.get(1)?;
+            Ok((id, json))
+        })?;
+        let mut results = Vec::new();
+        for row in rows {
+            let (id, json) = row?;
+            let index: ScanIndex =
+                serde_json::from_str(&json).with_context(|| {
+                    format!(
+                        "Failed to deserialize scan data for package {}",
+                        id
+                    )
+                })?;
+            results.push((id, index));
+        }
+        Ok(results)
+    }
+
     /// Load full ScanIndex by pkgname.
     pub fn get_scan_index_by_name(
         &self,
@@ -593,12 +642,13 @@ impl Database {
         deps: &[(i64, i64)],
     ) -> Result<()> {
         self.conn.execute("BEGIN TRANSACTION", [])?;
+        let mut stmt = self.conn.prepare(
+            "INSERT OR IGNORE INTO resolved_depends (package_id, depends_on_id) VALUES (?1, ?2)",
+        )?;
         for (package_id, depends_on_id) in deps {
-            self.conn.execute(
-                "INSERT OR IGNORE INTO resolved_depends (package_id, depends_on_id) VALUES (?1, ?2)",
-                params![package_id, depends_on_id],
-            )?;
+            stmt.execute(params![package_id, depends_on_id])?;
         }
+        drop(stmt);
         self.conn.execute("COMMIT", [])?;
         Ok(())
     }
