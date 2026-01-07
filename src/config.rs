@@ -811,16 +811,16 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
 
     // Parse each section
     let options = parse_options(&globals)
-        .map_err(|e| format!("Error parsing options: {}", e))?;
+        .map_err(|e| format!("Error parsing options table: {}", e))?;
     let pkgsrc_table: Table = globals
         .get("pkgsrc")
-        .map_err(|e| format!("Error getting pkgsrc: {}", e))?;
+        .map_err(|e| format!("Error getting pkgsrc table: {}", e))?;
     let pkgsrc = parse_pkgsrc(&globals)
-        .map_err(|e| format!("Error parsing pkgsrc: {}", e))?;
+        .map_err(|e| format!("Error parsing pkgsrc table: {}", e))?;
     let scripts = parse_scripts(&globals)
-        .map_err(|e| format!("Error parsing scripts: {}", e))?;
+        .map_err(|e| format!("Error parsing scripts table: {}", e))?;
     let sandboxes = parse_sandboxes(&globals)
-        .map_err(|e| format!("Error parsing sandboxes: {}", e))?;
+        .map_err(|e| format!("Error parsing sandboxes table: {}", e))?;
 
     // Store env function/table in registry if it exists
     let env_key = if let Ok(env_value) = pkgsrc_table.get::<Value>("env") {
@@ -861,20 +861,38 @@ fn parse_options(globals: &Table) -> LuaResult<Option<Options>> {
     }))
 }
 
+fn get_required_string(table: &Table, field: &str) -> LuaResult<String> {
+    let value: Value = table.get(field)?;
+    match value {
+        Value::String(s) => Ok(s.to_str()?.to_string()),
+        Value::Integer(n) => Ok(n.to_string()),
+        Value::Number(n) => Ok(n.to_string()),
+        Value::Nil => Err(mlua::Error::runtime(format!(
+            "missing required field '{}'",
+            field
+        ))),
+        _ => Err(mlua::Error::runtime(format!(
+            "field '{}' must be a string, got {}",
+            field,
+            value.type_name()
+        ))),
+    }
+}
+
 fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
     let pkgsrc: Table = globals.get("pkgsrc")?;
 
-    let basedir: String = pkgsrc.get("basedir")?;
+    let basedir = get_required_string(&pkgsrc, "basedir")?;
     let bootstrap: Option<PathBuf> =
         pkgsrc.get::<Option<String>>("bootstrap")?.map(PathBuf::from);
     let build_user: Option<String> =
         pkgsrc.get::<Option<String>>("build_user")?;
-    let logdir: String = pkgsrc.get("logdir")?;
-    let make: String = pkgsrc.get("make")?;
-    let packages: String = pkgsrc.get("packages")?;
-    let pkgtools: String = pkgsrc.get("pkgtools")?;
-    let prefix: String = pkgsrc.get("prefix")?;
-    let tar: String = pkgsrc.get("tar")?;
+    let logdir = get_required_string(&pkgsrc, "logdir")?;
+    let make = get_required_string(&pkgsrc, "make")?;
+    let packages = get_required_string(&pkgsrc, "packages")?;
+    let pkgtools = get_required_string(&pkgsrc, "pkgtools")?;
+    let prefix = get_required_string(&pkgsrc, "prefix")?;
+    let tar = get_required_string(&pkgsrc, "tar")?;
 
     let pkgpaths: Option<Vec<PkgPath>> =
         match pkgsrc.get::<Value>("pkgpaths")? {
