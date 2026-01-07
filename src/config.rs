@@ -880,11 +880,9 @@ fn parse_options(globals: &Table) -> LuaResult<Option<Options>> {
 
 /// Warn about unknown keys in a Lua table.
 fn warn_unknown_keys(table: &Table, table_name: &str, known_keys: &[&str]) {
-    for pair in table.pairs::<String, Value>() {
-        if let Ok((key, _)) = pair {
-            if !known_keys.contains(&key.as_str()) {
-                eprintln!("Warning: unknown config key '{}.{}'", table_name, key);
-            }
+    for (key, _) in table.pairs::<String, Value>().flatten() {
+        if !known_keys.contains(&key.as_str()) {
+            eprintln!("Warning: unknown config key '{}.{}'", table_name, key);
         }
     }
 }
