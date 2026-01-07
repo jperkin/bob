@@ -197,26 +197,30 @@ impl<'a> PkgBuilder<'a> {
     }
 
     /// Check if the package is already up-to-date.
-    fn check_up_to_date(&self) -> bool {
+    fn check_up_to_date(&self) -> anyhow::Result<bool> {
+        let packages =
+            self.config.packages().context("pkgsrc.packages not configured")?;
+        let pkgtools =
+            self.config.pkgtools().context("pkgsrc.pkgtools not configured")?;
+
         let pkgname = self.pkginfo.pkgname.pkgname();
-        let pkgfile =
-            self.config.packages().join("All").join(format!("{}.tgz", pkgname));
+        let pkgfile = packages.join("All").join(format!("{}.tgz", pkgname));
 
         // Check if package file exists
         if !pkgfile.exists() {
             debug!(pkgname, path = %pkgfile.display(), "package file not found");
-            return false;
+            return Ok(false);
         }
 
         let pkgfile_str = pkgfile.to_string_lossy();
-        let pkg_info = self.config.pkgtools().join("pkg_info");
-        let pkg_admin = self.config.pkgtools().join("pkg_admin");
+        let pkg_info = pkgtools.join("pkg_info");
+        let pkg_admin = pkgtools.join("pkg_admin");
 
         // Get BUILD_INFO and verify source files
         let Some(build_info) = self.run_cmd(&pkg_info, &["-qb", &pkgfile_str])
         else {
             debug!(pkgname, "pkg_info -qb failed or returned empty");
-            return false;
+            return Ok(false);
         };
         debug!(
             pkgname,
@@ -236,13 +240,13 @@ impl<'a> PkgBuilder<'a> {
             let src_file = self.config.pkgsrc().join(file);
             if !src_file.exists() {
                 debug!(pkgname, file, "source file missing");
-                return false;
+                return Ok(false);
             }
 
             if file_id.starts_with("$NetBSD") {
                 // CVS ID comparison - extract $NetBSD...$ from actual file
                 let Ok(content) = std::fs::read_to_string(&src_file) else {
-                    return false;
+                    return Ok(false);
                 };
                 let id = content.lines().find_map(|line| {
                     if let Some(start) = line.find("$NetBSD") {
@@ -254,7 +258,7 @@ impl<'a> PkgBuilder<'a> {
                 });
                 if id != Some(file_id) {
                     debug!(pkgname, file, "CVS ID mismatch");
-                    return false;
+                    return Ok(false);
                 }
             } else {
                 // Hash comparison
@@ -263,7 +267,7 @@ impl<'a> PkgBuilder<'a> {
                     self.run_cmd(&pkg_admin, &["digest", &src_file_str])
                 else {
                     debug!(pkgname, file, "pkg_admin digest failed");
-                    return false;
+                    return Ok(false);
                 };
                 let hash = hash.trim();
                 if hash != file_id {
@@ -275,7 +279,7 @@ impl<'a> PkgBuilder<'a> {
                         actual = hash,
                         "hash mismatch"
                     );
-                    return false;
+                    return Ok(false);
                 }
             }
         }
@@ -283,7 +287,7 @@ impl<'a> PkgBuilder<'a> {
         // Get package dependencies and verify
         let Some(pkg_deps) = self.run_cmd(&pkg_info, &["-qN", &pkgfile_str])
         else {
-            return false;
+            return Ok(false);
         };
 
         // Build sets of recorded vs expected dependencies
@@ -303,38 +307,37 @@ impl<'a> PkgBuilder<'a> {
                 expected = expected_deps.len(),
                 "dependency list changed"
             );
-            return false;
+            return Ok(false);
         }
 
         let pkgfile_mtime = match pkgfile.metadata().and_then(|m| m.modified())
         {
             Ok(t) => t,
-            Err(_) => return false,
+            Err(_) => return Ok(false),
         };
 
         // Check each dependency package exists and is not newer
         for dep in &recorded_deps {
-            let dep_pkg =
-                self.config.packages().join("All").join(format!("{}.tgz", dep));
+            let dep_pkg = packages.join("All").join(format!("{}.tgz", dep));
             if !dep_pkg.exists() {
                 debug!(pkgname, dep, "dependency package missing");
-                return false;
+                return Ok(false);
             }
 
             let dep_mtime = match dep_pkg.metadata().and_then(|m| m.modified())
             {
                 Ok(t) => t,
-                Err(_) => return false,
+                Err(_) => return Ok(false),
             };
 
             if dep_mtime > pkgfile_mtime {
                 debug!(pkgname, dep, "dependency is newer");
-                return false;
+                return Ok(false);
             }
         }
 
         debug!(pkgname, "package is up-to-date");
-        true
+        Ok(true)
     }
 
     /// Run the full build process.
@@ -348,7 +351,7 @@ impl<'a> PkgBuilder<'a> {
         };
 
         // Check if package is already up-to-date (skip check if force rebuild)
-        if !self.options.force_rebuild && self.check_up_to_date() {
+        if !self.options.force_rebuild && self.check_up_to_date()? {
             return Ok(PkgBuildResult::Skipped);
         }
 
@@ -495,7 +498,9 @@ impl<'a> PkgBuilder<'a> {
         }
 
         // Save package to packages directory
-        let packages_dir = self.config.packages().join("All");
+        let packages =
+            self.config.packages().context("pkgsrc.packages not configured")?;
+        let packages_dir = packages.join("All");
         fs::create_dir_all(&packages_dir)?;
         let dest = packages_dir.join(
             Path::new(&pkgfile)
@@ -761,7 +766,9 @@ impl<'a> PkgBuilder<'a> {
         let deps: Vec<String> =
             self.pkginfo.depends.iter().map(|d| d.to_string()).collect();
 
-        let pkg_path = self.config.packages().join("All");
+        let packages =
+            self.config.packages().context("pkgsrc.packages not configured")?;
+        let pkg_path = packages.join("All");
         let logfile = self.logdir.join("depends.log");
 
         let mut args = vec![];
@@ -780,7 +787,9 @@ impl<'a> PkgBuilder<'a> {
         pkg_path: &Path,
         logfile: &Path,
     ) -> anyhow::Result<ExitStatus> {
-        let pkg_add = self.config.pkgtools().join("pkg_add");
+        let pkgtools =
+            self.config.pkgtools().context("pkgsrc.pkgtools not configured")?;
+        let pkg_add = pkgtools.join("pkg_add");
         let pkg_path_value = pkg_path.to_string_lossy().to_string();
         let extra_envs = [("PKG_PATH", pkg_path_value.as_str())];
 
@@ -795,7 +804,9 @@ impl<'a> PkgBuilder<'a> {
 
     /// Install a package file.
     fn pkg_add(&self, pkgfile: &str) -> anyhow::Result<bool> {
-        let pkg_add = self.config.pkgtools().join("pkg_add");
+        let pkgtools =
+            self.config.pkgtools().context("pkgsrc.pkgtools not configured")?;
+        let pkg_add = pkgtools.join("pkg_add");
         let logfile = self.logdir.join("package.log");
 
         let status = self.run_command_logged(
@@ -810,7 +821,9 @@ impl<'a> PkgBuilder<'a> {
 
     /// Delete an installed package.
     fn pkg_delete(&self, pkgname: &str) -> anyhow::Result<bool> {
-        let pkg_delete = self.config.pkgtools().join("pkg_delete");
+        let pkgtools =
+            self.config.pkgtools().context("pkgsrc.pkgtools not configured")?;
+        let pkg_delete = pkgtools.join("pkg_delete");
         let logfile = self.logdir.join("deinstall.log");
 
         let status = self.run_command_logged(

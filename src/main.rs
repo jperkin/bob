@@ -154,6 +154,18 @@ impl BuildRunner {
         scan_result: bob::scan::ScanResult,
         options: build::BuildOptions,
     ) -> Result<build::BuildSummary> {
+        if self.config.packages().is_none() {
+            bail!("pkgsrc.packages must be set for build operations");
+        }
+        if self.config.pkgtools().is_none() {
+            bail!("pkgsrc.pkgtools must be set for build operations");
+        }
+        if self.config.prefix().is_none() {
+            bail!("pkgsrc.prefix must be set for build operations");
+        }
+        if self.config.tar().is_none() {
+            bail!("pkgsrc.tar must be set for build operations");
+        }
         if scan_result.buildable.is_empty() {
             bail!("No packages to build");
         }

@@ -442,22 +442,22 @@ pub struct Pkgsrc {
     pub logdir: PathBuf,
     /// Path to bmake binary.
     pub make: PathBuf,
-    /// Directory for built packages.
-    pub packages: PathBuf,
-    /// Directory containing pkg_add/pkg_delete.
-    pub pkgtools: PathBuf,
+    /// Directory for built packages (required for build, optional for scan).
+    pub packages: Option<PathBuf>,
+    /// Directory containing pkg_add/pkg_delete (required for build, optional for scan).
+    pub pkgtools: Option<PathBuf>,
     /// List of packages to build.
     pub pkgpaths: Option<Vec<PkgPath>>,
-    /// Installation prefix.
-    pub prefix: PathBuf,
+    /// Installation prefix (required for build, optional for scan).
+    pub prefix: Option<PathBuf>,
     /// Directory for HTML reports.
     pub report_dir: Option<PathBuf>,
     /// Glob patterns for files to save from WRKDIR on failure.
     pub save_wrkdir_patterns: Vec<String>,
     /// Environment variables for scan processes.
     pub scanenv: HashMap<String, String>,
-    /// Path to tar binary.
-    pub tar: PathBuf,
+    /// Path to tar binary (required for build, optional for scan).
+    pub tar: Option<PathBuf>,
 }
 
 /// Sandbox configuration from the `sandboxes` section.
@@ -632,16 +632,16 @@ impl Config {
         &self.file.pkgsrc.logdir
     }
 
-    pub fn packages(&self) -> &PathBuf {
-        &self.file.pkgsrc.packages
+    pub fn packages(&self) -> Option<&PathBuf> {
+        self.file.pkgsrc.packages.as_ref()
     }
 
-    pub fn pkgtools(&self) -> &PathBuf {
-        &self.file.pkgsrc.pkgtools
+    pub fn pkgtools(&self) -> Option<&PathBuf> {
+        self.file.pkgsrc.pkgtools.as_ref()
     }
 
-    pub fn prefix(&self) -> &PathBuf {
-        &self.file.pkgsrc.prefix
+    pub fn prefix(&self) -> Option<&PathBuf> {
+        self.file.pkgsrc.prefix.as_ref()
     }
 
     #[allow(dead_code)]
@@ -653,8 +653,8 @@ impl Config {
         self.file.pkgsrc.save_wrkdir_patterns.as_slice()
     }
 
-    pub fn tar(&self) -> &PathBuf {
-        &self.file.pkgsrc.tar
+    pub fn tar(&self) -> Option<&PathBuf> {
+        self.file.pkgsrc.tar.as_ref()
     }
 
     pub fn build_user(&self) -> Option<&str> {
@@ -678,18 +678,29 @@ impl Config {
         let mut envs = vec![
             ("bob_logdir".to_string(), format!("{}", self.logdir().display())),
             ("bob_make".to_string(), format!("{}", self.make().display())),
-            (
-                "bob_packages".to_string(),
-                format!("{}", self.packages().display()),
-            ),
-            (
-                "bob_pkgtools".to_string(),
-                format!("{}", self.pkgtools().display()),
-            ),
             ("bob_pkgsrc".to_string(), format!("{}", self.pkgsrc().display())),
-            ("bob_prefix".to_string(), format!("{}", self.prefix().display())),
-            ("bob_tar".to_string(), format!("{}", self.tar().display())),
         ];
+        if let Some(packages) = self.packages() {
+            envs.push((
+                "bob_packages".to_string(),
+                format!("{}", packages.display()),
+            ));
+        }
+        if let Some(pkgtools) = self.pkgtools() {
+            envs.push((
+                "bob_pkgtools".to_string(),
+                format!("{}", pkgtools.display()),
+            ));
+        }
+        if let Some(prefix) = self.prefix() {
+            envs.push((
+                "bob_prefix".to_string(),
+                format!("{}", prefix.display()),
+            ));
+        }
+        if let Some(tar) = self.tar() {
+            envs.push(("bob_tar".to_string(), format!("{}", tar.display())));
+        }
         if let Some(build_user) = self.build_user() {
             envs.push(("bob_build_user".to_string(), build_user.to_string()));
         }
@@ -773,13 +784,15 @@ impl Config {
             }
         }
 
-        // Check packages dir can be created
-        if let Some(parent) = self.file.pkgsrc.packages.parent() {
-            if !parent.exists() {
-                errors.push(format!(
-                    "Packages parent directory does not exist: {}",
-                    parent.display()
-                ));
+        // Check packages dir can be created (if configured)
+        if let Some(ref packages) = self.file.pkgsrc.packages {
+            if let Some(parent) = packages.parent() {
+                if !parent.exists() {
+                    errors.push(format!(
+                        "Packages parent directory does not exist: {}",
+                        parent.display()
+                    ));
+                }
             }
         }
 
@@ -889,10 +902,14 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         pkgsrc.get::<Option<String>>("build_user")?;
     let logdir = get_required_string(&pkgsrc, "logdir")?;
     let make = get_required_string(&pkgsrc, "make")?;
-    let packages = get_required_string(&pkgsrc, "packages")?;
-    let pkgtools = get_required_string(&pkgsrc, "pkgtools")?;
-    let prefix = get_required_string(&pkgsrc, "prefix")?;
-    let tar = get_required_string(&pkgsrc, "tar")?;
+    let packages: Option<PathBuf> =
+        pkgsrc.get::<Option<String>>("packages")?.map(PathBuf::from);
+    let pkgtools: Option<PathBuf> =
+        pkgsrc.get::<Option<String>>("pkgtools")?.map(PathBuf::from);
+    let prefix: Option<PathBuf> =
+        pkgsrc.get::<Option<String>>("prefix")?.map(PathBuf::from);
+    let tar: Option<PathBuf> =
+        pkgsrc.get::<Option<String>>("tar")?.map(PathBuf::from);
 
     let pkgpaths: Option<Vec<PkgPath>> =
         match pkgsrc.get::<Value>("pkgpaths")? {
@@ -935,14 +952,14 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         build_user,
         logdir: PathBuf::from(logdir),
         make: PathBuf::from(make),
-        packages: PathBuf::from(packages),
-        pkgtools: PathBuf::from(pkgtools),
+        packages,
+        pkgtools,
         pkgpaths,
-        prefix: PathBuf::from(prefix),
+        prefix,
         report_dir,
         save_wrkdir_patterns,
         scanenv,
-        tar: PathBuf::from(tar),
+        tar,
     })
 }
 
