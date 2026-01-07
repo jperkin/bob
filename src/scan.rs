@@ -837,8 +837,21 @@ impl Scan {
         );
 
         let reader = BufReader::new(&output.stdout[..]);
-        let mut index: Vec<ScanIndex> =
+        let all_results: Vec<ScanIndex> =
             ScanIndex::from_reader(reader).collect::<Result<_, _>>()?;
+
+        /*
+         * Filter to keep only the first occurrence of each PKGNAME.
+         * For multi-version packages, pbulk-index returns the *_DEFAULT
+         * version first, which is the one we want.
+         */
+        let mut seen_pkgnames = HashSet::new();
+        let mut index: Vec<ScanIndex> = Vec::new();
+        for pkg in all_results {
+            if seen_pkgnames.insert(pkg.pkgname.clone()) {
+                index.push(pkg);
+            }
+        }
 
         info!(pkgpath = %pkgpath_str,
             packages_found = index.len(),
