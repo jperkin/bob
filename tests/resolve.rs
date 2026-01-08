@@ -200,11 +200,10 @@ fn unresolvable_dependency() -> Result<()> {
     )?;
 
     let (mut scan, db) = setup_scan_with_db(vec![pkg1])?;
-    let res = scan.resolve(&db);
+    let result = scan.resolve(&db)?;
 
-    assert!(res.is_err());
-    let err = res.unwrap_err().to_string();
-    assert!(err.contains("bar"));
+    assert!(!result.errors.is_empty());
+    assert!(result.errors.iter().any(|e| e.contains("bar")));
     Ok(())
 }
 
@@ -308,11 +307,11 @@ fn resolve_reports_pattern_error_on_overflow_version() -> Result<()> {
     )?;
 
     let (mut scan, db) = setup_scan_with_db(vec![pkg1, pkg2, pkg3])?;
-    let res = scan.resolve(&db);
+    let result = scan.resolve(&db)?;
 
-    assert!(res.is_err());
-    let err = res.unwrap_err().to_string();
-    assert!(err.contains("Pattern error for lib-[0-9]*"));
+    assert!(!result.errors.is_empty());
+    let err = result.errors.join("\n");
+    assert!(err.contains("pattern error for lib-[0-9]*"));
     assert!(err.contains("app-1.0"));
     Ok(())
 }
