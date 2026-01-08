@@ -657,8 +657,9 @@ impl Scan {
                         }
                     }
 
-                    // Skip dependency discovery if interrupted
-                    if was_interrupted {
+                    // Skip dependency discovery for full tree scans (all
+                    // packages already discovered) or if interrupted
+                    if self.full_tree || was_interrupted {
                         continue;
                     }
 
