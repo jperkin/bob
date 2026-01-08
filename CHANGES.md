@@ -1,5 +1,19 @@
 # Changelog
 
+## Version 0.5.0 (2026-01-08)
+
+* Add `bob db` command for arbitrary SQL queries.
+
+* Improve scan performance and pbulk compatibility with regards to resolver
+  failures.  Add `strict_scan` to configure whether resolver errors are fatal.
+
+* Allow simpler configs if running in scan-only mode.  Improve error messages
+  for config issues.
+
+* Remove stats module, statistics are now recorded to the database.
+
+* Various report and TUI fixes.
+
 ## Version 0.4.0 (2026-01-03)
 
 * Rewrite pkg-build and pkg-up-to-date scripts in native Rust to improve
