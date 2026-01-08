@@ -2008,7 +2008,6 @@ impl Build {
         info!(package_count = self.scanpkgs.len(), "Build::start() called");
 
         let shutdown_flag = Arc::clone(&ctx.shutdown);
-        let stats = ctx.stats.clone();
 
         /*
          * Populate BuildJobs.
@@ -2326,7 +2325,6 @@ impl Build {
         let options = self.options.clone();
         let progress_clone = Arc::clone(&progress);
         let shutdown_for_manager = Arc::clone(&shutdown_flag);
-        let stats_for_manager = stats.clone();
         let (results_tx, results_rx) = mpsc::channel::<Vec<BuildResult>>();
         let (interrupted_tx, interrupted_rx) = mpsc::channel::<bool>();
         // Channel for completed results to save immediately
@@ -2337,7 +2335,6 @@ impl Build {
             let sandbox = sandbox.clone();
             let mut jobs = jobs.clone();
             let mut was_interrupted = false;
-            let stats = stats_for_manager;
 
             // Track which thread is building which package
             let mut thread_packages: HashMap<usize, PkgName> = HashMap::new();
@@ -2417,23 +2414,6 @@ impl Build {
                         };
                     }
                     ChannelCommand::JobSuccess(pkgname, duration) => {
-                        // Record stats even if shutting down
-                        if let Some(ref s) = stats {
-                            let pkgpath = jobs
-                                .scanpkgs
-                                .get(&pkgname)
-                                .and_then(|idx| idx.pkg_location.as_ref())
-                                .map(|p| {
-                                    p.as_path().to_string_lossy().to_string()
-                                });
-                            s.build(
-                                pkgname.pkgname(),
-                                pkgpath.as_deref(),
-                                duration,
-                                "success",
-                            );
-                        }
-
                         jobs.mark_success(&pkgname, duration);
                         jobs.running.remove(&pkgname);
 
@@ -2466,23 +2446,6 @@ impl Build {
                         }
                     }
                     ChannelCommand::JobSkipped(pkgname) => {
-                        // Record stats even if shutting down
-                        if let Some(ref s) = stats {
-                            let pkgpath = jobs
-                                .scanpkgs
-                                .get(&pkgname)
-                                .and_then(|idx| idx.pkg_location.as_ref())
-                                .map(|p| {
-                                    p.as_path().to_string_lossy().to_string()
-                                });
-                            s.build(
-                                pkgname.pkgname(),
-                                pkgpath.as_deref(),
-                                Duration::ZERO,
-                                "skipped",
-                            );
-                        }
-
                         jobs.mark_up_to_date(&pkgname);
                         jobs.running.remove(&pkgname);
 
@@ -2514,23 +2477,6 @@ impl Build {
                         }
                     }
                     ChannelCommand::JobFailed(pkgname, duration) => {
-                        // Record stats even if shutting down
-                        if let Some(ref s) = stats {
-                            let pkgpath = jobs
-                                .scanpkgs
-                                .get(&pkgname)
-                                .and_then(|idx| idx.pkg_location.as_ref())
-                                .map(|p| {
-                                    p.as_path().to_string_lossy().to_string()
-                                });
-                            s.build(
-                                pkgname.pkgname(),
-                                pkgpath.as_deref(),
-                                duration,
-                                "failed",
-                            );
-                        }
-
                         let results_before = jobs.results.len();
                         jobs.mark_failure(&pkgname, duration);
                         jobs.running.remove(&pkgname);
@@ -2564,23 +2510,6 @@ impl Build {
                         }
                     }
                     ChannelCommand::JobError((pkgname, duration, e)) => {
-                        // Record stats even if shutting down
-                        if let Some(ref s) = stats {
-                            let pkgpath = jobs
-                                .scanpkgs
-                                .get(&pkgname)
-                                .and_then(|idx| idx.pkg_location.as_ref())
-                                .map(|p| {
-                                    p.as_path().to_string_lossy().to_string()
-                                });
-                            s.build(
-                                pkgname.pkgname(),
-                                pkgpath.as_deref(),
-                                duration,
-                                "error",
-                            );
-                        }
-
                         let results_before = jobs.results.len();
                         jobs.mark_failure(&pkgname, duration);
                         jobs.running.remove(&pkgname);

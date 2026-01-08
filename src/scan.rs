@@ -73,7 +73,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::{debug, error, info, trace};
 
 /// Reason why a package was excluded from the build.
@@ -412,7 +412,6 @@ impl Scan {
             .context("Failed to build scan thread pool")?;
 
         let shutdown_flag = Arc::clone(&ctx.shutdown);
-        let stats = ctx.stats.clone();
 
         /*
          * Only a single sandbox is required, 'make pbulk-index' can safely be
@@ -589,7 +588,6 @@ impl Scan {
                 // Spawn scanning thread
                 let progress_clone = Arc::clone(&progress);
                 let shutdown_clone = Arc::clone(&shutdown_flag);
-                let stats_clone = stats.clone();
                 let pool_ref = &pool;
 
                 s.spawn(move || {
@@ -611,20 +609,9 @@ impl Scan {
                                     .set_worker_active(thread_id, &pathname);
                             }
 
-                            let scan_start = Instant::now();
                             let result = Self::scan_pkgpath_with(
                                 config, sandbox, pkgpath,
                             );
-                            let scan_duration = scan_start.elapsed();
-
-                            // Record stats
-                            if let Some(ref st) = stats_clone {
-                                st.scan(
-                                    &pathname,
-                                    scan_duration,
-                                    result.is_ok(),
-                                );
-                            }
 
                             // Update progress counter
                             if let Ok(mut p) = progress_clone.lock() {
@@ -1032,24 +1019,23 @@ impl Scan {
                  * Use pkgbase hashmap for efficient lookups when pattern
                  * has a known pkgbase, otherwise fall back to full scan.
                  */
-                let candidates: Vec<&PkgName> =
-                    if let Some(base) = depend.pattern().pkgbase() {
-                        match pkgbase_map.get(base) {
-                            Some(v) => v
-                                .iter()
-                                .filter(|c| {
-                                    depend.pattern().matches(c.pkgname())
-                                })
-                                .copied()
-                                .collect(),
-                            None => Vec::new(),
-                        }
-                    } else {
-                        pkgnames
+                let candidates: Vec<&PkgName> = if let Some(base) =
+                    depend.pattern().pkgbase()
+                {
+                    match pkgbase_map.get(base) {
+                        Some(v) => v
                             .iter()
                             .filter(|c| depend.pattern().matches(c.pkgname()))
-                            .collect()
-                    };
+                            .copied()
+                            .collect(),
+                        None => Vec::new(),
+                    }
+                } else {
+                    pkgnames
+                        .iter()
+                        .filter(|c| depend.pattern().matches(c.pkgname()))
+                        .collect()
+                };
 
                 // Find best match among all candidates using pbulk algorithm:
                 // higher version wins, larger name on tie.
@@ -1081,7 +1067,11 @@ impl Scan {
                         depend.pattern().pattern(),
                         e
                     );
-                    errors.push(format!("{} in {}", reason, pkg.pkgname.pkgname()));
+                    errors.push(format!(
+                        "{} in {}",
+                        reason,
+                        pkg.pkgname.pkgname()
+                    ));
                     if !skip_reasons.contains_key(&pkg.pkgname) {
                         pkg.pkg_fail_reason = Some(format!("\"{}\"", reason));
                         skip_reasons.insert(

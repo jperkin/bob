@@ -16,6 +16,7 @@
 
 use anyhow::{Result, bail};
 use bob::Init;
+use bob::RunContext;
 use bob::build::{self, Build};
 use bob::config::Config;
 use bob::db::Database;
@@ -23,7 +24,6 @@ use bob::logging;
 use bob::report;
 use bob::sandbox::Sandbox;
 use bob::scan::{Scan, SkipReason};
-use bob::{RunContext, Stats};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::str;
@@ -78,10 +78,7 @@ impl BuildRunner {
         })
         .expect("Error setting signal handler");
 
-        let stats_path = logs_dir.join("stats.jsonl");
-        let stats = Stats::new(&stats_path)?;
-        let ctx = RunContext::new(Arc::clone(&shutdown_flag))
-            .with_stats(Arc::new(stats));
+        let ctx = RunContext::new(Arc::clone(&shutdown_flag));
 
         Ok(Self { config, db, ctx })
     }
@@ -109,7 +106,6 @@ impl BuildRunner {
         let interrupted = scan.start(&self.ctx, &self.db)?;
 
         if interrupted {
-            self.flush_stats();
             std::process::exit(EXIT_INTERRUPTED);
         }
 
@@ -140,10 +136,7 @@ impl BuildRunner {
 
         // Check for unresolved dependency errors in strict_scan mode
         if self.config.strict_scan() && !result.errors.is_empty() {
-            bail!(
-                "Unresolved dependencies:\n  {}",
-                result.errors.join("\n  ")
-            );
+            bail!("Unresolved dependencies:\n  {}", result.errors.join("\n  "));
         }
 
         Ok(result)
@@ -218,8 +211,6 @@ impl BuildRunner {
             );
         }
 
-        self.flush_stats();
-
         // Add pre-skipped packages from scan to summary
         for pkg in scan_result.skipped {
             let reason = match pkg.reason {
@@ -247,13 +238,6 @@ impl BuildRunner {
 
         summary.scan_failed = scan_result.scan_failed;
         Ok(summary)
-    }
-
-    /// Flush stats if available.
-    fn flush_stats(&self) {
-        if let Some(ref s) = self.ctx.stats {
-            s.flush();
-        }
     }
 
     /// Generate and print the HTML report.
