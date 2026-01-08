@@ -91,6 +91,10 @@ pub enum SkipReason {
     /// This indicates the package is known to fail on the current platform
     /// and should not be attempted.
     PkgFailReason(String),
+    /// A dependency could not be resolved to any known package.
+    ///
+    /// Contains the dependency pattern that could not be matched.
+    UnresolvedDependency(String),
 }
 
 /// Information about a package that was skipped during scanning.
@@ -102,8 +106,6 @@ pub struct SkippedPackage {
     pub pkgpath: Option<PkgPath>,
     /// Reason the package was skipped.
     pub reason: SkipReason,
-    /// Full resolved index (for presolve output).
-    pub index: Option<ResolvedIndex>,
 }
 
 /// Information about a package that failed to scan.
@@ -124,12 +126,15 @@ pub struct ResolvedIndex {
     pub index: ScanIndex,
     /// Resolved dependencies as package names.
     pub depends: Vec<PkgName>,
+    /// True if this package has an unresolved dependency.
+    #[serde(default)]
+    pub has_unresolved_dep: bool,
 }
 
 impl ResolvedIndex {
     /// Create from a ScanIndex with empty depends.
     pub fn from_scan_index(index: ScanIndex) -> Self {
-        Self { index, depends: Vec::new() }
+        Self { index, depends: Vec::new(), has_unresolved_dep: false }
     }
 }
 
@@ -149,8 +154,8 @@ impl std::ops::DerefMut for ResolvedIndex {
 impl std::fmt::Display for ResolvedIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.index)?;
-        // Only output DEPENDS= if there are dependencies
-        if !self.depends.is_empty() {
+        // Only output DEPENDS= if there are dependencies and no unresolved deps.
+        if !self.depends.is_empty() && !self.has_unresolved_dep {
             write!(f, "DEPENDS=")?;
             for (i, d) in self.depends.iter().enumerate() {
                 if i > 0 {
@@ -182,6 +187,9 @@ pub struct ScanResult {
     /// All packages in original order with their skip reason (if any).
     /// Used for presolve output that needs to preserve original ordering.
     pub all_ordered: Vec<(ResolvedIndex, Option<SkipReason>)>,
+    /// Unresolved dependency errors.
+    /// Callers can check this and config.strict_scan() to decide if fatal.
+    pub errors: Vec<String>,
 }
 
 /// Package dependency scanner.
@@ -908,10 +916,8 @@ impl Scan {
         // Track package_id for storing resolved dependencies
         let mut pkgname_to_id: HashMap<PkgName, i64> = HashMap::new();
 
-        // Process all scan data
-        for (pkg_id, pkg) in &all_scan_data {
-            pkgname_to_id.insert(pkg.pkgname.clone(), *pkg_id);
-
+        // Process all scan data, consuming to avoid clones
+        for (pkg_id, pkg) in all_scan_data {
             debug!(pkgpath = ?pkg.pkg_location,
                 pkgname = %pkg.pkgname.pkgname(),
                 "Processing package"
@@ -955,13 +961,14 @@ impl Scan {
                 }
             }
 
+            pkgname_to_id.insert(pkg.pkgname.clone(), pkg_id);
             debug!(pkgname = %pkg.pkgname.pkgname(),
                 "Adding package to resolved set"
             );
             pkgnames.insert(pkg.pkgname.clone());
             self.resolved.insert(
                 pkg.pkgname.clone(),
-                ResolvedIndex::from_scan_index(pkg.clone()),
+                ResolvedIndex::from_scan_index(pkg),
             );
         }
 
@@ -972,18 +979,30 @@ impl Scan {
         );
 
         /*
+         * Build a hashmap of pkgbase -> Vec<&PkgName> for efficient lookups.
+         * For Dewey patterns with a known pkgbase, we can directly look up
+         * candidates instead of iterating through all packages.
+         */
+        let pkgbase_map: HashMap<&str, Vec<&PkgName>> = {
+            let mut map: HashMap<&str, Vec<&PkgName>> = HashMap::new();
+            for pkgname in &pkgnames {
+                map.entry(pkgname.pkgbase()).or_default().push(pkgname);
+            }
+            map
+        };
+
+        /*
          * Keep a cache of best Depend => PkgName matches we've already seen
          * as it's likely the same patterns will be used in multiple places.
          */
         let mut match_cache: HashMap<Depend, PkgName> = HashMap::new();
 
         /*
-         * Track packages to skip due to skipped dependencies, and truly
-         * unresolved dependencies (errors) when strict_scan is enabled.
+         * Track packages to skip due to skipped dependencies, and
+         * unresolved dependency errors (callers decide if these are fatal).
          */
         let mut skip_due_to_dep: HashMap<PkgName, String> = HashMap::new();
         let mut errors: Vec<String> = Vec::new();
-        let strict_scan = self.config.strict_scan();
 
         // Helper to check if a dependency pattern is already satisfied
         let is_satisfied = |depends: &[PkgName], pattern: &pkgsrc::Pattern| {
@@ -991,11 +1010,11 @@ impl Scan {
         };
 
         for pkg in self.resolved.values_mut() {
-            let all_deps = match pkg.all_depends.clone() {
+            let all_deps = match pkg.all_depends.take() {
                 Some(deps) => deps,
                 None => continue,
             };
-            for depend in &all_deps {
+            for depend in all_deps.iter() {
                 // Check for cached DEPENDS match first. If found, use it
                 // (but only add if the pattern isn't already satisfied).
                 if let Some(pkgname) = match_cache.get(depend) {
@@ -1009,13 +1028,28 @@ impl Scan {
                 /*
                  * Find best DEPENDS match out of all known PKGNAME.
                  * Collect all candidates that match the pattern.
+                 *
+                 * Use pkgbase hashmap for efficient lookups when pattern
+                 * has a known pkgbase, otherwise fall back to full scan.
                  */
-                let mut candidates: Vec<&PkgName> = Vec::new();
-                for candidate in &pkgnames {
-                    if depend.pattern().matches(candidate.pkgname()) {
-                        candidates.push(candidate);
-                    }
-                }
+                let candidates: Vec<&PkgName> =
+                    if let Some(base) = depend.pattern().pkgbase() {
+                        match pkgbase_map.get(base) {
+                            Some(v) => v
+                                .iter()
+                                .filter(|c| {
+                                    depend.pattern().matches(c.pkgname())
+                                })
+                                .copied()
+                                .collect(),
+                            None => Vec::new(),
+                        }
+                    } else {
+                        pkgnames
+                            .iter()
+                            .filter(|c| depend.pattern().matches(c.pkgname()))
+                            .collect()
+                    };
 
                 // Find best match among all candidates using pbulk algorithm:
                 // higher version wins, larger name on tie.
@@ -1047,13 +1081,9 @@ impl Scan {
                         depend.pattern().pattern(),
                         e
                     );
-                    if strict_scan {
-                        errors.push(format!(
-                            "{} in {}",
-                            reason,
-                            pkg.pkgname.pkgname()
-                        ));
-                    } else if !skip_reasons.contains_key(&pkg.pkgname) {
+                    errors.push(format!("{} in {}", reason, pkg.pkgname.pkgname()));
+                    if !skip_reasons.contains_key(&pkg.pkgname) {
+                        pkg.pkg_fail_reason = Some(format!("\"{}\"", reason));
                         skip_reasons.insert(
                             pkg.pkgname.clone(),
                             SkipReason::PkgFailReason(reason),
@@ -1071,24 +1101,28 @@ impl Scan {
                     match_cache.insert(depend.clone(), pkgname.clone());
                 } else {
                     // No matching package exists
-                    let reason = format!(
-                        "could not resolve dependency \"{}\"",
-                        depend.pattern().pattern()
-                    );
-                    if strict_scan {
-                        errors.push(format!(
-                            "No match found for {} in {}",
-                            depend.pattern().pattern(),
-                            pkg.pkgname.pkgname()
-                        ));
-                    } else if !skip_reasons.contains_key(&pkg.pkgname) {
+                    let pattern = depend.pattern().pattern().to_string();
+                    pkg.has_unresolved_dep = true;
+                    errors.push(format!(
+                        "No match found for {} in {}",
+                        pattern,
+                        pkg.pkgname.pkgname()
+                    ));
+                    if !skip_reasons.contains_key(&pkg.pkgname) {
+                        let reason = format!(
+                            "could not resolve dependency \"{}\"",
+                            pattern
+                        );
+                        pkg.pkg_fail_reason = Some(format!("\"{}\"", reason));
                         skip_reasons.insert(
                             pkg.pkgname.clone(),
-                            SkipReason::PkgFailReason(reason),
+                            SkipReason::UnresolvedDependency(pattern),
                         );
                     }
                 }
             }
+            // Restore all_depends for output formatting
+            pkg.all_depends = Some(all_deps);
         }
 
         /*
@@ -1142,15 +1176,17 @@ impl Scan {
 
         for (pkgname, index) in std::mem::take(&mut self.resolved) {
             let reason = skip_reasons.remove(&pkgname);
-            all_ordered.push((index.clone(), reason.clone()));
             if let Some(r) = reason {
+                // Skipped: extract metadata, then move index to all_ordered
                 skipped.push(SkippedPackage {
                     pkgname: index.pkgname.clone(),
                     pkgpath: index.pkg_location.clone(),
-                    reason: r,
-                    index: Some(index),
+                    reason: r.clone(),
                 });
+                all_ordered.push((index, Some(r)));
             } else {
+                // Buildable: clone for all_ordered, move to buildable
+                all_ordered.push((index.clone(), None));
                 buildable.insert(pkgname, index);
             }
         }
@@ -1199,16 +1235,13 @@ impl Scan {
             })
             .collect();
 
-        let result =
-            ScanResult { buildable, skipped, scan_failed, all_ordered };
-
-        // Check for unresolved dependency errors (only in strict_scan mode)
-        if !errors.is_empty() {
-            for err in &errors {
-                error!(error = %err, "Unresolved dependency");
-            }
-            bail!("Unresolved dependencies:\n  {}", errors.join("\n  "));
+        // Log errors but don't bail - let callers decide how to handle them
+        for err in &errors {
+            error!(error = %err, "Unresolved dependency");
         }
+
+        let result =
+            ScanResult { buildable, skipped, scan_failed, all_ordered, errors };
 
         if let Some(err) = cycle_error {
             bail!(err);

@@ -138,6 +138,14 @@ impl BuildRunner {
         println!("Resolving dependencies...");
         let result = scan.resolve(&self.db)?;
 
+        // Check for unresolved dependency errors in strict_scan mode
+        if self.config.strict_scan() && !result.errors.is_empty() {
+            bail!(
+                "Unresolved dependencies:\n  {}",
+                result.errors.join("\n  ")
+            );
+        }
+
         Ok(result)
     }
 
@@ -220,6 +228,12 @@ impl BuildRunner {
                 }
                 SkipReason::PkgFailReason(r) => {
                     format!("PKG_FAIL_REASON: {}", r)
+                }
+                SkipReason::UnresolvedDependency(pattern) => {
+                    format!(
+                        "PKG_FAIL_REASON: could not resolve dependency \"{}\"",
+                        pattern
+                    )
                 }
             };
             summary.results.push(build::BuildResult {
@@ -639,6 +653,14 @@ fn main() -> Result<()> {
             scan.init_from_db(&db)?;
 
             let result = scan.resolve(&db)?;
+
+            // Print unresolved dependency errors
+            if !result.errors.is_empty() {
+                eprintln!(
+                    "Unresolved dependencies:\n  {}",
+                    result.errors.join("\n  ")
+                );
+            }
 
             // Build presolve output in original order
             let mut out = String::new();
