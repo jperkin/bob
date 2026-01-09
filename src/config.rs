@@ -138,12 +138,14 @@
 //! | `actions` | table | yes | List of actions to perform during sandbox setup. See the [`action`](crate::action) module for details. |
 
 use crate::action::Action;
+use crate::sandbox::Sandbox;
 use crate::scan::ResolvedPackage;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use mlua::{Lua, RegistryKey, Result as LuaResult, Table, Value};
 use pkgsrc::PkgPath;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 /// Holds the Lua state for evaluating env functions.
@@ -360,6 +362,8 @@ pub struct Config {
     filename: PathBuf,
     verbose: bool,
     lua_env: LuaEnv,
+    /// Variables retrieved from pkgsrc's mk.conf via bmake.
+    pkgsrc_vars: HashMap<String, String>,
 }
 
 /// Parsed configuration file contents.
@@ -550,7 +554,13 @@ impl Config {
             false
         };
 
-        Ok(Config { file, filename, verbose, lua_env })
+        Ok(Config {
+            file,
+            filename,
+            verbose,
+            lua_env,
+            pkgsrc_vars: HashMap::new(),
+        })
     }
 
     pub fn build_threads(&self) -> usize {
@@ -692,6 +702,9 @@ impl Config {
                 format!("{}", bootstrap.display()),
             ));
         }
+        if let Some(pkg_dbdir) = self.pkg_dbdir() {
+            envs.push(("bob_pkg_dbdir".to_string(), pkg_dbdir.to_string()));
+        }
         envs
     }
 
@@ -703,6 +716,69 @@ impl Config {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
+    }
+
+    /// Get configuration values from pkgsrc's mk.conf.
+    ///
+    /// This queries bmake for variables that may be set in the user's mk.conf,
+    /// ensuring bob uses the same values as pkgsrc. Values are stored in
+    /// `pkgsrc_vars` and can be retrieved with `pkgsrc_var()`.
+    ///
+    /// Must be called after sandbox 0 is created if sandboxes are enabled,
+    /// since bmake may only exist inside the sandbox.
+    pub fn get_vars_from_pkgsrc(&mut self, sandbox: &Sandbox) -> Result<()> {
+        const VARNAMES: &[&str] =
+            &["PACKAGES", "PKG_DBDIR", "PKG_TOOLS_BIN", "PREFIX"];
+
+        let varnames_arg = VARNAMES.join(" ");
+        let script = format!(
+            "cd {}/pkgtools/pkg_install && {} show-vars VARNAMES=\"{}\"",
+            self.pkgsrc().display(),
+            self.make().display(),
+            varnames_arg
+        );
+
+        let mut cmd = sandbox.command(0, Path::new("/bin/sh"));
+        cmd.env_clear();
+        cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/usr/pkg/bin");
+        cmd.args(["-c", &script]);
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        let output =
+            cmd.output().context("Failed to execute bmake show-vars")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("Failed to query pkgsrc variables: {}", stderr.trim());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for (varname, value) in VARNAMES.iter().zip(stdout.lines()) {
+            self.pkgsrc_vars.insert((*varname).to_string(), value.to_string());
+        }
+
+        if let Some(packages) = self.pkgsrc_vars.get("PACKAGES") {
+            self.file.pkgsrc.packages = Some(PathBuf::from(packages));
+        }
+        if let Some(pkgtools) = self.pkgsrc_vars.get("PKG_TOOLS_BIN") {
+            self.file.pkgsrc.pkgtools = Some(PathBuf::from(pkgtools));
+        }
+        if let Some(prefix) = self.pkgsrc_vars.get("PREFIX") {
+            self.file.pkgsrc.prefix = Some(PathBuf::from(prefix));
+        }
+
+        Ok(())
+    }
+
+    /// Get a variable value retrieved from pkgsrc.
+    pub fn pkgsrc_var(&self, name: &str) -> Option<&str> {
+        self.pkgsrc_vars.get(name).map(|s| s.as_str())
+    }
+
+    /// Get PKG_DBDIR from pkgsrc.
+    pub fn pkg_dbdir(&self) -> Option<&str> {
+        self.pkgsrc_var("PKG_DBDIR")
     }
 
     /// Validate the configuration, checking that required paths and files exist.

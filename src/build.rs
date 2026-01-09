@@ -763,13 +763,18 @@ impl<'a> PkgBuilder<'a> {
     ) -> anyhow::Result<ExitStatus> {
         let pkgtools =
             self.config.pkgtools().context("pkgsrc.pkgtools not configured")?;
+        let pkg_dbdir =
+            self.config.pkg_dbdir().context("PKG_DBDIR not configured")?;
         let pkg_add = pkgtools.join("pkg_add");
         let pkg_path_value = pkg_path.to_string_lossy().to_string();
         let extra_envs = [("PKG_PATH", pkg_path_value.as_str())];
 
+        let mut args = vec!["-K", pkg_dbdir];
+        args.extend(packages.iter().copied());
+
         self.run_command_logged_with_env(
             &pkg_add,
-            packages,
+            &args,
             RunAs::Root,
             logfile,
             &extra_envs,
@@ -780,12 +785,14 @@ impl<'a> PkgBuilder<'a> {
     fn pkg_add(&self, pkgfile: &str) -> anyhow::Result<bool> {
         let pkgtools =
             self.config.pkgtools().context("pkgsrc.pkgtools not configured")?;
+        let pkg_dbdir =
+            self.config.pkg_dbdir().context("PKG_DBDIR not configured")?;
         let pkg_add = pkgtools.join("pkg_add");
         let logfile = self.logdir.join("package.log");
 
         let status = self.run_command_logged(
             &pkg_add,
-            &[pkgfile],
+            &["-K", pkg_dbdir, pkgfile],
             RunAs::Root,
             &logfile,
         )?;
@@ -797,12 +804,14 @@ impl<'a> PkgBuilder<'a> {
     fn pkg_delete(&self, pkgname: &str) -> anyhow::Result<bool> {
         let pkgtools =
             self.config.pkgtools().context("pkgsrc.pkgtools not configured")?;
+        let pkg_dbdir =
+            self.config.pkg_dbdir().context("PKG_DBDIR not configured")?;
         let pkg_delete = pkgtools.join("pkg_delete");
         let logfile = self.logdir.join("deinstall.log");
 
         let status = self.run_command_logged(
             &pkg_delete,
-            &[pkgname],
+            &["-K", pkg_dbdir, pkgname],
             RunAs::Root,
             &logfile,
         )?;

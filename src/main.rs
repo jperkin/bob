@@ -48,10 +48,18 @@ impl BuildRunner {
         verbose: bool,
         for_build: bool,
     ) -> Result<Self> {
-        let config = Config::load(config_path, verbose)?;
+        let mut config = Config::load(config_path, verbose)?;
         let logs_dir = config.logdir().join("bob");
 
         logging::init(&logs_dir, config.verbose())?;
+
+        // Sync config from pkgsrc mk.conf before validation.
+        // Create sandbox 0 first if needed, since bmake may only exist there.
+        let sandbox = Sandbox::new(&config);
+        if sandbox.enabled() {
+            sandbox.create(0)?;
+        }
+        config.get_vars_from_pkgsrc(&sandbox)?;
 
         if let Err(errors) = config.validate() {
             eprintln!("Configuration errors:");

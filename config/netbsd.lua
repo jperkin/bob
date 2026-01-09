@@ -15,13 +15,10 @@ pkgsrc = {
     basedir = "/usr/pkgsrc",
     logdir = initdir .. "/logs",
     make = "/usr/bin/make",
-    packages = initdir .. "/packages",
-    pkgtools = "/usr/sbin",
     pkgpaths = {
         "mail/mutt",
         "sysutils/coreutils",
     },
-    prefix = "/usr/pkg",
     tar = "/bin/tar",
 
     -- It is strongly recommended to set up an unprivileged user to perform
@@ -43,18 +40,11 @@ pkgsrc = {
     -- on a per-package basis.
     env = function(pkg)
         local env = {}
-        env.DISTDIR = initdir .. "/distfiles"
         env.MAKE_JOBS = 2
-        env.WRKOBJDIR = "/tmp/bob-work"
 
         -- Set MAKE_JOBS higher for lang/rust builds
         -- if pkg.pkgpath == "lang/rust" then
         --     env.MAKE_JOBS = "8"
-        -- end
-
-        -- Use disk-based WRKOBJDIR for packages that depend on Go
-        -- if pkg.scan_depends:match("/lang/go/") then
-        --     env.WRKOBJDIR = "/home/builder/build-disk"
         -- end
 
         return env
@@ -108,7 +98,9 @@ sandboxes = {
         { action = "mount", fs = "null", dir = "/usr/sbin", opts = "-o ro" },
         { action = "mount", fs = "null", dir = "/var/mail", opts = "-o ro" },
 
-        { action = "mount", fs = "null", dir = pkgsrc.basedir, opts = "-o ro" },
+        -- It is recommended to mount pkgsrc read-only, but you will first need
+        -- to configure DISTDIR, PACKAGES, and WRKOBJDIR to other directories.
+        { action = "mount", fs = "null", dir = pkgsrc.basedir },
 
         -- Directory where this config and support scripts live.
         { action = "mount", fs = "null", dir = initdir },
