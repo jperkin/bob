@@ -80,37 +80,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 /// Build sandbox manager.
-///
-/// Provides methods to create, execute commands in, and destroy sandboxes.
-/// The sandbox implementation is platform-specific but the interface is uniform.
-///
-/// # Example
-///
-/// ```no_run
-/// # use bob::{Config, Sandbox};
-/// # use std::path::Path;
-/// # fn example() -> anyhow::Result<()> {
-/// let config = Config::load(None, false)?;
-/// let sandbox = Sandbox::new(&config);
-///
-/// if sandbox.enabled() {
-///     sandbox.create(0)?;  // Create sandbox 0
-///
-///     // Execute a script in the sandbox
-///     let child = sandbox.execute(
-///         0,
-///         Path::new("/path/to/script"),
-///         vec![("KEY".to_string(), "value".to_string())],
-///         None,
-///         None,
-///     )?;
-///     let output = child.wait_with_output()?;
-///
-///     sandbox.destroy(0)?;
-/// }
-/// # Ok(())
-/// # }
-/// ```
 #[derive(Clone, Debug, Default)]
 pub struct Sandbox {
     config: Config,

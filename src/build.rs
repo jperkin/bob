@@ -41,32 +41,8 @@
 //! - `package` - Create binary package
 //! - `deinstall` - Test package removal (non-bootstrap only)
 //! - `clean` - Clean up build artifacts
-//!
-//! # Example
-//!
-//! ```no_run
-//! use bob::{Build, BuildOptions, Config, Database, RunContext, Scan};
-//! use std::sync::Arc;
-//! use std::sync::atomic::AtomicBool;
-//!
-//! let config = Config::load(None, false)?;
-//! let db_path = config.logdir().join("bob").join("bob.db");
-//! let db = Database::open(&db_path)?;
-//! let mut scan = Scan::new(&config);
-//! // Add packages...
-//! let ctx = RunContext::new(Arc::new(AtomicBool::new(false)));
-//! scan.start(&ctx, &db)?;
-//! let result = scan.resolve(&db)?;
-//!
-//! let mut build = Build::new(&config, result.buildable, BuildOptions::default());
-//! let summary = build.start(&ctx, &db)?;
-//!
-//! println!("Built {} packages", summary.success_count());
-//! # Ok::<(), anyhow::Error>(())
-//! ```
 
-use crate::scan::ResolvedIndex;
-use crate::scan::ScanFailure;
+use crate::scan::{ResolvedPackage, SkipReason, SkippedCounts};
 use crate::tui::{MultiProgress, format_duration};
 use crate::{Config, RunContext, Sandbox};
 use anyhow::{Context, bail};
@@ -137,7 +113,7 @@ struct PkgBuilder<'a> {
     config: &'a Config,
     sandbox: &'a Sandbox,
     sandbox_id: usize,
-    pkginfo: &'a ResolvedIndex,
+    pkginfo: &'a ResolvedPackage,
     logdir: PathBuf,
     build_user: Option<String>,
     envs: Vec<(String, String)>,
@@ -150,12 +126,12 @@ impl<'a> PkgBuilder<'a> {
         config: &'a Config,
         sandbox: &'a Sandbox,
         sandbox_id: usize,
-        pkginfo: &'a ResolvedIndex,
+        pkginfo: &'a ResolvedPackage,
         envs: Vec<(String, String)>,
         output_tx: Option<Sender<ChannelCommand>>,
         options: &'a BuildOptions,
     ) -> Self {
-        let logdir = config.logdir().join(pkginfo.pkgname.pkgname());
+        let logdir = config.logdir().join(pkginfo.index.pkgname.pkgname());
         let build_user = config.build_user().map(|s| s.to_string());
         Self {
             config,
@@ -203,7 +179,7 @@ impl<'a> PkgBuilder<'a> {
         let pkgtools =
             self.config.pkgtools().context("pkgsrc.pkgtools not configured")?;
 
-        let pkgname = self.pkginfo.pkgname.pkgname();
+        let pkgname = self.pkginfo.index.pkgname.pkgname();
         let pkgfile = packages.join("All").join(format!("{}.tgz", pkgname));
 
         // Check if package file exists
@@ -297,7 +273,7 @@ impl<'a> PkgBuilder<'a> {
             .filter(|l| !l.is_empty())
             .collect();
         let expected_deps: HashSet<&str> =
-            self.pkginfo.depends.iter().map(|d| d.pkgname()).collect();
+            self.pkginfo.depends().iter().map(|d| d.pkgname()).collect();
 
         // If dependency list has changed in any way, rebuild
         if recorded_deps != expected_deps {
@@ -345,10 +321,8 @@ impl<'a> PkgBuilder<'a> {
         &self,
         callback: &mut C,
     ) -> anyhow::Result<PkgBuildResult> {
-        let pkgname = self.pkginfo.pkgname.pkgname();
-        let Some(pkgpath) = &self.pkginfo.pkg_location else {
-            bail!("Could not get PKGPATH for {}", pkgname);
-        };
+        let pkgname_str = self.pkginfo.pkgname().pkgname();
+        let pkgpath = &self.pkginfo.pkgpath;
 
         // Check if package is already up-to-date (skip check if force rebuild)
         if !self.options.force_rebuild && self.check_up_to_date()? {
@@ -391,7 +365,7 @@ impl<'a> PkgBuilder<'a> {
         )?;
 
         // Install dependencies
-        if !self.pkginfo.depends.is_empty() {
+        if !self.pkginfo.depends().is_empty() {
             callback.stage(Stage::Depends.as_str());
             let _ = self.write_stage(Stage::Depends);
             if !self.install_dependencies()? {
@@ -483,7 +457,7 @@ impl<'a> PkgBuilder<'a> {
         let pkgfile = self.get_make_var(&pkgdir, "STAGE_PKGFILE")?;
 
         // Test package install (unless bootstrap package)
-        let is_bootstrap = self.pkginfo.bootstrap_pkg.as_deref() == Some("yes");
+        let is_bootstrap = self.pkginfo.bootstrap_pkg() == Some("yes");
         if !is_bootstrap {
             if !self.pkg_add(&pkgfile)? {
                 return Ok(PkgBuildResult::Failed);
@@ -492,7 +466,7 @@ impl<'a> PkgBuilder<'a> {
             // Test package deinstall
             callback.stage(Stage::Deinstall.as_str());
             let _ = self.write_stage(Stage::Deinstall);
-            if !self.pkg_delete(pkgname)? {
+            if !self.pkg_delete(pkgname_str)? {
                 return Ok(PkgBuildResult::Failed);
             }
         }
@@ -764,7 +738,7 @@ impl<'a> PkgBuilder<'a> {
     /// Install package dependencies.
     fn install_dependencies(&self) -> anyhow::Result<bool> {
         let deps: Vec<String> =
-            self.pkginfo.depends.iter().map(|d| d.to_string()).collect();
+            self.pkginfo.depends().iter().map(|d| d.to_string()).collect();
 
         let packages =
             self.config.packages().context("pkgsrc.packages not configured")?;
@@ -843,8 +817,7 @@ impl<'a> PkgBuilder<'a> {
         pkgdir: &Path,
         logfile: &Path,
     ) -> anyhow::Result<bool> {
-        let usergroup_phase =
-            self.pkginfo.usergroup_phase.as_deref().unwrap_or("");
+        let usergroup_phase = self.pkginfo.usergroup_phase().unwrap_or("");
 
         let should_run = match stage {
             Stage::Configure => usergroup_phase.ends_with("configure"),
@@ -886,7 +859,7 @@ impl<'a> PkgBuilder<'a> {
             owned_args.push("BATCH=1".to_string());
             owned_args.push("DEPENDS_TARGET=/nonexistent".to_string());
 
-            if let Some(ref multi_version) = self.pkginfo.multi_version {
+            if let Some(multi_version) = self.pkginfo.multi_version() {
                 for flag in multi_version {
                     owned_args.push(flag.clone());
                 }
@@ -1004,19 +977,10 @@ pub enum BuildOutcome {
     /// Package did not need to be built - we already have a binary package
     /// for this revision.
     UpToDate,
-    /// Package is marked with PKG_SKIP_REASON or PKG_FAIL_REASON so cannot
-    /// be built.
+    /// Package was not built due to a scan-phase failure.
     ///
-    /// The string contains the skip/fail reason.
-    PreFailed(String),
-    /// Package depends on a different package that has Failed.
-    ///
-    /// The string contains the name of the failed dependency.
-    IndirectFailed(String),
-    /// Package depends on a different package that has PreFailed.
-    ///
-    /// The string contains the name of the pre-failed dependency.
-    IndirectPreFailed(String),
+    /// Contains the reason for skipping.
+    Skipped(SkipReason),
 }
 
 /// Result of building a single package.
@@ -1039,87 +1003,60 @@ pub struct BuildResult {
     pub log_dir: Option<PathBuf>,
 }
 
+/// Counts of build results by outcome category.
+#[derive(Clone, Debug, Default)]
+pub struct BuildCounts {
+    /// Packages that built successfully.
+    pub success: usize,
+    /// Packages that failed to build.
+    pub failed: usize,
+    /// Packages already up-to-date (binary package exists).
+    pub up_to_date: usize,
+    /// Packages that were skipped.
+    pub skipped: SkippedCounts,
+    /// Packages that failed to scan.
+    pub scanfail: usize,
+}
+
 /// Summary of an entire build run.
-///
-/// Contains timing information and results for all packages.
-///
-/// # Example
-///
-/// ```no_run
-/// # use bob::BuildSummary;
-/// # fn example(summary: &BuildSummary) {
-/// println!("Succeeded: {}", summary.success_count());
-/// println!("Failed: {}", summary.failed_count());
-/// println!("Up-to-date: {}", summary.up_to_date_count());
-/// println!("Duration: {:?}", summary.duration);
-///
-/// for result in summary.failed() {
-///     println!("  {} failed", result.pkgname.pkgname());
-/// }
-/// # }
-/// ```
 #[derive(Clone, Debug)]
 pub struct BuildSummary {
     /// Total duration of the build run.
     pub duration: Duration,
     /// Results for each package.
     pub results: Vec<BuildResult>,
-    /// Packages that failed to scan (bmake pbulk-index failed).
-    pub scan_failed: Vec<ScanFailure>,
+    /// Packages that failed to scan (pkgpath, error message).
+    pub scanfail: Vec<(PkgPath, String)>,
 }
 
 impl BuildSummary {
-    /// Count of successfully built packages.
-    pub fn success_count(&self) -> usize {
-        self.results
-            .iter()
-            .filter(|r| matches!(r.outcome, BuildOutcome::Success))
-            .count()
-    }
-
-    /// Count of failed packages (direct build failures only).
-    pub fn failed_count(&self) -> usize {
-        self.results
-            .iter()
-            .filter(|r| matches!(r.outcome, BuildOutcome::Failed(_)))
-            .count()
-    }
-
-    /// Count of up-to-date packages (already have binary package).
-    pub fn up_to_date_count(&self) -> usize {
-        self.results
-            .iter()
-            .filter(|r| matches!(r.outcome, BuildOutcome::UpToDate))
-            .count()
-    }
-
-    /// Count of pre-failed packages (PKG_SKIP_REASON/PKG_FAIL_REASON).
-    pub fn prefailed_count(&self) -> usize {
-        self.results
-            .iter()
-            .filter(|r| matches!(r.outcome, BuildOutcome::PreFailed(_)))
-            .count()
-    }
-
-    /// Count of indirect failed packages (depend on Failed).
-    pub fn indirect_failed_count(&self) -> usize {
-        self.results
-            .iter()
-            .filter(|r| matches!(r.outcome, BuildOutcome::IndirectFailed(_)))
-            .count()
-    }
-
-    /// Count of indirect pre-failed packages (depend on PreFailed).
-    pub fn indirect_prefailed_count(&self) -> usize {
-        self.results
-            .iter()
-            .filter(|r| matches!(r.outcome, BuildOutcome::IndirectPreFailed(_)))
-            .count()
-    }
-
-    /// Count of packages that failed to scan.
-    pub fn scan_failed_count(&self) -> usize {
-        self.scan_failed.len()
+    /// Compute all outcome counts in a single pass.
+    pub fn counts(&self) -> BuildCounts {
+        let mut c =
+            BuildCounts { scanfail: self.scanfail.len(), ..Default::default() };
+        for r in &self.results {
+            match &r.outcome {
+                BuildOutcome::Success => c.success += 1,
+                BuildOutcome::Failed(_) => c.failed += 1,
+                BuildOutcome::UpToDate => c.up_to_date += 1,
+                BuildOutcome::Skipped(SkipReason::PkgSkip(_)) => {
+                    c.skipped.pkg_skip += 1
+                }
+                BuildOutcome::Skipped(SkipReason::PkgFail(_)) => {
+                    c.skipped.pkg_fail += 1
+                }
+                BuildOutcome::Skipped(SkipReason::UnresolvedDep(_)) => {
+                    c.skipped.unresolved += 1
+                }
+                BuildOutcome::Skipped(SkipReason::IndirectFail(_)) => {
+                    c.skipped.indirect_fail += 1
+                }
+                BuildOutcome::Skipped(SkipReason::IndirectSkip(_)) => {
+                    c.skipped.indirect_skip += 1
+                }
+            }
+        }
+        c
     }
 
     /// Get all failed results (direct build failures only).
@@ -1150,7 +1087,7 @@ impl BuildSummary {
     pub fn prefailed(&self) -> Vec<&BuildResult> {
         self.results
             .iter()
-            .filter(|r| matches!(r.outcome, BuildOutcome::PreFailed(_)))
+            .filter(|r| matches!(&r.outcome, BuildOutcome::Skipped(s) if s.is_direct()))
             .collect()
     }
 
@@ -1158,7 +1095,12 @@ impl BuildSummary {
     pub fn indirect_failed(&self) -> Vec<&BuildResult> {
         self.results
             .iter()
-            .filter(|r| matches!(r.outcome, BuildOutcome::IndirectFailed(_)))
+            .filter(|r| {
+                matches!(
+                    r.outcome,
+                    BuildOutcome::Skipped(SkipReason::IndirectFail(_))
+                )
+            })
             .collect()
     }
 
@@ -1166,7 +1108,20 @@ impl BuildSummary {
     pub fn indirect_prefailed(&self) -> Vec<&BuildResult> {
         self.results
             .iter()
-            .filter(|r| matches!(r.outcome, BuildOutcome::IndirectPreFailed(_)))
+            .filter(|r| {
+                matches!(
+                    r.outcome,
+                    BuildOutcome::Skipped(SkipReason::IndirectSkip(_))
+                )
+            })
+            .collect()
+    }
+
+    /// Get all skipped results.
+    pub fn skipped(&self) -> Vec<&BuildResult> {
+        self.results
+            .iter()
+            .filter(|r| matches!(r.outcome, BuildOutcome::Skipped(_)))
             .collect()
     }
 }
@@ -1185,7 +1140,7 @@ pub struct Build {
     /// [`Sandbox`] configuration.
     sandbox: Sandbox,
     /// List of packages to build, as input from Scan::resolve.
-    scanpkgs: IndexMap<PkgName, ResolvedIndex>,
+    scanpkgs: IndexMap<PkgName, ResolvedPackage>,
     /// Cached build results from previous run.
     cached: IndexMap<PkgName, BuildResult>,
     /// Build options.
@@ -1196,7 +1151,7 @@ pub struct Build {
 struct PackageBuild {
     id: usize,
     config: Config,
-    pkginfo: ResolvedIndex,
+    pkginfo: ResolvedPackage,
     sandbox: Sandbox,
     options: BuildOptions,
 }
@@ -1306,16 +1261,13 @@ impl PackageBuild {
         &self,
         status_tx: &Sender<ChannelCommand>,
     ) -> anyhow::Result<PackageBuildResult> {
-        let pkgname = self.pkginfo.pkgname.pkgname();
+        let pkgname = self.pkginfo.index.pkgname.pkgname();
         info!(pkgname = %pkgname,
             sandbox_id = self.id,
             "Starting package build"
         );
 
-        let Some(pkgpath) = &self.pkginfo.pkg_location else {
-            error!(pkgname = %pkgname, "Could not get PKGPATH for package");
-            bail!("Could not get PKGPATH for {}", pkgname);
-        };
+        let pkgpath = &self.pkginfo.pkgpath;
 
         let logdir = self.config.logdir();
 
@@ -1716,7 +1668,7 @@ enum BuildStatus {
 
 #[derive(Clone, Debug)]
 struct BuildJobs {
-    scanpkgs: IndexMap<PkgName, ResolvedIndex>,
+    scanpkgs: IndexMap<PkgName, ResolvedPackage>,
     incoming: HashMap<PkgName, HashSet<PkgName>>,
     /// Reverse dependency map: package -> packages that depend on it.
     /// Precomputed for O(1) lookup in mark_failure instead of O(n) scan.
@@ -1776,7 +1728,7 @@ impl BuildJobs {
         let log_dir = Some(self.logdir.join(pkgname.pkgname()));
         self.results.push(BuildResult {
             pkgname: pkgname.clone(),
-            pkgpath: scanpkg.and_then(|s| s.pkg_location.clone()),
+            pkgpath: scanpkg.map(|s| s.pkgpath.clone()),
             outcome,
             duration,
             log_dir,
@@ -1833,13 +1785,16 @@ impl BuildJobs {
                 (BuildOutcome::Failed("Build failed".to_string()), duration)
             } else {
                 (
-                    BuildOutcome::IndirectFailed(pkgname.pkgname().to_string()),
+                    BuildOutcome::Skipped(SkipReason::IndirectFail(format!(
+                        "dependency {} failed",
+                        pkgname.pkgname()
+                    ))),
                     Duration::ZERO,
                 )
             };
             self.results.push(BuildResult {
                 pkgname: pkg,
-                pkgpath: scanpkg.and_then(|s| s.pkg_location.clone()),
+                pkgpath: scanpkg.map(|s| s.pkgpath.clone()),
                 outcome,
                 duration: dur,
                 log_dir,
@@ -1881,13 +1836,16 @@ impl BuildJobs {
             let scanpkg = self.scanpkgs.get(&pkg);
             let log_dir = Some(self.logdir.join(pkg.pkgname()));
             let outcome = if is_original(&pkg) {
-                BuildOutcome::PreFailed(reason.clone())
+                BuildOutcome::Skipped(SkipReason::PkgFail(reason.clone()))
             } else {
-                BuildOutcome::IndirectPreFailed(pkgname.pkgname().to_string())
+                BuildOutcome::Skipped(SkipReason::IndirectSkip(format!(
+                    "dependency {} skipped",
+                    pkgname.pkgname()
+                )))
             };
             self.results.push(BuildResult {
                 pkgname: pkg,
-                pkgpath: scanpkg.and_then(|s| s.pkg_location.clone()),
+                pkgpath: scanpkg.map(|s| s.pkgpath.clone()),
                 outcome,
                 duration: Duration::ZERO,
                 log_dir,
@@ -1939,7 +1897,7 @@ impl BuildJobs {
 impl Build {
     pub fn new(
         config: &Config,
-        scanpkgs: IndexMap<PkgName, ResolvedIndex>,
+        scanpkgs: IndexMap<PkgName, ResolvedPackage>,
         options: BuildOptions,
     ) -> Build {
         let sandbox = Sandbox::new(config);
@@ -1952,9 +1910,9 @@ impl Build {
         );
         for (pkgname, index) in &scanpkgs {
             debug!(pkgname = %pkgname.pkgname(),
-                pkgpath = ?index.pkg_location,
-                depends_count = index.depends.len(),
-                depends = ?index.depends.iter().map(|d| d.pkgname()).collect::<Vec<_>>(),
+                pkgpath = ?index.pkgpath,
+                depends_count = index.depends().len(),
+                depends = ?index.depends().iter().map(|d| d.pkgname()).collect::<Vec<_>>(),
                 "Package in build queue"
             );
         }
@@ -2018,7 +1976,7 @@ impl Build {
             HashMap::new();
         for (pkgname, index) in &self.scanpkgs {
             let mut deps: HashSet<PkgName> = HashSet::new();
-            for dep in &index.depends {
+            for dep in index.depends() {
                 // Only track dependencies that are in our build queue.
                 // Dependencies outside scanpkgs are assumed to already be
                 // installed (from a previous build) or will cause the build
@@ -2062,10 +2020,7 @@ impl Build {
                     // Don't add to results - already in database
                     cached_count += 1;
                 }
-                BuildOutcome::Failed(_)
-                | BuildOutcome::PreFailed(_)
-                | BuildOutcome::IndirectFailed(_)
-                | BuildOutcome::IndirectPreFailed(_) => {
+                BuildOutcome::Failed(_) | BuildOutcome::Skipped(_) => {
                     // Failed package - remove from incoming, add to failed
                     incoming.remove(pkgname);
                     failed.insert(pkgname.clone());
@@ -2113,7 +2068,7 @@ impl Build {
             return Ok(BuildSummary {
                 duration: started.elapsed(),
                 results,
-                scan_failed: Vec::new(),
+                scanfail: Vec::new(),
             });
         }
 
@@ -2126,7 +2081,7 @@ impl Build {
         let get_weight = |pkg: &PkgName| -> usize {
             self.scanpkgs
                 .get(pkg)
-                .and_then(|idx| idx.pbulk_weight.as_ref())
+                .and_then(|idx| idx.pbulk_weight())
                 .and_then(|w| w.parse().ok())
                 .unwrap_or(100)
         };
@@ -2266,7 +2221,7 @@ impl Build {
                             continue;
                         }
                         ChannelCommand::JobData(pkg) => {
-                            let pkgname = pkg.pkginfo.pkgname.clone();
+                            let pkgname = pkg.pkginfo.index.pkgname.clone();
                             trace!(pkgname = %pkgname.pkgname(), worker = i, "Worker starting build");
                             let build_start = Instant::now();
                             let result = pkg.build(&manager_tx);
@@ -2624,7 +2579,7 @@ impl Build {
         let summary = BuildSummary {
             duration: started.elapsed(),
             results,
-            scan_failed: Vec::new(),
+            scanfail: Vec::new(),
         };
 
         if self.sandbox.enabled() {

@@ -138,7 +138,7 @@
 //! | `actions` | table | yes | List of actions to perform during sandbox setup. See the [`action`](crate::action) module for details. |
 
 use crate::action::Action;
-use crate::scan::ResolvedIndex;
+use crate::scan::ResolvedPackage;
 use anyhow::{Context, Result, anyhow};
 use mlua::{Lua, RegistryKey, Result as LuaResult, Table, Value};
 use pkgsrc::PkgPath;
@@ -172,7 +172,7 @@ impl LuaEnv {
     /// Returns a HashMap of VAR_NAME -> value.
     pub fn get_env(
         &self,
-        idx: &ResolvedIndex,
+        pkg: &ResolvedPackage,
     ) -> Result<HashMap<String, String>, String> {
         let Some(env_key) = &self.env_key else {
             return Ok(HashMap::new());
@@ -186,6 +186,8 @@ impl LuaEnv {
             .registry_value(env_key)
             .map_err(|e| format!("Failed to get env from registry: {}", e))?;
 
+        let idx = &pkg.index;
+
         let result_table: Table = match env_value {
             // If it's a function, call it with pkg info
             Value::Function(func) => {
@@ -198,13 +200,7 @@ impl LuaEnv {
                     .set("pkgname", idx.pkgname.to_string())
                     .map_err(|e| format!("Failed to set pkgname: {}", e))?;
                 pkg_table
-                    .set(
-                        "pkgpath",
-                        idx.pkg_location
-                            .as_ref()
-                            .map(|p| p.as_path().display().to_string())
-                            .unwrap_or_default(),
-                    )
+                    .set("pkgpath", pkg.pkgpath.as_path().display().to_string())
                     .map_err(|e| format!("Failed to set pkgpath: {}", e))?;
                 pkg_table
                     .set(
@@ -327,7 +323,7 @@ impl LuaEnv {
                 pkg_table
                     .set(
                         "depends",
-                        idx.depends
+                        pkg.depends()
                             .iter()
                             .map(|d| d.to_string())
                             .collect::<Vec<_>>()
@@ -358,20 +354,6 @@ impl LuaEnv {
 }
 
 /// Main configuration structure.
-///
-/// Load configuration using [`Config::load`], then access settings through
-/// the provided methods.
-///
-/// # Example
-///
-/// ```no_run
-/// use bob::Config;
-/// use std::path::Path;
-///
-/// let config = Config::load(Some(Path::new("/data/bob/config.lua")), false)?;
-/// println!("Building with {} threads", config.build_threads());
-/// # Ok::<(), anyhow::Error>(())
-/// ```
 #[derive(Clone, Debug, Default)]
 pub struct Config {
     file: ConfigFile,
@@ -668,9 +650,9 @@ impl Config {
     /// Get environment variables for a package from the Lua env function/table.
     pub fn get_pkg_env(
         &self,
-        idx: &ResolvedIndex,
+        pkg: &ResolvedPackage,
     ) -> Result<std::collections::HashMap<String, String>, String> {
-        self.lua_env.get_env(idx)
+        self.lua_env.get_env(pkg)
     }
 
     /// Return environment variables for script execution.

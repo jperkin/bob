@@ -31,6 +31,7 @@
 //! - `metadata` - Key-value store for flags and cached data
 
 use crate::build::{BuildOutcome, BuildResult};
+use crate::scan::SkipReason;
 use anyhow::{Context, Result};
 use pkgsrc::{PkgName, PkgPath, ScanIndex};
 use rusqlite::{Connection, params};
@@ -693,16 +694,6 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    /// Check if dependencies are resolved.
-    pub fn is_resolved(&self) -> Result<bool> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM resolved_depends",
-            [],
-            |row| row.get(0),
-        )?;
-        Ok(count > 0)
-    }
-
     /// Clear all resolved dependencies.
     pub fn clear_resolved_depends(&self) -> Result<()> {
         self.conn.execute("DELETE FROM resolved_depends", [])?;
@@ -1141,15 +1132,6 @@ impl Database {
         Ok(())
     }
 
-    /// Get the buildable package count.
-    pub fn get_buildable_count(&self) -> Result<i64> {
-        self.conn.query_row(
-            "SELECT COUNT(*) FROM packages WHERE skip_reason IS NULL AND fail_reason IS NULL",
-            [],
-            |row| row.get(0),
-        ).context("Failed to count buildable packages")
-    }
-
     // ========================================================================
     // CHANGE DETECTION
     // ========================================================================
@@ -1273,11 +1255,13 @@ fn build_outcome_to_db(
         BuildOutcome::Success => ("success", None),
         BuildOutcome::UpToDate => ("up_to_date", None),
         BuildOutcome::Failed(s) => ("failed", Some(s.clone())),
-        BuildOutcome::PreFailed(s) => ("pre_failed", Some(s.clone())),
-        BuildOutcome::IndirectFailed(s) => ("indirect_failed", Some(s.clone())),
-        BuildOutcome::IndirectPreFailed(s) => {
-            ("indirect_pre_failed", Some(s.clone()))
-        }
+        BuildOutcome::Skipped(reason) => match reason {
+            SkipReason::PkgSkip(s) => ("pkg_skip", Some(s.clone())),
+            SkipReason::PkgFail(s) => ("pkg_fail", Some(s.clone())),
+            SkipReason::IndirectSkip(s) => ("indirect_skip", Some(s.clone())),
+            SkipReason::IndirectFail(s) => ("indirect_fail", Some(s.clone())),
+            SkipReason::UnresolvedDep(s) => ("unresolved_dep", Some(s.clone())),
+        },
     }
 }
 
@@ -1287,13 +1271,26 @@ fn db_outcome_to_build(outcome: &str, detail: Option<String>) -> BuildOutcome {
         "success" => BuildOutcome::Success,
         "up_to_date" => BuildOutcome::UpToDate,
         "failed" => BuildOutcome::Failed(detail.unwrap_or_default()),
-        "pre_failed" => BuildOutcome::PreFailed(detail.unwrap_or_default()),
-        "indirect_failed" => {
-            BuildOutcome::IndirectFailed(detail.unwrap_or_default())
-        }
-        "indirect_pre_failed" => {
-            BuildOutcome::IndirectPreFailed(detail.unwrap_or_default())
-        }
+        "pkg_skip" => BuildOutcome::Skipped(SkipReason::PkgSkip(
+            detail.unwrap_or_default(),
+        )),
+        "pkg_fail" | "pre_failed" => BuildOutcome::Skipped(
+            SkipReason::PkgFail(detail.unwrap_or_default()),
+        ),
+        "indirect_skip" | "indirect_pre_failed" => BuildOutcome::Skipped(
+            SkipReason::IndirectSkip(detail.unwrap_or_default()),
+        ),
+        "indirect_fail" | "indirect_failed" => BuildOutcome::Skipped(
+            SkipReason::IndirectFail(detail.unwrap_or_default()),
+        ),
+        "unresolved_dep" => BuildOutcome::Skipped(SkipReason::UnresolvedDep(
+            detail.unwrap_or_default(),
+        )),
+        // Legacy: scan_fail was previously wrapped in Skipped, now treat as Failed
+        "scan_fail" => BuildOutcome::Failed(format!(
+            "Scan failed: {}",
+            detail.unwrap_or_default()
+        )),
         _ => BuildOutcome::Failed(format!("Unknown outcome: {}", outcome)),
     }
 }

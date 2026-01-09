@@ -23,12 +23,13 @@ use bob::db::Database;
 use bob::logging;
 use bob::report;
 use bob::sandbox::Sandbox;
-use bob::scan::{Scan, SkipReason};
+use bob::scan::{Scan, ScanResult};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::str;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tracing::error;
 
 /// Exit code when interrupted.  We do not know what exact signal this was.
 const EXIT_INTERRUPTED: i32 = 128 + libc::SIGINT;
@@ -84,7 +85,7 @@ impl BuildRunner {
     }
 
     /// Run the scan phase, returning the resolved scan result.
-    fn run_scan(&self, scan: &mut Scan) -> Result<bob::scan::ScanResult> {
+    fn run_scan(&self, scan: &mut Scan) -> Result<bob::scan::ScanSummary> {
         // For full tree scans with full_scan_complete, we might be able to
         // skip scanning entirely
         if scan.is_full_tree() && self.db.full_scan_complete() {
@@ -135,8 +136,9 @@ impl BuildRunner {
         let result = scan.resolve(&self.db)?;
 
         // Check for unresolved dependency errors in strict_scan mode
-        if self.config.strict_scan() && !result.errors.is_empty() {
-            bail!("Unresolved dependencies:\n  {}", result.errors.join("\n  "));
+        let errors: Vec<_> = result.errors().collect();
+        if self.config.strict_scan() && !errors.is_empty() {
+            bail!("Unresolved dependencies:\n  {}", errors.join("\n  "));
         }
 
         Ok(result)
@@ -145,14 +147,14 @@ impl BuildRunner {
     /// Run the build phase, returning the build summary.
     fn run_build(
         &self,
-        scan_result: bob::scan::ScanResult,
+        scan_result: bob::scan::ScanSummary,
     ) -> Result<build::BuildSummary> {
         self.run_build_with(scan_result, build::BuildOptions::default())
     }
 
     fn run_build_with(
         &self,
-        scan_result: bob::scan::ScanResult,
+        scan_result: bob::scan::ScanSummary,
         options: build::BuildOptions,
     ) -> Result<build::BuildSummary> {
         if self.config.packages().is_none() {
@@ -167,12 +169,15 @@ impl BuildRunner {
         if self.config.tar().is_none() {
             bail!("pkgsrc.tar must be set for build operations");
         }
-        if scan_result.buildable.is_empty() {
+        if scan_result.count_buildable() == 0 {
             bail!("No packages to build");
         }
 
-        let mut build =
-            Build::new(&self.config, scan_result.buildable.clone(), options);
+        let buildable: indexmap::IndexMap<_, _> = scan_result
+            .buildable()
+            .map(|p| (p.pkgname().clone(), p.clone()))
+            .collect();
+        let mut build = Build::new(&self.config, buildable, options);
 
         // Load cached build results from database
         build.load_cached_from_db(&self.db)?;
@@ -211,32 +216,29 @@ impl BuildRunner {
             );
         }
 
-        // Add pre-skipped packages from scan to summary
-        for pkg in scan_result.skipped {
-            let reason = match pkg.reason {
-                SkipReason::PkgSkipReason(r) => {
-                    format!("PKG_SKIP_REASON: {}", r)
+        // Add pre-skipped/failed/unresolved packages from scan to summary
+        for pkg in scan_result.packages.iter() {
+            match pkg {
+                ScanResult::Skipped { pkgpath, reason, index, .. } => {
+                    let Some(pkgname) = index.as_ref().map(|i| &i.pkgname)
+                    else {
+                        error!(pkgpath = %pkgpath, "Skipped package missing PKGNAME");
+                        continue;
+                    };
+                    summary.results.push(build::BuildResult {
+                        pkgname: pkgname.clone(),
+                        pkgpath: Some(pkgpath.clone()),
+                        outcome: build::BuildOutcome::Skipped(reason.clone()),
+                        duration: std::time::Duration::ZERO,
+                        log_dir: None,
+                    });
                 }
-                SkipReason::PkgFailReason(r) => {
-                    format!("PKG_FAIL_REASON: {}", r)
+                ScanResult::ScanFail { pkgpath, error } => {
+                    summary.scanfail.push((pkgpath.clone(), error.clone()));
                 }
-                SkipReason::UnresolvedDependency(pattern) => {
-                    format!(
-                        "PKG_FAIL_REASON: could not resolve dependency \"{}\"",
-                        pattern
-                    )
-                }
-            };
-            summary.results.push(build::BuildResult {
-                pkgname: pkg.pkgname,
-                pkgpath: pkg.pkgpath,
-                outcome: build::BuildOutcome::PreFailed(reason),
-                duration: std::time::Duration::ZERO,
-                log_dir: None,
-            });
+                ScanResult::Buildable(_) => {}
+            }
         }
-
-        summary.scan_failed = scan_result.scan_failed;
         Ok(summary)
     }
 
@@ -424,17 +426,21 @@ enum UtilCmd {
 }
 
 fn print_summary(summary: &build::BuildSummary) {
+    let c = summary.counts();
+    let s = &c.skipped;
     println!();
     println!("Build Summary");
     println!("=============");
-    println!("  Succeeded:          {}", summary.success_count());
-    println!("  Failed:             {}", summary.failed_count());
-    println!("  Up-to-date:         {}", summary.up_to_date_count());
-    println!("  Pre-failed:         {}", summary.prefailed_count());
-    println!("  Indirect failed:    {}", summary.indirect_failed_count());
-    println!("  Indirect prefailed: {}", summary.indirect_prefailed_count());
-    if summary.scan_failed_count() > 0 {
-        println!("  Scan failed:        {}", summary.scan_failed_count());
+    println!("  Succeeded:          {}", c.success);
+    println!("  Failed:             {}", c.failed);
+    println!("  Up-to-date:         {}", c.up_to_date);
+    println!("  Pkg skip:           {}", s.pkg_skip);
+    println!("  Pkg fail:           {}", s.pkg_fail);
+    println!("  Unresolved:         {}", s.unresolved);
+    println!("  Indirect skip:      {}", s.indirect_skip);
+    println!("  Indirect fail:      {}", s.indirect_fail);
+    if c.scanfail > 0 {
+        println!("  Scan failed:        {}", c.scanfail);
     }
     println!();
 }
@@ -605,8 +611,9 @@ fn main() -> Result<()> {
             // Build DAG output
             let mut edges: std::collections::BTreeSet<String> =
                 std::collections::BTreeSet::new();
-            for (pkgname, idx) in &result.buildable {
-                for dep in &idx.depends {
+            for pkg in result.buildable() {
+                let pkgname = pkg.pkgname();
+                for dep in pkg.depends() {
                     edges.insert(format!("{} -> {}", dep, pkgname));
                 }
             }
@@ -639,26 +646,30 @@ fn main() -> Result<()> {
             let result = scan.resolve(&db)?;
 
             // Print unresolved dependency errors
-            if !result.errors.is_empty() {
+            let errors: Vec<_> = result.errors().collect();
+            if !errors.is_empty() {
                 eprintln!(
                     "Unresolved dependencies:\n  {}",
-                    result.errors.join("\n  ")
+                    errors.join("\n  ")
                 );
             }
 
             // Build presolve output in original order
             let mut out = String::new();
-            for (idx, _reason) in &result.all_ordered {
-                out.push_str(&idx.to_string());
+            for pkg in &result.packages {
+                out.push_str(&pkg.to_string());
             }
 
             // Write to file or stdout
             if let Some(path) = output {
                 std::fs::write(&path, &out)?;
+                let c = result.counts();
+                let s = &c.skipped;
+                let skipped = s.pkg_skip + s.pkg_fail + s.unresolved;
                 println!(
                     "Wrote {} buildable, {} skipped to {}",
-                    result.buildable.len(),
-                    result.skipped.len(),
+                    c.buildable,
+                    skipped,
                     path.display()
                 );
             } else {
@@ -793,20 +804,8 @@ fn main() -> Result<()> {
                 }
             }
 
-            // Fast path: for full tree scans with everything cached, just get count
-            let buildable = if scan.is_full_tree()
-                && runner.db.full_scan_complete()
-                && runner.db.is_resolved()?
-            {
-                runner.db.get_buildable_count()? as usize
-            } else {
-                runner.run_scan(&mut scan)?.buildable.len()
-            };
-            let pkgpaths = runner.db.count_scan()?;
-            println!(
-                "Resolved {} buildable packages from {} package paths",
-                buildable, pkgpaths
-            );
+            let result = runner.run_scan(&mut scan)?;
+            println!("{result}");
         }
     };
 

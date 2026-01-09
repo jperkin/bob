@@ -54,3 +54,4 @@ mlua = { version = "0.10", features = ["lua54", "send"] }
 
 [dev-dependencies]
 tempfile = "3.24.0"
+zstd = "0.13"

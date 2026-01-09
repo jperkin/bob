@@ -23,19 +23,6 @@
 //! - Skipped packages with reasons
 //! - Successfully built packages with build times
 //!
-//! # Usage
-//!
-//! ```no_run
-//! use bob::{write_html_report, Database};
-//! use std::path::Path;
-//!
-//! # fn example(db: &Database) -> anyhow::Result<()> {
-//! let logdir = Path::new("/data/bob/logs");
-//! write_html_report(db, logdir, &logdir.join("report.html"))?;
-//! # Ok(())
-//! # }
-//! ```
-//!
 //! # Report Structure
 //!
 //! The generated HTML report is self-contained with embedded CSS and JavaScript.
@@ -62,8 +49,9 @@
 
 use crate::build::{BuildOutcome, BuildResult, BuildSummary};
 use crate::db::Database;
-use crate::scan::ScanFailure;
+use crate::scan::SkipReason;
 use anyhow::Result;
+use pkgsrc::PkgPath;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
@@ -114,7 +102,7 @@ pub fn write_html_report(
         results.push(BuildResult {
             pkgname: pkgsrc::PkgName::new(&pkgname),
             pkgpath: pkgpath.and_then(|p| pkgsrc::PkgPath::new(&p).ok()),
-            outcome: BuildOutcome::PreFailed(reason),
+            outcome: BuildOutcome::Skipped(SkipReason::PkgFail(reason)),
             duration: std::time::Duration::ZERO,
             log_dir: None,
         });
@@ -125,13 +113,15 @@ pub fn write_html_report(
         results.push(BuildResult {
             pkgname: pkgsrc::PkgName::new(&pkgname),
             pkgpath: pkgpath.and_then(|p| pkgsrc::PkgPath::new(&p).ok()),
-            outcome: BuildOutcome::IndirectFailed(failed_dep),
+            outcome: BuildOutcome::Skipped(SkipReason::IndirectFail(
+                failed_dep,
+            )),
             duration: std::time::Duration::ZERO,
             log_dir: None,
         });
     }
 
-    let summary = BuildSummary { duration, results, scan_failed: Vec::new() };
+    let summary = BuildSummary { duration, results, scanfail: Vec::new() };
 
     write_report_impl(&summary, &breaks_counts, logdir, path)
 }
@@ -157,10 +147,7 @@ fn write_report_impl(
         .filter(|r| {
             matches!(
                 r.outcome,
-                BuildOutcome::UpToDate
-                    | BuildOutcome::PreFailed(_)
-                    | BuildOutcome::IndirectFailed(_)
-                    | BuildOutcome::IndirectPreFailed(_)
+                BuildOutcome::UpToDate | BuildOutcome::Skipped(_)
             )
         })
         .collect();
@@ -228,8 +215,8 @@ fn write_report_impl(
     write_failed_section(&mut file, &failed_info, logdir)?;
 
     // Scan failed section (if any)
-    if !summary.scan_failed.is_empty() {
-        write_scan_failed_section(&mut file, &summary.scan_failed)?;
+    if !summary.scanfail.is_empty() {
+        write_scanfail_section(&mut file, &summary.scanfail)?;
     }
 
     // Skipped packages section
@@ -437,31 +424,35 @@ fn write_summary_stats(
         format!("{}s", seconds)
     };
 
+    let c = summary.counts();
+    let s = &c.skipped;
+    let skipped_count = c.up_to_date
+        + s.pkg_skip
+        + s.pkg_fail
+        + s.unresolved
+        + s.indirect_skip
+        + s.indirect_fail;
     writeln!(file, "<div class=\"summary\">")?;
     writeln!(
         file,
         "  <div class=\"stat success\"><h2>Succeeded</h2><div class=\"value\">{}</div></div>",
-        summary.success_count()
+        c.success
     )?;
     writeln!(
         file,
         "  <div class=\"stat failed\"><h2>Failed</h2><div class=\"value\">{}</div></div>",
-        summary.failed_count()
+        c.failed
     )?;
-    let skipped_count = summary.up_to_date_count()
-        + summary.prefailed_count()
-        + summary.indirect_failed_count()
-        + summary.indirect_prefailed_count();
     writeln!(
         file,
         "  <div class=\"stat skipped\"><h2>Skipped</h2><div class=\"value\">{}</div></div>",
         skipped_count
     )?;
-    if summary.scan_failed_count() > 0 {
+    if c.scanfail > 0 {
         writeln!(
             file,
             "  <div class=\"stat scan-failed\"><h2>Scan Failed</h2><div class=\"value\">{}</div></div>",
-            summary.scan_failed_count()
+            c.scanfail
         )?;
     }
     writeln!(
@@ -627,30 +618,8 @@ fn write_skipped_section(
         for result in skipped {
             let (status, reason) = match &result.outcome {
                 BuildOutcome::UpToDate => ("up-to-date", String::new()),
-                BuildOutcome::PreFailed(r) => ("pre-failed", r.clone()),
-                BuildOutcome::IndirectFailed(deps) => {
-                    let reason = if deps.contains(',') {
-                        format!(
-                            "Dependencies {} failed",
-                            deps.replace(',', ", ")
-                        )
-                    } else {
-                        format!("Dependency {} failed", deps)
-                    };
-                    ("indirect-failed", reason)
-                }
-                BuildOutcome::IndirectPreFailed(deps) => {
-                    let reason = if deps.contains(',') {
-                        format!(
-                            "Dependencies {} pre-failed",
-                            deps.replace(',', ", ")
-                        )
-                    } else {
-                        format!("Dependency {} pre-failed", deps)
-                    };
-                    ("indirect-prefailed", reason)
-                }
-                _ => ("", String::new()),
+                BuildOutcome::Skipped(r) => (r.status(), r.to_string()),
+                BuildOutcome::Success | BuildOutcome::Failed(_) => continue,
             };
             let pkgpath = result
                 .pkgpath
@@ -734,12 +703,12 @@ fn write_success_section(
     Ok(())
 }
 
-fn write_scan_failed_section(
+fn write_scanfail_section(
     file: &mut fs::File,
-    scan_failed: &[ScanFailure],
+    scanfail: &[(PkgPath, String)],
 ) -> Result<()> {
     writeln!(file, "<div class=\"section scan-failed\">")?;
-    writeln!(file, "  <h2>Scan Failed Packages ({})</h2>", scan_failed.len())?;
+    writeln!(file, "  <h2>Scan Failed Packages ({})</h2>", scanfail.len())?;
 
     writeln!(file, "  <table id=\"scan-failed-table\">")?;
     writeln!(file, "    <thead><tr>")?;
@@ -754,18 +723,17 @@ fn write_scan_failed_section(
     writeln!(file, "    </tr></thead>")?;
     writeln!(file, "    <tbody>")?;
 
-    for failure in scan_failed {
-        let pkgpath = failure.pkgpath.as_path().display().to_string();
+    for (pkgpath, error_msg) in scanfail {
+        let path_str = pkgpath.as_path().display().to_string();
         // Escape HTML in error message
-        let error = failure
-            .error
+        let error = error_msg
             .replace('&', "&amp;")
             .replace('<', "&lt;")
             .replace('>', "&gt;");
         writeln!(
             file,
             "    <tr><td>{}</td><td class=\"reason\">{}</td></tr>",
-            pkgpath, error
+            path_str, error
         )?;
     }
 
