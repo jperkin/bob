@@ -17,13 +17,10 @@ pkgsrc = {
     bootstrap = initdir .. "/bootstrap.tar.gz",
     logdir = initdir .. "/logs",
     make = "/usr/pkg/bin/bmake",
-    packages = initdir .. "/packages",
-    pkgtools = "/usr/pkg/sbin",
     pkgpaths = {
         "mail/mutt",
         "sysutils/coreutils",
     },
-    prefix = "/usr/pkg",
     tar = "/usr/bin/tar",
 
     -- It is strongly recommended to set up an unprivileged user to perform
@@ -36,18 +33,11 @@ pkgsrc = {
     -- on a per-package basis.
     env = function(pkg)
         local env = {}
-        env.DISTDIR = initdir .. "/distfiles"
         env.MAKE_JOBS = 2
-        env.WRKOBJDIR = "/tmp/bob-work"
 
         -- Set MAKE_JOBS higher for lang/rust builds
         -- if pkg.pkgpath == "lang/rust" then
         --     env.MAKE_JOBS = "8"
-        -- end
-
-        -- Use disk-based WRKOBJDIR for packages that depend on Go
-        -- if pkg.scan_depends:match("/lang/go/") then
-        --     env.WRKOBJDIR = "/home/builder/build-disk"
         -- end
 
         return env
