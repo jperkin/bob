@@ -109,6 +109,8 @@
 //! | `bob_logdir` | Path to the log directory. |
 //! | `bob_make` | Path to the bmake binary. |
 //! | `bob_packages` | Path to the packages directory. |
+//! | `bob_pkg_dbdir` | PKG_DBDIR from pkgsrc. |
+//! | `bob_pkg_refcount_dbdir` | PKG_REFCOUNT_DBDIR from pkgsrc. |
 //! | `bob_pkgtools` | Path to the pkg tools directory. |
 //! | `bob_pkgsrc` | Path to the pkgsrc source tree. |
 //! | `bob_prefix` | Installation prefix. |
@@ -704,6 +706,9 @@ impl Config {
         if let Some(pkg_dbdir) = self.pkg_dbdir() {
             envs.push(("bob_pkg_dbdir".to_string(), pkg_dbdir.to_string()));
         }
+        if let Some(v) = self.pkgsrc_var("PKG_REFCOUNT_DBDIR") {
+            envs.push(("bob_pkg_refcount_dbdir".to_string(), v.to_string()));
+        }
         envs
     }
 
@@ -727,7 +732,7 @@ impl Config {
     /// since bmake may only exist inside the sandbox.
     pub fn get_vars_from_pkgsrc(&mut self, sandbox: &Sandbox) -> Result<()> {
         const VARNAMES: &[&str] =
-            &["PACKAGES", "PKG_DBDIR", "PKG_TOOLS_BIN", "PREFIX"];
+            &["PACKAGES", "PKG_DBDIR", "PKG_REFCOUNT_DBDIR", "PKG_TOOLS_BIN", "PREFIX"];
 
         let varnames_arg = VARNAMES.join(" ");
         let script = format!(
