@@ -50,9 +50,6 @@
 //! | `basedir` | string | Absolute path to the pkgsrc source tree (e.g., `/data/pkgsrc`). |
 //! | `logdir` | string | Directory for all logs. Per-package build logs go in subdirectories. Failed builds leave logs here; successful builds clean up. |
 //! | `make` | string | Absolute path to the bmake binary (e.g., `/usr/pkg/bin/bmake`). |
-//! | `packages` | string | Directory where binary packages are stored after successful builds. |
-//! | `pkgtools` | string | Directory containing `pkg_add`, `pkg_delete`, and other pkg tools (e.g., `/usr/pkg/sbin`). |
-//! | `prefix` | string | Installation prefix for packages (e.g., `/usr/pkg`). Must match the bootstrap kit. |
 //!
 //! ## Optional Fields
 //!
@@ -405,10 +402,6 @@ pub struct Options {
 /// - `basedir`: Path to pkgsrc source tree
 /// - `logdir`: Directory for logs
 /// - `make`: Path to bmake binary
-/// - `packages`: Directory for built packages
-/// - `pkgtools`: Directory containing pkg_add/pkg_delete
-/// - `prefix`: Installation prefix (e.g., `/usr/pkg`)
-/// - `tar`: Path to tar binary
 ///
 /// # Optional Fields
 ///
@@ -417,6 +410,7 @@ pub struct Options {
 /// - `pkgpaths`: List of packages to build
 /// - `report_dir`: Directory for HTML reports
 /// - `save_wrkdir_patterns`: Glob patterns for files to save on build failure
+/// - `tar`: Path to tar binary (required when bootstrap is configured)
 #[derive(Clone, Debug, Default)]
 pub struct Pkgsrc {
     /// Path to pkgsrc source tree.
@@ -429,14 +423,8 @@ pub struct Pkgsrc {
     pub logdir: PathBuf,
     /// Path to bmake binary.
     pub make: PathBuf,
-    /// Directory for built packages (required for build, optional for scan).
-    pub packages: Option<PathBuf>,
-    /// Directory containing pkg_add/pkg_delete (required for build, optional for scan).
-    pub pkgtools: Option<PathBuf>,
     /// List of packages to build.
     pub pkgpaths: Option<Vec<PkgPath>>,
-    /// Installation prefix (required for build, optional for scan).
-    pub prefix: Option<PathBuf>,
     /// Directory for HTML reports.
     pub report_dir: Option<PathBuf>,
     /// Glob patterns for files to save from WRKDIR on failure.
@@ -625,16 +613,16 @@ impl Config {
         &self.file.pkgsrc.logdir
     }
 
-    pub fn packages(&self) -> Option<&PathBuf> {
-        self.file.pkgsrc.packages.as_ref()
+    pub fn packages(&self) -> Option<PathBuf> {
+        self.pkgsrc_var("PACKAGES").map(PathBuf::from)
     }
 
-    pub fn pkgtools(&self) -> Option<&PathBuf> {
-        self.file.pkgsrc.pkgtools.as_ref()
+    pub fn pkgtools(&self) -> Option<PathBuf> {
+        self.pkgsrc_var("PKG_TOOLS_BIN").map(PathBuf::from)
     }
 
-    pub fn prefix(&self) -> Option<&PathBuf> {
-        self.file.pkgsrc.prefix.as_ref()
+    pub fn prefix(&self) -> Option<PathBuf> {
+        self.pkgsrc_var("PREFIX").map(PathBuf::from)
     }
 
     #[allow(dead_code)]
@@ -674,22 +662,13 @@ impl Config {
             ("bob_pkgsrc".to_string(), format!("{}", self.pkgsrc().display())),
         ];
         if let Some(packages) = self.packages() {
-            envs.push((
-                "bob_packages".to_string(),
-                format!("{}", packages.display()),
-            ));
+            envs.push(("bob_packages".to_string(), packages.display().to_string()));
         }
         if let Some(pkgtools) = self.pkgtools() {
-            envs.push((
-                "bob_pkgtools".to_string(),
-                format!("{}", pkgtools.display()),
-            ));
+            envs.push(("bob_pkgtools".to_string(), pkgtools.display().to_string()));
         }
         if let Some(prefix) = self.prefix() {
-            envs.push((
-                "bob_prefix".to_string(),
-                format!("{}", prefix.display()),
-            ));
+            envs.push(("bob_prefix".to_string(), prefix.display().to_string()));
         }
         if let Some(tar) = self.tar() {
             envs.push(("bob_tar".to_string(), format!("{}", tar.display())));
@@ -760,16 +739,6 @@ impl Config {
         let stdout = String::from_utf8_lossy(&output.stdout);
         for (varname, value) in VARNAMES.iter().zip(stdout.lines()) {
             self.pkgsrc_vars.insert((*varname).to_string(), value.to_string());
-        }
-
-        if let Some(packages) = self.pkgsrc_vars.get("PACKAGES") {
-            self.file.pkgsrc.packages = Some(PathBuf::from(packages));
-        }
-        if let Some(pkgtools) = self.pkgsrc_vars.get("PKG_TOOLS_BIN") {
-            self.file.pkgsrc.pkgtools = Some(PathBuf::from(pkgtools));
-        }
-        if let Some(prefix) = self.pkgsrc_vars.get("PREFIX") {
-            self.file.pkgsrc.prefix = Some(PathBuf::from(prefix));
         }
 
         Ok(())
@@ -843,18 +812,6 @@ impl Config {
                     "logdir parent directory does not exist: {}",
                     parent.display()
                 ));
-            }
-        }
-
-        // Check packages dir can be created (if configured)
-        if let Some(ref packages) = self.file.pkgsrc.packages {
-            if let Some(parent) = packages.parent() {
-                if !parent.exists() {
-                    errors.push(format!(
-                        "Packages parent directory does not exist: {}",
-                        parent.display()
-                    ));
-                }
             }
         }
 
@@ -977,10 +934,7 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         "env",
         "logdir",
         "make",
-        "packages",
         "pkgpaths",
-        "pkgtools",
-        "prefix",
         "report_dir",
         "save_wrkdir_patterns",
         "scanenv",
@@ -995,12 +949,6 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         pkgsrc.get::<Option<String>>("build_user")?;
     let logdir = get_required_string(&pkgsrc, "logdir")?;
     let make = get_required_string(&pkgsrc, "make")?;
-    let packages: Option<PathBuf> =
-        pkgsrc.get::<Option<String>>("packages")?.map(PathBuf::from);
-    let pkgtools: Option<PathBuf> =
-        pkgsrc.get::<Option<String>>("pkgtools")?.map(PathBuf::from);
-    let prefix: Option<PathBuf> =
-        pkgsrc.get::<Option<String>>("prefix")?.map(PathBuf::from);
     let tar: Option<PathBuf> =
         pkgsrc.get::<Option<String>>("tar")?.map(PathBuf::from);
 
@@ -1045,10 +993,7 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         build_user,
         logdir: PathBuf::from(logdir),
         make: PathBuf::from(make),
-        packages,
-        pkgtools,
         pkgpaths,
-        prefix,
         report_dir,
         save_wrkdir_patterns,
         scanenv,
