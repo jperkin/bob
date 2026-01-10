@@ -78,6 +78,7 @@ use anyhow::{Result, bail};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use tracing::warn;
 
 /// Build sandbox manager.
 #[derive(Clone, Debug, Default)]
@@ -337,7 +338,16 @@ impl Sandbox {
         if let Some(script) = config.script("pre-build") {
             let child = self.execute(id, script, envs, None, None)?;
             let output = child.wait_with_output()?;
-            return Ok(output.status.success());
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                warn!(
+                    stdout = %stdout.trim(),
+                    stderr = %stderr.trim(),
+                    "pre-build script failed"
+                );
+                return Ok(false);
+            }
         }
         Ok(true)
     }
@@ -356,7 +366,16 @@ impl Sandbox {
         if let Some(script) = config.script("post-build") {
             let child = self.execute(id, script, envs, None, None)?;
             let output = child.wait_with_output()?;
-            return Ok(output.status.success());
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                warn!(
+                    stdout = %stdout.trim(),
+                    stderr = %stderr.trim(),
+                    "post-build script failed"
+                );
+                return Ok(false);
+            }
         }
         Ok(true)
     }
