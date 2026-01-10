@@ -59,7 +59,6 @@
 //! | `tar` | string | none | Absolute path to a tar binary capable of extracting the bootstrap kit. Required when `bootstrap` is set. |
 //! | `build_user` | string | none | Unprivileged user to run builds as. If set, builds run as this user instead of root. |
 //! | `pkgpaths` | table | `{}` | List of package paths to build (e.g., `{"mail/mutt", "www/curl"}`). Dependencies are discovered automatically. |
-//! | `report_dir` | string | `logdir` | Directory for HTML build reports. Defaults to the `logdir` directory. |
 //! | `save_wrkdir_patterns` | table | `{}` | Glob patterns for files to preserve from WRKDIR on build failure (e.g., `{"**/config.log"}`). |
 //! | `env` | function or table | `{}` | Environment variables for builds. Can be a table of key-value pairs, or a function receiving package metadata and returning a table. See [Environment Function](#environment-function). |
 //!
@@ -408,7 +407,6 @@ pub struct Options {
 /// - `bootstrap`: Path to bootstrap tarball (required on non-NetBSD systems)
 /// - `build_user`: Unprivileged user for builds
 /// - `pkgpaths`: List of packages to build
-/// - `report_dir`: Directory for HTML reports
 /// - `save_wrkdir_patterns`: Glob patterns for files to save on build failure
 /// - `tar`: Path to tar binary (required when bootstrap is configured)
 #[derive(Clone, Debug, Default)]
@@ -425,8 +423,6 @@ pub struct Pkgsrc {
     pub make: PathBuf,
     /// List of packages to build.
     pub pkgpaths: Option<Vec<PkgPath>>,
-    /// Directory for HTML reports.
-    pub report_dir: Option<PathBuf>,
     /// Glob patterns for files to save from WRKDIR on failure.
     pub save_wrkdir_patterns: Vec<String>,
     /// Environment variables for scan processes.
@@ -623,11 +619,6 @@ impl Config {
 
     pub fn prefix(&self) -> Option<PathBuf> {
         self.pkgsrc_var("PREFIX").map(PathBuf::from)
-    }
-
-    #[allow(dead_code)]
-    pub fn report_dir(&self) -> Option<&PathBuf> {
-        self.file.pkgsrc.report_dir.as_ref()
     }
 
     pub fn save_wrkdir_patterns(&self) -> &[String] {
@@ -935,7 +926,6 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         "logdir",
         "make",
         "pkgpaths",
-        "report_dir",
         "save_wrkdir_patterns",
         "scanenv",
         "tar",
@@ -966,9 +956,6 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
             _ => None,
         };
 
-    let report_dir: Option<PathBuf> =
-        pkgsrc.get::<Option<String>>("report_dir")?.map(PathBuf::from);
-
     let save_wrkdir_patterns: Vec<String> =
         match pkgsrc.get::<Value>("save_wrkdir_patterns")? {
             Value::Nil => Vec::new(),
@@ -994,7 +981,6 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         logdir: PathBuf::from(logdir),
         make: PathBuf::from(make),
         pkgpaths,
-        report_dir,
         save_wrkdir_patterns,
         scanenv,
         tar,

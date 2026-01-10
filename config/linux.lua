@@ -17,7 +17,6 @@ pkgsrc = {
     logdir = initdir .. "/logs",
     make = "/usr/pkg/bin/bmake",
     pkgpaths = { "mail/mutt" },
-    report_dir = initdir .. "/reports",
     tar = "/bin/tar",
 
     -- It is strongly recommended to set up an unprivileged user to perform
