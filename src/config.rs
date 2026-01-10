@@ -145,7 +145,6 @@ use mlua::{Lua, RegistryKey, Result as LuaResult, Table, Value};
 use pkgsrc::PkgPath;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 /// Holds the Lua state for evaluating env functions.
@@ -732,21 +731,16 @@ impl Config {
 
         let varnames_arg = VARNAMES.join(" ");
         let script = format!(
-            "cd {}/pkgtools/pkg_install && {} show-vars VARNAMES=\"{}\"",
+            "cd {}/pkgtools/pkg_install && {} show-vars VARNAMES=\"{}\"\n",
             self.pkgsrc().display(),
             self.make().display(),
             varnames_arg
         );
 
-        let mut cmd = sandbox.command(0, Path::new("/bin/sh"));
-        cmd.env_clear();
-        cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/usr/pkg/bin");
-        cmd.args(["-c", &script]);
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-
-        let output =
-            cmd.output().context("Failed to execute bmake show-vars")?;
+        let child = sandbox.execute_script(0, &script, vec![])?;
+        let output = child
+            .wait_with_output()
+            .context("Failed to execute bmake show-vars")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
