@@ -653,10 +653,16 @@ impl Config {
             ("bob_pkgsrc".to_string(), format!("{}", self.pkgsrc().display())),
         ];
         if let Some(packages) = self.packages() {
-            envs.push(("bob_packages".to_string(), packages.display().to_string()));
+            envs.push((
+                "bob_packages".to_string(),
+                packages.display().to_string(),
+            ));
         }
         if let Some(pkgtools) = self.pkgtools() {
-            envs.push(("bob_pkgtools".to_string(), pkgtools.display().to_string()));
+            envs.push((
+                "bob_pkgtools".to_string(),
+                pkgtools.display().to_string(),
+            ));
         }
         if let Some(prefix) = self.prefix() {
             envs.push(("bob_prefix".to_string(), prefix.display().to_string()));
