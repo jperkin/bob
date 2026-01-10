@@ -2107,25 +2107,6 @@ impl Build {
             cached_count,
         };
 
-        // Create sandboxes before starting progress display
-        if self.sandbox.enabled() {
-            println!("Creating sandboxes...");
-            for i in 0..self.config.build_threads() {
-                if let Err(e) = self.sandbox.create(i) {
-                    // Rollback: destroy sandboxes including the failed one (may be partial)
-                    for j in (0..=i).rev() {
-                        if let Err(destroy_err) = self.sandbox.destroy(j) {
-                            eprintln!(
-                                "Warning: failed to destroy sandbox {}: {}",
-                                j, destroy_err
-                            );
-                        }
-                    }
-                    return Err(e);
-                }
-            }
-        }
-
         println!("Building packages...");
 
         // Set up multi-line progress display using ratatui inline viewport

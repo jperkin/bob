@@ -386,11 +386,22 @@ impl Sandbox {
     }
 
     /**
-     * Create all sandboxes.
+     * Create all sandboxes, rolling back on failure.
      */
     pub fn create_all(&self, count: usize) -> Result<()> {
         for i in 0..count {
-            self.create(i)?;
+            if let Err(e) = self.create(i) {
+                // Rollback: destroy sandboxes including the failed one (may be partial)
+                for j in (0..=i).rev() {
+                    if let Err(destroy_err) = self.destroy(j) {
+                        eprintln!(
+                            "Warning: failed to destroy sandbox {}: {}",
+                            j, destroy_err
+                        );
+                    }
+                }
+                return Err(e);
+            }
         }
         Ok(())
     }
