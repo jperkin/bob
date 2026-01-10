@@ -719,22 +719,12 @@ impl Scan {
             }
 
             // Run pre-build script if defined
-            if let Some(pre_build) = self.config.script("pre-build") {
-                debug!("Running pre-build script");
-                let child = self.sandbox.execute(
-                    0,
-                    pre_build,
-                    script_envs.clone(),
-                    None,
-                    None,
-                )?;
-                let output = child
-                    .wait_with_output()
-                    .context("Failed to wait for pre-build")?;
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    error!(exit_code = ?output.status.code(), stderr = %stderr, "pre-build script failed");
-                }
+            if !self.sandbox.run_pre_build(
+                0,
+                &self.config,
+                script_envs.clone(),
+            )? {
+                error!("pre-build script failed");
             }
         }
 
@@ -1012,17 +1002,8 @@ impl Scan {
         &self,
         envs: Vec<(String, String)>,
     ) -> anyhow::Result<()> {
-        if let Some(post_build) = self.config.script("post-build") {
-            debug!("Running post-build script");
-            let child =
-                self.sandbox.execute(0, post_build, envs, None, None)?;
-            let output = child
-                .wait_with_output()
-                .context("Failed to wait for post-build")?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                error!(exit_code = ?output.status.code(), stderr = %stderr, "post-build script failed");
-            }
+        if !self.sandbox.run_post_build(0, &self.config, envs)? {
+            error!("post-build script failed");
         }
         self.sandbox.destroy(0)
     }

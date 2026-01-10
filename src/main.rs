@@ -55,11 +55,20 @@ impl BuildRunner {
 
         // Sync config from pkgsrc mk.conf before validation.
         // Create sandbox 0 first if needed, since bmake may only exist there.
+        // Run pre-build to unpack bootstrap, then query vars, then post-build.
         let sandbox = Sandbox::new(&config);
         if sandbox.enabled() {
             sandbox.create(0)?;
+            if !sandbox.run_pre_build(0, &config, config.script_env())? {
+                bail!("pre-build script failed");
+            }
         }
         config.get_vars_from_pkgsrc(&sandbox)?;
+        if sandbox.enabled()
+            && !sandbox.run_post_build(0, &config, config.script_env())?
+        {
+            bail!("post-build script failed");
+        }
 
         if let Err(errors) = config.validate() {
             eprintln!("Configuration errors:");

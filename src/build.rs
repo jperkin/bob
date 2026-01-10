@@ -1297,21 +1297,8 @@ impl PackageBuild {
         let patterns = self.config.save_wrkdir_patterns();
 
         // Run pre-build script if defined (always runs)
-        if let Some(pre_build) = self.config.script("pre-build") {
-            debug!(pkgname = %pkgname, "Running pre-build script");
-            let child = self.sandbox.execute(
-                self.id,
-                pre_build,
-                envs.clone(),
-                None,
-                None,
-            )?;
-            let output = child
-                .wait_with_output()
-                .context("Failed to wait for pre-build")?;
-            if !output.status.success() {
-                warn!(pkgname = %pkgname, exit_code = ?output.status.code(), "pre-build script failed");
-            }
+        if !self.sandbox.run_pre_build(self.id, &self.config, envs.clone())? {
+            warn!(pkgname = %pkgname, "pre-build script failed");
         }
 
         // Run the build using PkgBuilder
@@ -1411,26 +1398,11 @@ impl PackageBuild {
         };
 
         // Run post-build script if defined (always runs regardless of result)
-        if let Some(post_build) = self.config.script("post-build") {
-            debug!(pkgname = %pkgname, script = %post_build.display(), "Running post-build script");
-            match self.sandbox.execute(self.id, post_build, envs, None, None) {
-                Ok(child) => {
-                    debug!(pkgname = %pkgname, pid = ?child.id(), "post-build spawned, waiting");
-                    match child.wait_with_output() {
-                        Ok(output) => {
-                            debug!(pkgname = %pkgname, exit_code = ?output.status.code(), "post-build completed");
-                            if !output.status.success() {
-                                warn!(pkgname = %pkgname, exit_code = ?output.status.code(), "post-build script failed");
-                            }
-                        }
-                        Err(e) => {
-                            warn!(pkgname = %pkgname, error = %e, "Failed to wait for post-build");
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(pkgname = %pkgname, error = %e, "Failed to spawn post-build script");
-                }
+        match self.sandbox.run_post_build(self.id, &self.config, envs) {
+            Ok(true) => {}
+            Ok(false) => warn!(pkgname = %pkgname, "post-build script failed"),
+            Err(e) => {
+                warn!(pkgname = %pkgname, error = %e, "post-build script error")
             }
         }
 
