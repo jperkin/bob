@@ -48,18 +48,10 @@ impl BuildRunner {
         verbose: bool,
         for_build: bool,
     ) -> Result<Self> {
-        let mut config = Config::load(config_path, verbose)?;
+        let config = Config::load(config_path, verbose)?;
         let logs_dir = config.logdir().join("bob");
 
         logging::init(&logs_dir, config.verbose())?;
-
-        // Sync config from pkgsrc mk.conf before validation.
-        // Create sandbox 0 first if needed, since bmake may only exist there.
-        let sandbox = Sandbox::new(&config);
-        if sandbox.enabled() {
-            sandbox.create(0)?;
-        }
-        config.get_vars_from_pkgsrc(&sandbox)?;
 
         if let Err(errors) = config.validate() {
             eprintln!("Configuration errors:");
@@ -154,17 +146,40 @@ impl BuildRunner {
 
     /// Run the build phase, returning the build summary.
     fn run_build(
-        &self,
+        &mut self,
         scan_result: bob::scan::ScanSummary,
     ) -> Result<build::BuildSummary> {
         self.run_build_with(scan_result, build::BuildOptions::default())
     }
 
     fn run_build_with(
-        &self,
+        &mut self,
         scan_result: bob::scan::ScanSummary,
         options: build::BuildOptions,
     ) -> Result<build::BuildSummary> {
+        let sandbox = Sandbox::new(&self.config);
+        if sandbox.enabled() {
+            println!("Creating sandboxes...");
+            sandbox.create_all(self.config.build_threads())?;
+            if !sandbox.run_pre_build(
+                0,
+                &self.config,
+                self.config.script_env(),
+            )? {
+                bail!("pre-build script failed");
+            }
+        }
+        self.config.get_vars_from_pkgsrc(&sandbox)?;
+        if sandbox.enabled()
+            && !sandbox.run_post_build(
+                0,
+                &self.config,
+                self.config.script_env(),
+            )?
+        {
+            bail!("post-build script failed");
+        }
+
         if self.config.packages().is_none() {
             bail!("pkgsrc.packages must be set for build operations");
         }
@@ -458,7 +473,7 @@ fn main() -> Result<()> {
 
     match args.cmd {
         Cmd::Build { pkgpaths: cmdline_pkgs } => {
-            let runner =
+            let mut runner =
                 BuildRunner::new(args.config.as_deref(), args.verbose, true)?;
             tracing::info!("Build command started");
 
@@ -484,7 +499,7 @@ fn main() -> Result<()> {
             runner.generate_report();
         }
         Cmd::Rebuild { force, packages } => {
-            let runner =
+            let mut runner =
                 BuildRunner::new(args.config.as_deref(), args.verbose, true)?;
 
             // Convert packages to pkgpaths and collect for dependent lookup

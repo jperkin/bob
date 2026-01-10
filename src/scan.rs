@@ -678,12 +678,6 @@ impl Scan {
 
         let shutdown_flag = Arc::clone(&ctx.shutdown);
 
-        /*
-         * Only a single sandbox is required, 'make pbulk-index' can safely be
-         * run in parallel inside one sandbox.
-         */
-        let script_envs = self.config.script_env();
-
         // For full tree scans where a previous scan completed, all packages
         // are already cached - nothing to do.
         if self.full_tree && self.full_scan_complete && !self.done.is_empty() {
@@ -706,6 +700,10 @@ impl Scan {
             }
         }
 
+        /*
+         * Only a single sandbox is required, 'make pbulk-index' can safely be
+         * run in parallel inside one sandbox.
+         */
         if self.sandbox.enabled() {
             println!("Creating sandbox...");
             if let Err(e) = self.sandbox.create(0) {
@@ -719,23 +717,14 @@ impl Scan {
             }
 
             // Run pre-build script if defined
-            if let Some(pre_build) = self.config.script("pre-build") {
-                debug!("Running pre-build script");
-                let child = self.sandbox.execute(
-                    0,
-                    pre_build,
-                    script_envs.clone(),
-                    None,
-                    None,
-                )?;
-                let output = child
-                    .wait_with_output()
-                    .context("Failed to wait for pre-build")?;
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    error!(exit_code = ?output.status.code(), stderr = %stderr, "pre-build script failed");
-                }
+            if !self.sandbox.run_pre_build(
+                0,
+                &self.config,
+                self.config.script_env(),
+            )? {
+                error!("pre-build script failed");
             }
+            self.config.get_vars_from_pkgsrc(&self.sandbox)?;
         }
 
         // For full tree scans, always discover all packages
@@ -754,7 +743,7 @@ impl Scan {
             }
 
             if self.sandbox.enabled() {
-                self.cleanup_sandbox(script_envs)?;
+                self.cleanup_sandbox(self.config.script_env())?;
             }
 
             return Ok(false);
@@ -997,7 +986,7 @@ impl Scan {
         }
 
         if self.sandbox.enabled() {
-            self.cleanup_sandbox(script_envs)?;
+            self.cleanup_sandbox(self.config.script_env())?;
         }
 
         if interrupted {
@@ -1012,17 +1001,8 @@ impl Scan {
         &self,
         envs: Vec<(String, String)>,
     ) -> anyhow::Result<()> {
-        if let Some(post_build) = self.config.script("post-build") {
-            debug!("Running post-build script");
-            let child =
-                self.sandbox.execute(0, post_build, envs, None, None)?;
-            let output = child
-                .wait_with_output()
-                .context("Failed to wait for post-build")?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                error!(exit_code = ?output.status.code(), stderr = %stderr, "post-build script failed");
-            }
+        if !self.sandbox.run_post_build(0, &self.config, envs)? {
+            error!("post-build script failed");
         }
         self.sandbox.destroy(0)
     }

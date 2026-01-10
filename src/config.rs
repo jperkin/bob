@@ -731,8 +731,13 @@ impl Config {
     /// Must be called after sandbox 0 is created if sandboxes are enabled,
     /// since bmake may only exist inside the sandbox.
     pub fn get_vars_from_pkgsrc(&mut self, sandbox: &Sandbox) -> Result<()> {
-        const VARNAMES: &[&str] =
-            &["PACKAGES", "PKG_DBDIR", "PKG_REFCOUNT_DBDIR", "PKG_TOOLS_BIN", "PREFIX"];
+        const VARNAMES: &[&str] = &[
+            "PACKAGES",
+            "PKG_DBDIR",
+            "PKG_REFCOUNT_DBDIR",
+            "PKG_TOOLS_BIN",
+            "PREFIX",
+        ];
 
         let varnames_arg = VARNAMES.join(" ");
         let script = format!(

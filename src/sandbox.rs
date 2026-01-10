@@ -324,6 +324,44 @@ impl Sandbox {
     }
 
     /**
+     * Run the pre-build script if configured.
+     * Returns Ok(true) if script ran successfully or wasn't configured,
+     * Ok(false) if script failed.
+     */
+    pub fn run_pre_build(
+        &self,
+        id: usize,
+        config: &Config,
+        envs: Vec<(String, String)>,
+    ) -> Result<bool> {
+        if let Some(script) = config.script("pre-build") {
+            let child = self.execute(id, script, envs, None, None)?;
+            let output = child.wait_with_output()?;
+            return Ok(output.status.success());
+        }
+        Ok(true)
+    }
+
+    /**
+     * Run the post-build script if configured.
+     * Returns Ok(true) if script ran successfully or wasn't configured,
+     * Ok(false) if script failed.
+     */
+    pub fn run_post_build(
+        &self,
+        id: usize,
+        config: &Config,
+        envs: Vec<(String, String)>,
+    ) -> Result<bool> {
+        if let Some(script) = config.script("post-build") {
+            let child = self.execute(id, script, envs, None, None)?;
+            let output = child.wait_with_output()?;
+            return Ok(output.status.success());
+        }
+        Ok(true)
+    }
+
+    /**
      * Destroy a single sandbox by id.
      */
     pub fn destroy(&self, id: usize) -> anyhow::Result<()> {
@@ -348,11 +386,22 @@ impl Sandbox {
     }
 
     /**
-     * Create all sandboxes.
+     * Create all sandboxes, rolling back on failure.
      */
     pub fn create_all(&self, count: usize) -> Result<()> {
         for i in 0..count {
-            self.create(i)?;
+            if let Err(e) = self.create(i) {
+                // Rollback: destroy sandboxes including the failed one (may be partial)
+                for j in (0..=i).rev() {
+                    if let Err(destroy_err) = self.destroy(j) {
+                        eprintln!(
+                            "Warning: failed to destroy sandbox {}: {}",
+                            j, destroy_err
+                        );
+                    }
+                }
+                return Err(e);
+            }
         }
         Ok(())
     }
