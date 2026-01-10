@@ -231,7 +231,10 @@ impl Sandbox {
      * Create a single sandbox by id.
      * If the sandbox already exists and is valid (has lock), this is a no-op.
      */
-    pub fn create(&self, id: usize) -> Result<()> {
+    pub fn create(&self, id: usize, verbose: bool) -> Result<()> {
+        if verbose {
+            println!("Creating sandbox...");
+        }
         let sandbox = self.path(id);
         if sandbox.exists() {
             if self.lockpath(id).exists() {
@@ -383,7 +386,10 @@ impl Sandbox {
     /**
      * Destroy a single sandbox by id.
      */
-    pub fn destroy(&self, id: usize) -> anyhow::Result<()> {
+    pub fn destroy(&self, id: usize, verbose: bool) -> anyhow::Result<()> {
+        if verbose {
+            println!("Destroying sandbox...");
+        }
         let sandbox = self.path(id);
         if !sandbox.exists() {
             return Ok(());
@@ -407,12 +413,19 @@ impl Sandbox {
     /**
      * Create all sandboxes, rolling back on failure.
      */
-    pub fn create_all(&self, count: usize) -> Result<()> {
+    pub fn create_all(&self, count: usize, verbose: bool) -> Result<()> {
+        if verbose {
+            if count == 1 {
+                println!("Creating sandbox...");
+            } else {
+                println!("Creating sandboxes...");
+            }
+        }
         for i in 0..count {
-            if let Err(e) = self.create(i) {
+            if let Err(e) = self.create(i, false) {
                 // Rollback: destroy sandboxes including the failed one (may be partial)
                 for j in (0..=i).rev() {
-                    if let Err(destroy_err) = self.destroy(j) {
+                    if let Err(destroy_err) = self.destroy(j, false) {
                         eprintln!(
                             "Warning: failed to destroy sandbox {}: {}",
                             j, destroy_err
@@ -429,10 +442,17 @@ impl Sandbox {
      * Destroy all sandboxes.  Continue on errors to ensure all sandboxes
      * are attempted, printing each error as it occurs.
      */
-    pub fn destroy_all(&self, count: usize) -> Result<()> {
+    pub fn destroy_all(&self, count: usize, verbose: bool) -> Result<()> {
+        if verbose {
+            if count == 1 {
+                println!("Destroying sandbox...");
+            } else {
+                println!("Destroying sandboxes...");
+            }
+        }
         let mut failed = 0;
         for i in 0..count {
-            if let Err(e) = self.destroy(i) {
+            if let Err(e) = self.destroy(i, false) {
                 eprintln!("sandbox {}: {}", i, e);
                 failed += 1;
             }
@@ -817,5 +837,87 @@ impl Sandbox {
         }
         fs::remove_dir(path)?;
         Ok(())
+    }
+}
+
+/// RAII guard for multiple sandboxes (used by build).
+///
+/// Creates sandboxes on construction, destroys them on drop.
+/// This ensures sandboxes are always cleaned up, even on error paths.
+/// If sandboxes are disabled, this is a no-op.
+#[derive(Debug)]
+pub struct SandboxGuard {
+    sandbox: Sandbox,
+    count: usize,
+    verbose: bool,
+}
+
+impl SandboxGuard {
+    /// Create a new guard, creating `count` sandboxes if enabled.
+    pub fn new(sandbox: Sandbox, count: usize, verbose: bool) -> Result<Self> {
+        if sandbox.enabled() {
+            sandbox.create_all(count, verbose)?;
+        }
+        Ok(Self { sandbox, count, verbose })
+    }
+
+    /// Access the underlying sandbox for operations.
+    pub fn sandbox(&self) -> &Sandbox {
+        &self.sandbox
+    }
+
+    /// Return whether sandboxes are enabled.
+    pub fn enabled(&self) -> bool {
+        self.sandbox.enabled()
+    }
+}
+
+impl Drop for SandboxGuard {
+    fn drop(&mut self) {
+        if self.sandbox.enabled() {
+            if let Err(e) = self.sandbox.destroy_all(self.count, self.verbose) {
+                eprintln!("Warning: failed to destroy sandboxes: {}", e);
+            }
+        }
+    }
+}
+
+/// RAII guard for a single sandbox (used by scan).
+///
+/// Creates sandbox 0 on construction, destroys it on drop.
+/// If sandboxes are disabled, this is a no-op.
+#[derive(Debug)]
+pub struct SingleSandboxGuard {
+    sandbox: Sandbox,
+    verbose: bool,
+}
+
+impl SingleSandboxGuard {
+    /// Create a new guard, creating sandbox 0 if enabled.
+    pub fn new(sandbox: Sandbox, verbose: bool) -> Result<Self> {
+        if sandbox.enabled() {
+            sandbox.create(0, verbose)?;
+        }
+        Ok(Self { sandbox, verbose })
+    }
+
+    /// Access the underlying sandbox for operations.
+    pub fn sandbox(&self) -> &Sandbox {
+        &self.sandbox
+    }
+
+    /// Return whether sandboxes are enabled.
+    pub fn enabled(&self) -> bool {
+        self.sandbox.enabled()
+    }
+}
+
+impl Drop for SingleSandboxGuard {
+    fn drop(&mut self) {
+        if self.sandbox.enabled() {
+            if let Err(e) = self.sandbox.destroy(0, self.verbose) {
+                eprintln!("Warning: failed to destroy sandbox: {}", e);
+            }
+        }
     }
 }

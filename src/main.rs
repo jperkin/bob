@@ -22,7 +22,7 @@ use bob::config::Config;
 use bob::db::Database;
 use bob::logging;
 use bob::report;
-use bob::sandbox::Sandbox;
+use bob::sandbox::{Sandbox, SandboxGuard};
 use bob::scan::{Scan, ScanResult};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -157,29 +157,7 @@ impl BuildRunner {
         scan_result: bob::scan::ScanSummary,
         options: build::BuildOptions,
     ) -> Result<build::BuildSummary> {
-        let sandbox = Sandbox::new(&self.config);
-        if sandbox.enabled() {
-            println!("Creating sandboxes...");
-            sandbox.create_all(self.config.build_threads())?;
-            if !sandbox.run_pre_build(
-                0,
-                &self.config,
-                self.config.script_env(),
-            )? {
-                bail!("pre-build script failed");
-            }
-        }
-        self.config.get_vars_from_pkgsrc(&sandbox)?;
-        if sandbox.enabled()
-            && !sandbox.run_post_build(
-                0,
-                &self.config,
-                self.config.script_env(),
-            )?
-        {
-            bail!("post-build script failed");
-        }
-
+        // Validate config before sandbox creation
         if self.config.packages().is_none() {
             bail!("pkgsrc.packages must be set for build operations");
         }
@@ -200,7 +178,35 @@ impl BuildRunner {
             .buildable()
             .map(|p| (p.pkgname().clone(), p.clone()))
             .collect();
-        let mut build = Build::new(&self.config, buildable, options);
+
+        // Create sandbox guard - automatically destroys sandboxes on drop
+        let sandbox = Sandbox::new(&self.config);
+        let guard = SandboxGuard::new(
+            sandbox,
+            self.config.build_threads(),
+            self.config.verbose(),
+        )?;
+
+        if guard.enabled()
+            && !guard.sandbox().run_pre_build(
+                0,
+                &self.config,
+                self.config.script_env(),
+            )? {
+                bail!("pre-build script failed");
+            }
+        self.config.get_vars_from_pkgsrc(guard.sandbox())?;
+        if guard.enabled()
+            && !guard.sandbox().run_post_build(
+                0,
+                &self.config,
+                self.config.script_env(),
+            )?
+        {
+            bail!("post-build script failed");
+        }
+
+        let mut build = Build::new(&self.config, guard, buildable, options);
 
         // Load cached build results from database
         build.load_cached_from_db(&self.db)?;
@@ -215,10 +221,8 @@ impl BuildRunner {
 
         // Check if we were interrupted - results are already saved during build
         if self.ctx.shutdown.load(Ordering::SeqCst) {
-            let sandbox = Sandbox::new(&self.config);
-            if sandbox.enabled() {
-                let _ = sandbox.destroy_all(self.config.build_threads());
-            }
+            // Drop build explicitly to trigger sandbox cleanup before exit
+            drop(build);
             std::process::exit(EXIT_INTERRUPTED);
         }
 
@@ -792,10 +796,7 @@ fn main() -> Result<()> {
             if !sandbox.enabled() {
                 bail!("No sandboxes configured");
             }
-            if config.verbose() {
-                println!("Creating sandboxes");
-            }
-            sandbox.create_all(config.build_threads())?;
+            sandbox.create_all(config.build_threads(), config.verbose())?;
         }
         Cmd::Util { cmd: UtilCmd::Sandbox { cmd: SandboxCmd::Destroy } } => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
@@ -803,10 +804,7 @@ fn main() -> Result<()> {
             if !sandbox.enabled() {
                 bail!("No sandboxes configured");
             }
-            if config.verbose() {
-                println!("Destroying sandboxes");
-            }
-            sandbox.destroy_all(config.build_threads())?;
+            sandbox.destroy_all(config.build_threads(), config.verbose())?;
         }
         Cmd::Util { cmd: UtilCmd::Sandbox { cmd: SandboxCmd::List } } => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;

@@ -42,6 +42,7 @@
 //! - `deinstall` - Test package removal (non-bootstrap only)
 //! - `clean` - Clean up build artifacts
 
+use crate::sandbox::SandboxGuard;
 use crate::scan::{ResolvedPackage, SkipReason, SkippedCounts};
 use crate::tui::{MultiProgress, format_duration};
 use crate::{Config, RunContext, Sandbox};
@@ -1142,12 +1143,12 @@ pub struct BuildOptions {
     pub force_rebuild: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Build {
     /// Parsed [`Config`].
     config: Config,
-    /// [`Sandbox`] configuration.
-    sandbox: Sandbox,
+    /// Sandbox guard - owns created sandboxes, destroys on drop.
+    guard: SandboxGuard,
     /// List of packages to build, as input from Scan::resolve.
     scanpkgs: IndexMap<PkgName, ResolvedPackage>,
     /// Cached build results from previous run.
@@ -1878,13 +1879,13 @@ impl BuildJobs {
 impl Build {
     pub fn new(
         config: &Config,
+        guard: SandboxGuard,
         scanpkgs: IndexMap<PkgName, ResolvedPackage>,
         options: BuildOptions,
     ) -> Build {
-        let sandbox = Sandbox::new(config);
         info!(
             package_count = scanpkgs.len(),
-            sandbox_enabled = sandbox.enabled(),
+            sandbox_enabled = guard.enabled(),
             build_threads = config.build_threads(),
             ?options,
             "Creating new Build instance"
@@ -1899,7 +1900,7 @@ impl Build {
         }
         Build {
             config: config.clone(),
-            sandbox,
+            guard,
             scanpkgs,
             cached: IndexMap::new(),
             options,
@@ -2046,6 +2047,7 @@ impl Build {
         );
 
         if incoming.is_empty() {
+            // Guard is dropped when Build goes out of scope, destroying sandboxes
             return Ok(BuildSummary {
                 duration: started.elapsed(),
                 results,
@@ -2238,7 +2240,7 @@ impl Build {
          * accordingly.  Returns the build results via a channel.
          */
         let config = self.config.clone();
-        let sandbox = self.sandbox.clone();
+        let sandbox = self.guard.sandbox().clone();
         let options = self.options.clone();
         let progress_clone = Arc::clone(&progress);
         let shutdown_for_manager = Arc::clone(&shutdown_flag);
@@ -2544,16 +2546,7 @@ impl Build {
             scanfail: Vec::new(),
         };
 
-        if self.sandbox.enabled() {
-            debug!("Destroying sandboxes");
-            let destroy_start = Instant::now();
-            self.sandbox.destroy_all(self.config.build_threads())?;
-            debug!(
-                elapsed_ms = destroy_start.elapsed().as_millis(),
-                "Sandboxes destroyed"
-            );
-        }
-
+        // Guard is dropped when Build goes out of scope, destroying sandboxes
         Ok(summary)
     }
 }
