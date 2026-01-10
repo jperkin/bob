@@ -705,7 +705,9 @@ impl Scan {
          * run in parallel inside one sandbox.
          */
         if self.sandbox.enabled() {
-            println!("Creating sandbox...");
+            if self.config.verbose() {
+                println!("Creating sandbox...");
+            }
             if let Err(e) = self.sandbox.create(0) {
                 if let Err(destroy_err) = self.sandbox.destroy(0) {
                     eprintln!(
@@ -1003,6 +1005,9 @@ impl Scan {
     ) -> anyhow::Result<()> {
         if !self.sandbox.run_post_build(0, &self.config, envs)? {
             error!("post-build script failed");
+        }
+        if self.config.verbose() {
+            println!("Destroying sandbox...");
         }
         self.sandbox.destroy(0)
     }

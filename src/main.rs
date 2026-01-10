@@ -159,7 +159,9 @@ impl BuildRunner {
     ) -> Result<build::BuildSummary> {
         let sandbox = Sandbox::new(&self.config);
         if sandbox.enabled() {
-            println!("Creating sandboxes...");
+            if self.config.verbose() {
+                println!("Creating sandboxes...");
+            }
             sandbox.create_all(self.config.build_threads())?;
             if !sandbox.run_pre_build(
                 0,
@@ -200,7 +202,7 @@ impl BuildRunner {
             .buildable()
             .map(|p| (p.pkgname().clone(), p.clone()))
             .collect();
-        let mut build = Build::new(&self.config, buildable, options);
+        let mut build = Build::new(&self.config, sandbox, buildable, options);
 
         // Load cached build results from database
         build.load_cached_from_db(&self.db)?;
@@ -217,6 +219,9 @@ impl BuildRunner {
         if self.ctx.shutdown.load(Ordering::SeqCst) {
             let sandbox = Sandbox::new(&self.config);
             if sandbox.enabled() {
+                if self.config.verbose() {
+                    println!("Destroying sandboxes...");
+                }
                 let _ = sandbox.destroy_all(self.config.build_threads());
             }
             std::process::exit(EXIT_INTERRUPTED);
@@ -793,7 +798,7 @@ fn main() -> Result<()> {
                 bail!("No sandboxes configured");
             }
             if config.verbose() {
-                println!("Creating sandboxes");
+                println!("Creating sandboxes...");
             }
             sandbox.create_all(config.build_threads())?;
         }
@@ -804,7 +809,7 @@ fn main() -> Result<()> {
                 bail!("No sandboxes configured");
             }
             if config.verbose() {
-                println!("Destroying sandboxes");
+                println!("Destroying sandboxes...");
             }
             sandbox.destroy_all(config.build_threads())?;
         }

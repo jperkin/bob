@@ -1878,10 +1878,10 @@ impl BuildJobs {
 impl Build {
     pub fn new(
         config: &Config,
+        sandbox: Sandbox,
         scanpkgs: IndexMap<PkgName, ResolvedPackage>,
         options: BuildOptions,
     ) -> Build {
-        let sandbox = Sandbox::new(config);
         info!(
             package_count = scanpkgs.len(),
             sandbox_enabled = sandbox.enabled(),
@@ -2545,7 +2545,9 @@ impl Build {
         };
 
         if self.sandbox.enabled() {
-            debug!("Destroying sandboxes");
+            if self.config.verbose() {
+                println!("Destroying sandboxes...");
+            }
             let destroy_start = Instant::now();
             self.sandbox.destroy_all(self.config.build_threads())?;
             debug!(
