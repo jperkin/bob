@@ -40,7 +40,7 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 /// Current schema version for migrations.
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 /// Lightweight package row without full scan data.
 #[derive(Clone, Debug)]
@@ -123,9 +123,9 @@ impl Database {
 
             if has_old_scan {
                 info!("Migrating from schema v1 to v{}", SCHEMA_VERSION);
-                self.migrate_v1_to_v2()?;
+                self.migrate_v1_to_v3()?;
             } else {
-                self.create_schema_v2()?;
+                self.create_schema_v3()?;
             }
         } else {
             let version: i32 = self.conn.query_row(
@@ -140,7 +140,9 @@ impl Database {
                     version, SCHEMA_VERSION
                 );
                 if version == 1 {
-                    self.migrate_v1_to_v2()?;
+                    self.migrate_v1_to_v3()?;
+                } else if version == 2 {
+                    self.migrate_v2_to_v3()?;
                 }
             }
         }
@@ -148,14 +150,14 @@ impl Database {
         Ok(())
     }
 
-    /// Create the v2 schema from scratch.
-    fn create_schema_v2(&self) -> Result<()> {
+    /// Create the v3 schema from scratch.
+    fn create_schema_v3(&self) -> Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY
             );
 
-            INSERT OR REPLACE INTO schema_version (version) VALUES (2);
+            INSERT OR REPLACE INTO schema_version (version) VALUES (3);
 
             CREATE TABLE IF NOT EXISTS packages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -167,7 +169,7 @@ impl Database {
                 fail_reason TEXT,
                 is_bootstrap INTEGER DEFAULT 0,
                 pbulk_weight INTEGER DEFAULT 100,
-                scan_data TEXT,
+                scan_data BLOB,
                 scanned_at INTEGER NOT NULL
             );
 
@@ -216,14 +218,14 @@ impl Database {
             );"
         )?;
 
-        debug!("Created schema v2");
+        debug!("Created schema v3");
         Ok(())
     }
 
-    /// Migrate from v1 (old scan/build tables) to v2.
-    fn migrate_v1_to_v2(&self) -> Result<()> {
+    /// Migrate from v1 (old scan/build tables) to v3.
+    fn migrate_v1_to_v3(&self) -> Result<()> {
         // Create new schema first
-        self.create_schema_v2()?;
+        self.create_schema_v3()?;
 
         // Migrate scan data
         let mut stmt = self
@@ -295,8 +297,93 @@ impl Database {
         info!(
             packages = migrated_count,
             builds = build_count,
-            "Migration to v2 complete"
+            "Migration from v1 to v3 complete"
         );
+        Ok(())
+    }
+
+    /// Migrate from v2 (JSON TEXT) to v3 (compressed JSON BLOB).
+    fn migrate_v2_to_v3(&self) -> Result<()> {
+        info!("Migrating scan_data from JSON TEXT to compressed JSON BLOB");
+
+        // Read all existing JSON data
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, scan_data FROM packages WHERE scan_data IS NOT NULL")?;
+
+        let rows: Vec<(i64, String)> = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Create new table with BLOB column
+        self.conn.execute_batch(
+            "ALTER TABLE packages RENAME TO packages_old;
+
+            CREATE TABLE packages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pkgname TEXT UNIQUE NOT NULL,
+                pkgpath TEXT NOT NULL,
+                pkgname_base TEXT NOT NULL,
+                version TEXT NOT NULL,
+                skip_reason TEXT,
+                fail_reason TEXT,
+                is_bootstrap INTEGER DEFAULT 0,
+                pbulk_weight INTEGER DEFAULT 100,
+                scan_data BLOB,
+                scanned_at INTEGER NOT NULL
+            );
+
+            INSERT INTO packages (id, pkgname, pkgpath, pkgname_base, version,
+                skip_reason, fail_reason, is_bootstrap, pbulk_weight, scanned_at)
+            SELECT id, pkgname, pkgpath, pkgname_base, version,
+                skip_reason, fail_reason, is_bootstrap, pbulk_weight, scanned_at
+            FROM packages_old;
+
+            DROP TABLE packages_old;
+
+            CREATE INDEX IF NOT EXISTS idx_packages_pkgpath ON packages(pkgpath);
+            CREATE INDEX IF NOT EXISTS idx_packages_pkgname_base ON packages(pkgname_base);
+            CREATE INDEX IF NOT EXISTS idx_packages_status ON packages(skip_reason, fail_reason);"
+        )?;
+
+        // Convert JSON to bincode and update
+        let mut migrated_count = 0;
+        for (id, json) in rows {
+            // Validate the JSON is valid before compressing
+            let _: ScanIndex = match serde_json::from_str(&json) {
+                Ok(idx) => idx,
+                Err(e) => {
+                    warn!(id = id, error = %e, "Failed to parse JSON during v2->v3 migration");
+                    continue;
+                }
+            };
+
+            // Compress the validated JSON
+            let compressed = match zstd::encode_all(json.as_bytes(), 3) {
+                Ok(data) => data,
+                Err(e) => {
+                    warn!(id = id, error = %e, "Failed to compress JSON");
+                    continue;
+                }
+            };
+
+            self.conn.execute(
+                "UPDATE packages SET scan_data = ?1 WHERE id = ?2",
+                params![&compressed[..], id],
+            )?;
+            migrated_count += 1;
+        }
+
+        // Update schema version
+        self.conn.execute(
+            "INSERT OR REPLACE INTO schema_version (version) VALUES (3)",
+            [],
+        )?;
+
+        info!(packages = migrated_count, "Migration from v2 to v3 complete");
         Ok(())
     }
 
@@ -324,7 +411,10 @@ impl Database {
             .and_then(|s| s.parse().ok())
             .unwrap_or(100);
 
-        let scan_data = serde_json::to_string(index)?;
+        let json = serde_json::to_vec(index)
+            .context("Failed to serialize scan data to JSON")?;
+        let scan_data = zstd::encode_all(&json[..], 3)
+            .context("Failed to compress scan data")?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
@@ -345,7 +435,7 @@ impl Database {
                 fail_reason,
                 is_bootstrap,
                 pbulk_weight,
-                scan_data,
+                &scan_data[..],
                 now
             ])?;
         }
@@ -556,12 +646,14 @@ impl Database {
 
     /// Load full ScanIndex for a package.
     pub fn get_full_scan_index(&self, package_id: i64) -> Result<ScanIndex> {
-        let json: String = self.conn.query_row(
+        let data: Vec<u8> = self.conn.query_row(
             "SELECT scan_data FROM packages WHERE id = ?1",
             [package_id],
             |row| row.get(0),
         )?;
-        serde_json::from_str(&json).context("Failed to deserialize scan data")
+        let json = zstd::decode_all(&data[..])
+            .context("Failed to decompress scan data")?;
+        serde_json::from_slice(&json).context("Failed to deserialize scan data")
     }
 
     /// Load all ScanIndex data in one query.
@@ -571,14 +663,17 @@ impl Database {
             .prepare("SELECT id, scan_data FROM packages ORDER BY id")?;
         let rows = stmt.query_map([], |row| {
             let id: i64 = row.get(0)?;
-            let json: String = row.get(1)?;
-            Ok((id, json))
+            let data: Vec<u8> = row.get(1)?;
+            Ok((id, data))
         })?;
         let mut results = Vec::new();
         for row in rows {
-            let (id, json) = row?;
+            let (id, data) = row?;
+            let json = zstd::decode_all(&data[..]).with_context(|| {
+                format!("Failed to decompress scan data for package {}", id)
+            })?;
             let index: ScanIndex =
-                serde_json::from_str(&json).with_context(|| {
+                serde_json::from_slice(&json).with_context(|| {
                     format!(
                         "Failed to deserialize scan data for package {}",
                         id
@@ -597,12 +692,14 @@ impl Database {
         let result = self.conn.query_row(
             "SELECT scan_data FROM packages WHERE pkgname = ?1",
             [pkgname],
-            |row| row.get::<_, String>(0),
+            |row| row.get::<_, Vec<u8>>(0),
         );
 
         match result {
-            Ok(json) => {
-                let index: ScanIndex = serde_json::from_str(&json)
+            Ok(data) => {
+                let json = zstd::decode_all(&data[..])
+                    .context("Failed to decompress scan data")?;
+                let index: ScanIndex = serde_json::from_slice(&json)
                     .context("Failed to deserialize scan data")?;
                 Ok(Some(index))
             }
@@ -1295,5 +1392,147 @@ fn db_outcome_to_build(outcome: &str, detail: Option<String>) -> BuildOutcome {
             BuildOutcome::IndirectPreFailed(detail.unwrap_or_default())
         }
         _ => BuildOutcome::Failed(format!("Unknown outcome: {}", outcome)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_json_vs_compressed_size() {
+        let index = ScanIndex {
+            pkgname: PkgName::new("test-1.0"),
+            pkg_location: Some(PkgPath::new("cat/test").unwrap()),
+            all_depends: None,
+            pkg_skip_reason: None,
+            pkg_fail_reason: None,
+            categories: None,
+            maintainer: None,
+            use_destdir: None,
+            bootstrap_pkg: None,
+            usergroup_phase: None,
+            scan_depends: None,
+            pbulk_weight: None,
+            multi_version: None,
+            no_bin_on_ftp: None,
+            restricted: None,
+        };
+
+        // Test JSON roundtrip
+        let json = serde_json::to_vec(&index).expect("json serialize");
+        println!("JSON size: {} bytes", json.len());
+
+        // Test compressed JSON roundtrip
+        let compressed = zstd::encode_all(&json[..], 3).expect("compress");
+        println!("Compressed JSON size: {} bytes", compressed.len());
+        let decompressed = zstd::decode_all(&compressed[..]).expect("decompress");
+        let decoded: ScanIndex = serde_json::from_slice(&decompressed).expect("json deserialize");
+        assert_eq!(decoded.pkgname.pkgname(), "test-1.0");
+
+        // Note: For small data, compression overhead may exceed savings
+        // Real benefit appears with larger/repeated data
+        println!(
+            "Compression ratio: {:.1}%",
+            (compressed.len() as f64 / json.len() as f64) * 100.0
+        );
+    }
+
+    #[test]
+    fn test_db_store_and_retrieve() {
+        let tmp = tempdir().expect("tempdir");
+        let db_path = tmp.path().join("test.db");
+        let db = Database::open(&db_path).expect("open db");
+
+        let index = ScanIndex {
+            pkgname: PkgName::new("test-1.0"),
+            pkg_location: Some(PkgPath::new("cat/test").unwrap()),
+            all_depends: None,
+            pkg_skip_reason: None,
+            pkg_fail_reason: None,
+            categories: None,
+            maintainer: None,
+            use_destdir: None,
+            bootstrap_pkg: None,
+            usergroup_phase: None,
+            scan_depends: None,
+            pbulk_weight: None,
+            multi_version: None,
+            no_bin_on_ftp: None,
+            restricted: None,
+        };
+
+        // Store
+        let pkg_id = db.store_package("cat/test", &index).expect("store");
+        println!("Stored package with id {}", pkg_id);
+
+        // Retrieve
+        let retrieved = db.get_full_scan_index(pkg_id).expect("get");
+        assert_eq!(retrieved.pkgname.pkgname(), "test-1.0");
+    }
+
+    #[test]
+    fn test_compression_with_skip_reason() {
+        let index = ScanIndex {
+            pkgname: PkgName::new("test-1.0"),
+            pkg_location: Some(PkgPath::new("cat/test").unwrap()),
+            all_depends: None,
+            pkg_skip_reason: Some("not supported".to_string()),
+            pkg_fail_reason: None,
+            categories: None,
+            maintainer: None,
+            use_destdir: None,
+            bootstrap_pkg: None,
+            usergroup_phase: None,
+            scan_depends: None,
+            pbulk_weight: None,
+            multi_version: None,
+            no_bin_on_ftp: None,
+            restricted: None,
+        };
+
+        // Test compressed JSON roundtrip with skip_reason set
+        let json = serde_json::to_vec(&index).expect("json serialize");
+        let compressed = zstd::encode_all(&json[..], 3).expect("compress");
+        let decompressed = zstd::decode_all(&compressed[..]).expect("decompress");
+        let decoded: ScanIndex = serde_json::from_slice(&decompressed).expect("json deserialize");
+        assert_eq!(decoded.pkg_skip_reason, Some("not supported".to_string()));
+    }
+
+    #[test]
+    fn test_db_store_and_retrieve_with_skip_reason() {
+        let tmp = tempdir().expect("tempdir");
+        let db_path = tmp.path().join("test.db");
+        let db = Database::open(&db_path).expect("open db");
+
+        let index = ScanIndex {
+            pkgname: PkgName::new("test-1.0"),
+            pkg_location: Some(PkgPath::new("cat/test").unwrap()),
+            all_depends: None,
+            pkg_skip_reason: Some("broken on this platform".to_string()),
+            pkg_fail_reason: None,
+            categories: None,
+            maintainer: None,
+            use_destdir: None,
+            bootstrap_pkg: None,
+            usergroup_phase: None,
+            scan_depends: None,
+            pbulk_weight: None,
+            multi_version: None,
+            no_bin_on_ftp: None,
+            restricted: None,
+        };
+
+        // Store
+        let pkg_id = db.store_package("cat/test", &index).expect("store");
+
+        // Retrieve
+        let retrieved = db.get_full_scan_index(pkg_id).expect("get");
+        assert_eq!(retrieved.pkgname.pkgname(), "test-1.0");
+        assert_eq!(
+            retrieved.pkg_skip_reason,
+            Some("broken on this platform".to_string())
+        );
     }
 }
