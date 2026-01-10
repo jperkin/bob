@@ -19,7 +19,6 @@ pkgsrc = {
         "mail/mutt",
         "sysutils/coreutils",
     },
-    tar = "/bin/tar",
 
     -- It is strongly recommended to set up an unprivileged user to perform
     -- builds. If you do, ensure that their home directory is created inside
