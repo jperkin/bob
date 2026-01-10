@@ -174,8 +174,8 @@ impl BuildRunner {
         if self.config.prefix().is_none() {
             bail!("pkgsrc.prefix must be set for build operations");
         }
-        if self.config.tar().is_none() {
-            bail!("pkgsrc.tar must be set for build operations");
+        if self.config.bootstrap().is_some() && self.config.tar().is_none() {
+            bail!("pkgsrc.tar must be set when bootstrap is configured");
         }
         if scan_result.count_buildable() == 0 {
             bail!("No packages to build");
