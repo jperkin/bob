@@ -644,11 +644,6 @@ impl Config {
         &self.file.pkgsrc.prefix
     }
 
-    #[allow(dead_code)]
-    pub fn report_dir(&self) -> Option<&PathBuf> {
-        self.file.pkgsrc.report_dir.as_ref()
-    }
-
     pub fn save_wrkdir_patterns(&self) -> &[String] {
         self.file.pkgsrc.save_wrkdir_patterns.as_slice()
     }

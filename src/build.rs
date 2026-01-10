@@ -1148,24 +1148,6 @@ impl<'a> MakeQuery<'a> {
         self.var_path("WRKDIR")
     }
 
-    /// Get the WRKSRC for this package.
-    #[allow(dead_code)]
-    fn wrksrc(&self) -> Option<PathBuf> {
-        self.var_path("WRKSRC")
-    }
-
-    /// Get the DESTDIR for this package.
-    #[allow(dead_code)]
-    fn destdir(&self) -> Option<PathBuf> {
-        self.var_path("DESTDIR")
-    }
-
-    /// Get the PREFIX for this package.
-    #[allow(dead_code)]
-    fn prefix(&self) -> Option<PathBuf> {
-        self.var_path("PREFIX")
-    }
-
     /// Resolve a path to its actual location on the host filesystem.
     /// If sandboxed, prepends the sandbox root path.
     fn resolve_path(&self, path: &Path) -> PathBuf {
@@ -1631,9 +1613,6 @@ struct BuildJobs {
     failed: HashSet<PkgName>,
     results: Vec<BuildResult>,
     logdir: PathBuf,
-    /// Number of packages loaded from cache.
-    #[allow(dead_code)]
-    cached_count: usize,
 }
 
 impl BuildJobs {
@@ -1748,53 +1727,6 @@ impl BuildJobs {
             });
         }
         debug!(pkgname = %pkgname.pkgname(), total_results = self.results.len(), elapsed_ms = start.elapsed().as_millis(), "mark_failure completed");
-    }
-
-    /**
-     * Recursively mark a package as pre-failed and its dependents as
-     * indirect-pre-failed.
-     */
-    #[allow(dead_code)]
-    fn mark_prefailed(&mut self, pkgname: &PkgName, reason: String) {
-        let mut broken: HashSet<PkgName> = HashSet::new();
-        let mut to_check: Vec<PkgName> = vec![];
-        to_check.push(pkgname.clone());
-
-        loop {
-            let Some(badpkg) = to_check.pop() else {
-                break;
-            };
-            if broken.contains(&badpkg) {
-                continue;
-            }
-            for (pkg, deps) in &self.incoming {
-                if deps.contains(&badpkg) {
-                    to_check.push(pkg.clone());
-                }
-            }
-            broken.insert(badpkg);
-        }
-
-        let is_original = |p: &PkgName| p == pkgname;
-        for pkg in broken {
-            self.incoming.remove(&pkg);
-            self.failed.insert(pkg.clone());
-
-            let scanpkg = self.scanpkgs.get(&pkg);
-            let log_dir = Some(self.logdir.join(pkg.pkgname()));
-            let outcome = if is_original(&pkg) {
-                BuildOutcome::PreFailed(reason.clone())
-            } else {
-                BuildOutcome::IndirectPreFailed(pkgname.pkgname().to_string())
-            };
-            self.results.push(BuildResult {
-                pkgname: pkg,
-                pkgpath: scanpkg.and_then(|s| s.pkg_location.clone()),
-                outcome,
-                duration: Duration::ZERO,
-                log_dir,
-            });
-        }
     }
 
     /**
@@ -2041,7 +1973,6 @@ impl Build {
             failed,
             results,
             logdir,
-            cached_count,
         };
 
         // Create sandboxes before starting progress display
