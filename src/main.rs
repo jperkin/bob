@@ -250,7 +250,7 @@ impl BuildRunner {
         &self,
         pkgpaths: &[&str],
     ) -> Result<(Vec<String>, std::collections::HashMap<String, String>)> {
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
 
         // Get all packages for pkgname -> pkgpath mapping
         let all_packages = self.db.get_all_packages()?;
@@ -263,7 +263,7 @@ impl BuildRunner {
         }
 
         // Find package IDs for the given pkgpaths
-        let mut seed_ids: Vec<i64> = Vec::new();
+        let mut seed_ids = Vec::new();
         for pkgpath in pkgpaths {
             let packages = self.db.get_packages_by_path(pkgpath)?;
             for pkg in packages {
@@ -272,16 +272,15 @@ impl BuildRunner {
         }
 
         // Use database to get all transitive reverse dependencies
-        let mut to_clear: Vec<String> = Vec::new();
+        let mut to_clear_set: HashSet<String> = HashSet::new();
         for seed_id in seed_ids {
             let rev_deps = self.db.get_transitive_reverse_deps(seed_id)?;
             for dep_id in rev_deps {
                 let pkgname = self.db.get_pkgname(dep_id)?;
-                if !to_clear.contains(&pkgname) {
-                    to_clear.push(pkgname);
-                }
+                to_clear_set.insert(pkgname);
             }
         }
+        let to_clear: Vec<String> = to_clear_set.into_iter().collect();
 
         Ok((to_clear, pkgname_to_pkgpath))
     }
