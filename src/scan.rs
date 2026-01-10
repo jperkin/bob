@@ -678,12 +678,6 @@ impl Scan {
 
         let shutdown_flag = Arc::clone(&ctx.shutdown);
 
-        /*
-         * Only a single sandbox is required, 'make pbulk-index' can safely be
-         * run in parallel inside one sandbox.
-         */
-        let script_envs = self.config.script_env();
-
         // For full tree scans where a previous scan completed, all packages
         // are already cached - nothing to do.
         if self.full_tree && self.full_scan_complete && !self.done.is_empty() {
@@ -706,6 +700,10 @@ impl Scan {
             }
         }
 
+        /*
+         * Only a single sandbox is required, 'make pbulk-index' can safely be
+         * run in parallel inside one sandbox.
+         */
         if self.sandbox.enabled() {
             println!("Creating sandbox...");
             if let Err(e) = self.sandbox.create(0) {
@@ -722,10 +720,11 @@ impl Scan {
             if !self.sandbox.run_pre_build(
                 0,
                 &self.config,
-                script_envs.clone(),
+                self.config.script_env(),
             )? {
                 error!("pre-build script failed");
             }
+            self.config.get_vars_from_pkgsrc(&self.sandbox)?;
         }
 
         // For full tree scans, always discover all packages
@@ -744,7 +743,7 @@ impl Scan {
             }
 
             if self.sandbox.enabled() {
-                self.cleanup_sandbox(script_envs)?;
+                self.cleanup_sandbox(self.config.script_env())?;
             }
 
             return Ok(false);
@@ -987,7 +986,7 @@ impl Scan {
         }
 
         if self.sandbox.enabled() {
-            self.cleanup_sandbox(script_envs)?;
+            self.cleanup_sandbox(self.config.script_env())?;
         }
 
         if interrupted {
