@@ -8,4 +8,4 @@
 # leftovers and also so that the sandbox can be cleanly unmounted and removed
 # (empty directories are ok).
 #
-rm -rf "${bob_prefix}" 2>/dev/null || true
+rm -rf "${bob_prefix}" "${bob_pkg_dbdir}" 2>/dev/null || true
