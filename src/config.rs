@@ -53,13 +53,13 @@
 //! | `packages` | string | Directory where binary packages are stored after successful builds. |
 //! | `pkgtools` | string | Directory containing `pkg_add`, `pkg_delete`, and other pkg tools (e.g., `/usr/pkg/sbin`). |
 //! | `prefix` | string | Installation prefix for packages (e.g., `/usr/pkg`). Must match the bootstrap kit. |
-//! | `tar` | string | Absolute path to a tar binary capable of extracting the bootstrap kit. |
 //!
 //! ## Optional Fields
 //!
 //! | Field | Type | Default | Description |
 //! |-------|------|---------|-------------|
 //! | `bootstrap` | string | none | Path to a bootstrap tarball. Required on non-NetBSD systems. Unpacked into each sandbox before builds. |
+//! | `tar` | string | none | Absolute path to a tar binary capable of extracting the bootstrap kit. Required when `bootstrap` is set. |
 //! | `build_user` | string | none | Unprivileged user to run builds as. If set, builds run as this user instead of root. |
 //! | `pkgpaths` | table | `{}` | List of package paths to build (e.g., `{"mail/mutt", "www/curl"}`). Dependencies are discovered automatically. |
 //! | `report_dir` | string | `logdir` | Directory for HTML build reports. Defaults to the `logdir` directory. |
@@ -441,7 +441,7 @@ pub struct Pkgsrc {
     pub save_wrkdir_patterns: Vec<String>,
     /// Environment variables for scan processes.
     pub scanenv: HashMap<String, String>,
-    /// Path to tar binary (required for build, optional for scan).
+    /// Path to tar binary (required when bootstrap is configured).
     pub tar: Option<PathBuf>,
 }
 
