@@ -18,7 +18,7 @@ use anyhow::{Result, bail};
 use bob::Init;
 use bob::RunContext;
 use bob::build::{self, Build};
-use bob::config::Config;
+use bob::config::{Config, PkgsrcEnv};
 use bob::db::Database;
 use bob::logging;
 use bob::report;
@@ -158,15 +158,6 @@ impl BuildRunner {
         options: build::BuildOptions,
     ) -> Result<build::BuildSummary> {
         // Validate config before sandbox creation
-        if self.config.packages().is_none() {
-            bail!("pkgsrc.packages must be set for build operations");
-        }
-        if self.config.pkgtools().is_none() {
-            bail!("pkgsrc.pkgtools must be set for build operations");
-        }
-        if self.config.prefix().is_none() {
-            bail!("pkgsrc.prefix must be set for build operations");
-        }
         if self.config.bootstrap().is_some() && self.config.tar().is_none() {
             bail!("pkgsrc.tar must be set when bootstrap is configured");
         }
@@ -191,22 +182,23 @@ impl BuildRunner {
             && !guard.sandbox().run_pre_build(
                 0,
                 &self.config,
-                self.config.script_env(),
+                self.config.script_env(None),
             )? {
                 bail!("pre-build script failed");
             }
-        self.config.get_vars_from_pkgsrc(guard.sandbox())?;
+        let pkgsrc_env = PkgsrcEnv::fetch(&self.config, guard.sandbox())?;
+
         if guard.enabled()
             && !guard.sandbox().run_post_build(
                 0,
                 &self.config,
-                self.config.script_env(),
+                self.config.script_env(Some(&pkgsrc_env)),
             )?
         {
             bail!("post-build script failed");
         }
 
-        let mut build = Build::new(&self.config, guard, buildable, options);
+        let mut build = Build::new(&self.config, pkgsrc_env, guard, buildable, options);
 
         // Load cached build results from database
         build.load_cached_from_db(&self.db)?;

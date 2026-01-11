@@ -145,6 +145,86 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+/// Environment variables retrieved from pkgsrc.
+///
+/// These values are queried from pkgsrc's mk.conf via bmake and represent
+/// the actual paths pkgsrc is configured to use. This struct is created
+/// after sandbox setup and passed to build operations.
+#[derive(Clone, Debug)]
+pub struct PkgsrcEnv {
+    /// PACKAGES directory for binary packages.
+    pub packages: PathBuf,
+    /// PKG_TOOLS_BIN directory containing pkg_add, pkg_delete, etc.
+    pub pkgtools: PathBuf,
+    /// PREFIX installation directory.
+    pub prefix: PathBuf,
+    /// PKG_DBDIR for installed package database.
+    pub pkg_dbdir: PathBuf,
+    /// PKG_REFCOUNT_DBDIR for refcounted files database.
+    pub pkg_refcount_dbdir: PathBuf,
+}
+
+impl PkgsrcEnv {
+    /// Fetch pkgsrc environment variables by querying bmake.
+    ///
+    /// This must be called after sandbox 0 is created if sandboxes are enabled,
+    /// since bmake may only exist inside the sandbox.
+    pub fn fetch(config: &Config, sandbox: &Sandbox) -> Result<Self> {
+        const VARNAMES: &[&str] = &[
+            "PACKAGES",
+            "PKG_DBDIR",
+            "PKG_REFCOUNT_DBDIR",
+            "PKG_TOOLS_BIN",
+            "PREFIX",
+        ];
+
+        let varnames_arg = VARNAMES.join(" ");
+        let script = format!(
+            "cd {}/pkgtools/pkg_install && {} show-vars VARNAMES=\"{}\"\n",
+            config.pkgsrc().display(),
+            config.make().display(),
+            varnames_arg
+        );
+
+        let child = sandbox.execute_script(0, &script, vec![])?;
+        let output = child
+            .wait_with_output()
+            .context("Failed to execute bmake show-vars")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("Failed to query pkgsrc variables: {}", stderr.trim());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+
+        if lines.len() != VARNAMES.len() {
+            bail!(
+                "Expected {} variables from pkgsrc, got {}",
+                VARNAMES.len(),
+                lines.len()
+            );
+        }
+
+        let mut values: HashMap<&str, &str> = HashMap::new();
+        for (varname, value) in VARNAMES.iter().zip(lines) {
+            if value.is_empty() {
+                bail!("pkgsrc returned empty value for {}", varname);
+            }
+            values.insert(varname, value);
+        }
+
+        Ok(PkgsrcEnv {
+            packages: PathBuf::from(values["PACKAGES"]),
+            pkgtools: PathBuf::from(values["PKG_TOOLS_BIN"]),
+            prefix: PathBuf::from(values["PREFIX"]),
+            pkg_dbdir: PathBuf::from(values["PKG_DBDIR"]),
+            pkg_refcount_dbdir: PathBuf::from(values["PKG_REFCOUNT_DBDIR"]),
+        })
+    }
+}
+
 /// Holds the Lua state for evaluating env functions.
 #[derive(Clone)]
 pub struct LuaEnv {
@@ -359,8 +439,6 @@ pub struct Config {
     filename: PathBuf,
     verbose: bool,
     lua_env: LuaEnv,
-    /// Variables retrieved from pkgsrc's mk.conf via bmake.
-    pkgsrc_vars: HashMap<String, String>,
 }
 
 /// Parsed configuration file contents.
@@ -544,7 +622,6 @@ impl Config {
             filename,
             verbose,
             lua_env,
-            pkgsrc_vars: HashMap::new(),
         })
     }
 
@@ -609,18 +686,6 @@ impl Config {
         &self.file.pkgsrc.logdir
     }
 
-    pub fn packages(&self) -> Option<PathBuf> {
-        self.pkgsrc_var("PACKAGES").map(PathBuf::from)
-    }
-
-    pub fn pkgtools(&self) -> Option<PathBuf> {
-        self.pkgsrc_var("PKG_TOOLS_BIN").map(PathBuf::from)
-    }
-
-    pub fn prefix(&self) -> Option<PathBuf> {
-        self.pkgsrc_var("PREFIX").map(PathBuf::from)
-    }
-
     pub fn save_wrkdir_patterns(&self) -> &[String] {
         self.file.pkgsrc.save_wrkdir_patterns.as_slice()
     }
@@ -646,26 +711,33 @@ impl Config {
     }
 
     /// Return environment variables for script execution.
-    pub fn script_env(&self) -> Vec<(String, String)> {
+    ///
+    /// If `pkgsrc_env` is provided, includes the pkgsrc-derived variables
+    /// (packages, pkgtools, prefix, pkg_dbdir, pkg_refcount_dbdir).
+    pub fn script_env(&self, pkgsrc_env: Option<&PkgsrcEnv>) -> Vec<(String, String)> {
         let mut envs = vec![
             ("bob_logdir".to_string(), format!("{}", self.logdir().display())),
             ("bob_make".to_string(), format!("{}", self.make().display())),
             ("bob_pkgsrc".to_string(), format!("{}", self.pkgsrc().display())),
         ];
-        if let Some(packages) = self.packages() {
+        if let Some(env) = pkgsrc_env {
             envs.push((
                 "bob_packages".to_string(),
-                packages.display().to_string(),
+                env.packages.display().to_string(),
             ));
-        }
-        if let Some(pkgtools) = self.pkgtools() {
             envs.push((
                 "bob_pkgtools".to_string(),
-                pkgtools.display().to_string(),
+                env.pkgtools.display().to_string(),
             ));
-        }
-        if let Some(prefix) = self.prefix() {
-            envs.push(("bob_prefix".to_string(), prefix.display().to_string()));
+            envs.push(("bob_prefix".to_string(), env.prefix.display().to_string()));
+            envs.push((
+                "bob_pkg_dbdir".to_string(),
+                env.pkg_dbdir.display().to_string(),
+            ));
+            envs.push((
+                "bob_pkg_refcount_dbdir".to_string(),
+                env.pkg_refcount_dbdir.display().to_string(),
+            ));
         }
         if let Some(tar) = self.tar() {
             envs.push(("bob_tar".to_string(), format!("{}", tar.display())));
@@ -679,12 +751,6 @@ impl Config {
                 format!("{}", bootstrap.display()),
             ));
         }
-        if let Some(pkg_dbdir) = self.pkg_dbdir() {
-            envs.push(("bob_pkg_dbdir".to_string(), pkg_dbdir.to_string()));
-        }
-        if let Some(v) = self.pkgsrc_var("PKG_REFCOUNT_DBDIR") {
-            envs.push(("bob_pkg_refcount_dbdir".to_string(), v.to_string()));
-        }
         envs
     }
 
@@ -696,59 +762,6 @@ impl Config {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
-    }
-
-    /// Get configuration values from pkgsrc's mk.conf.
-    ///
-    /// This queries bmake for variables that may be set in the user's mk.conf,
-    /// ensuring bob uses the same values as pkgsrc. Values are stored in
-    /// `pkgsrc_vars` and can be retrieved with `pkgsrc_var()`.
-    ///
-    /// Must be called after sandbox 0 is created if sandboxes are enabled,
-    /// since bmake may only exist inside the sandbox.
-    pub fn get_vars_from_pkgsrc(&mut self, sandbox: &Sandbox) -> Result<()> {
-        const VARNAMES: &[&str] = &[
-            "PACKAGES",
-            "PKG_DBDIR",
-            "PKG_REFCOUNT_DBDIR",
-            "PKG_TOOLS_BIN",
-            "PREFIX",
-        ];
-
-        let varnames_arg = VARNAMES.join(" ");
-        let script = format!(
-            "cd {}/pkgtools/pkg_install && {} show-vars VARNAMES=\"{}\"\n",
-            self.pkgsrc().display(),
-            self.make().display(),
-            varnames_arg
-        );
-
-        let child = sandbox.execute_script(0, &script, vec![])?;
-        let output = child
-            .wait_with_output()
-            .context("Failed to execute bmake show-vars")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("Failed to query pkgsrc variables: {}", stderr.trim());
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for (varname, value) in VARNAMES.iter().zip(stdout.lines()) {
-            self.pkgsrc_vars.insert((*varname).to_string(), value.to_string());
-        }
-
-        Ok(())
-    }
-
-    /// Get a variable value retrieved from pkgsrc.
-    pub fn pkgsrc_var(&self, name: &str) -> Option<&str> {
-        self.pkgsrc_vars.get(name).map(|s| s.as_str())
-    }
-
-    /// Get PKG_DBDIR from pkgsrc.
-    pub fn pkg_dbdir(&self) -> Option<&str> {
-        self.pkgsrc_var("PKG_DBDIR")
     }
 
     /// Validate the configuration, checking that required paths and files exist.
