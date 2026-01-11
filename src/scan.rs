@@ -37,6 +37,7 @@
 //! - Unresolved dependencies - Required dependency not found
 //! - Circular dependencies - Package has a dependency cycle
 
+use crate::config::PkgsrcEnv;
 use crate::sandbox::SingleSandboxGuard;
 use crate::tui::MultiProgress;
 use crate::{Config, RunContext, Sandbox};
@@ -507,6 +508,8 @@ pub struct Scan {
     full_scan_complete: bool,
     /// Packages that failed to scan (pkgpath, error message).
     scan_failures: Vec<(PkgPath, String)>,
+    /// Pkgsrc environment variables (populated after pre-build).
+    pkgsrc_env: Option<PkgsrcEnv>,
 }
 
 impl Scan {
@@ -520,8 +523,13 @@ impl Scan {
         Scan {
             config: config.clone(),
             sandbox,
+            incoming: HashSet::new(),
+            done: HashSet::new(),
+            packages: IndexMap::new(),
             full_tree: true,
-            ..Default::default()
+            full_scan_complete: false,
+            scan_failures: Vec::new(),
+            pkgsrc_env: None,
         }
     }
 
@@ -718,11 +726,11 @@ impl Scan {
             if !self.sandbox.run_pre_build(
                 0,
                 &self.config,
-                self.config.script_env(),
+                self.config.script_env(None),
             )? {
                 error!("pre-build script failed");
             }
-            self.config.get_vars_from_pkgsrc(&self.sandbox)?;
+            self.pkgsrc_env = Some(PkgsrcEnv::fetch(&self.config, &self.sandbox)?);
         }
 
         // For full tree scans, always discover all packages
@@ -1000,7 +1008,7 @@ impl Scan {
         if !self.sandbox.run_post_build(
             0,
             &self.config,
-            self.config.script_env(),
+            self.config.script_env(self.pkgsrc_env.as_ref()),
         )? {
             error!("post-build script failed");
         }

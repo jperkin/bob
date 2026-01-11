@@ -42,6 +42,7 @@
 //! - `deinstall` - Test package removal (non-bootstrap only)
 //! - `clean` - Clean up build artifacts
 
+use crate::config::PkgsrcEnv;
 use crate::sandbox::SandboxGuard;
 use crate::scan::{ResolvedPackage, SkipReason, SkippedCounts};
 use crate::tui::{MultiProgress, format_duration};
@@ -112,6 +113,7 @@ trait BuildCallback: Send {
 /// Package builder that executes build stages.
 struct PkgBuilder<'a> {
     config: &'a Config,
+    pkgsrc_env: &'a PkgsrcEnv,
     sandbox: &'a Sandbox,
     sandbox_id: usize,
     pkginfo: &'a ResolvedPackage,
@@ -125,6 +127,7 @@ struct PkgBuilder<'a> {
 impl<'a> PkgBuilder<'a> {
     fn new(
         config: &'a Config,
+        pkgsrc_env: &'a PkgsrcEnv,
         sandbox: &'a Sandbox,
         sandbox_id: usize,
         pkginfo: &'a ResolvedPackage,
@@ -136,6 +139,7 @@ impl<'a> PkgBuilder<'a> {
         let build_user = config.build_user().map(|s| s.to_string());
         Self {
             config,
+            pkgsrc_env,
             sandbox,
             sandbox_id,
             pkginfo,
@@ -175,13 +179,9 @@ impl<'a> PkgBuilder<'a> {
 
     /// Check if the package is already up-to-date.
     fn check_up_to_date(&self) -> anyhow::Result<bool> {
-        let packages =
-            self.config.packages().context("pkgsrc.packages not configured")?;
-        let pkgtools =
-            self.config.pkgtools().context("pkgsrc.pkgtools not configured")?;
-
         let pkgname = self.pkginfo.index.pkgname.pkgname();
-        let pkgfile = packages.join("All").join(format!("{}.tgz", pkgname));
+        let pkgfile =
+            self.pkgsrc_env.packages.join("All").join(format!("{}.tgz", pkgname));
 
         // Check if package file exists
         if !pkgfile.exists() {
@@ -190,8 +190,8 @@ impl<'a> PkgBuilder<'a> {
         }
 
         let pkgfile_str = pkgfile.to_string_lossy();
-        let pkg_info = pkgtools.join("pkg_info");
-        let pkg_admin = pkgtools.join("pkg_admin");
+        let pkg_info = self.pkgsrc_env.pkgtools.join("pkg_info");
+        let pkg_admin = self.pkgsrc_env.pkgtools.join("pkg_admin");
 
         // Get BUILD_INFO and verify source files
         let Some(build_info) = self.run_cmd(&pkg_info, &["-qb", &pkgfile_str])
@@ -295,7 +295,7 @@ impl<'a> PkgBuilder<'a> {
 
         // Check each dependency package exists and is not newer
         for dep in &recorded_deps {
-            let dep_pkg = packages.join("All").join(format!("{}.tgz", dep));
+            let dep_pkg = self.pkgsrc_env.packages.join("All").join(format!("{}.tgz", dep));
             if !dep_pkg.exists() {
                 debug!(pkgname, dep, "dependency package missing");
                 return Ok(false);
@@ -473,9 +473,7 @@ impl<'a> PkgBuilder<'a> {
         }
 
         // Save package to packages directory
-        let packages =
-            self.config.packages().context("pkgsrc.packages not configured")?;
-        let packages_dir = packages.join("All");
+        let packages_dir = self.pkgsrc_env.packages.join("All");
         fs::create_dir_all(&packages_dir)?;
         let dest = packages_dir.join(
             Path::new(&pkgfile)
@@ -741,9 +739,7 @@ impl<'a> PkgBuilder<'a> {
         let deps: Vec<String> =
             self.pkginfo.depends().iter().map(|d| d.to_string()).collect();
 
-        let packages =
-            self.config.packages().context("pkgsrc.packages not configured")?;
-        let pkg_path = packages.join("All");
+        let pkg_path = self.pkgsrc_env.packages.join("All");
         let logfile = self.logdir.join("depends.log");
 
         let mut args = vec![];
@@ -762,15 +758,12 @@ impl<'a> PkgBuilder<'a> {
         pkg_path: &Path,
         logfile: &Path,
     ) -> anyhow::Result<ExitStatus> {
-        let pkgtools =
-            self.config.pkgtools().context("pkgsrc.pkgtools not configured")?;
-        let pkg_dbdir =
-            self.config.pkg_dbdir().context("PKG_DBDIR not configured")?;
-        let pkg_add = pkgtools.join("pkg_add");
+        let pkg_add = self.pkgsrc_env.pkgtools.join("pkg_add");
+        let pkg_dbdir = self.pkgsrc_env.pkg_dbdir.to_string_lossy();
         let pkg_path_value = pkg_path.to_string_lossy().to_string();
         let extra_envs = [("PKG_PATH", pkg_path_value.as_str())];
 
-        let mut args = vec!["-K", pkg_dbdir];
+        let mut args = vec!["-K", &*pkg_dbdir];
         args.extend(packages.iter().copied());
 
         self.run_command_logged_with_env(
@@ -784,16 +777,13 @@ impl<'a> PkgBuilder<'a> {
 
     /// Install a package file.
     fn pkg_add(&self, pkgfile: &str) -> anyhow::Result<bool> {
-        let pkgtools =
-            self.config.pkgtools().context("pkgsrc.pkgtools not configured")?;
-        let pkg_dbdir =
-            self.config.pkg_dbdir().context("PKG_DBDIR not configured")?;
-        let pkg_add = pkgtools.join("pkg_add");
+        let pkg_add = self.pkgsrc_env.pkgtools.join("pkg_add");
+        let pkg_dbdir = self.pkgsrc_env.pkg_dbdir.to_string_lossy();
         let logfile = self.logdir.join("package.log");
 
         let status = self.run_command_logged(
             &pkg_add,
-            &["-K", pkg_dbdir, pkgfile],
+            &["-K", &*pkg_dbdir, pkgfile],
             RunAs::Root,
             &logfile,
         )?;
@@ -803,16 +793,13 @@ impl<'a> PkgBuilder<'a> {
 
     /// Delete an installed package.
     fn pkg_delete(&self, pkgname: &str) -> anyhow::Result<bool> {
-        let pkgtools =
-            self.config.pkgtools().context("pkgsrc.pkgtools not configured")?;
-        let pkg_dbdir =
-            self.config.pkg_dbdir().context("PKG_DBDIR not configured")?;
-        let pkg_delete = pkgtools.join("pkg_delete");
+        let pkg_delete = self.pkgsrc_env.pkgtools.join("pkg_delete");
+        let pkg_dbdir = self.pkgsrc_env.pkg_dbdir.to_string_lossy();
         let logfile = self.logdir.join("deinstall.log");
 
         let status = self.run_command_logged(
             &pkg_delete,
-            &["-K", pkg_dbdir, pkgname],
+            &["-K", &*pkg_dbdir, pkgname],
             RunAs::Root,
             &logfile,
         )?;
@@ -1147,6 +1134,8 @@ pub struct BuildOptions {
 pub struct Build {
     /// Parsed [`Config`].
     config: Config,
+    /// Pkgsrc environment variables.
+    pkgsrc_env: PkgsrcEnv,
     /// Sandbox guard - owns created sandboxes, destroys on drop.
     guard: SandboxGuard,
     /// List of packages to build, as input from Scan::resolve.
@@ -1161,6 +1150,7 @@ pub struct Build {
 struct PackageBuild {
     id: usize,
     config: Config,
+    pkgsrc_env: PkgsrcEnv,
     pkginfo: ResolvedPackage,
     sandbox: Sandbox,
     options: BuildOptions,
@@ -1290,7 +1280,7 @@ impl PackageBuild {
             }
         };
 
-        let mut envs = self.config.script_env();
+        let mut envs = self.config.script_env(Some(&self.pkgsrc_env));
         for (key, value) in &pkg_env {
             envs.push((key.clone(), value.clone()));
         }
@@ -1305,6 +1295,7 @@ impl PackageBuild {
         // Run the build using PkgBuilder
         let builder = PkgBuilder::new(
             &self.config,
+            &self.pkgsrc_env,
             &self.sandbox,
             self.id,
             &self.pkginfo,
@@ -1879,6 +1870,7 @@ impl BuildJobs {
 impl Build {
     pub fn new(
         config: &Config,
+        pkgsrc_env: PkgsrcEnv,
         guard: SandboxGuard,
         scanpkgs: IndexMap<PkgName, ResolvedPackage>,
         options: BuildOptions,
@@ -1900,6 +1892,7 @@ impl Build {
         }
         Build {
             config: config.clone(),
+            pkgsrc_env,
             guard,
             scanpkgs,
             cached: IndexMap::new(),
@@ -2240,6 +2233,7 @@ impl Build {
          * accordingly.  Returns the build results via a channel.
          */
         let config = self.config.clone();
+        let pkgsrc_env = self.pkgsrc_env.clone();
         let sandbox = self.guard.sandbox().clone();
         let options = self.options.clone();
         let progress_clone = Arc::clone(&progress);
@@ -2251,6 +2245,7 @@ impl Build {
         let manager = std::thread::spawn(move || {
             let mut clients = clients.clone();
             let config = config.clone();
+            let pkgsrc_env = pkgsrc_env.clone();
             let sandbox = sandbox.clone();
             let mut jobs = jobs.clone();
             let mut was_interrupted = false;
@@ -2303,6 +2298,7 @@ impl Build {
                                     Box::new(PackageBuild {
                                         id: c,
                                         config: config.clone(),
+                                        pkgsrc_env: pkgsrc_env.clone(),
                                         pkginfo: pkginfo.clone(),
                                         sandbox: sandbox.clone(),
                                         options: options.clone(),
