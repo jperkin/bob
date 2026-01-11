@@ -110,50 +110,51 @@ trait BuildCallback: Send {
     fn stage(&mut self, stage: &str);
 }
 
+/// Session-level build data shared across all package builds.
+#[derive(Debug)]
+struct BuildSession {
+    config: Config,
+    pkgsrc_env: PkgsrcEnv,
+    sandbox: Sandbox,
+    options: BuildOptions,
+}
+
 /// Package builder that executes build stages.
 struct PkgBuilder<'a> {
-    config: &'a Config,
-    pkgsrc_env: &'a PkgsrcEnv,
-    sandbox: &'a Sandbox,
+    session: &'a BuildSession,
     sandbox_id: usize,
     pkginfo: &'a ResolvedPackage,
     logdir: PathBuf,
     build_user: Option<String>,
     envs: Vec<(String, String)>,
     output_tx: Option<Sender<ChannelCommand>>,
-    options: &'a BuildOptions,
 }
 
 impl<'a> PkgBuilder<'a> {
     fn new(
-        config: &'a Config,
-        pkgsrc_env: &'a PkgsrcEnv,
-        sandbox: &'a Sandbox,
+        session: &'a BuildSession,
         sandbox_id: usize,
         pkginfo: &'a ResolvedPackage,
         envs: Vec<(String, String)>,
         output_tx: Option<Sender<ChannelCommand>>,
-        options: &'a BuildOptions,
     ) -> Self {
-        let logdir = config.logdir().join(pkginfo.index.pkgname.pkgname());
-        let build_user = config.build_user().map(|s| s.to_string());
+        let logdir =
+            session.config.logdir().join(pkginfo.index.pkgname.pkgname());
+        let build_user = session.config.build_user().map(|s| s.to_string());
         Self {
-            config,
-            pkgsrc_env,
-            sandbox,
+            session,
             sandbox_id,
             pkginfo,
             logdir,
             build_user,
             envs,
             output_tx,
-            options,
         }
     }
 
     /// Run a command in the sandbox and capture its stdout.
     fn run_cmd(&self, cmd: &Path, args: &[&str]) -> Option<String> {
-        let mut command = self.sandbox.command(self.sandbox_id, cmd);
+        let mut command = self.session.sandbox.command(self.sandbox_id, cmd);
         command.args(args);
         self.apply_envs(&mut command, &[]);
         match command.output() {
@@ -180,8 +181,12 @@ impl<'a> PkgBuilder<'a> {
     /// Check if the package is already up-to-date.
     fn check_up_to_date(&self) -> anyhow::Result<bool> {
         let pkgname = self.pkginfo.index.pkgname.pkgname();
-        let pkgfile =
-            self.pkgsrc_env.packages.join("All").join(format!("{}.tgz", pkgname));
+        let pkgfile = self
+            .session
+            .pkgsrc_env
+            .packages
+            .join("All")
+            .join(format!("{}.tgz", pkgname));
 
         // Check if package file exists
         if !pkgfile.exists() {
@@ -190,8 +195,8 @@ impl<'a> PkgBuilder<'a> {
         }
 
         let pkgfile_str = pkgfile.to_string_lossy();
-        let pkg_info = self.pkgsrc_env.pkgtools.join("pkg_info");
-        let pkg_admin = self.pkgsrc_env.pkgtools.join("pkg_admin");
+        let pkg_info = self.session.pkgsrc_env.pkgtools.join("pkg_info");
+        let pkg_admin = self.session.pkgsrc_env.pkgtools.join("pkg_admin");
 
         // Get BUILD_INFO and verify source files
         let Some(build_info) = self.run_cmd(&pkg_info, &["-qb", &pkgfile_str])
@@ -214,7 +219,7 @@ impl<'a> PkgBuilder<'a> {
                 continue;
             }
 
-            let src_file = self.config.pkgsrc().join(file);
+            let src_file = self.session.config.pkgsrc().join(file);
             if !src_file.exists() {
                 debug!(pkgname, file, "source file missing");
                 return Ok(false);
@@ -295,7 +300,12 @@ impl<'a> PkgBuilder<'a> {
 
         // Check each dependency package exists and is not newer
         for dep in &recorded_deps {
-            let dep_pkg = self.pkgsrc_env.packages.join("All").join(format!("{}.tgz", dep));
+            let dep_pkg = self
+                .session
+                .pkgsrc_env
+                .packages
+                .join("All")
+                .join(format!("{}.tgz", dep));
             if !dep_pkg.exists() {
                 debug!(pkgname, dep, "dependency package missing");
                 return Ok(false);
@@ -326,7 +336,7 @@ impl<'a> PkgBuilder<'a> {
         let pkgpath = &self.pkginfo.pkgpath;
 
         // Check if package is already up-to-date (skip check if force rebuild)
-        if !self.options.force_rebuild && self.check_up_to_date()? {
+        if !self.session.options.force_rebuild && self.check_up_to_date()? {
             return Ok(PkgBuildResult::Skipped);
         }
 
@@ -353,7 +363,7 @@ impl<'a> PkgBuilder<'a> {
                 .status();
         }
 
-        let pkgdir = self.config.pkgsrc().join(pkgpath.as_path());
+        let pkgdir = self.session.config.pkgsrc().join(pkgpath.as_path());
 
         // Pre-clean
         callback.stage(Stage::PreClean.as_str());
@@ -473,7 +483,7 @@ impl<'a> PkgBuilder<'a> {
         }
 
         // Save package to packages directory
-        let packages_dir = self.pkgsrc_env.packages.join("All");
+        let packages_dir = self.session.pkgsrc_env.packages.join("All");
         fs::create_dir_all(&packages_dir)?;
         let dest = packages_dir.join(
             Path::new(&pkgfile)
@@ -481,8 +491,9 @@ impl<'a> PkgBuilder<'a> {
                 .context("Invalid package file path")?,
         );
         // pkgfile is a path inside the sandbox; prepend sandbox path for host access
-        let host_pkgfile = if self.sandbox.enabled() {
-            self.sandbox
+        let host_pkgfile = if self.session.sandbox.enabled() {
+            self.session
+                .sandbox
                 .path(self.sandbox_id)
                 .join(pkgfile.trim_start_matches('/'))
         } else {
@@ -542,7 +553,7 @@ impl<'a> PkgBuilder<'a> {
         debug!(stage = stage.as_str(), targets = ?targets, "Running make stage");
 
         let status = self.run_command_logged(
-            self.config.make(),
+            self.session.config.make(),
             &args,
             run_as,
             &logfile,
@@ -587,6 +598,7 @@ impl<'a> PkgBuilder<'a> {
             let shell_cmd =
                 self.build_shell_command(cmd, args, run_as, extra_envs);
             let mut child = self
+                .session
                 .sandbox
                 .command(self.sandbox_id, Path::new("/bin/sh"))
                 .arg("-c")
@@ -671,7 +683,8 @@ impl<'a> PkgBuilder<'a> {
 
         match run_as {
             RunAs::Root => {
-                let mut command = self.sandbox.command(self.sandbox_id, cmd);
+                let mut command =
+                    self.session.sandbox.command(self.sandbox_id, cmd);
                 command.args(args);
                 self.apply_envs(&mut command, extra_envs);
                 command
@@ -690,8 +703,10 @@ impl<'a> PkgBuilder<'a> {
                     .map(|part| Self::shell_escape(part))
                     .collect::<Vec<_>>()
                     .join(" ");
-                let mut command =
-                    self.sandbox.command(self.sandbox_id, Path::new("su"));
+                let mut command = self
+                    .session
+                    .sandbox
+                    .command(self.sandbox_id, Path::new("su"));
                 command.arg(user).arg("-c").arg(&inner_cmd);
                 self.apply_envs(&mut command, extra_envs);
                 command
@@ -709,7 +724,10 @@ impl<'a> PkgBuilder<'a> {
         pkgdir: &Path,
         varname: &str,
     ) -> anyhow::Result<String> {
-        let mut cmd = self.sandbox.command(self.sandbox_id, self.config.make());
+        let mut cmd = self
+            .session
+            .sandbox
+            .command(self.sandbox_id, self.session.config.make());
         self.apply_envs(&mut cmd, &[]);
 
         let work_log = self.logdir.join("work.log");
@@ -739,7 +757,7 @@ impl<'a> PkgBuilder<'a> {
         let deps: Vec<String> =
             self.pkginfo.depends().iter().map(|d| d.to_string()).collect();
 
-        let pkg_path = self.pkgsrc_env.packages.join("All");
+        let pkg_path = self.session.pkgsrc_env.packages.join("All");
         let logfile = self.logdir.join("depends.log");
 
         let mut args = vec![];
@@ -758,8 +776,8 @@ impl<'a> PkgBuilder<'a> {
         pkg_path: &Path,
         logfile: &Path,
     ) -> anyhow::Result<ExitStatus> {
-        let pkg_add = self.pkgsrc_env.pkgtools.join("pkg_add");
-        let pkg_dbdir = self.pkgsrc_env.pkg_dbdir.to_string_lossy();
+        let pkg_add = self.session.pkgsrc_env.pkgtools.join("pkg_add");
+        let pkg_dbdir = self.session.pkgsrc_env.pkg_dbdir.to_string_lossy();
         let pkg_path_value = pkg_path.to_string_lossy().to_string();
         let extra_envs = [("PKG_PATH", pkg_path_value.as_str())];
 
@@ -777,8 +795,8 @@ impl<'a> PkgBuilder<'a> {
 
     /// Install a package file.
     fn pkg_add(&self, pkgfile: &str) -> anyhow::Result<bool> {
-        let pkg_add = self.pkgsrc_env.pkgtools.join("pkg_add");
-        let pkg_dbdir = self.pkgsrc_env.pkg_dbdir.to_string_lossy();
+        let pkg_add = self.session.pkgsrc_env.pkgtools.join("pkg_add");
+        let pkg_dbdir = self.session.pkgsrc_env.pkg_dbdir.to_string_lossy();
         let logfile = self.logdir.join("package.log");
 
         let status = self.run_command_logged(
@@ -793,8 +811,8 @@ impl<'a> PkgBuilder<'a> {
 
     /// Delete an installed package.
     fn pkg_delete(&self, pkgname: &str) -> anyhow::Result<bool> {
-        let pkg_delete = self.pkgsrc_env.pkgtools.join("pkg_delete");
-        let pkg_dbdir = self.pkgsrc_env.pkg_dbdir.to_string_lossy();
+        let pkg_delete = self.session.pkgsrc_env.pkgtools.join("pkg_delete");
+        let pkg_dbdir = self.session.pkgsrc_env.pkg_dbdir.to_string_lossy();
         let logfile = self.logdir.join("deinstall.log");
 
         let status = self.run_command_logged(
@@ -833,7 +851,7 @@ impl<'a> PkgBuilder<'a> {
         }
 
         let status = self.run_command_logged(
-            self.config.make(),
+            self.session.config.make(),
             &args,
             RunAs::Root,
             logfile,
@@ -1146,20 +1164,17 @@ pub struct Build {
     options: BuildOptions,
 }
 
+/// Per-package build task sent to worker threads.
 #[derive(Debug)]
 struct PackageBuild {
-    id: usize,
-    config: Config,
-    pkgsrc_env: PkgsrcEnv,
+    session: Arc<BuildSession>,
+    sandbox_id: usize,
     pkginfo: ResolvedPackage,
-    sandbox: Sandbox,
-    options: BuildOptions,
 }
 
 /// Helper for querying bmake variables with the correct environment.
 struct MakeQuery<'a> {
-    config: &'a Config,
-    sandbox: &'a Sandbox,
+    session: &'a BuildSession,
     sandbox_id: usize,
     pkgpath: &'a PkgPath,
     env: &'a HashMap<String, String>,
@@ -1167,20 +1182,22 @@ struct MakeQuery<'a> {
 
 impl<'a> MakeQuery<'a> {
     fn new(
-        config: &'a Config,
-        sandbox: &'a Sandbox,
+        session: &'a BuildSession,
         sandbox_id: usize,
         pkgpath: &'a PkgPath,
         env: &'a HashMap<String, String>,
     ) -> Self {
-        Self { config, sandbox, sandbox_id, pkgpath, env }
+        Self { session, sandbox_id, pkgpath, env }
     }
 
     /// Query a bmake variable value.
     fn var(&self, name: &str) -> Option<String> {
-        let pkgdir = self.config.pkgsrc().join(self.pkgpath.as_path());
+        let pkgdir = self.session.config.pkgsrc().join(self.pkgpath.as_path());
 
-        let mut cmd = self.sandbox.command(self.sandbox_id, self.config.make());
+        let mut cmd = self
+            .session
+            .sandbox
+            .command(self.sandbox_id, self.session.config.make());
         cmd.arg("-C")
             .arg(&pkgdir)
             .arg("show-var")
@@ -1235,8 +1252,9 @@ impl<'a> MakeQuery<'a> {
     /// Resolve a path to its actual location on the host filesystem.
     /// If sandboxed, prepends the sandbox root path.
     fn resolve_path(&self, path: &Path) -> PathBuf {
-        if self.sandbox.enabled() {
-            self.sandbox
+        if self.session.sandbox.enabled() {
+            self.session
+                .sandbox
                 .path(self.sandbox_id)
                 .join(path.strip_prefix("/").unwrap_or(path))
         } else {
@@ -1263,16 +1281,16 @@ impl PackageBuild {
     ) -> anyhow::Result<PackageBuildResult> {
         let pkgname = self.pkginfo.index.pkgname.pkgname();
         info!(pkgname = %pkgname,
-            sandbox_id = self.id,
+            sandbox_id = self.sandbox_id,
             "Starting package build"
         );
 
         let pkgpath = &self.pkginfo.pkgpath;
 
-        let logdir = self.config.logdir();
+        let logdir = self.session.config.logdir();
 
         // Get env vars from Lua config for wrkdir saving and build environment
-        let pkg_env = match self.config.get_pkg_env(&self.pkginfo) {
+        let pkg_env = match self.session.config.get_pkg_env(&self.pkginfo) {
             Ok(env) => env,
             Err(e) => {
                 error!(pkgname = %pkgname, error = %e, "Failed to get env from Lua config");
@@ -1280,35 +1298,38 @@ impl PackageBuild {
             }
         };
 
-        let mut envs = self.config.script_env(Some(&self.pkgsrc_env));
+        let mut envs =
+            self.session.config.script_env(Some(&self.session.pkgsrc_env));
         for (key, value) in &pkg_env {
             envs.push((key.clone(), value.clone()));
         }
 
-        let patterns = self.config.save_wrkdir_patterns();
+        let patterns = self.session.config.save_wrkdir_patterns();
 
         // Run pre-build script if defined (always runs)
-        if !self.sandbox.run_pre_build(self.id, &self.config, envs.clone())? {
+        if !self.session.sandbox.run_pre_build(
+            self.sandbox_id,
+            &self.session.config,
+            envs.clone(),
+        )? {
             warn!(pkgname = %pkgname, "pre-build script failed");
         }
 
         // Run the build using PkgBuilder
         let builder = PkgBuilder::new(
-            &self.config,
-            &self.pkgsrc_env,
-            &self.sandbox,
-            self.id,
+            &self.session,
+            self.sandbox_id,
             &self.pkginfo,
             envs.clone(),
             Some(status_tx.clone()),
-            &self.options,
         );
 
-        let mut callback = ChannelCallback::new(self.id, status_tx);
+        let mut callback = ChannelCallback::new(self.sandbox_id, status_tx);
         let result = builder.build(&mut callback);
 
         // Clear stage display
-        let _ = status_tx.send(ChannelCommand::StageUpdate(self.id, None));
+        let _ =
+            status_tx.send(ChannelCommand::StageUpdate(self.sandbox_id, None));
 
         let result = match &result {
             Ok(PkgBuildResult::Success) => {
@@ -1323,7 +1344,7 @@ impl PackageBuild {
                 error!(pkgname = %pkgname, "package build failed");
                 // Show cleanup stage to user
                 let _ = status_tx.send(ChannelCommand::StageUpdate(
-                    self.id,
+                    self.sandbox_id,
                     Some("cleanup".to_string()),
                 ));
                 // Kill any orphaned processes in the sandbox before cleanup.
@@ -1331,7 +1352,7 @@ impl PackageBuild {
                 // subsequent commands like bmake show-var or bmake clean.
                 debug!(pkgname = %pkgname, "Calling kill_processes_by_id");
                 let kill_start = Instant::now();
-                self.sandbox.kill_processes_by_id(self.id);
+                self.session.sandbox.kill_processes_by_id(self.sandbox_id);
                 debug!(pkgname = %pkgname, elapsed_ms = kill_start.elapsed().as_millis(), "kill_processes_by_id completed");
                 // Save wrkdir files matching configured patterns, then clean up
                 if !patterns.is_empty() {
@@ -1357,7 +1378,7 @@ impl PackageBuild {
                 error!(pkgname = %pkgname, error = %e, "package build error");
                 // Show cleanup stage to user
                 let _ = status_tx.send(ChannelCommand::StageUpdate(
-                    self.id,
+                    self.sandbox_id,
                     Some("cleanup".to_string()),
                 ));
                 // Kill any orphaned processes in the sandbox before cleanup.
@@ -1365,7 +1386,7 @@ impl PackageBuild {
                 // subsequent commands like bmake show-var or bmake clean.
                 debug!(pkgname = %pkgname, "Calling kill_processes_by_id");
                 let kill_start = Instant::now();
-                self.sandbox.kill_processes_by_id(self.id);
+                self.session.sandbox.kill_processes_by_id(self.sandbox_id);
                 debug!(pkgname = %pkgname, elapsed_ms = kill_start.elapsed().as_millis(), "kill_processes_by_id completed");
                 // Save wrkdir files matching configured patterns, then clean up
                 if !patterns.is_empty() {
@@ -1390,7 +1411,11 @@ impl PackageBuild {
         };
 
         // Run post-build script if defined (always runs regardless of result)
-        match self.sandbox.run_post_build(self.id, &self.config, envs) {
+        match self.session.sandbox.run_post_build(
+            self.sandbox_id,
+            &self.session.config,
+            envs,
+        ) {
             Ok(true) => {}
             Ok(false) => warn!(pkgname = %pkgname, "post-build script failed"),
             Err(e) => {
@@ -1410,13 +1435,8 @@ impl PackageBuild {
         patterns: &[String],
         pkg_env: &HashMap<String, String>,
     ) {
-        let make = MakeQuery::new(
-            &self.config,
-            &self.sandbox,
-            self.id,
-            pkgpath,
-            pkg_env,
-        );
+        let make =
+            MakeQuery::new(&self.session, self.sandbox_id, pkgpath, pkg_env);
 
         // Get WRKDIR
         let wrkdir = match make.wrkdir() {
@@ -1488,9 +1508,12 @@ impl PackageBuild {
 
     /// Run bmake clean for a package.
     fn run_clean(&self, pkgpath: &PkgPath, envs: &[(String, String)]) {
-        let pkgdir = self.config.pkgsrc().join(pkgpath.as_path());
+        let pkgdir = self.session.config.pkgsrc().join(pkgpath.as_path());
 
-        let mut cmd = self.sandbox.command(self.id, self.config.make());
+        let mut cmd = self
+            .session
+            .sandbox
+            .command(self.sandbox_id, self.session.config.make());
         cmd.arg("-C").arg(&pkgdir).arg("clean");
         for (key, value) in envs {
             cmd.env(key, value);
@@ -2232,10 +2255,12 @@ impl Build {
          * Manager thread.  Read incoming commands from clients and reply
          * accordingly.  Returns the build results via a channel.
          */
-        let config = self.config.clone();
-        let pkgsrc_env = self.pkgsrc_env.clone();
-        let sandbox = self.guard.sandbox().clone();
-        let options = self.options.clone();
+        let session = Arc::new(BuildSession {
+            config: self.config.clone(),
+            pkgsrc_env: self.pkgsrc_env.clone(),
+            sandbox: self.guard.sandbox().clone(),
+            options: self.options.clone(),
+        });
         let progress_clone = Arc::clone(&progress);
         let shutdown_for_manager = Arc::clone(&shutdown_flag);
         let (results_tx, results_rx) = mpsc::channel::<Vec<BuildResult>>();
@@ -2244,9 +2269,6 @@ impl Build {
         let (completed_tx, completed_rx) = mpsc::channel::<BuildResult>();
         let manager = std::thread::spawn(move || {
             let mut clients = clients.clone();
-            let config = config.clone();
-            let pkgsrc_env = pkgsrc_env.clone();
-            let sandbox = sandbox.clone();
             let mut jobs = jobs.clone();
             let mut was_interrupted = false;
 
@@ -2296,12 +2318,9 @@ impl Build {
 
                                 let _ = client.send(ChannelCommand::JobData(
                                     Box::new(PackageBuild {
-                                        id: c,
-                                        config: config.clone(),
-                                        pkgsrc_env: pkgsrc_env.clone(),
+                                        session: Arc::clone(&session),
+                                        sandbox_id: c,
                                         pkginfo: pkginfo.clone(),
-                                        sandbox: sandbox.clone(),
-                                        options: options.clone(),
                                     }),
                                 ));
                             }
