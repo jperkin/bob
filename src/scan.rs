@@ -39,7 +39,7 @@
 
 use crate::config::PkgsrcEnv;
 use crate::sandbox::SingleSandboxGuard;
-use crate::tui::MultiProgress;
+use crate::tui::{MultiProgress, format_duration};
 use crate::{Config, RunContext, Sandbox};
 use anyhow::{Context, Result, bail};
 use indexmap::IndexMap;
@@ -499,6 +499,10 @@ pub struct Scan {
     incoming: HashSet<PkgPath>,
     /// Pkgpaths we've completed scanning (in this session).
     done: HashSet<PkgPath>,
+    /// Number of pkgpaths loaded from cache at start of scan.
+    initial_cached: usize,
+    /// Number of pkgpaths discovered as cached during dependency discovery.
+    discovered_cached: usize,
     /// Packages loaded from scan, indexed by pkgname.
     packages: IndexMap<PkgName, ScanIndex>,
     /// Full tree scan - discover all packages, skip recursive dependency discovery.
@@ -525,6 +529,8 @@ impl Scan {
             sandbox,
             incoming: HashSet::new(),
             done: HashSet::new(),
+            initial_cached: 0,
+            discovered_cached: 0,
             packages: IndexMap::new(),
             full_tree: true,
             full_scan_complete: false,
@@ -760,24 +766,26 @@ impl Scan {
 
         println!("Scanning packages...");
 
+        // Track initial cached count for final summary
+        self.initial_cached = self.done.len();
+
         // Set up multi-line progress display using ratatui inline viewport
-        // Include cached packages in total so progress shows full picture
-        let cached_count = self.done.len();
-        let total_count = cached_count + self.incoming.len();
+        // Note: finished_title is unused since we print our own summary
+        let total_count = self.initial_cached + self.incoming.len();
         let progress = Arc::new(Mutex::new(
             MultiProgress::new(
                 "Scanning",
-                "Scanned",
+                "",
                 total_count,
                 self.config.scan_threads(),
             )
             .expect("Failed to initialize progress display"),
         ));
 
-        // Mark cached packages
-        if cached_count > 0 {
+        // Mark cached packages in progress display
+        if self.initial_cached > 0 {
             if let Ok(mut p) = progress.lock() {
-                p.state_mut().cached = cached_count;
+                p.state_mut().cached = self.initial_cached;
             }
         }
 
@@ -939,6 +947,7 @@ impl Scan {
                                 {
                                     Ok(true) => {
                                         self.done.insert(dep_path.clone());
+                                        self.discovered_cached += 1;
                                         if let Ok(mut p) = progress.lock() {
                                             p.state_mut().total += 1;
                                             p.state_mut().cached += 1;
@@ -972,7 +981,12 @@ impl Scan {
              * We're finished with the current incoming, replace it with the
              * new incoming list.  If it is empty then we've already processed
              * all known PKGPATHs and are done.
+             *
+             * Filter out any pkgpaths that were already scanned this wave.
+             * This handles a race where dependency discovery finds a pkgpath
+             * before its parallel scan completes and adds it to done.
              */
+            new_incoming.retain(|p| !self.done.contains(p));
             self.incoming = new_incoming;
         }
 
@@ -983,11 +997,38 @@ impl Scan {
         stop_refresh.store(true, Ordering::Relaxed);
         let _ = refresh_thread.join();
 
-        // Only call finish() for normal completion; finish_interrupted()
+        // Only print summary for normal completion; finish_interrupted()
         // was already called immediately when interrupt was detected
         if !interrupted {
-            if let Ok(mut p) = progress.lock() {
-                let _ = p.finish();
+            // Get elapsed time and clean up TUI without printing generic summary
+            let elapsed = if let Ok(mut p) = progress.lock() {
+                p.finish_silent().ok()
+            } else {
+                None
+            };
+
+            // Print scan-specific summary from source of truth
+            // total = initial_cached + discovered_cached + actually_scanned
+            // where actually_scanned = succeeded + failed
+            let total = self.done.len();
+            let cached = self.initial_cached + self.discovered_cached;
+            let failed = self.scan_failures.len();
+            let succeeded = total.saturating_sub(cached).saturating_sub(failed);
+
+            let elapsed_str = elapsed
+                .map(format_duration)
+                .unwrap_or_else(|| "?".to_string());
+
+            if cached > 0 {
+                println!(
+                    "Scanned {} package paths in {} ({} scanned, {} cached, {} failed)",
+                    total, elapsed_str, succeeded, cached, failed
+                );
+            } else {
+                println!(
+                    "Scanned {} package paths in {} ({} succeeded, {} failed)",
+                    total, elapsed_str, succeeded, failed
+                );
             }
         }
 
