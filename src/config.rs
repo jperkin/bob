@@ -56,7 +56,7 @@
 //! | Field | Type | Default | Description |
 //! |-------|------|---------|-------------|
 //! | `bootstrap` | string | none | Path to a bootstrap tarball. Required on non-NetBSD systems. Unpacked into each sandbox before builds. |
-//! | `tar` | string | none | Absolute path to a tar binary capable of extracting the bootstrap kit. Required when `bootstrap` is set. |
+//! | `tar` | string | `tar` | Path to a tar binary capable of extracting the bootstrap kit. Defaults to `tar` in PATH. |
 //! | `build_user` | string | none | Unprivileged user to run builds as. If set, builds run as this user instead of root. |
 //! | `pkgpaths` | table | `{}` | List of package paths to build (e.g., `{"mail/mutt", "www/curl"}`). Dependencies are discovered automatically. |
 //! | `save_wrkdir_patterns` | table | `{}` | Glob patterns for files to preserve from WRKDIR on build failure (e.g., `{"**/config.log"}`). |
@@ -486,7 +486,7 @@ pub struct Options {
 /// - `build_user`: Unprivileged user for builds
 /// - `pkgpaths`: List of packages to build
 /// - `save_wrkdir_patterns`: Glob patterns for files to save on build failure
-/// - `tar`: Path to tar binary (required when bootstrap is configured)
+/// - `tar`: Path to tar binary (defaults to `tar`)
 #[derive(Clone, Debug, Default)]
 pub struct Pkgsrc {
     /// Path to pkgsrc source tree.
@@ -505,7 +505,7 @@ pub struct Pkgsrc {
     pub save_wrkdir_patterns: Vec<String>,
     /// Environment variables for scan processes.
     pub scanenv: HashMap<String, String>,
-    /// Path to tar binary (required when bootstrap is configured).
+    /// Path to tar binary (defaults to `tar` in PATH).
     pub tar: Option<PathBuf>,
 }
 
@@ -739,9 +739,10 @@ impl Config {
                 env.pkg_refcount_dbdir.display().to_string(),
             ));
         }
-        if let Some(tar) = self.tar() {
-            envs.push(("bob_tar".to_string(), format!("{}", tar.display())));
-        }
+        let tar_value = self.tar()
+            .map(|t| t.display().to_string())
+            .unwrap_or_else(|| "tar".to_string());
+        envs.push(("bob_tar".to_string(), tar_value));
         if let Some(build_user) = self.build_user() {
             envs.push(("bob_build_user".to_string(), build_user.to_string()));
         }

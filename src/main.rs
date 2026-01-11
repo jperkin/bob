@@ -158,9 +158,6 @@ impl BuildRunner {
         options: build::BuildOptions,
     ) -> Result<build::BuildSummary> {
         // Validate config before sandbox creation
-        if self.config.bootstrap().is_some() && self.config.tar().is_none() {
-            bail!("pkgsrc.tar must be set when bootstrap is configured");
-        }
         if scan_result.count_buildable() == 0 {
             bail!("No packages to build");
         }
