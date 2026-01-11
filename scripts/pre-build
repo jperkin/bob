@@ -10,5 +10,5 @@
 # If a bootstrap kit has been defined (required on any OS other than NetBSD)
 # then unpack it.
 if [ -n "${bob_bootstrap}" ]; then
-	${bob_tar:-tar} -zxpf "${bob_bootstrap}" -C /
+	${bob_tar} -zxpf "${bob_bootstrap}" -C /
 fi
