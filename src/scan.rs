@@ -736,7 +736,8 @@ impl Scan {
             )? {
                 error!("pre-build script failed");
             }
-            self.pkgsrc_env = Some(PkgsrcEnv::fetch(&self.config, &self.sandbox)?);
+            self.pkgsrc_env =
+                Some(PkgsrcEnv::fetch(&self.config, &self.sandbox)?);
         }
 
         // For full tree scans, always discover all packages
@@ -1015,9 +1016,8 @@ impl Scan {
             let failed = self.scan_failures.len();
             let succeeded = total.saturating_sub(cached).saturating_sub(failed);
 
-            let elapsed_str = elapsed
-                .map(format_duration)
-                .unwrap_or_else(|| "?".to_string());
+            let elapsed_str =
+                elapsed.map(format_duration).unwrap_or_else(|| "?".to_string());
 
             if cached > 0 {
                 println!(
