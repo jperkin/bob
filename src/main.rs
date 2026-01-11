@@ -180,9 +180,10 @@ impl BuildRunner {
                 0,
                 &self.config,
                 self.config.script_env(None),
-            )? {
-                bail!("pre-build script failed");
-            }
+            )?
+        {
+            bail!("pre-build script failed");
+        }
         let pkgsrc_env = PkgsrcEnv::fetch(&self.config, guard.sandbox())?;
 
         if guard.enabled()
@@ -195,7 +196,8 @@ impl BuildRunner {
             bail!("post-build script failed");
         }
 
-        let mut build = Build::new(&self.config, pkgsrc_env, guard, buildable, options);
+        let mut build =
+            Build::new(&self.config, pkgsrc_env, guard, buildable, options);
 
         // Load cached build results from database
         build.load_cached_from_db(&self.db)?;
