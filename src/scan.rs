@@ -37,6 +37,7 @@
 //! - Unresolved dependencies - Required dependency not found
 //! - Circular dependencies - Package has a dependency cycle
 
+use crate::sandbox::SingleSandboxGuard;
 use crate::tui::MultiProgress;
 use crate::{Config, RunContext, Sandbox};
 use anyhow::{Context, Result, bail};
@@ -703,21 +704,16 @@ impl Scan {
         /*
          * Only a single sandbox is required, 'make pbulk-index' can safely be
          * run in parallel inside one sandbox.
+         *
+         * Create guard which handles sandbox lifecycle - creates on construction,
+         * destroys on drop. This ensures cleanup even on error paths.
          */
-        if self.sandbox.enabled() {
-            if self.config.verbose() {
-                println!("Creating sandbox...");
-            }
-            if let Err(e) = self.sandbox.create(0) {
-                if let Err(destroy_err) = self.sandbox.destroy(0) {
-                    eprintln!(
-                        "Warning: failed to destroy sandbox: {}",
-                        destroy_err
-                    );
-                }
-                return Err(e);
-            }
+        let _guard = SingleSandboxGuard::new(
+            self.sandbox.clone(),
+            self.config.verbose(),
+        )?;
 
+        if self.sandbox.enabled() {
             // Run pre-build script if defined
             if !self.sandbox.run_pre_build(
                 0,
@@ -745,9 +741,9 @@ impl Scan {
             }
 
             if self.sandbox.enabled() {
-                self.cleanup_sandbox(self.config.script_env())?;
+                self.run_post_build()?;
             }
-
+            // Guard dropped here, destroys sandbox
             return Ok(false);
         }
 
@@ -988,9 +984,10 @@ impl Scan {
         }
 
         if self.sandbox.enabled() {
-            self.cleanup_sandbox(self.config.script_env())?;
+            self.run_post_build()?;
         }
 
+        // Guard dropped here, destroys sandbox
         if interrupted {
             return Ok(true);
         }
@@ -998,18 +995,16 @@ impl Scan {
         Ok(false)
     }
 
-    /// Run post-build cleanup and destroy the scan sandbox.
-    fn cleanup_sandbox(
-        &self,
-        envs: Vec<(String, String)>,
-    ) -> anyhow::Result<()> {
-        if !self.sandbox.run_post_build(0, &self.config, envs)? {
+    /// Run post-build script if configured.
+    fn run_post_build(&self) -> anyhow::Result<()> {
+        if !self.sandbox.run_post_build(
+            0,
+            &self.config,
+            self.config.script_env(),
+        )? {
             error!("post-build script failed");
         }
-        if self.config.verbose() {
-            println!("Destroying sandbox...");
-        }
-        self.sandbox.destroy(0)
+        Ok(())
     }
 
     /// Returns scan failures as formatted error strings.
