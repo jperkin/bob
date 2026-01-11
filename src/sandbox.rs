@@ -840,20 +840,20 @@ impl Sandbox {
     }
 }
 
-/// RAII guard for multiple sandboxes (used by build).
+/// RAII scope for multiple sandboxes (used by build).
 ///
 /// Creates sandboxes on construction, destroys them on drop.
 /// This ensures sandboxes are always cleaned up, even on error paths.
 /// If sandboxes are disabled, this is a no-op.
 #[derive(Debug)]
-pub struct SandboxGuard {
+pub struct SandboxScope {
     sandbox: Sandbox,
     count: usize,
     verbose: bool,
 }
 
-impl SandboxGuard {
-    /// Create a new guard, creating `count` sandboxes if enabled.
+impl SandboxScope {
+    /// Create a new scope, creating `count` sandboxes if enabled.
     pub fn new(sandbox: Sandbox, count: usize, verbose: bool) -> Result<Self> {
         if sandbox.enabled() {
             sandbox.create_all(count, verbose)?;
@@ -872,7 +872,7 @@ impl SandboxGuard {
     }
 }
 
-impl Drop for SandboxGuard {
+impl Drop for SandboxScope {
     fn drop(&mut self) {
         if self.sandbox.enabled() {
             if let Err(e) = self.sandbox.destroy_all(self.count, self.verbose) {
@@ -882,18 +882,18 @@ impl Drop for SandboxGuard {
     }
 }
 
-/// RAII guard for a single sandbox (used by scan).
+/// RAII scope for a single sandbox (used by scan).
 ///
 /// Creates sandbox 0 on construction, destroys it on drop.
 /// If sandboxes are disabled, this is a no-op.
 #[derive(Debug)]
-pub struct SingleSandboxGuard {
+pub struct SingleSandboxScope {
     sandbox: Sandbox,
     verbose: bool,
 }
 
-impl SingleSandboxGuard {
-    /// Create a new guard, creating sandbox 0 if enabled.
+impl SingleSandboxScope {
+    /// Create a new scope, creating sandbox 0 if enabled.
     pub fn new(sandbox: Sandbox, verbose: bool) -> Result<Self> {
         if sandbox.enabled() {
             sandbox.create(0, verbose)?;
@@ -912,7 +912,7 @@ impl SingleSandboxGuard {
     }
 }
 
-impl Drop for SingleSandboxGuard {
+impl Drop for SingleSandboxScope {
     fn drop(&mut self) {
         if self.sandbox.enabled() {
             if let Err(e) = self.sandbox.destroy(0, self.verbose) {

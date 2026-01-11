@@ -43,7 +43,7 @@
 //! - `clean` - Clean up build artifacts
 
 use crate::config::PkgsrcEnv;
-use crate::sandbox::SandboxGuard;
+use crate::sandbox::SandboxScope;
 use crate::scan::{ResolvedPackage, SkipReason, SkippedCounts};
 use crate::tui::{MultiProgress, format_duration};
 use crate::{Config, RunContext, Sandbox};
@@ -1154,8 +1154,8 @@ pub struct Build {
     config: Config,
     /// Pkgsrc environment variables.
     pkgsrc_env: PkgsrcEnv,
-    /// Sandbox guard - owns created sandboxes, destroys on drop.
-    guard: SandboxGuard,
+    /// Sandbox scope - owns created sandboxes, destroys on drop.
+    scope: SandboxScope,
     /// List of packages to build, as input from Scan::resolve.
     scanpkgs: IndexMap<PkgName, ResolvedPackage>,
     /// Cached build results from previous run.
@@ -1894,13 +1894,13 @@ impl Build {
     pub fn new(
         config: &Config,
         pkgsrc_env: PkgsrcEnv,
-        guard: SandboxGuard,
+        scope: SandboxScope,
         scanpkgs: IndexMap<PkgName, ResolvedPackage>,
         options: BuildOptions,
     ) -> Build {
         info!(
             package_count = scanpkgs.len(),
-            sandbox_enabled = guard.enabled(),
+            sandbox_enabled = scope.enabled(),
             build_threads = config.build_threads(),
             ?options,
             "Creating new Build instance"
@@ -1916,7 +1916,7 @@ impl Build {
         Build {
             config: config.clone(),
             pkgsrc_env,
-            guard,
+            scope,
             scanpkgs,
             cached: IndexMap::new(),
             options,
@@ -2258,7 +2258,7 @@ impl Build {
         let session = Arc::new(BuildSession {
             config: self.config.clone(),
             pkgsrc_env: self.pkgsrc_env.clone(),
-            sandbox: self.guard.sandbox().clone(),
+            sandbox: self.scope.sandbox().clone(),
             options: self.options.clone(),
         });
         let progress_clone = Arc::clone(&progress);

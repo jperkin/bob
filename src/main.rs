@@ -22,7 +22,7 @@ use bob::config::{Config, PkgsrcEnv};
 use bob::db::Database;
 use bob::logging;
 use bob::report;
-use bob::sandbox::{Sandbox, SandboxGuard};
+use bob::sandbox::{Sandbox, SandboxScope};
 use bob::scan::{Scan, ScanResult};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -167,16 +167,16 @@ impl BuildRunner {
             .map(|p| (p.pkgname().clone(), p.clone()))
             .collect();
 
-        // Create sandbox guard - automatically destroys sandboxes on drop
+        // Create sandbox scope - automatically destroys sandboxes on drop
         let sandbox = Sandbox::new(&self.config);
-        let guard = SandboxGuard::new(
+        let scope = SandboxScope::new(
             sandbox,
             self.config.build_threads(),
             self.config.verbose(),
         )?;
 
-        if guard.enabled()
-            && !guard.sandbox().run_pre_build(
+        if scope.enabled()
+            && !scope.sandbox().run_pre_build(
                 0,
                 &self.config,
                 self.config.script_env(None),
@@ -184,10 +184,10 @@ impl BuildRunner {
         {
             bail!("pre-build script failed");
         }
-        let pkgsrc_env = PkgsrcEnv::fetch(&self.config, guard.sandbox())?;
+        let pkgsrc_env = PkgsrcEnv::fetch(&self.config, scope.sandbox())?;
 
-        if guard.enabled()
-            && !guard.sandbox().run_post_build(
+        if scope.enabled()
+            && !scope.sandbox().run_post_build(
                 0,
                 &self.config,
                 self.config.script_env(Some(&pkgsrc_env)),
@@ -197,7 +197,7 @@ impl BuildRunner {
         }
 
         let mut build =
-            Build::new(&self.config, pkgsrc_env, guard, buildable, options);
+            Build::new(&self.config, pkgsrc_env, scope, buildable, options);
 
         // Load cached build results from database
         build.load_cached_from_db(&self.db)?;

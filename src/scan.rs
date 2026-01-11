@@ -38,7 +38,7 @@
 //! - Circular dependencies - Package has a dependency cycle
 
 use crate::config::PkgsrcEnv;
-use crate::sandbox::SingleSandboxGuard;
+use crate::sandbox::SingleSandboxScope;
 use crate::tui::{MultiProgress, format_duration};
 use crate::{Config, RunContext, Sandbox};
 use anyhow::{Context, Result, bail};
@@ -719,10 +719,10 @@ impl Scan {
          * Only a single sandbox is required, 'make pbulk-index' can safely be
          * run in parallel inside one sandbox.
          *
-         * Create guard which handles sandbox lifecycle - creates on construction,
+         * Create scope which handles sandbox lifecycle - creates on construction,
          * destroys on drop. This ensures cleanup even on error paths.
          */
-        let _guard = SingleSandboxGuard::new(
+        let _scope = SingleSandboxScope::new(
             self.sandbox.clone(),
             self.config.verbose(),
         )?;
