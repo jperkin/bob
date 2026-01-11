@@ -771,7 +771,29 @@ impl MultiProgress {
         Ok(())
     }
 
+    /// Finish display and print a summary line.
     pub fn finish(&mut self) -> io::Result<()> {
+        let elapsed = self.finish_silent()?;
+        let elapsed_str = format_duration(elapsed);
+        let total = self.state.completed
+            + self.state.cached
+            + self.state.failed
+            + self.state.skipped;
+        println!(
+            "{} {} in {} ({} succeeded, {} cached, {} failed, {} skipped)",
+            self.state.finished_title,
+            total,
+            elapsed_str,
+            self.state.completed,
+            self.state.cached,
+            self.state.failed,
+            self.state.skipped
+        );
+        Ok(())
+    }
+
+    /// Finish display without printing a summary. Returns elapsed time.
+    pub fn finish_silent(&mut self) -> io::Result<Duration> {
         // If in multi-panel mode, switch back to inline first to restore output
         if self.view_mode == ViewMode::MultiPanel {
             self.switch_to_inline()?;
@@ -786,24 +808,7 @@ impl MultiProgress {
         // Restore cursor
         stdout().execute(Show)?;
 
-        // Print final summary to stdout (outside ratatui)
-        let elapsed = format_duration(self.state.elapsed());
-        let total = self.state.completed
-            + self.state.cached
-            + self.state.failed
-            + self.state.skipped;
-        println!(
-            "{} {} in {} ({} succeeded, {} cached, {} failed, {} skipped)",
-            self.state.finished_title,
-            total,
-            elapsed,
-            self.state.completed,
-            self.state.cached,
-            self.state.failed,
-            self.state.skipped
-        );
-
-        Ok(())
+        Ok(self.state.elapsed())
     }
 
     /// Finish display with an interrupted message (for Ctrl+C handling).
