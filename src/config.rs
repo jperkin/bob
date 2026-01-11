@@ -617,12 +617,7 @@ impl Config {
             false
         };
 
-        Ok(Config {
-            file,
-            filename,
-            verbose,
-            lua_env,
-        })
+        Ok(Config { file, filename, verbose, lua_env })
     }
 
     pub fn build_threads(&self) -> usize {
@@ -714,7 +709,10 @@ impl Config {
     ///
     /// If `pkgsrc_env` is provided, includes the pkgsrc-derived variables
     /// (packages, pkgtools, prefix, pkg_dbdir, pkg_refcount_dbdir).
-    pub fn script_env(&self, pkgsrc_env: Option<&PkgsrcEnv>) -> Vec<(String, String)> {
+    pub fn script_env(
+        &self,
+        pkgsrc_env: Option<&PkgsrcEnv>,
+    ) -> Vec<(String, String)> {
         let mut envs = vec![
             ("bob_logdir".to_string(), format!("{}", self.logdir().display())),
             ("bob_make".to_string(), format!("{}", self.make().display())),
@@ -729,7 +727,10 @@ impl Config {
                 "bob_pkgtools".to_string(),
                 env.pkgtools.display().to_string(),
             ));
-            envs.push(("bob_prefix".to_string(), env.prefix.display().to_string()));
+            envs.push((
+                "bob_prefix".to_string(),
+                env.prefix.display().to_string(),
+            ));
             envs.push((
                 "bob_pkg_dbdir".to_string(),
                 env.pkg_dbdir.display().to_string(),
@@ -739,7 +740,8 @@ impl Config {
                 env.pkg_refcount_dbdir.display().to_string(),
             ));
         }
-        let tar_value = self.tar()
+        let tar_value = self
+            .tar()
             .map(|t| t.display().to_string())
             .unwrap_or_else(|| "tar".to_string());
         envs.push(("bob_tar".to_string(), tar_value));
