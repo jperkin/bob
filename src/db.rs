@@ -36,8 +36,9 @@ use anyhow::{Context, Result};
 use pkgsrc::{PkgName, PkgPath, ScanIndex};
 use rusqlite::{Connection, params};
 use std::collections::HashSet;
+use std::cell::Cell;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 /// Current schema version for migrations.
@@ -58,6 +59,12 @@ pub struct PackageRow {
 /// SQLite database for scan and build caching.
 pub struct Database {
     conn: Connection,
+    // Timing instrumentation for profiling store_package()
+    timing_json_ns: Cell<u64>,
+    timing_pkg_insert_ns: Cell<u64>,
+    timing_deps_insert_ns: Cell<u64>,
+    timing_count: Cell<u64>,
+    timing_deps_count: Cell<u64>,
 }
 
 impl Database {
@@ -68,7 +75,14 @@ impl Database {
                 .context("Failed to create database directory")?;
         }
         let conn = Connection::open(path).context("Failed to open database")?;
-        let db = Self { conn };
+        let db = Self {
+            conn,
+            timing_json_ns: Cell::new(0),
+            timing_pkg_insert_ns: Cell::new(0),
+            timing_deps_insert_ns: Cell::new(0),
+            timing_count: Cell::new(0),
+            timing_deps_count: Cell::new(0),
+        };
         db.configure_pragmas()?;
         db.init_or_migrate()?;
         Ok(db)
@@ -325,11 +339,18 @@ impl Database {
             .and_then(|s| s.parse().ok())
             .unwrap_or(100);
 
+        // Time JSON serialization
+        let t0 = Instant::now();
         let scan_data = serde_json::to_string(index)?;
+        let json_elapsed = t0.elapsed().as_nanos() as u64;
+        self.timing_json_ns.set(self.timing_json_ns.get() + json_elapsed);
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
 
+        // Time package INSERT
+        let t1 = Instant::now();
         {
             let mut stmt = self.conn.prepare_cached(
                 "INSERT OR REPLACE INTO packages
@@ -350,10 +371,15 @@ impl Database {
                 now
             ])?;
         }
+        let pkg_insert_elapsed = t1.elapsed().as_nanos() as u64;
+        self.timing_pkg_insert_ns
+            .set(self.timing_pkg_insert_ns.get() + pkg_insert_elapsed);
 
         let package_id = self.conn.last_insert_rowid();
 
-        // Store raw dependencies
+        // Time dependencies INSERT
+        let t2 = Instant::now();
+        let mut deps_count = 0u64;
         if let Some(ref deps) = index.all_depends {
             let mut stmt = self.conn.prepare_cached(
                 "INSERT OR IGNORE INTO depends (package_id, depend_pattern, depend_pkgpath)
@@ -365,11 +391,50 @@ impl Database {
                     dep.pattern().pattern(),
                     dep.pkgpath().to_string()
                 ])?;
+                deps_count += 1;
             }
+        }
+        let deps_insert_elapsed = t2.elapsed().as_nanos() as u64;
+        self.timing_deps_insert_ns
+            .set(self.timing_deps_insert_ns.get() + deps_insert_elapsed);
+        self.timing_deps_count
+            .set(self.timing_deps_count.get() + deps_count);
+
+        // Update count and report periodically
+        let count = self.timing_count.get() + 1;
+        self.timing_count.set(count);
+        if count % 1000 == 0 {
+            self.report_timing();
         }
 
         debug!(pkgname = pkgname, package_id = package_id, "Stored package");
         Ok(package_id)
+    }
+
+    /// Report accumulated timing statistics.
+    pub fn report_timing(&self) {
+        let count = self.timing_count.get();
+        if count == 0 {
+            return;
+        }
+        let json_ms = self.timing_json_ns.get() / 1_000_000;
+        let pkg_ms = self.timing_pkg_insert_ns.get() / 1_000_000;
+        let deps_ms = self.timing_deps_insert_ns.get() / 1_000_000;
+        let deps_count = self.timing_deps_count.get();
+        let total_ms = json_ms + pkg_ms + deps_ms;
+
+        info!(
+            packages = count,
+            deps = deps_count,
+            total_ms = total_ms,
+            json_ms = json_ms,
+            pkg_insert_ms = pkg_ms,
+            deps_insert_ms = deps_ms,
+            avg_json_us = json_ms * 1000 / count,
+            avg_pkg_us = pkg_ms * 1000 / count,
+            avg_deps_us = deps_ms * 1000 / count,
+            "DB timing"
+        );
     }
 
     /// Store scan results for a pkgpath.
