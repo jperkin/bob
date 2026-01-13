@@ -76,12 +76,77 @@ use crate::action::{ActionType, FSType};
 use crate::config::Config;
 use anyhow::{Result, bail};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tracing::warn;
 
 /// Maximum number of retries when killing processes in a sandbox.
 const KILL_PROCESSES_MAX_RETRIES: u32 = 10;
+
+/*
+ * Poll for child process exit while checking a shutdown flag.  If shutdown
+ * is requested, kill the child and return an error.
+ */
+pub fn wait_with_shutdown(
+    child: &mut Child,
+    shutdown: &AtomicBool,
+) -> Result<ExitStatus> {
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("Interrupted by shutdown");
+        }
+        match child.try_wait()? {
+            Some(status) => return Ok(status),
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+}
+
+/*
+ * Poll for child process exit while checking a shutdown flag, returning
+ * the full output (stdout/stderr).  If shutdown is requested, kill the
+ * child and return an error.
+ */
+pub fn wait_output_with_shutdown(
+    mut child: Child,
+    shutdown: &AtomicBool,
+) -> Result<Output> {
+    let stdout = child.stdout.take().map(|s| (s, Vec::new()));
+    let stderr = child.stderr.take().map(|s| (s, Vec::new()));
+
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("Interrupted by shutdown");
+        }
+        match child.try_wait()? {
+            Some(status) => {
+                let mut stdout_bytes = Vec::new();
+                let mut stderr_bytes = Vec::new();
+                if let Some((mut r, mut buf)) = stdout {
+                    let _ = r.read_to_end(&mut buf);
+                    stdout_bytes = buf;
+                }
+                if let Some((mut r, mut buf)) = stderr {
+                    let _ = r.read_to_end(&mut buf);
+                    stderr_bytes = buf;
+                }
+                return Ok(Output {
+                    status,
+                    stdout: stdout_bytes,
+                    stderr: stderr_bytes,
+                });
+            }
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+}
 
 /// Build sandbox manager.
 #[derive(Clone, Debug, Default)]
@@ -885,19 +950,11 @@ pub struct SandboxScope {
 
 impl SandboxScope {
     /// Create a new scope, creating `count` sandboxes if enabled.
-    pub fn new(
-        sandbox: Sandbox,
-        count: usize,
-        verbose: bool,
-    ) -> Result<Self> {
+    pub fn new(sandbox: Sandbox, count: usize, verbose: bool) -> Result<Self> {
         if sandbox.enabled() {
             sandbox.create_all(count, verbose)?;
         }
-        Ok(Self {
-            sandbox,
-            count,
-            verbose,
-        })
+        Ok(Self { sandbox, count, verbose })
     }
 
     /// Access the underlying sandbox for operations.

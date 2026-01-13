@@ -43,7 +43,7 @@
 //! - `clean` - Clean up build artifacts
 
 use crate::config::PkgsrcEnv;
-use crate::sandbox::SandboxScope;
+use crate::sandbox::{SandboxScope, wait_with_shutdown};
 use crate::scan::{ResolvedPackage, SkipReason, SkippedCounts};
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, RunContext, Sandbox};
@@ -55,7 +55,7 @@ use pkgsrc::{PkgName, PkgPath};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc, mpsc::Sender};
 use std::time::{Duration, Instant};
@@ -151,25 +151,6 @@ impl<'a> PkgBuilder<'a> {
             build_user,
             envs,
             output_tx,
-        }
-    }
-
-    /*
-     * Poll for child process exit while checking the shutdown flag.  If
-     * shutdown is requested, kill the child and return an error so that
-     * the worker can exit cleanly.
-     */
-    fn wait_with_shutdown(&self, child: &mut Child) -> anyhow::Result<ExitStatus> {
-        loop {
-            if self.session.shutdown.load(Ordering::SeqCst) {
-                let _ = child.kill();
-                let _ = child.wait();
-                bail!("Build interrupted by shutdown");
-            }
-            match child.try_wait()? {
-                Some(status) => return Ok(status),
-                None => std::thread::sleep(Duration::from_millis(100)),
-            }
         }
     }
 
@@ -674,17 +655,8 @@ impl<'a> PkgBuilder<'a> {
                 }
             });
 
-            let status = loop {
-                if self.session.shutdown.load(Ordering::SeqCst) {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    bail!("Build interrupted by shutdown");
-                }
-                match child.try_wait()? {
-                    Some(status) => break status,
-                    None => std::thread::sleep(Duration::from_millis(100)),
-                }
-            };
+            let status =
+                wait_with_shutdown(&mut child, &self.session.shutdown)?;
 
             // Reader thread will exit when pipe closes (process exits)
             let _ = tee_handle.join();
@@ -721,8 +693,10 @@ impl<'a> PkgBuilder<'a> {
                     .stdout(Stdio::from(log))
                     .stderr(Stdio::from(log_err))
                     .spawn()
-                    .with_context(|| format!("Failed to spawn {}", cmd.display()))?;
-                self.wait_with_shutdown(&mut child)
+                    .with_context(|| {
+                        format!("Failed to spawn {}", cmd.display())
+                    })?;
+                wait_with_shutdown(&mut child, &self.session.shutdown)
             }
             RunAs::User => {
                 let user = self.build_user.as_ref().unwrap();
@@ -745,7 +719,7 @@ impl<'a> PkgBuilder<'a> {
                     .stderr(Stdio::from(log_err))
                     .spawn()
                     .context("Failed to spawn su command")?;
-                self.wait_with_shutdown(&mut child)
+                wait_with_shutdown(&mut child, &self.session.shutdown)
             }
         }
     }
@@ -2345,6 +2319,11 @@ impl Build {
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     };
 
+                // Check shutdown before processing - don't save results or update UI
+                if shutdown_for_manager.load(Ordering::SeqCst) {
+                    continue;
+                }
+
                 match command {
                     ChannelCommand::ClientReady(c) => {
                         let client = clients.get(&c).unwrap();
@@ -2403,11 +2382,6 @@ impl Build {
                             let _ = completed_tx.send(result.clone());
                         }
 
-                        // Don't update UI if we're shutting down
-                        if shutdown_for_manager.load(Ordering::SeqCst) {
-                            continue;
-                        }
-
                         // Find which thread completed and mark idle
                         if let Ok(mut p) = progress_clone.lock() {
                             let _ = p.print_status(&format!(
@@ -2433,11 +2407,6 @@ impl Build {
                         // Send result for immediate saving
                         if let Some(result) = jobs.results.last() {
                             let _ = completed_tx.send(result.clone());
-                        }
-
-                        // Don't update UI if we're shutting down
-                        if shutdown_for_manager.load(Ordering::SeqCst) {
-                            continue;
                         }
 
                         // Find which thread completed and mark idle
@@ -2467,11 +2436,6 @@ impl Build {
                             let _ = completed_tx.send(result.clone());
                         }
 
-                        // Don't update UI if we're shutting down
-                        if shutdown_for_manager.load(Ordering::SeqCst) {
-                            continue;
-                        }
-
                         // Find which thread failed and mark idle
                         if let Ok(mut p) = progress_clone.lock() {
                             let _ = p.print_status(&format!(
@@ -2498,12 +2462,6 @@ impl Build {
                         // Send all new results for immediate saving
                         for result in jobs.results.iter().skip(results_before) {
                             let _ = completed_tx.send(result.clone());
-                        }
-
-                        // Don't update UI if we're shutting down
-                        if shutdown_for_manager.load(Ordering::SeqCst) {
-                            tracing::error!(error = %e, pkgname = %pkgname.pkgname(), "Build error");
-                            continue;
                         }
 
                         // Find which thread errored and mark idle
@@ -2565,21 +2523,23 @@ impl Build {
             "Worker threads completed"
         );
 
-        // Save all completed results to database immediately
-        let mut saved_count = 0;
-        while let Ok(result) = completed_rx.try_recv() {
-            if let Err(e) = db.store_build_by_name(&result) {
-                warn!(
-                    pkgname = %result.pkgname.pkgname(),
-                    error = %e,
-                    "Failed to save build result"
-                );
-            } else {
-                saved_count += 1;
+        // Save all completed results to database (skip if shutdown)
+        if !shutdown_flag.load(Ordering::SeqCst) {
+            let mut saved_count = 0;
+            while let Ok(result) = completed_rx.try_recv() {
+                if let Err(e) = db.store_build_by_name(&result) {
+                    warn!(
+                        pkgname = %result.pkgname.pkgname(),
+                        error = %e,
+                        "Failed to save build result"
+                    );
+                } else {
+                    saved_count += 1;
+                }
             }
-        }
-        if saved_count > 0 {
-            debug!(saved_count, "Saved build results to database");
+            if saved_count > 0 {
+                debug!(saved_count, "Saved build results to database");
+            }
         }
 
         // Stop the refresh thread
