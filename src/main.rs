@@ -93,15 +93,9 @@ impl BuildRunner {
         }
 
         // Initialize scan from database (checks what's already scanned)
-        let (scanned_count, pending_count, failed_count) = scan.init_from_db(&self.db)?;
-        if scanned_count > 0 || pending_count > 0 || failed_count > 0 {
-            println!(
-                "Found {} scanned, {} pending, {} failed package paths",
-                scanned_count, pending_count, failed_count
-            );
-            if pending_count > 0 {
-                println!("Resuming scan with {} pending packages", pending_count);
-            }
+        let scanned_count = scan.init_from_db(&self.db)?;
+        if scanned_count > 0 {
+            println!("Found {} packages in database", scanned_count);
         }
 
         let interrupted = scan.start(&self.ctx, &self.db)?;
