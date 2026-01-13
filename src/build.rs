@@ -45,9 +45,10 @@
 use crate::config::PkgsrcEnv;
 use crate::sandbox::SandboxScope;
 use crate::scan::{ResolvedPackage, SkipReason, SkippedCounts};
-use crate::tui::{MultiProgress, format_duration};
+use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, RunContext, Sandbox};
 use anyhow::{Context, bail};
+use crossterm::event;
 use glob::Pattern;
 use indexmap::IndexMap;
 use pkgsrc::{PkgName, PkgPath};
@@ -2156,12 +2157,15 @@ impl Build {
             while !stop_flag.load(Ordering::Relaxed)
                 && !shutdown_for_refresh.load(Ordering::SeqCst)
             {
+                // Poll outside lock to avoid blocking main thread
+                let has_event = event::poll(REFRESH_INTERVAL).unwrap_or(false);
+
                 if let Ok(mut p) = progress_refresh.lock() {
-                    // Check for keyboard events (like 'v' for view toggle)
-                    let _ = p.poll_events();
-                    let _ = p.render_throttled();
+                    if has_event {
+                        let _ = p.handle_event();
+                    }
+                    let _ = p.render();
                 }
-                std::thread::sleep(Duration::from_millis(50));
             }
         });
 
@@ -2313,7 +2317,7 @@ impl Build {
                                     p.clear_output_buffer(c);
                                     p.state_mut()
                                         .set_worker_active(c, pkg.pkgname());
-                                    let _ = p.render_throttled();
+                                    let _ = p.render();
                                 }
 
                                 let _ = client.send(ChannelCommand::JobData(
@@ -2328,7 +2332,7 @@ impl Build {
                                 if let Ok(mut p) = progress_clone.lock() {
                                     p.clear_output_buffer(c);
                                     p.state_mut().set_worker_idle(c);
-                                    let _ = p.render_throttled();
+                                    let _ = p.render();
                                 }
                                 let _ =
                                     client.send(ChannelCommand::ComeBackLater);
@@ -2337,7 +2341,7 @@ impl Build {
                                 if let Ok(mut p) = progress_clone.lock() {
                                     p.clear_output_buffer(c);
                                     p.state_mut().set_worker_idle(c);
-                                    let _ = p.render_throttled();
+                                    let _ = p.render();
                                 }
                                 let _ = client.send(ChannelCommand::Quit);
                                 clients.remove(&c);
@@ -2376,7 +2380,7 @@ impl Build {
                                     break;
                                 }
                             }
-                            let _ = p.render_throttled();
+                            let _ = p.render();
                         }
                     }
                     ChannelCommand::JobSkipped(pkgname) => {
@@ -2407,7 +2411,7 @@ impl Build {
                                     break;
                                 }
                             }
-                            let _ = p.render_throttled();
+                            let _ = p.render();
                         }
                     }
                     ChannelCommand::JobFailed(pkgname, duration) => {
@@ -2440,7 +2444,7 @@ impl Build {
                                     break;
                                 }
                             }
-                            let _ = p.render_throttled();
+                            let _ = p.render();
                         }
                     }
                     ChannelCommand::JobError((pkgname, duration, e)) => {
@@ -2474,7 +2478,7 @@ impl Build {
                                     break;
                                 }
                             }
-                            let _ = p.render_throttled();
+                            let _ = p.render();
                         }
                         tracing::error!(error = %e, pkgname = %pkgname.pkgname(), "Build error");
                     }
@@ -2482,7 +2486,7 @@ impl Build {
                         if let Ok(mut p) = progress_clone.lock() {
                             p.state_mut()
                                 .set_worker_stage(tid, stage.as_deref());
-                            let _ = p.render_throttled();
+                            let _ = p.render();
                         }
                     }
                     ChannelCommand::OutputLines(tid, lines) => {

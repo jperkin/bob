@@ -35,6 +35,10 @@ use std::io::{self, Stdout, stdout};
 use std::time::{Duration, Instant};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+/// Default refresh interval for UI updates (10fps).
+/// Used for both event polling timeout and render throttling.
+pub const REFRESH_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Strip ANSI escape sequences and sanitize control characters.
 fn sanitize_output(s: &str) -> String {
     let stripped = strip_ansi_escapes::strip(s);
@@ -387,8 +391,6 @@ pub struct MultiProgress {
     num_workers: usize,
     /// Messages buffered while in fullscreen mode, printed when returning to inline.
     pending_messages: Vec<String>,
-    /// Last render timestamp for throttling.
-    last_render: Instant,
 }
 
 impl MultiProgress {
@@ -424,7 +426,6 @@ impl MultiProgress {
             output_buffers,
             num_workers,
             pending_messages: Vec::new(),
-            last_render: Instant::now(),
         })
     }
 
@@ -471,6 +472,13 @@ impl MultiProgress {
     }
 
     pub fn render(&mut self) -> io::Result<()> {
+        match self.view_mode {
+            ViewMode::Inline => self.render_inline(),
+            ViewMode::MultiPanel => self.render_multipanel(),
+        }
+    }
+
+    fn render_inline(&mut self) -> io::Result<()> {
         // Don't render if suppressed
         if self.state.suppressed {
             return Ok(());
@@ -577,44 +585,28 @@ impl MultiProgress {
         Ok(())
     }
 
-    pub fn render_throttled(&mut self) -> io::Result<()> {
-        // Throttle renders to ~30fps for inline, ~20fps for multipanel
-        let min_interval = match self.view_mode {
-            ViewMode::Inline => Duration::from_millis(33),
-            ViewMode::MultiPanel => Duration::from_millis(50),
-        };
-        if self.last_render.elapsed() < min_interval {
-            return Ok(());
-        }
-        self.last_render = Instant::now();
-        match self.view_mode {
-            ViewMode::Inline => self.render(),
-            ViewMode::MultiPanel => self.render_multipanel(),
-        }
-    }
-
-    /// Poll for keyboard events (non-blocking).
-    /// Returns Ok(true) if view mode was toggled, Err if Ctrl+C pressed.
-    pub fn poll_events(&mut self) -> io::Result<bool> {
+    /// Handle a pending terminal event (call only after poll returned true).
+    /// Returns Ok(true) if view mode was toggled.
+    pub fn handle_event(&mut self) -> io::Result<bool> {
         if self.state.suppressed {
             return Ok(false);
         }
 
-        // Non-blocking poll
-        if event::poll(Duration::from_millis(0))? {
-            if let Event::Key(key) = event::read()? {
-                // Toggle view mode on 'v' key
-                if key.code == KeyCode::Char('v') && key.modifiers.is_empty() {
-                    self.toggle_view_mode()?;
-                    return Ok(true);
-                }
-                // Handle Ctrl+C - raise SIGINT to trigger the ctrlc handler
-                if key.code == KeyCode::Char('c')
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
-                {
-                    unsafe {
-                        libc::raise(libc::SIGINT);
-                    }
+        if let Event::Key(key) = event::read()? {
+            // Toggle view mode on 'v' key
+            if key.code == KeyCode::Char('v') && key.modifiers.is_empty() {
+                self.toggle_view_mode()?;
+                return Ok(true);
+            }
+            // Handle Ctrl+C - immediately show interrupted message, then
+            // raise SIGINT to trigger shutdown. This ensures the user sees
+            // feedback right away, even if cleanup takes time.
+            if key.code == KeyCode::Char('c')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                let _ = self.finish_interrupted();
+                unsafe {
+                    libc::raise(libc::SIGINT);
                 }
             }
         }
@@ -812,8 +804,12 @@ impl MultiProgress {
     }
 
     /// Finish display with an interrupted message (for Ctrl+C handling).
+    /// This method is idempotent - safe to call multiple times.
     pub fn finish_interrupted(&mut self) -> io::Result<()> {
-        // Suppress any further output
+        // Only run once - subsequent calls are no-ops
+        if self.state.suppressed {
+            return Ok(());
+        }
         self.state.suppressed = true;
 
         // If in multi-panel mode, switch back to inline first to restore output

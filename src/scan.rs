@@ -39,9 +39,10 @@
 
 use crate::config::PkgsrcEnv;
 use crate::sandbox::SingleSandboxScope;
-use crate::tui::{MultiProgress, format_duration};
+use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, RunContext, Sandbox};
 use anyhow::{Context, Result, bail};
+use crossterm::event;
 use indexmap::IndexMap;
 use petgraph::graphmap::DiGraphMap;
 use pkgsrc::{Depend, PkgName, PkgPath, ScanIndex};
@@ -50,7 +51,6 @@ use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tracing::{debug, error, info, trace};
 
 /// Reason why a package was skipped (not built).
@@ -801,12 +801,15 @@ impl Scan {
             while !stop_flag.load(Ordering::Relaxed)
                 && !shutdown_for_refresh.load(Ordering::SeqCst)
             {
+                // Poll outside lock to avoid blocking main thread
+                let has_event = event::poll(REFRESH_INTERVAL).unwrap_or(false);
+
                 if let Ok(mut p) = progress_refresh.lock() {
-                    // Check for keyboard events (Ctrl+C raises SIGINT)
-                    let _ = p.poll_events();
+                    if has_event {
+                        let _ = p.handle_event();
+                    }
                     let _ = p.render();
                 }
-                std::thread::sleep(Duration::from_millis(50));
             }
         });
 
