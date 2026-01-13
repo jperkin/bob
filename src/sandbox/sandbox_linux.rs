@@ -19,6 +19,7 @@ use anyhow::Context;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
+use tracing::trace;
 
 impl Sandbox {
     pub fn mount_bindfs(
@@ -216,36 +217,77 @@ impl Sandbox {
     }
 
     /// Kill all processes with open file handles within a sandbox path.
+    ///
+    /// Uses procfs to scan all processes for file descriptors, cwd, or root
+    /// that point into the sandbox directory. This is more thorough than
+    /// `fuser` which only checks the exact path, not files within subdirs.
     pub fn kill_processes(&self, sandbox: &Path) {
-        for _ in 0..super::KILL_PROCESSES_MAX_RETRIES {
-            // Use fuser -k to kill all processes using files under the sandbox
-            let _ = Command::new("fuser")
-                .arg("-k")
-                .arg(sandbox)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+        for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
+            let mut found_any = false;
+
+            // Scan all processes
+            if let Ok(procs) = procfs::process::all_processes() {
+                for proc in procs.flatten() {
+                    if let Some(reason) = Self::process_uses_path(&proc, sandbox) {
+                        found_any = true;
+                        let comm = proc.stat().map(|s| s.comm).unwrap_or_default();
+                        trace!(
+                            pid = proc.pid,
+                            comm = %comm,
+                            reason = %reason,
+                            iteration,
+                            "Killing process using sandbox"
+                        );
+                        unsafe {
+                            libc::kill(proc.pid, libc::SIGKILL);
+                        }
+                    }
+                }
+            }
+
+            if !found_any {
+                trace!(sandbox = %sandbox.display(), iteration, "No processes found using sandbox");
+                return;
+            }
 
             // Give processes a moment to die
             std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        trace!(
+            sandbox = %sandbox.display(),
+            max_retries = super::KILL_PROCESSES_MAX_RETRIES,
+            "Gave up killing processes after max retries"
+        );
+    }
 
-            // Check if any processes are still using the sandbox
-            let status = Command::new("fuser")
-                .arg(sandbox)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-
-            // fuser exits 0 if processes found, 1 if none found
-            if let Ok(s) = status {
-                if !s.success() {
-                    // No processes found, we're done
-                    return;
-                }
-            } else {
-                // fuser failed to run, bail out
-                return;
+    /// Check if a process has any references to paths under the given directory.
+    /// Returns Some(reason) describing why the process matches, or None.
+    fn process_uses_path(proc: &procfs::process::Process, dir: &Path) -> Option<String> {
+        // Check cwd
+        if let Ok(cwd) = proc.cwd() {
+            if cwd.starts_with(dir) {
+                return Some(format!("cwd={}", cwd.display()));
             }
         }
+
+        // Check root (chroot)
+        if let Ok(root) = proc.root() {
+            if root.starts_with(dir) {
+                return Some(format!("root={}", root.display()));
+            }
+        }
+
+        // Check all open file descriptors
+        if let Ok(fds) = proc.fd() {
+            for fd in fds.flatten() {
+                if let procfs::process::FDTarget::Path(path) = fd.target {
+                    if path.starts_with(dir) {
+                        return Some(format!("fd={}", path.display()));
+                    }
+                }
+            }
+        }
+
+        None
     }
 }
