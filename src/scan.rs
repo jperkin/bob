@@ -1029,14 +1029,14 @@ impl Scan {
                             bench_db_write_total.as_millis() as f64 / bench_results_processed as f64
                         } else { 0.0 };
 
-                        eprintln!(
-                            "[BENCH] t={:.1}s done={} interval_rate={:.1}/s interval_db={:.2}ms/pkg cumulative_db={:.2}ms/pkg db%={:.1}",
-                            elapsed.as_secs_f64(),
-                            bench_results_processed,
-                            rate,
-                            interval_db_ms,
-                            cumulative_db_ms,
-                            db_pct
+                        info!(
+                            elapsed_secs = format!("{:.1}", elapsed.as_secs_f64()),
+                            done = bench_results_processed,
+                            interval_rate = format!("{:.1}/s", rate),
+                            interval_db_ms = format!("{:.2}", interval_db_ms),
+                            cumulative_db_ms = format!("{:.2}", cumulative_db_ms),
+                            db_pct = format!("{:.1}", db_pct),
+                            "Scan benchmark progress"
                         );
 
                         bench_last_report = std::time::Instant::now();
@@ -1067,26 +1067,33 @@ impl Scan {
                     (scan_time_secs / theoretical_max) * 100.0
                 } else { 0.0 };
 
-                eprintln!(
-                    "[BENCH SUMMARY] batch={:.1}s pkgs={} rate={:.1}/s",
-                    batch_secs,
-                    bench_results_processed,
-                    bench_results_processed as f64 / batch_secs
-                );
-                eprintln!(
-                    "[BENCH SUMMARY] main_thread: db_write={:.1}s ({:.1}%) dep_disc={:.1}s ({:.1}%)",
-                    db_secs, (db_secs / batch_secs) * 100.0,
-                    dep_secs, (dep_secs / batch_secs) * 100.0
-                );
-                eprintln!(
-                    "[BENCH SUMMARY] workers: scan_time={:.1}s send_wait={:.1}s ({:.1}% backpressure)",
-                    scan_time_secs,
-                    send_wait_secs,
+                let backpressure_pct = if scan_time_secs > 0.0 {
                     (send_wait_secs / scan_time_secs) * 100.0
+                } else { 0.0 };
+
+                info!(
+                    batch_secs = format!("{:.1}", batch_secs),
+                    pkgs = bench_results_processed,
+                    rate = format!("{:.1}/s", bench_results_processed as f64 / batch_secs),
+                    "Scan batch complete"
                 );
-                eprintln!(
-                    "[BENCH SUMMARY] worker_efficiency={:.1}% (scan_time / batch_time*threads)",
-                    worker_efficiency
+                info!(
+                    db_write_secs = format!("{:.1}", db_secs),
+                    db_write_pct = format!("{:.1}%", (db_secs / batch_secs) * 100.0),
+                    dep_disc_secs = format!("{:.1}", dep_secs),
+                    dep_disc_pct = format!("{:.1}%", (dep_secs / batch_secs) * 100.0),
+                    "Main thread timing"
+                );
+                info!(
+                    scan_time_secs = format!("{:.1}", scan_time_secs),
+                    send_wait_secs = format!("{:.1}", send_wait_secs),
+                    backpressure_pct = format!("{:.1}%", backpressure_pct),
+                    "Worker timing"
+                );
+                info!(
+                    worker_efficiency_pct = format!("{:.1}%", worker_efficiency),
+                    num_threads = num_threads,
+                    "Worker efficiency (scan_time / batch_time * threads)"
                 );
             }
 
