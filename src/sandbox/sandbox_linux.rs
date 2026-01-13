@@ -17,6 +17,7 @@
 use crate::sandbox::Sandbox;
 use anyhow::Context;
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use tracing::trace;
@@ -164,11 +165,15 @@ impl Sandbox {
         dest: &Path,
     ) -> anyhow::Result<Option<ExitStatus>> {
         let cmd = "/bin/umount";
+        // Use process_group(0) to put umount in its own process group.
+        // This prevents it from receiving SIGINT when the user presses Ctrl+C,
+        // ensuring cleanup can complete even during repeated interrupts.
         Ok(Some(
             Command::new(cmd)
                 .arg(dest)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))

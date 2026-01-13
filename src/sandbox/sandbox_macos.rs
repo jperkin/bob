@@ -17,6 +17,7 @@
 use crate::sandbox::Sandbox;
 use anyhow::{Context, bail};
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitStatus};
 
@@ -122,12 +123,17 @@ impl Sandbox {
          * macOS is notorious for not unmounting file systems, even with
          * "diskutil unmount force" in some cases, so for now we just skip
          * straight to "umount -f" which appears to work.
+         *
+         * Use process_group(0) to put umount in its own process group.
+         * This prevents it from receiving SIGINT when the user presses Ctrl+C,
+         * ensuring cleanup can complete even during repeated interrupts.
          */
         let cmd = "/sbin/umount";
         Ok(Some(
             Command::new(cmd)
                 .arg("-f")
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))

@@ -17,6 +17,7 @@
 use crate::sandbox::Sandbox;
 use anyhow::{Context, bail};
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitStatus};
 
@@ -133,6 +134,10 @@ impl Sandbox {
     /*
      * General unmount routine common to file system types that involve
      * mounted file systems.
+     *
+     * Use process_group(0) to put umount in its own process group.
+     * This prevents it from receiving SIGINT when the user presses Ctrl+C,
+     * ensuring cleanup can complete even during repeated interrupts.
      */
     fn unmount_common(
         &self,
@@ -142,6 +147,7 @@ impl Sandbox {
         Ok(Some(
             Command::new(cmd)
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
