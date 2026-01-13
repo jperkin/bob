@@ -608,17 +608,20 @@ impl Scan {
     }
 
     /// Discover all packages in pkgsrc tree.
-    fn discover_packages(&mut self) -> anyhow::Result<()> {
+    fn discover_packages(
+        &mut self,
+        pool: &rayon::ThreadPool,
+    ) -> anyhow::Result<()> {
         println!("Discovering packages...");
-        let pkgsrc = self.config.pkgsrc().display();
-        let make = self.config.make().display();
+        let pkgsrc = self.config.pkgsrc().display().to_string();
 
         // Get top-level SUBDIR (categories + USER_ADDITIONAL_PKGS)
-        let script = format!(
-            "cd {} && {} show-subdir-var VARNAME=SUBDIR\n",
-            pkgsrc, make
-        );
-        let child = self.sandbox.execute_script(0, &script, vec![])?;
+        let child = self.sandbox.execute_command(
+            0,
+            self.config.make(),
+            ["-C", &pkgsrc, "show-subdir-var", "VARNAME=SUBDIR"],
+            vec![],
+        )?;
         let output = child
             .wait_with_output()
             .context("Failed to run show-subdir-var")?;
@@ -631,43 +634,67 @@ impl Scan {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let entries: Vec<&str> = stdout.split_whitespace().collect();
 
+        // Separate USER_ADDITIONAL_PKGS (contain '/') from categories
+        let mut categories: Vec<&str> = Vec::new();
         for entry in entries {
             if entry.contains('/') {
-                // USER_ADDITIONAL_PKGS - add directly as pkgpath
                 if let Ok(pkgpath) = PkgPath::new(entry) {
                     self.incoming.insert(pkgpath);
                 }
             } else {
-                // Category - get packages within it
-                let script = format!(
-                    "cd {}/{} && {} show-subdir-var VARNAME=SUBDIR\n",
-                    pkgsrc, entry, make
-                );
-                let child = self.sandbox.execute_script(0, &script, vec![])?;
-                let cat_output = child.wait_with_output();
-
-                match cat_output {
-                    Ok(o) if o.status.success() => {
-                        let pkgs = String::from_utf8_lossy(&o.stdout);
-                        for pkg in pkgs.split_whitespace() {
-                            let path = format!("{}/{}", entry, pkg);
-                            if let Ok(pkgpath) = PkgPath::new(&path) {
-                                self.incoming.insert(pkgpath);
-                            }
-                        }
-                    }
-                    Ok(o) => {
-                        let stderr = String::from_utf8_lossy(&o.stderr);
-                        debug!(category = entry, stderr = %stderr,
-                            "Failed to get packages for category");
-                    }
-                    Err(e) => {
-                        debug!(category = entry, error = %e,
-                            "Failed to run make in category");
-                    }
-                }
+                categories.push(entry);
             }
         }
+
+        // Process categories in parallel
+        let make = self.config.make();
+        let sandbox = &self.sandbox;
+        let discovered: Vec<PkgPath> = pool.install(|| {
+            categories
+                .par_iter()
+                .flat_map(|category| {
+                    let workdir = format!("{}/{}", pkgsrc, category);
+                    let result = sandbox
+                        .execute_command(
+                            0,
+                            make,
+                            [
+                                "-C",
+                                &workdir,
+                                "show-subdir-var",
+                                "VARNAME=SUBDIR",
+                            ],
+                            vec![],
+                        )
+                        .and_then(|c| c.wait_with_output().map_err(Into::into));
+
+                    match result {
+                        Ok(o) if o.status.success() => {
+                            let pkgs = String::from_utf8_lossy(&o.stdout);
+                            pkgs.split_whitespace()
+                                .filter_map(|pkg| {
+                                    let path = format!("{}/{}", category, pkg);
+                                    PkgPath::new(&path).ok()
+                                })
+                                .collect::<Vec<_>>()
+                        }
+                        Ok(o) => {
+                            let stderr = String::from_utf8_lossy(&o.stderr);
+                            debug!(category = *category, stderr = %stderr,
+                                "Failed to get packages for category");
+                            vec![]
+                        }
+                        Err(e) => {
+                            debug!(category = *category, error = %e,
+                                "Failed to run make in category");
+                            vec![]
+                        }
+                    }
+                })
+                .collect()
+        });
+
+        self.incoming.extend(discovered);
 
         info!(discovered = self.incoming.len(), "Package discovery complete");
         println!("Discovered {} package paths", self.incoming.len());
@@ -742,7 +769,7 @@ impl Scan {
 
         // For full tree scans, always discover all packages
         if self.full_tree {
-            self.discover_packages()?;
+            self.discover_packages(&pool)?;
             self.incoming.retain(|p| !self.done.contains(p));
         }
 
