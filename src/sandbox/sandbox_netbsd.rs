@@ -187,28 +187,37 @@ impl Sandbox {
         self.unmount_common(dest)
     }
 
-    /// Kill all processes using files within a sandbox path.
+    /// Kill all processes with open file handles within a sandbox path.
     pub fn kill_processes(&self, sandbox: &Path) {
-        // Use fstat to find processes and kill them
-        let output = Command::new("fstat").arg(sandbox).output();
-        if let Ok(out) = output {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            for line in stdout.lines().skip(1) {
-                // fstat output: USER CMD PID FD MOUNT ...
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 3 {
-                    if let Ok(pid) = parts[2].parse::<i32>() {
-                        let _ = Command::new("kill")
-                            .arg("-9")
-                            .arg(pid.to_string())
-                            .stderr(std::process::Stdio::null())
-                            .status();
-                    }
-                }
-            }
-        }
+        for _ in 0..super::KILL_PROCESSES_MAX_RETRIES {
+            // Use fstat to find processes using files under the sandbox
+            let output = Command::new("fstat").arg(sandbox).output();
+            let Ok(out) = output else {
+                return;
+            };
 
-        // Give processes a moment to die
-        std::thread::sleep(std::time::Duration::from_millis(100));
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            // fstat output: USER CMD PID FD MOUNT ...
+            // Collect unique PIDs from column 3
+            let pids: Vec<&str> = stdout
+                .lines()
+                .skip(1)
+                .filter_map(|line| line.split_whitespace().nth(2))
+                .collect();
+
+            // No processes found, we're done
+            if pids.is_empty() {
+                return;
+            }
+
+            let _ = Command::new("kill")
+                .arg("-9")
+                .args(&pids)
+                .stderr(std::process::Stdio::null())
+                .status();
+
+            // Give processes a moment to die
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 }

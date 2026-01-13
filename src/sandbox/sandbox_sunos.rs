@@ -189,18 +189,39 @@ impl Sandbox {
         self.unmount_common(dest)
     }
 
-    /// Kill all processes using files within a sandbox path.
+    /// Kill all processes with open file handles within a sandbox path.
     pub fn kill_processes(&self, sandbox: &Path) {
         use std::process::Stdio;
-        // Use fuser -k to kill all processes using files under the sandbox
-        let _ = Command::new("fuser")
-            .arg("-k")
-            .arg(sandbox)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
 
-        // Give processes a moment to die
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        for _ in 0..super::KILL_PROCESSES_MAX_RETRIES {
+            // Use fuser -k to kill all processes using files under the sandbox
+            let _ = Command::new("fuser")
+                .arg("-k")
+                .arg(sandbox)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+
+            // Give processes a moment to die
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            // Check if any processes are still using the sandbox
+            let status = Command::new("fuser")
+                .arg(sandbox)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+
+            // fuser exits 0 if processes found, non-zero if none found
+            if let Ok(s) = status {
+                if !s.success() {
+                    // No processes found, we're done
+                    return;
+                }
+            } else {
+                // fuser failed to run, bail out
+                return;
+            }
+        }
     }
 }

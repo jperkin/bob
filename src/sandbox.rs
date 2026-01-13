@@ -80,6 +80,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use tracing::warn;
 
+/// Maximum number of retries when killing processes in a sandbox.
+const KILL_PROCESSES_MAX_RETRIES: u32 = 10;
+
 /// Build sandbox manager.
 #[derive(Clone, Debug, Default)]
 pub struct Sandbox {
