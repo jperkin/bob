@@ -77,6 +77,7 @@ use crate::config::Config;
 use anyhow::{Result, bail};
 use std::fs;
 use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -750,6 +751,7 @@ impl Sandbox {
     /// Run a custom action command.
     /// The command is run via /bin/sh -c with environment variables set.
     /// If cwd is specified, the directory is created if it doesn't exist.
+    /// Uses process_group(0) to isolate from terminal signals during cleanup.
     fn run_action_cmd(
         &self,
         id: usize,
@@ -773,6 +775,7 @@ impl Sandbox {
             .arg("-c")
             .arg(cmd)
             .current_dir(&work_dir)
+            .process_group(0)
             .status()?;
 
         Ok(Some(status))
