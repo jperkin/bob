@@ -566,7 +566,13 @@ impl Database {
     }
 
     /// Load all ScanIndex data in one query.
+    /// Note: For better memory efficiency with large datasets, consider using
+    /// `iter_scan_indexes` which processes records in batches.
     pub fn get_all_scan_indexes(&self) -> Result<Vec<(i64, ScanIndex)>> {
+        // Pre-size the vector based on package count to avoid reallocations
+        let count = self.count_packages()? as usize;
+        let mut results = Vec::with_capacity(count);
+
         let mut stmt = self
             .conn
             .prepare("SELECT id, scan_data FROM packages ORDER BY id")?;
@@ -575,7 +581,6 @@ impl Database {
             let json: String = row.get(1)?;
             Ok((id, json))
         })?;
-        let mut results = Vec::new();
         for row in rows {
             let (id, json) = row?;
             let index: ScanIndex =
@@ -588,6 +593,64 @@ impl Database {
             results.push((id, index));
         }
         Ok(results)
+    }
+
+    /// Load ScanIndex data in batches, calling the provided function for each batch.
+    /// This reduces peak memory usage by processing packages incrementally.
+    /// The callback receives (package_id, ScanIndex) for each package in the batch.
+    pub fn process_scan_indexes_batched<F>(
+        &self,
+        batch_size: usize,
+        mut callback: F,
+    ) -> Result<usize>
+    where
+        F: FnMut(i64, ScanIndex) -> Result<()>,
+    {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, scan_data FROM packages ORDER BY id")?;
+        let rows = stmt.query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            let json: String = row.get(1)?;
+            Ok((id, json))
+        })?;
+
+        let mut processed = 0;
+        let mut batch_buffer: Vec<(i64, String)> = Vec::with_capacity(batch_size);
+
+        for row in rows {
+            let (id, json) = row?;
+            batch_buffer.push((id, json));
+
+            if batch_buffer.len() >= batch_size {
+                for (id, json) in batch_buffer.drain(..) {
+                    let index: ScanIndex =
+                        serde_json::from_str(&json).with_context(|| {
+                            format!(
+                                "Failed to deserialize scan data for package {}",
+                                id
+                            )
+                        })?;
+                    callback(id, index)?;
+                    processed += 1;
+                }
+            }
+        }
+
+        // Process remaining items
+        for (id, json) in batch_buffer {
+            let index: ScanIndex =
+                serde_json::from_str(&json).with_context(|| {
+                    format!(
+                        "Failed to deserialize scan data for package {}",
+                        id
+                    )
+                })?;
+            callback(id, index)?;
+            processed += 1;
+        }
+
+        Ok(processed)
     }
 
     /// Load full ScanIndex by pkgname.

@@ -1084,6 +1084,8 @@ impl Scan {
         sandbox: &Sandbox,
         pkgpath: &PkgPath,
     ) -> anyhow::Result<Vec<ScanIndex>> {
+        use std::io::Read;
+
         let pkgpath_str = pkgpath.as_path().display().to_string();
         debug!(pkgpath = %pkgpath_str, "Scanning package");
 
@@ -1100,17 +1102,30 @@ impl Scan {
             scan_env = ?scan_env,
             "Executing pkg-scan"
         );
-        let child = sandbox.execute_script(0, &script, scan_env)?;
-        let output = child.wait_with_output()?;
+        let mut child = sandbox.execute_script(0, &script, scan_env)?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        // Stream stdout directly instead of buffering entire output.
+        // This reduces peak memory usage significantly for large outputs.
+        let stdout = child.stdout.take().context("Failed to capture stdout")?;
+        let reader = BufReader::new(stdout);
+        let all_results: Vec<ScanIndex> =
+            ScanIndex::from_reader(reader).collect::<Result<_, _>>()?;
+
+        // Now wait for the process to complete and check stderr
+        let status = child.wait()?;
+
+        if !status.success() {
+            // Read stderr for error message
+            let mut stderr_content = String::new();
+            if let Some(mut stderr) = child.stderr.take() {
+                let _ = stderr.read_to_string(&mut stderr_content);
+            }
             error!(pkgpath = %pkgpath_str,
-                exit_code = ?output.status.code(),
-                stderr = %stderr,
+                exit_code = ?status.code(),
+                stderr = %stderr_content,
                 "pkg-scan script failed"
             );
-            let stderr = stderr.trim();
+            let stderr = stderr_content.trim();
             let msg = if stderr.is_empty() {
                 format!("Scan failed for {}", pkgpath_str)
             } else {
@@ -1119,16 +1134,10 @@ impl Scan {
             bail!(msg);
         }
 
-        let stdout_str = String::from_utf8_lossy(&output.stdout);
         trace!(pkgpath = %pkgpath_str,
-            stdout_len = stdout_str.len(),
-            stdout = %stdout_str,
-            "pkg-scan script output"
+            packages_found = all_results.len(),
+            "pkg-scan script output parsed"
         );
-
-        let reader = BufReader::new(&output.stdout[..]);
-        let all_results: Vec<ScanIndex> =
-            ScanIndex::from_reader(reader).collect::<Result<_, _>>()?;
 
         /*
          * Filter to keep only the first occurrence of each PKGNAME.
@@ -1178,13 +1187,17 @@ impl Scan {
 
         // Load all scan data in one query
         let all_scan_data = db.get_all_scan_indexes()?;
+        let pkg_count = all_scan_data.len();
 
+        // Pre-size collections to avoid reallocations during population
         // Track package_id for storing resolved dependencies
-        let mut pkgname_to_id: HashMap<PkgName, i64> = HashMap::new();
+        let mut pkgname_to_id: HashMap<PkgName, i64> = HashMap::with_capacity(pkg_count);
 
         // Track skip reasons (packages not in this map are buildable)
-        let mut skip_reasons: HashMap<PkgName, SkipReason> = HashMap::new();
-        let mut depends: HashMap<PkgName, Vec<PkgName>> = HashMap::new();
+        // Typically ~10-20% of packages have skip/fail reasons
+        let mut skip_reasons: HashMap<PkgName, SkipReason> =
+            HashMap::with_capacity(pkg_count / 5);
+        let mut depends: HashMap<PkgName, Vec<PkgName>> = HashMap::with_capacity(pkg_count);
 
         // Process all scan data
         for (pkg_id, pkg) in all_scan_data {
@@ -1225,10 +1238,13 @@ impl Scan {
 
         // Collect pkgnames for lookups (owned to avoid borrow issues)
         let pkgnames: Vec<PkgName> = self.packages.keys().cloned().collect();
+        let pkgname_count = pkgnames.len();
 
         // Build pkgbase -> Vec<&PkgName> for efficient lookups
+        // Pre-size assuming average of ~2-3 versions per pkgbase
         let pkgbase_map: HashMap<&str, Vec<&PkgName>> = {
-            let mut map: HashMap<&str, Vec<&PkgName>> = HashMap::new();
+            let mut map: HashMap<&str, Vec<&PkgName>> =
+                HashMap::with_capacity(pkgname_count / 2);
             for pkgname in &pkgnames {
                 map.entry(pkgname.pkgbase()).or_default().push(pkgname);
             }
@@ -1236,7 +1252,9 @@ impl Scan {
         };
 
         // Cache of best Depend => PkgName matches
-        let mut match_cache: HashMap<Depend, PkgName> = HashMap::new();
+        // Estimate based on typical dependency count per package (~5-10 deps average)
+        let mut match_cache: HashMap<Depend, PkgName> =
+            HashMap::with_capacity(pkgname_count * 3);
 
         // Helper to check if a dependency pattern is already satisfied
         let is_satisfied = |deps: &[PkgName], pattern: &pkgsrc::Pattern| {
@@ -1395,8 +1413,9 @@ impl Scan {
             }
         }
 
-        // Build final packages list
-        let mut packages: Vec<ScanResult> = Vec::new();
+        // Build final packages list - pre-size to avoid reallocations
+        let final_pkg_count = self.packages.len() + self.scan_failures.len();
+        let mut packages: Vec<ScanResult> = Vec::with_capacity(final_pkg_count);
         let mut count_buildable = 0;
 
         for (pkgname, index) in std::mem::take(&mut self.packages) {
@@ -1486,7 +1505,9 @@ impl Scan {
         );
 
         // Store resolved dependencies in database
-        let mut resolved_deps: Vec<(i64, i64)> = Vec::new();
+        // Pre-size based on buildable count and average deps per package
+        let mut resolved_deps: Vec<(i64, i64)> =
+            Vec::with_capacity(count_buildable * 5);
         for pkg in &packages {
             if let ScanResult::Buildable(resolved) = pkg {
                 if let Some(&pkg_id) = pkgname_to_id.get(resolved.pkgname()) {
