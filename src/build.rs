@@ -2520,23 +2520,25 @@ impl Build {
             "Worker threads completed"
         );
 
-        // Save all completed results to database (skip if shutdown)
-        if !shutdown_flag.load(Ordering::SeqCst) {
-            let mut saved_count = 0;
-            while let Ok(result) = completed_rx.try_recv() {
-                if let Err(e) = db.store_build_by_name(&result) {
-                    warn!(
-                        pkgname = %result.pkgname.pkgname(),
-                        error = %e,
-                        "Failed to save build result"
-                    );
-                } else {
-                    saved_count += 1;
-                }
+        // Save all completed results to database.
+        // Important: We save results even on interrupt - these are builds that
+        // COMPLETED before the interrupt, and should be preserved. Only builds
+        // that were in-progress when interrupted are excluded (they never sent
+        // a result to the channel).
+        let mut saved_count = 0;
+        while let Ok(result) = completed_rx.try_recv() {
+            if let Err(e) = db.store_build_by_name(&result) {
+                warn!(
+                    pkgname = %result.pkgname.pkgname(),
+                    error = %e,
+                    "Failed to save build result"
+                );
+            } else {
+                saved_count += 1;
             }
-            if saved_count > 0 {
-                debug!(saved_count, "Saved build results to database");
-            }
+        }
+        if saved_count > 0 {
+            debug!(saved_count, "Saved build results to database");
         }
 
         // Stop the refresh thread

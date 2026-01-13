@@ -856,8 +856,10 @@ impl Scan {
          * next.
          */
         loop {
-            // Check for shutdown signal
-            if shutdown_flag.load(Ordering::Relaxed) {
+            // Check for shutdown signal.
+            // Use SeqCst for consistency with signal handler's store ordering,
+            // ensuring the shutdown is observed promptly on all architectures.
+            if shutdown_flag.load(Ordering::SeqCst) {
                 stop_refresh.store(true, Ordering::Relaxed);
                 if let Ok(mut p) = progress.lock() {
                     let _ = p.finish_interrupted();
@@ -893,7 +895,7 @@ impl Scan {
                     pool_ref.install(|| {
                         pkgpaths.par_iter().for_each(|pkgpath| {
                             // Check for shutdown before starting
-                            if shutdown_clone.load(Ordering::Relaxed) {
+                            if shutdown_clone.load(Ordering::SeqCst) {
                                 return;
                             }
 
@@ -933,7 +935,7 @@ impl Scan {
                 });
 
                 // Check if we were interrupted during parallel processing
-                let was_interrupted = shutdown_flag.load(Ordering::Relaxed);
+                let was_interrupted = shutdown_flag.load(Ordering::SeqCst);
 
                 /*
                  * Process results - write to DB and extract dependencies.
