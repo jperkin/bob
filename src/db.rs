@@ -31,18 +31,17 @@
 //! - `metadata` - Key-value store for flags and cached data
 
 use crate::build::{BuildOutcome, BuildResult};
-use crate::scan::{ScannedPackage, SkipReason};
+use crate::scan::SkipReason;
 use anyhow::{Context, Result};
 use pkgsrc::{PkgName, PkgPath, ScanIndex};
 use rusqlite::{Connection, params};
 use std::collections::HashSet;
-use std::cell::Cell;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 /// Current schema version for migrations.
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 2;
 
 /// Lightweight package row without full scan data.
 #[derive(Clone, Debug)]
@@ -59,12 +58,6 @@ pub struct PackageRow {
 /// SQLite database for scan and build caching.
 pub struct Database {
     conn: Connection,
-    // Timing instrumentation for profiling store_package()
-    timing_json_ns: Cell<u64>,
-    timing_pkg_insert_ns: Cell<u64>,
-    timing_deps_insert_ns: Cell<u64>,
-    timing_count: Cell<u64>,
-    timing_deps_count: Cell<u64>,
 }
 
 impl Database {
@@ -75,14 +68,7 @@ impl Database {
                 .context("Failed to create database directory")?;
         }
         let conn = Connection::open(path).context("Failed to open database")?;
-        let db = Self {
-            conn,
-            timing_json_ns: Cell::new(0),
-            timing_pkg_insert_ns: Cell::new(0),
-            timing_deps_insert_ns: Cell::new(0),
-            timing_count: Cell::new(0),
-            timing_deps_count: Cell::new(0),
-        };
+        let db = Self { conn };
         db.configure_pragmas()?;
         db.init_or_migrate()?;
         Ok(db)
@@ -157,43 +143,20 @@ impl Database {
                 if version == 1 {
                     self.migrate_v1_to_v2()?;
                 }
-                if version <= 2 {
-                    self.migrate_v2_to_v3()?;
-                }
             }
         }
 
         Ok(())
     }
 
-    /// Migrate from v2 to v3 (add scan_queue table).
-    fn migrate_v2_to_v3(&self) -> Result<()> {
-        self.conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS scan_queue (
-                pkgpath TEXT PRIMARY KEY,
-                status TEXT NOT NULL DEFAULT 'pending',
-                error TEXT,
-                created_at INTEGER NOT NULL,
-                scanned_at INTEGER
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_scan_queue_status ON scan_queue(status);
-
-            UPDATE schema_version SET version = 3 WHERE version = 2;
-            INSERT OR IGNORE INTO schema_version (version) VALUES (3);"
-        )?;
-        debug!("Migrated to schema v3");
-        Ok(())
-    }
-
-    /// Create the current schema from scratch.
+    /// Create the v2 schema from scratch.
     fn create_schema_v2(&self) -> Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY
             );
 
-            INSERT OR REPLACE INTO schema_version (version) VALUES (3);
+            INSERT OR REPLACE INTO schema_version (version) VALUES (2);
 
             CREATE TABLE IF NOT EXISTS packages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -251,20 +214,10 @@ impl Database {
             CREATE TABLE IF NOT EXISTS metadata (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS scan_queue (
-                pkgpath TEXT PRIMARY KEY,
-                status TEXT NOT NULL DEFAULT 'pending',
-                error TEXT,
-                created_at INTEGER NOT NULL,
-                scanned_at INTEGER
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_scan_queue_status ON scan_queue(status);"
+            );"
         )?;
 
-        debug!("Created schema v3");
+        debug!("Created schema v2");
         Ok(())
     }
 
@@ -348,6 +301,10 @@ impl Database {
         Ok(())
     }
 
+    // ========================================================================
+    // PACKAGE QUERIES
+    // ========================================================================
+
     /// Store a package from scan results.
     pub fn store_package(
         &self,
@@ -368,18 +325,11 @@ impl Database {
             .and_then(|s| s.parse().ok())
             .unwrap_or(100);
 
-        // Time JSON serialization
-        let t0 = Instant::now();
         let scan_data = serde_json::to_string(index)?;
-        let json_elapsed = t0.elapsed().as_nanos() as u64;
-        self.timing_json_ns.set(self.timing_json_ns.get() + json_elapsed);
-
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
 
-        // Time package INSERT
-        let t1 = Instant::now();
         {
             let mut stmt = self.conn.prepare_cached(
                 "INSERT OR REPLACE INTO packages
@@ -400,15 +350,10 @@ impl Database {
                 now
             ])?;
         }
-        let pkg_insert_elapsed = t1.elapsed().as_nanos() as u64;
-        self.timing_pkg_insert_ns
-            .set(self.timing_pkg_insert_ns.get() + pkg_insert_elapsed);
 
         let package_id = self.conn.last_insert_rowid();
 
-        // Time dependencies INSERT
-        let t2 = Instant::now();
-        let mut deps_count = 0u64;
+        // Store raw dependencies
         if let Some(ref deps) = index.all_depends {
             let mut stmt = self.conn.prepare_cached(
                 "INSERT OR IGNORE INTO depends (package_id, depend_pattern, depend_pkgpath)
@@ -420,50 +365,11 @@ impl Database {
                     dep.pattern().pattern(),
                     dep.pkgpath().to_string()
                 ])?;
-                deps_count += 1;
             }
-        }
-        let deps_insert_elapsed = t2.elapsed().as_nanos() as u64;
-        self.timing_deps_insert_ns
-            .set(self.timing_deps_insert_ns.get() + deps_insert_elapsed);
-        self.timing_deps_count
-            .set(self.timing_deps_count.get() + deps_count);
-
-        // Update count and report periodically
-        let count = self.timing_count.get() + 1;
-        self.timing_count.set(count);
-        if count % 1000 == 0 {
-            self.report_timing();
         }
 
         debug!(pkgname = pkgname, package_id = package_id, "Stored package");
         Ok(package_id)
-    }
-
-    /// Report accumulated timing statistics.
-    pub fn report_timing(&self) {
-        let count = self.timing_count.get();
-        if count == 0 {
-            return;
-        }
-        let json_ms = self.timing_json_ns.get() / 1_000_000;
-        let pkg_ms = self.timing_pkg_insert_ns.get() / 1_000_000;
-        let deps_ms = self.timing_deps_insert_ns.get() / 1_000_000;
-        let deps_count = self.timing_deps_count.get();
-        let total_ms = json_ms + pkg_ms + deps_ms;
-
-        info!(
-            packages = count,
-            deps = deps_count,
-            total_ms = total_ms,
-            json_ms = json_ms,
-            pkg_insert_ms = pkg_ms,
-            deps_insert_ms = deps_ms,
-            avg_json_us = json_ms * 1000 / count,
-            avg_pkg_us = pkg_ms * 1000 / count,
-            avg_deps_us = deps_ms * 1000 / count,
-            "DB timing"
-        );
     }
 
     /// Store scan results for a pkgpath.
@@ -476,92 +382,6 @@ impl Database {
             self.store_package(pkgpath, index)?;
         }
         Ok(())
-    }
-
-    /// Store scan results for a pkgpath using pre-serialized JSON.
-    ///
-    /// This is the preferred method when JSON serialization has already been
-    /// done in worker threads to parallelize the CPU work.
-    pub fn store_scan_pkgpath_preserialized(
-        &self,
-        pkgpath: &str,
-        packages: &[ScannedPackage],
-    ) -> Result<()> {
-        for pkg in packages {
-            self.store_package_preserialized(pkgpath, &pkg.index, &pkg.scan_data_json)?;
-        }
-        Ok(())
-    }
-
-    /// Store a package with pre-serialized scan_data JSON.
-    ///
-    /// This avoids JSON serialization in the main thread by accepting
-    /// pre-serialized data from worker threads.
-    ///
-    /// Note: Dependencies are NOT stored in the depends table during scan.
-    /// The scan_data blob contains all_depends which is used by the resolver.
-    /// This eliminates ~287k INSERT statements during a full scan.
-    pub fn store_package_preserialized(
-        &self,
-        pkgpath: &str,
-        index: &ScanIndex,
-        scan_data: &str,
-    ) -> Result<i64> {
-        let pkgname = index.pkgname.pkgname();
-        let (base, version) = split_pkgname(pkgname);
-
-        let skip_reason =
-            index.pkg_skip_reason.as_ref().filter(|s| !s.is_empty());
-        let fail_reason =
-            index.pkg_fail_reason.as_ref().filter(|s| !s.is_empty());
-        let is_bootstrap = index.bootstrap_pkg.as_deref() == Some("yes");
-        let pbulk_weight: i32 = index
-            .pbulk_weight
-            .as_ref()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(100);
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs() as i64;
-
-        // Time package INSERT
-        let t1 = Instant::now();
-        {
-            let mut stmt = self.conn.prepare_cached(
-                "INSERT OR REPLACE INTO packages
-                 (pkgname, pkgpath, pkgname_base, version, skip_reason, fail_reason,
-                  is_bootstrap, pbulk_weight, scan_data, scanned_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            )?;
-            stmt.execute(params![
-                pkgname,
-                pkgpath,
-                base,
-                version,
-                skip_reason,
-                fail_reason,
-                is_bootstrap,
-                pbulk_weight,
-                scan_data,
-                now
-            ])?;
-        }
-        let pkg_insert_elapsed = t1.elapsed().as_nanos() as u64;
-        self.timing_pkg_insert_ns
-            .set(self.timing_pkg_insert_ns.get() + pkg_insert_elapsed);
-
-        let package_id = self.conn.last_insert_rowid();
-
-        // Update count and report periodically
-        let count = self.timing_count.get() + 1;
-        self.timing_count.set(count);
-        if count % 1000 == 0 {
-            self.report_timing();
-        }
-
-        debug!(pkgname = pkgname, package_id = package_id, "Stored package");
-        Ok(package_id)
     }
 
     /// Get package by name.

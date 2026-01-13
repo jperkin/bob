@@ -42,28 +42,17 @@ use crate::sandbox::SingleSandboxScope;
 use crate::tui::{MultiProgress, format_duration};
 use crate::{Config, RunContext, Sandbox};
 use anyhow::{Context, Result, bail};
+use crossbeam::queue::SegQueue;
 use indexmap::IndexMap;
 use petgraph::graphmap::DiGraphMap;
 use pkgsrc::{Depend, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{debug, error, info, trace};
-
-/// A scanned package with pre-serialized JSON for database storage.
-///
-/// JSON serialization is done in worker threads to parallelize the CPU work,
-/// rather than serializing in the main thread which would create a bottleneck.
-#[derive(Debug)]
-pub struct ScannedPackage {
-    /// The scan index data.
-    pub index: ScanIndex,
-    /// Pre-serialized JSON of the scan index for database storage.
-    pub scan_data_json: String,
-}
 
 /// Reason why a package was skipped (not built).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -511,8 +500,10 @@ pub struct Scan {
     incoming: HashSet<PkgPath>,
     /// Pkgpaths we've completed scanning (in this session).
     done: HashSet<PkgPath>,
-    /// Number of pkgpaths already scanned at start of scan.
+    /// Number of pkgpaths loaded from cache at start of scan.
     initial_cached: usize,
+    /// Number of pkgpaths discovered as cached during dependency discovery.
+    discovered_cached: usize,
     /// Packages loaded from scan, indexed by pkgname.
     packages: IndexMap<PkgName, ScanIndex>,
     /// Full tree scan - discover all packages, skip recursive dependency discovery.
@@ -540,6 +531,7 @@ impl Scan {
             incoming: HashSet::new(),
             done: HashSet::new(),
             initial_cached: 0,
+            discovered_cached: 0,
             packages: IndexMap::new(),
             full_tree: true,
             full_scan_complete: false,
@@ -565,24 +557,59 @@ impl Scan {
     }
 
     /// Initialize scan from database, checking what's already scanned.
-    /// Returns count of packages already in the database.
+    /// Returns (cached_count, pending_deps_count) where pending_deps_count is the
+    /// number of dependencies discovered but not yet scanned (from interrupted scans).
     pub fn init_from_db(
         &mut self,
         db: &crate::db::Database,
-    ) -> Result<usize> {
-        let scanned = db.count_packages()? as usize;
+    ) -> Result<(usize, usize)> {
+        let scanned = db.get_scanned_pkgpaths()?;
+        let cached_count = scanned.len();
+        let mut pending_count = 0;
 
-        if scanned > 0 {
-            info!(scanned = scanned, "Found packages in database");
+        if cached_count > 0 {
+            info!(
+                cached_count = cached_count,
+                "Found cached scan results in database"
+            );
+
+            // For full tree scans with full_scan_complete, we'll skip scanning
+            // For limited scans, remove already-scanned from incoming
+            if !self.full_tree {
+                self.incoming.retain(|p| !scanned.contains(&p.to_string()));
+            }
+
+            // Add scanned pkgpaths to done set
+            for pkgpath_str in &scanned {
+                if let Ok(pkgpath) = PkgPath::new(pkgpath_str) {
+                    self.done.insert(pkgpath);
+                }
+            }
+
+            // Check for dependencies that were discovered but not yet scanned.
+            // This handles the case where a scan was interrupted partway through.
+            let unscanned = db.get_unscanned_dependencies()?;
+            if !unscanned.is_empty() {
+                info!(
+                    unscanned_count = unscanned.len(),
+                    "Found unscanned dependencies from interrupted scan"
+                );
+                for pkgpath_str in unscanned {
+                    if let Ok(pkgpath) = PkgPath::new(&pkgpath_str) {
+                        if !self.done.contains(&pkgpath) {
+                            self.incoming.insert(pkgpath);
+                            pending_count += 1;
+                        }
+                    }
+                }
+            }
         }
 
-        self.initial_cached = scanned;
-        Ok(scanned)
+        Ok((cached_count, pending_count))
     }
 
     /// Discover all packages in pkgsrc tree.
-    /// Returns list of all pkgpaths found.
-    fn discover_packages(&self) -> anyhow::Result<Vec<String>> {
+    fn discover_packages(&mut self) -> anyhow::Result<()> {
         println!("Discovering packages...");
         let pkgsrc = self.config.pkgsrc().display();
         let make = self.config.make().display();
@@ -605,12 +632,12 @@ impl Scan {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let entries: Vec<&str> = stdout.split_whitespace().collect();
 
-        let mut pkgpaths: Vec<String> = Vec::new();
-
         for entry in entries {
             if entry.contains('/') {
                 // USER_ADDITIONAL_PKGS - add directly as pkgpath
-                pkgpaths.push(entry.to_string());
+                if let Ok(pkgpath) = PkgPath::new(entry) {
+                    self.incoming.insert(pkgpath);
+                }
             } else {
                 // Category - get packages within it
                 let script = format!(
@@ -624,7 +651,10 @@ impl Scan {
                     Ok(o) if o.status.success() => {
                         let pkgs = String::from_utf8_lossy(&o.stdout);
                         for pkg in pkgs.split_whitespace() {
-                            pkgpaths.push(format!("{}/{}", entry, pkg));
+                            let path = format!("{}/{}", entry, pkg);
+                            if let Ok(pkgpath) = PkgPath::new(&path) {
+                                self.incoming.insert(pkgpath);
+                            }
                         }
                     }
                     Ok(o) => {
@@ -640,10 +670,10 @@ impl Scan {
             }
         }
 
-        info!(discovered = pkgpaths.len(), "Package discovery complete");
-        println!("Discovered {} package paths", pkgpaths.len());
+        info!(discovered = self.incoming.len(), "Package discovery complete");
+        println!("Discovered {} package paths", self.incoming.len());
 
-        Ok(pkgpaths)
+        Ok(())
     }
 
     pub fn start(
@@ -657,23 +687,33 @@ impl Scan {
             "Starting package scan"
         );
 
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(self.config.scan_threads())
-            .build()
-            .context("Failed to build scan thread pool")?;
-
         let shutdown_flag = Arc::clone(&ctx.shutdown);
 
-        // Load what's already scanned from the packages table
-        let mut scanned: HashSet<String> = db.get_scanned_pkgpaths()?;
-        self.initial_cached = scanned.len();
+        // For full tree scans where a previous scan completed, all packages
+        // are already cached - nothing to do.
+        if self.full_tree && self.full_scan_complete && !self.done.is_empty() {
+            println!("All {} package paths already scanned", self.done.len());
+            return Ok(false);
+        }
+
+        // For non-full-tree scans, prune already-cached packages from incoming
+        // before sandbox creation to avoid unnecessary setup/teardown.
+        if !self.full_tree {
+            self.incoming.retain(|p| !self.done.contains(p));
+            if self.incoming.is_empty() {
+                if !self.done.is_empty() {
+                    println!(
+                        "All {} package paths already scanned",
+                        self.done.len()
+                    );
+                }
+                return Ok(false);
+            }
+        }
 
         /*
          * Only a single sandbox is required, 'make pbulk-index' can safely be
          * run in parallel inside one sandbox.
-         *
-         * Create scope which handles sandbox lifecycle - creates on construction,
-         * destroys on drop. This ensures cleanup even on error paths.
          */
         let _scope = SingleSandboxScope::new(
             self.sandbox.clone(),
@@ -681,7 +721,6 @@ impl Scan {
         )?;
 
         if self.sandbox.enabled() {
-            // Run pre-build script if defined
             if !self.sandbox.run_pre_build(
                 0,
                 &self.config,
@@ -693,28 +732,19 @@ impl Scan {
                 Some(PkgsrcEnv::fetch(&self.config, &self.sandbox)?);
         }
 
-        // Build pending list - either from full tree discovery or from incoming
-        let mut pending: VecDeque<PkgPath> = if self.full_tree {
-            let all_pkgs = self.discover_packages()?;
-            let new_count = all_pkgs.iter().filter(|p| !scanned.contains(*p)).count();
-            println!("{} packages to scan ({} cached)", new_count, scanned.len());
+        // For full tree scans, always discover all packages
+        if self.full_tree {
+            self.discover_packages()?;
+            self.incoming.retain(|p| !self.done.contains(p));
+        }
 
-            all_pkgs
-                .into_iter()
-                .filter(|p| !scanned.contains(p))
-                .filter_map(|p| PkgPath::new(&p).ok())
-                .collect()
-        } else {
-            // For partial scans, start with incoming packages
-            self.incoming
-                .drain()
-                .filter(|p| !scanned.contains(&p.to_string()))
-                .collect()
-        };
-
-        if pending.is_empty() {
-            if self.initial_cached > 0 {
-                println!("All {} package paths already scanned", self.initial_cached);
+        // Nothing to scan - all packages are cached
+        if self.incoming.is_empty() {
+            if !self.done.is_empty() {
+                println!(
+                    "All {} package paths already scanned",
+                    self.done.len()
+                );
             }
             if self.sandbox.enabled() {
                 self.run_post_build()?;
@@ -727,8 +757,15 @@ impl Scan {
 
         println!("Scanning packages...");
 
-        // Set up multi-line progress display
-        let total_count = self.initial_cached + pending.len();
+        // Track initial cached count for final summary
+        self.initial_cached = self.done.len();
+
+        // Convert incoming to Vec for indexed access
+        let pending: Vec<PkgPath> = self.incoming.drain().collect();
+        let pending_count = pending.len();
+
+        // Set up progress display
+        let total_count = self.initial_cached + pending_count;
         let progress = Arc::new(Mutex::new(
             MultiProgress::new(
                 "Scanning",
@@ -739,7 +776,6 @@ impl Scan {
             .expect("Failed to initialize progress display"),
         ));
 
-        // Mark cached packages in progress display
         if self.initial_cached > 0 {
             if let Ok(mut p) = progress.lock() {
                 p.state_mut().cached = self.initial_cached;
@@ -749,7 +785,7 @@ impl Scan {
         // Flag to stop the refresh thread
         let stop_refresh = Arc::new(AtomicBool::new(false));
 
-        // Spawn a thread to periodically refresh the display (for timer updates)
+        // Spawn refresh thread for timer updates
         let progress_refresh = Arc::clone(&progress);
         let stop_flag = Arc::clone(&stop_refresh);
         let shutdown_for_refresh = Arc::clone(&shutdown_flag);
@@ -765,167 +801,171 @@ impl Scan {
             }
         });
 
-        let mut interrupted = false;
+        // =====================================================================
+        // STREAMING ARCHITECTURE
+        //
+        // Workers scan continuously, pushing results to a lock-free queue.
+        // A separate DB writer thread drains the queue and writes to DB.
+        // Workers NEVER wait for DB writes - they just keep scanning.
+        // =====================================================================
 
-        // Borrow config and sandbox separately for use in scanner thread
+        // Lock-free queue for scan results (workers push, writer pops)
+        let results: Arc<SegQueue<(PkgPath, Result<Vec<ScanIndex>>)>> =
+            Arc::new(SegQueue::new());
+
+        // Atomic counter for completed scans (to know when workers are done)
+        let completed = Arc::new(AtomicUsize::new(0));
+
+        // Flag to signal workers are done
+        let workers_done = Arc::new(AtomicBool::new(false));
+
+        // Borrow config and sandbox for worker threads
         let config = &self.config;
         let sandbox = &self.sandbox;
 
-        // Process pending pkgpaths in batches
-        loop {
-            // Check for shutdown signal
-            if shutdown_flag.load(Ordering::Relaxed) {
-                stop_refresh.store(true, Ordering::Relaxed);
-                if let Ok(mut p) = progress.lock() {
-                    let _ = p.finish_interrupted();
-                }
-                interrupted = true;
-                break;
-            }
+        // Track failures and successes from DB writer
+        let failures: Arc<Mutex<Vec<(PkgPath, String)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let success_count = Arc::new(AtomicUsize::new(0));
 
-            // Get next batch
-            let batch_size = 1000.min(pending.len());
-            if batch_size == 0 {
-                break;
-            }
-            let pkgpaths: Vec<PkgPath> = pending.drain(..batch_size).collect();
+        let mut interrupted = false;
 
-            // Start transaction for this batch
-            db.begin_transaction()?;
+        // Start transaction for DB writes
+        db.begin_transaction()?;
 
-            // Create bounded channel for streaming results
-            const CHANNEL_BUFFER_SIZE: usize = 128;
-            let (tx, rx) = std::sync::mpsc::sync_channel::<(
-                PkgPath,
-                Result<Vec<ScannedPackage>>,
-            )>(CHANNEL_BUFFER_SIZE);
+        std::thread::scope(|s| {
+            // -------------------------------------------------------------
+            // WORKER THREADS (via rayon in separate thread)
+            // Scan packages continuously, pushing results to lock-free queue.
+            // Workers NEVER wait for DB - they just push and continue.
+            // -------------------------------------------------------------
+            let results_for_workers = Arc::clone(&results);
+            let completed_for_workers = Arc::clone(&completed);
+            let progress_for_workers = Arc::clone(&progress);
+            let shutdown_for_workers = Arc::clone(&shutdown_flag);
+            let workers_done_for_signal = Arc::clone(&workers_done);
 
-            std::thread::scope(|s| {
-                // Spawn scanning thread
-                let progress_clone = Arc::clone(&progress);
-                let shutdown_clone = Arc::clone(&shutdown_flag);
-                let pool_ref = &pool;
+            s.spawn(move || {
+                pending.par_iter().for_each(|pkgpath| {
+                    // Check for shutdown
+                    if shutdown_for_workers.load(Ordering::Relaxed) {
+                        return;
+                    }
 
-                s.spawn(move || {
-                    pool_ref.install(|| {
-                        pkgpaths.par_iter().for_each(|pkgpath| {
-                            if shutdown_clone.load(Ordering::Relaxed) {
-                                return;
-                            }
+                    let pathname = pkgpath.as_path().to_string_lossy().to_string();
+                    let thread_id = rayon::current_thread_index().unwrap_or(0);
 
-                            let pathname =
-                                pkgpath.as_path().to_string_lossy().to_string();
-                            let thread_id =
-                                rayon::current_thread_index().unwrap_or(0);
+                    // Update progress - show current package
+                    if let Ok(mut p) = progress_for_workers.lock() {
+                        p.state_mut().set_worker_active(thread_id, &pathname);
+                    }
 
-                            if let Ok(mut p) = progress_clone.lock() {
-                                p.state_mut()
-                                    .set_worker_active(thread_id, &pathname);
-                            }
+                    // Do the actual scan
+                    let result = Self::scan_pkgpath_with(config, sandbox, pkgpath);
 
-                            let result = Self::scan_pkgpath_with(
-                                config, sandbox, pkgpath,
-                            );
+                    // Update progress counter
+                    if let Ok(mut p) = progress_for_workers.lock() {
+                        p.state_mut().set_worker_idle(thread_id);
+                        if result.is_ok() {
+                            p.state_mut().increment_completed();
+                        } else {
+                            p.state_mut().increment_failed();
+                        }
+                    }
 
-                            if let Ok(mut p) = progress_clone.lock() {
-                                p.state_mut().set_worker_idle(thread_id);
-                                if result.is_ok() {
-                                    p.state_mut().increment_completed();
-                                } else {
-                                    p.state_mut().increment_failed();
-                                }
-                            }
+                    // Push result to lock-free queue (NEVER blocks)
+                    results_for_workers.push((pkgpath.clone(), result));
 
-                            // Serialize JSON in worker thread
-                            let result = result.map(|indexes| {
-                                indexes
-                                    .into_iter()
-                                    .map(|index| {
-                                        let scan_data_json =
-                                            serde_json::to_string(&index)
-                                                .unwrap_or_default();
-                                        ScannedPackage { index, scan_data_json }
-                                    })
-                                    .collect()
-                            });
-
-                            let _ = tx.send((pkgpath.clone(), result));
-                        });
-                    });
-                    drop(tx);
+                    completed_for_workers.fetch_add(1, Ordering::Relaxed);
                 });
 
-                let was_interrupted = shutdown_flag.load(Ordering::Relaxed);
+                // Signal that workers are done
+                workers_done_for_signal.store(true, Ordering::Relaxed);
+            });
 
-                // Process results
-                for (pkgpath, result) in rx {
-                    let pkgpath_str = pkgpath.to_string();
+            // -------------------------------------------------------------
+            // DB WRITER (main thread in this scope)
+            // Continuously drains results queue and writes to database.
+            // Never blocks workers - they just keep pushing to the queue.
+            // -------------------------------------------------------------
+            let mut batch_count = 0;
+            const COMMIT_INTERVAL: usize = 1000;
 
-                    let scanpkgs = match result {
-                        Ok(pkgs) => pkgs,
-                        Err(e) => {
-                            self.scan_failures
-                                .push((pkgpath.clone(), e.to_string()));
-                            continue;
-                        }
-                    };
-
-                    // Save to database
-                    if !scanpkgs.is_empty() {
-                        if let Err(e) = db
-                            .store_scan_pkgpath_preserialized(
-                                &pkgpath_str,
-                                &scanpkgs,
-                            )
-                        {
-                            error!(error = %e, "Failed to store scan results");
-                        }
-                    }
-
-                    // Mark as scanned in our local set
-                    scanned.insert(pkgpath_str);
-
-                    // For partial scans, discover new dependencies
-                    if !self.full_tree && !was_interrupted {
-                        for pkg in &scanpkgs {
-                            if let Some(ref all_deps) = pkg.index.all_depends {
-                                for dep in all_deps {
-                                    let dep_path_str = dep.pkgpath().to_string();
-                                    // Only add if not already scanned or pending
-                                    if !scanned.contains(&dep_path_str) {
-                                        if let Ok(dep_path) = PkgPath::new(&dep_path_str) {
-                                            if !pending.contains(&dep_path) {
-                                                pending.push_back(dep_path);
-                                                if let Ok(mut p) = progress.lock() {
-                                                    p.state_mut().total += 1;
-                                                }
-                                            }
-                                        }
-                                    }
+            loop {
+                // Try to pop a result from the queue
+                if let Some((pkgpath, result)) = results.pop() {
+                    match result {
+                        Ok(scanpkgs) => {
+                            if !scanpkgs.is_empty() {
+                                if let Err(e) = db.store_scan_pkgpath(
+                                    &pkgpath.to_string(),
+                                    &scanpkgs,
+                                ) {
+                                    error!(error = %e, "Failed to store scan results");
+                                } else {
+                                    success_count.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
                         }
+                        Err(e) => {
+                            if let Ok(mut f) = failures.lock() {
+                                f.push((pkgpath, e.to_string()));
+                            }
+                        }
                     }
-                }
-            });
 
-            // Commit this batch
-            db.commit()?;
+                    batch_count += 1;
 
-            if shutdown_flag.load(Ordering::Relaxed) {
-                stop_refresh.store(true, Ordering::Relaxed);
-                if let Ok(mut p) = progress.lock() {
-                    let _ = p.finish_interrupted();
+                    // Periodic commit for resumability
+                    if batch_count >= COMMIT_INTERVAL {
+                        if let Err(e) = db.commit() {
+                            error!(error = %e, "Failed to commit batch");
+                        }
+                        if let Err(e) = db.begin_transaction() {
+                            error!(error = %e, "Failed to begin transaction");
+                        }
+                        batch_count = 0;
+                    }
+                } else {
+                    // Queue is empty
+                    if workers_done.load(Ordering::Relaxed) {
+                        // Workers are done and queue is empty - we're finished
+                        break;
+                    }
+                    if shutdown_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    // Brief sleep to avoid busy-wait when queue is empty
+                    std::thread::sleep(Duration::from_millis(1));
                 }
-                interrupted = true;
-                break;
             }
+        });
+
+        // Final commit
+        db.commit()?;
+
+        // Check if we were interrupted
+        if shutdown_flag.load(Ordering::Relaxed) {
+            stop_refresh.store(true, Ordering::Relaxed);
+            if let Ok(mut p) = progress.lock() {
+                let _ = p.finish_interrupted();
+            }
+            interrupted = true;
         }
 
         // Stop the refresh thread
         stop_refresh.store(true, Ordering::Relaxed);
         let _ = refresh_thread.join();
 
+        // Collect failures
+        if let Ok(f) = failures.lock() {
+            self.scan_failures.extend(f.iter().cloned());
+        }
+
+        // Get counts
+        let scanned = success_count.load(Ordering::Relaxed);
+
+        // Print summary
         if !interrupted {
             let elapsed = if let Ok(mut p) = progress.lock() {
                 p.finish_silent().ok()
@@ -933,10 +973,9 @@ impl Scan {
                 None
             };
 
-            let total_scanned = scanned.len();
+            let total = self.initial_cached + scanned + self.scan_failures.len();
             let cached = self.initial_cached;
             let failed = self.scan_failures.len();
-            let succeeded = total_scanned.saturating_sub(cached);
 
             let elapsed_str =
                 elapsed.map(format_duration).unwrap_or_else(|| "?".to_string());
@@ -944,12 +983,12 @@ impl Scan {
             if cached > 0 {
                 println!(
                     "Scanned {} package paths in {} ({} scanned, {} cached, {} failed)",
-                    total_scanned + failed, elapsed_str, succeeded, cached, failed
+                    total, elapsed_str, scanned, cached, failed
                 );
             } else {
                 println!(
                     "Scanned {} package paths in {} ({} succeeded, {} failed)",
-                    total_scanned + failed, elapsed_str, succeeded, failed
+                    total, elapsed_str, scanned, failed
                 );
             }
         }
