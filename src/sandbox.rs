@@ -331,6 +331,33 @@ impl Sandbox {
     }
 
     /**
+     * Execute a command directly without shell interpretation.
+     */
+    pub fn execute_command<I, S>(
+        &self,
+        id: usize,
+        cmd: &Path,
+        args: I,
+        envs: Vec<(String, String)>,
+    ) -> Result<Child>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let mut command = self.command(id, cmd);
+        command.args(args);
+        for (key, val) in envs {
+            command.env(key, val);
+        }
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(Into::into)
+    }
+
+    /**
      * Run the pre-build script if configured.
      * Returns Ok(true) if script ran successfully or wasn't configured,
      * Ok(false) if script failed.
