@@ -35,6 +35,7 @@ impl Sandbox {
                 .args(opts)
                 .arg(src)
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
@@ -53,6 +54,7 @@ impl Sandbox {
                 .arg("devfs")
                 .args(opts)
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
@@ -80,6 +82,7 @@ impl Sandbox {
                 .args(opts)
                 .arg(src)
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
@@ -106,6 +109,7 @@ impl Sandbox {
             Command::new(cmd)
                 .args(opts)
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
@@ -187,7 +191,12 @@ impl Sandbox {
     pub fn kill_processes(&self, sandbox: &Path) {
         for _ in 0..super::KILL_PROCESSES_MAX_RETRIES {
             // Use lsof to find processes using files under the sandbox
-            let output = Command::new("lsof").arg("+D").arg(sandbox).output();
+            // Use process_group(0) to isolate from terminal signals
+            let output = Command::new("lsof")
+                .arg("+D")
+                .arg(sandbox)
+                .process_group(0)
+                .output();
             let Ok(out) = output else {
                 return;
             };
@@ -210,6 +219,7 @@ impl Sandbox {
                 .arg("-9")
                 .args(&pids)
                 .stderr(std::process::Stdio::null())
+                .process_group(0)
                 .status();
 
             // Give processes a moment to die

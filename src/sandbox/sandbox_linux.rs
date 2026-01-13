@@ -41,6 +41,7 @@ impl Sandbox {
                 .arg(&opts_str)
                 .arg(src)
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
@@ -61,6 +62,7 @@ impl Sandbox {
                 .args(opts)
                 .arg("devtmpfs")
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
@@ -84,6 +86,7 @@ impl Sandbox {
                 .arg(&opts_str)
                 .arg("/dev/fd")
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
@@ -104,6 +107,7 @@ impl Sandbox {
                 .args(opts)
                 .arg(src)
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
@@ -124,6 +128,7 @@ impl Sandbox {
                 .args(opts)
                 .arg("proc")
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
@@ -155,6 +160,7 @@ impl Sandbox {
                 .arg(if !mount_opts.is_empty() { &opts_str } else { "" })
                 .arg("tmpfs")
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))

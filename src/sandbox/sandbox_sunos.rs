@@ -37,6 +37,7 @@ impl Sandbox {
                 .args(opts)
                 .arg(src)
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
@@ -66,6 +67,7 @@ impl Sandbox {
                 .args(opts)
                 .arg("fd")
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
@@ -86,6 +88,7 @@ impl Sandbox {
                 .args(opts)
                 .arg(src)
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
@@ -106,6 +109,7 @@ impl Sandbox {
                 .args(opts)
                 .arg("/proc")
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
@@ -126,6 +130,7 @@ impl Sandbox {
                 .args(opts)
                 .arg("swap")
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
@@ -201,11 +206,13 @@ impl Sandbox {
 
         for _ in 0..super::KILL_PROCESSES_MAX_RETRIES {
             // Use fuser -k to kill all processes using files under the sandbox
+            // Use process_group(0) to isolate from terminal signals
             let _ = Command::new("fuser")
                 .arg("-k")
                 .arg(sandbox)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
+                .process_group(0)
                 .status();
 
             // Give processes a moment to die
@@ -216,6 +223,7 @@ impl Sandbox {
                 .arg(sandbox)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
+                .process_group(0)
                 .status();
 
             // fuser exits 0 if processes found, non-zero if none found
