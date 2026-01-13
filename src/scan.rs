@@ -54,6 +54,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{debug, error, info, trace};
 
+/// A scanned package with pre-serialized JSON for database storage.
+/// JSON serialization is done in worker threads to parallelize the CPU work.
+#[derive(Debug)]
+pub struct ScannedPackage {
+    /// The scan index data.
+    pub index: ScanIndex,
+    /// Pre-serialized JSON of the scan index for database storage.
+    pub scan_data_json: String,
+}
+
 /// Reason why a package was skipped (not built).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SkipReason {
@@ -687,6 +697,11 @@ impl Scan {
             "Starting package scan"
         );
 
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(self.config.scan_threads())
+            .build()
+            .context("Failed to build scan thread pool")?;
+
         let shutdown_flag = Arc::clone(&ctx.shutdown);
 
         // For full tree scans where a previous scan completed, all packages
@@ -810,7 +825,8 @@ impl Scan {
         // =====================================================================
 
         // Lock-free queue for scan results (workers push, writer pops)
-        let results: Arc<SegQueue<(PkgPath, Result<Vec<ScanIndex>>)>> =
+        // Workers do JSON serialization before pushing to parallelize CPU work
+        let results: Arc<SegQueue<(PkgPath, Result<Vec<ScannedPackage>>)>> =
             Arc::new(SegQueue::new());
 
         // Atomic counter for completed scans (to know when workers are done)
@@ -845,38 +861,54 @@ impl Scan {
             let shutdown_for_workers = Arc::clone(&shutdown_flag);
             let workers_done_for_signal = Arc::clone(&workers_done);
 
+            let pool_ref = &pool;
+
             s.spawn(move || {
-                pending.par_iter().for_each(|pkgpath| {
-                    // Check for shutdown
-                    if shutdown_for_workers.load(Ordering::Relaxed) {
-                        return;
-                    }
-
-                    let pathname = pkgpath.as_path().to_string_lossy().to_string();
-                    let thread_id = rayon::current_thread_index().unwrap_or(0);
-
-                    // Update progress - show current package
-                    if let Ok(mut p) = progress_for_workers.lock() {
-                        p.state_mut().set_worker_active(thread_id, &pathname);
-                    }
-
-                    // Do the actual scan
-                    let result = Self::scan_pkgpath_with(config, sandbox, pkgpath);
-
-                    // Update progress counter
-                    if let Ok(mut p) = progress_for_workers.lock() {
-                        p.state_mut().set_worker_idle(thread_id);
-                        if result.is_ok() {
-                            p.state_mut().increment_completed();
-                        } else {
-                            p.state_mut().increment_failed();
+                pool_ref.install(|| {
+                    pending.par_iter().for_each(|pkgpath| {
+                        // Check for shutdown
+                        if shutdown_for_workers.load(Ordering::Relaxed) {
+                            return;
                         }
-                    }
 
-                    // Push result to lock-free queue (NEVER blocks)
-                    results_for_workers.push((pkgpath.clone(), result));
+                        let pathname = pkgpath.as_path().to_string_lossy().to_string();
+                        let thread_id = rayon::current_thread_index().unwrap_or(0);
 
-                    completed_for_workers.fetch_add(1, Ordering::Relaxed);
+                        // Update progress - show current package
+                        if let Ok(mut p) = progress_for_workers.lock() {
+                            p.state_mut().set_worker_active(thread_id, &pathname);
+                        }
+
+                        // Do the actual scan
+                        let result = Self::scan_pkgpath_with(config, sandbox, pkgpath);
+
+                        // Update progress counter
+                        if let Ok(mut p) = progress_for_workers.lock() {
+                            p.state_mut().set_worker_idle(thread_id);
+                            if result.is_ok() {
+                                p.state_mut().increment_completed();
+                            } else {
+                                p.state_mut().increment_failed();
+                            }
+                        }
+
+                        // Serialize JSON in worker thread (parallelizes CPU work)
+                        let result = result.map(|indexes| {
+                            indexes
+                                .into_iter()
+                                .map(|index| {
+                                    let scan_data_json =
+                                        serde_json::to_string(&index).unwrap_or_default();
+                                    ScannedPackage { index, scan_data_json }
+                                })
+                                .collect()
+                        });
+
+                        // Push result to lock-free queue (NEVER blocks)
+                        results_for_workers.push((pkgpath.clone(), result));
+
+                        completed_for_workers.fetch_add(1, Ordering::Relaxed);
+                    });
                 });
 
                 // Signal that workers are done
@@ -896,10 +928,13 @@ impl Scan {
                 if let Some((pkgpath, result)) = results.pop() {
                     match result {
                         Ok(scanpkgs) => {
-                            if !scanpkgs.is_empty() {
-                                if let Err(e) = db.store_scan_pkgpath(
-                                    &pkgpath.to_string(),
-                                    &scanpkgs,
+                            let pkgpath_str = pkgpath.to_string();
+                            for pkg in scanpkgs {
+                                // Use preserialized JSON (workers already did serialization)
+                                if let Err(e) = db.store_package_preserialized(
+                                    &pkgpath_str,
+                                    &pkg.index,
+                                    &pkg.scan_data_json,
                                 ) {
                                     error!(error = %e, "Failed to store scan results");
                                 } else {

@@ -384,6 +384,73 @@ impl Database {
         Ok(())
     }
 
+    /// Store a package with pre-serialized JSON (avoids serialization in DB writer thread).
+    pub fn store_package_preserialized(
+        &self,
+        pkgpath: &str,
+        index: &ScanIndex,
+        scan_data_json: &str,
+    ) -> Result<i64> {
+        let pkgname = index.pkgname.pkgname();
+        let (base, version) = split_pkgname(pkgname);
+
+        let skip_reason =
+            index.pkg_skip_reason.as_ref().filter(|s| !s.is_empty());
+        let fail_reason =
+            index.pkg_fail_reason.as_ref().filter(|s| !s.is_empty());
+        let is_bootstrap = index.bootstrap_pkg.as_deref() == Some("yes");
+        let pbulk_weight: i32 = index
+            .pbulk_weight
+            .as_ref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(100);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+
+        {
+            let mut stmt = self.conn.prepare_cached(
+                "INSERT OR REPLACE INTO packages
+                 (pkgname, pkgpath, pkgname_base, version, skip_reason, fail_reason,
+                  is_bootstrap, pbulk_weight, scan_data, scanned_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            )?;
+            stmt.execute(params![
+                pkgname,
+                pkgpath,
+                base,
+                version,
+                skip_reason,
+                fail_reason,
+                is_bootstrap,
+                pbulk_weight,
+                scan_data_json,
+                now
+            ])?;
+        }
+
+        let package_id = self.conn.last_insert_rowid();
+
+        // Store raw dependencies
+        if let Some(ref deps) = index.all_depends {
+            let mut stmt = self.conn.prepare_cached(
+                "INSERT OR IGNORE INTO depends (package_id, depend_pattern, depend_pkgpath)
+                 VALUES (?1, ?2, ?3)",
+            )?;
+            for dep in deps {
+                stmt.execute(params![
+                    package_id,
+                    dep.pattern().pattern(),
+                    dep.pkgpath().to_string()
+                ])?;
+            }
+        }
+
+        debug!(pkgname = pkgname, package_id = package_id, "Stored package");
+        Ok(package_id)
+    }
+
     /// Get package by name.
     pub fn get_package_by_name(
         &self,
