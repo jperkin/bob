@@ -86,6 +86,8 @@ impl BuildRunner {
 
     /// Run the scan phase, returning the resolved scan result.
     fn run_scan(&self, scan: &mut Scan) -> Result<bob::scan::ScanSummary> {
+        let total_start = std::time::Instant::now();
+
         // For full tree scans with full_scan_complete, we might be able to
         // skip scanning entirely
         if scan.is_full_tree() && self.db.full_scan_complete() {
@@ -93,7 +95,14 @@ impl BuildRunner {
         }
 
         // Initialize scan from database (checks what's already scanned)
+        let init_start = std::time::Instant::now();
         let (cached_count, pending_count) = scan.init_from_db(&self.db)?;
+        let init_elapsed = init_start.elapsed();
+        tracing::info!(
+            init_secs = format!("{:.2}", init_elapsed.as_secs_f64()),
+            "Scan init_from_db complete"
+        );
+
         if cached_count > 0 {
             println!("Found {} cached package paths", cached_count);
             if pending_count > 0 {
@@ -104,7 +113,13 @@ impl BuildRunner {
             }
         }
 
+        let scan_start = std::time::Instant::now();
         let interrupted = scan.start(&self.ctx, &self.db)?;
+        let scan_elapsed = scan_start.elapsed();
+        tracing::info!(
+            scan_secs = format!("{:.2}", scan_elapsed.as_secs_f64()),
+            "Scan start() complete"
+        );
 
         if interrupted {
             std::process::exit(EXIT_INTERRUPTED);
@@ -133,13 +148,28 @@ impl BuildRunner {
         drop(scan_errors);
 
         println!("Resolving dependencies...");
+        let resolve_start = std::time::Instant::now();
         let result = scan.resolve(&self.db)?;
+        let resolve_elapsed = resolve_start.elapsed();
+        tracing::info!(
+            resolve_secs = format!("{:.2}", resolve_elapsed.as_secs_f64()),
+            "Scan resolve() complete"
+        );
 
         // Check for unresolved dependency errors in strict_scan mode
         let errors: Vec<_> = result.errors().collect();
         if self.config.strict_scan() && !errors.is_empty() {
             bail!("Unresolved dependencies:\n  {}", errors.join("\n  "));
         }
+
+        let total_elapsed = total_start.elapsed();
+        tracing::info!(
+            total_secs = format!("{:.2}", total_elapsed.as_secs_f64()),
+            init_secs = format!("{:.2}", init_elapsed.as_secs_f64()),
+            scan_secs = format!("{:.2}", scan_elapsed.as_secs_f64()),
+            resolve_secs = format!("{:.2}", resolve_elapsed.as_secs_f64()),
+            "run_scan total timing breakdown"
+        );
 
         Ok(result)
     }

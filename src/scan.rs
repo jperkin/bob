@@ -1301,13 +1301,22 @@ impl Scan {
     /// Returns a [`ScanSummary`] containing all packages with their outcomes.
     /// Also stores resolved dependencies in the database for fast reverse lookups.
     pub fn resolve(&mut self, db: &crate::db::Database) -> Result<ScanSummary> {
+        let resolve_total_start = std::time::Instant::now();
+
         info!(
             done_pkgpaths = self.done.len(),
             "Starting dependency resolution"
         );
 
         // Load all scan data in one query
+        let load_start = std::time::Instant::now();
         let all_scan_data = db.get_all_scan_indexes()?;
+        let load_elapsed = load_start.elapsed();
+        info!(
+            load_secs = format!("{:.2}", load_elapsed.as_secs_f64()),
+            packages_loaded = all_scan_data.len(),
+            "Loaded scan data from database"
+        );
 
         // Track package_id for storing resolved dependencies
         let mut pkgname_to_id: HashMap<PkgName, i64> = HashMap::new();
@@ -1352,6 +1361,8 @@ impl Scan {
         }
 
         info!(packages = self.packages.len(), "Loaded packages");
+
+        let pattern_match_start = std::time::Instant::now();
 
         // Collect pkgnames for lookups (owned to avoid borrow issues)
         let pkgnames: Vec<PkgName> = self.packages.keys().cloned().collect();
@@ -1489,6 +1500,14 @@ impl Scan {
             pkg.all_depends = Some(all_deps);
         }
 
+        let pattern_match_elapsed = pattern_match_start.elapsed();
+        info!(
+            pattern_match_secs = format!("{:.2}", pattern_match_elapsed.as_secs_f64()),
+            "Pattern matching complete"
+        );
+
+        let propagate_start = std::time::Instant::now();
+
         // Propagate failures using O(V+E) worklist algorithm instead of O(depth × V × E) iterative.
         // If A depends on B and B is failed/skipped, A is indirect-failed/skipped.
         //
@@ -1550,6 +1569,14 @@ impl Scan {
             }
         }
 
+        let propagate_elapsed = propagate_start.elapsed();
+        info!(
+            propagate_secs = format!("{:.2}", propagate_elapsed.as_secs_f64()),
+            "Failure propagation complete"
+        );
+
+        let build_list_start = std::time::Instant::now();
+
         // Build final packages list
         let mut packages: Vec<ScanResult> = Vec::new();
         let mut count_buildable = 0;
@@ -1586,6 +1613,14 @@ impl Scan {
                 error: error.clone(),
             });
         }
+
+        let build_list_elapsed = build_list_start.elapsed();
+        info!(
+            build_list_secs = format!("{:.2}", build_list_elapsed.as_secs_f64()),
+            "Build final packages list complete"
+        );
+
+        let cycle_check_start = std::time::Instant::now();
 
         // Verify no circular dependencies (only for buildable packages)
         debug!(count_buildable, "Checking for circular dependencies");
@@ -1640,6 +1675,14 @@ impl Scan {
             "Resolution complete"
         );
 
+        let cycle_check_elapsed = cycle_check_start.elapsed();
+        info!(
+            cycle_check_secs = format!("{:.2}", cycle_check_elapsed.as_secs_f64()),
+            "Cycle check complete"
+        );
+
+        let store_deps_start = std::time::Instant::now();
+
         // Store resolved dependencies in database
         let mut resolved_deps: Vec<(i64, i64)> = Vec::new();
         for pkg in &packages {
@@ -1657,6 +1700,19 @@ impl Scan {
             db.store_resolved_dependencies_batch(&resolved_deps)?;
             debug!(count = resolved_deps.len(), "Stored resolved dependencies");
         }
+
+        let store_deps_elapsed = store_deps_start.elapsed();
+        let resolve_total_elapsed = resolve_total_start.elapsed();
+        info!(
+            total_secs = format!("{:.2}", resolve_total_elapsed.as_secs_f64()),
+            load_secs = format!("{:.2}", load_elapsed.as_secs_f64()),
+            pattern_match_secs = format!("{:.2}", pattern_match_elapsed.as_secs_f64()),
+            propagate_secs = format!("{:.2}", propagate_elapsed.as_secs_f64()),
+            build_list_secs = format!("{:.2}", build_list_elapsed.as_secs_f64()),
+            cycle_check_secs = format!("{:.2}", cycle_check_elapsed.as_secs_f64()),
+            store_deps_secs = format!("{:.2}", store_deps_elapsed.as_secs_f64()),
+            "resolve() timing breakdown"
+        );
 
         Ok(ScanSummary { pkgpaths: self.done.len(), packages })
     }
