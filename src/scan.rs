@@ -38,7 +38,7 @@
 //! - Circular dependencies - Package has a dependency cycle
 
 use crate::config::PkgsrcEnv;
-use crate::sandbox::SingleSandboxScope;
+use crate::sandbox::{SingleSandboxScope, wait_output_with_shutdown};
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, RunContext, Sandbox};
 use anyhow::{Context, Result, bail};
@@ -611,6 +611,7 @@ impl Scan {
     fn discover_packages(
         &mut self,
         pool: &rayon::ThreadPool,
+        shutdown: &AtomicBool,
     ) -> anyhow::Result<()> {
         println!("Discovering packages...");
         let pkgsrc = self.config.pkgsrc().display().to_string();
@@ -622,8 +623,7 @@ impl Scan {
             ["-C", &pkgsrc, "show-subdir-var", "VARNAME=SUBDIR"],
             vec![],
         )?;
-        let output = child
-            .wait_with_output()
+        let output = wait_output_with_shutdown(child, shutdown)
             .context("Failed to run show-subdir-var")?;
 
         if !output.status.success() {
@@ -666,7 +666,7 @@ impl Scan {
                             ],
                             vec![],
                         )
-                        .and_then(|c| c.wait_with_output().map_err(Into::into));
+                        .and_then(|c| wait_output_with_shutdown(c, shutdown));
 
                     match result {
                         Ok(o) if o.status.success() => {
@@ -769,7 +769,7 @@ impl Scan {
 
         // For full tree scans, always discover all packages
         if self.full_tree {
-            self.discover_packages(&pool)?;
+            self.discover_packages(&pool, &shutdown_flag)?;
             self.incoming.retain(|p| !self.done.contains(p));
         }
 
@@ -856,8 +856,10 @@ impl Scan {
          * next.
          */
         loop {
-            // Check for shutdown signal
-            if shutdown_flag.load(Ordering::Relaxed) {
+            // Check for shutdown signal.
+            // Use SeqCst for consistency with signal handler's store ordering,
+            // ensuring the shutdown is observed promptly on all architectures.
+            if shutdown_flag.load(Ordering::SeqCst) {
                 stop_refresh.store(true, Ordering::Relaxed);
                 if let Ok(mut p) = progress.lock() {
                     let _ = p.finish_interrupted();
@@ -893,7 +895,7 @@ impl Scan {
                     pool_ref.install(|| {
                         pkgpaths.par_iter().for_each(|pkgpath| {
                             // Check for shutdown before starting
-                            if shutdown_clone.load(Ordering::Relaxed) {
+                            if shutdown_clone.load(Ordering::SeqCst) {
                                 return;
                             }
 
@@ -909,7 +911,10 @@ impl Scan {
                             }
 
                             let result = Self::scan_pkgpath_with(
-                                config, sandbox, pkgpath,
+                                config,
+                                sandbox,
+                                pkgpath,
+                                &shutdown_clone,
                             );
 
                             // Update progress counter
@@ -930,7 +935,7 @@ impl Scan {
                 });
 
                 // Check if we were interrupted during parallel processing
-                let was_interrupted = shutdown_flag.load(Ordering::Relaxed);
+                let was_interrupted = shutdown_flag.load(Ordering::SeqCst);
 
                 /*
                  * Process results - write to DB and extract dependencies.
@@ -997,16 +1002,6 @@ impl Scan {
                     }
                 }
             });
-
-            // Check for interruption after batch
-            if shutdown_flag.load(Ordering::Relaxed) {
-                stop_refresh.store(true, Ordering::Relaxed);
-                if let Ok(mut p) = progress.lock() {
-                    let _ = p.finish_interrupted();
-                }
-                interrupted = true;
-                break;
-            }
 
             /*
              * We're finished with the current incoming, replace it with the
@@ -1104,15 +1099,24 @@ impl Scan {
         &self,
         pkgpath: &PkgPath,
     ) -> anyhow::Result<Vec<ScanIndex>> {
-        Self::scan_pkgpath_with(&self.config, &self.sandbox, pkgpath)
+        static NO_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+        Self::scan_pkgpath_with(
+            &self.config,
+            &self.sandbox,
+            pkgpath,
+            &NO_SHUTDOWN,
+        )
     }
 
-    /// Scan a single PKGPATH using provided config and sandbox references.
-    /// This allows scanning without borrowing all of `self`.
+    /*
+     * Scan a single PKGPATH using provided config and sandbox references.
+     * This allows scanning without borrowing all of `self`.
+     */
     fn scan_pkgpath_with(
         config: &Config,
         sandbox: &Sandbox,
         pkgpath: &PkgPath,
+        shutdown: &AtomicBool,
     ) -> anyhow::Result<Vec<ScanIndex>> {
         let pkgpath_str = pkgpath.as_path().display().to_string();
         debug!(pkgpath = %pkgpath_str, "Scanning package");
@@ -1132,7 +1136,7 @@ impl Scan {
             ["-C", &workdir, "pbulk-index"],
             scan_env,
         )?;
-        let output = child.wait_with_output()?;
+        let output = wait_output_with_shutdown(child, shutdown)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

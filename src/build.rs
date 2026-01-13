@@ -43,7 +43,7 @@
 //! - `clean` - Clean up build artifacts
 
 use crate::config::PkgsrcEnv;
-use crate::sandbox::SandboxScope;
+use crate::sandbox::{SandboxScope, wait_with_shutdown};
 use crate::scan::{ResolvedPackage, SkipReason, SkippedCounts};
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, RunContext, Sandbox};
@@ -118,6 +118,7 @@ struct BuildSession {
     pkgsrc_env: PkgsrcEnv,
     sandbox: Sandbox,
     options: BuildOptions,
+    shutdown: Arc<AtomicBool>,
 }
 
 /// Package builder that executes build stages.
@@ -654,8 +655,8 @@ impl<'a> PkgBuilder<'a> {
                 }
             });
 
-            // Wait for command to exit
-            let status = child.wait()?;
+            let status =
+                wait_with_shutdown(&mut child, &self.session.shutdown)?;
 
             // Reader thread will exit when pipe closes (process exits)
             let _ = tee_handle.join();
@@ -688,11 +689,14 @@ impl<'a> PkgBuilder<'a> {
                     self.session.sandbox.command(self.sandbox_id, cmd);
                 command.args(args);
                 self.apply_envs(&mut command, extra_envs);
-                command
+                let mut child = command
                     .stdout(Stdio::from(log))
                     .stderr(Stdio::from(log_err))
-                    .status()
-                    .with_context(|| format!("Failed to run {}", cmd.display()))
+                    .spawn()
+                    .with_context(|| {
+                        format!("Failed to spawn {}", cmd.display())
+                    })?;
+                wait_with_shutdown(&mut child, &self.session.shutdown)
             }
             RunAs::User => {
                 let user = self.build_user.as_ref().unwrap();
@@ -710,11 +714,12 @@ impl<'a> PkgBuilder<'a> {
                     .command(self.sandbox_id, Path::new("su"));
                 command.arg(user).arg("-c").arg(&inner_cmd);
                 self.apply_envs(&mut command, extra_envs);
-                command
+                let mut child = command
                     .stdout(Stdio::from(log))
                     .stderr(Stdio::from(log_err))
-                    .status()
-                    .context("Failed to run su command")
+                    .spawn()
+                    .context("Failed to spawn su command")?;
+                wait_with_shutdown(&mut child, &self.session.shutdown)
             }
         }
     }
@@ -2187,8 +2192,13 @@ impl Build {
             let (client_tx, client_rx) = mpsc::channel::<ChannelCommand>();
             clients.insert(i, client_tx);
             let manager_tx = manager_tx.clone();
+            let shutdown_for_worker = Arc::clone(&shutdown_flag);
             let thread = std::thread::spawn(move || {
                 loop {
+                    if shutdown_for_worker.load(Ordering::SeqCst) {
+                        break;
+                    }
+
                     // Use send() which can fail if receiver is dropped (manager shutdown)
                     if manager_tx.send(ChannelCommand::ClientReady(i)).is_err()
                     {
@@ -2211,6 +2221,7 @@ impl Build {
                             let result = pkg.build(&manager_tx);
                             let duration = build_start.elapsed();
                             trace!(pkgname = %pkgname.pkgname(), worker = i, elapsed_ms = duration.as_millis(), "Worker build() returned");
+
                             match result {
                                 Ok(PackageBuildResult::Success) => {
                                     trace!(pkgname = %pkgname.pkgname(), "Worker sending JobSuccess");
@@ -2235,13 +2246,20 @@ impl Build {
                                     );
                                 }
                                 Err(e) => {
-                                    trace!(pkgname = %pkgname.pkgname(), "Worker sending JobError");
-                                    let _ = manager_tx.send(
-                                        ChannelCommand::JobError((
-                                            pkgname, duration, e,
-                                        )),
-                                    );
+                                    // Don't report errors caused by shutdown
+                                    if !shutdown_for_worker.load(Ordering::SeqCst) {
+                                        trace!(pkgname = %pkgname.pkgname(), "Worker sending JobError");
+                                        let _ = manager_tx.send(
+                                            ChannelCommand::JobError((
+                                                pkgname, duration, e,
+                                            )),
+                                        );
+                                    }
                                 }
+                            }
+
+                            if shutdown_for_worker.load(Ordering::SeqCst) {
+                                break;
                             }
                             continue;
                         }
@@ -2264,6 +2282,7 @@ impl Build {
             pkgsrc_env: self.pkgsrc_env.clone(),
             sandbox: self.scope.sandbox().clone(),
             options: self.options.clone(),
+            shutdown: Arc::clone(&shutdown_flag),
         });
         let progress_clone = Arc::clone(&progress);
         let shutdown_for_manager = Arc::clone(&shutdown_flag);
@@ -2360,11 +2379,6 @@ impl Build {
                             let _ = completed_tx.send(result.clone());
                         }
 
-                        // Don't update UI if we're shutting down
-                        if shutdown_for_manager.load(Ordering::SeqCst) {
-                            continue;
-                        }
-
                         // Find which thread completed and mark idle
                         if let Ok(mut p) = progress_clone.lock() {
                             let _ = p.print_status(&format!(
@@ -2390,11 +2404,6 @@ impl Build {
                         // Send result for immediate saving
                         if let Some(result) = jobs.results.last() {
                             let _ = completed_tx.send(result.clone());
-                        }
-
-                        // Don't update UI if we're shutting down
-                        if shutdown_for_manager.load(Ordering::SeqCst) {
-                            continue;
                         }
 
                         // Find which thread completed and mark idle
@@ -2424,11 +2433,6 @@ impl Build {
                             let _ = completed_tx.send(result.clone());
                         }
 
-                        // Don't update UI if we're shutting down
-                        if shutdown_for_manager.load(Ordering::SeqCst) {
-                            continue;
-                        }
-
                         // Find which thread failed and mark idle
                         if let Ok(mut p) = progress_clone.lock() {
                             let _ = p.print_status(&format!(
@@ -2455,12 +2459,6 @@ impl Build {
                         // Send all new results for immediate saving
                         for result in jobs.results.iter().skip(results_before) {
                             let _ = completed_tx.send(result.clone());
-                        }
-
-                        // Don't update UI if we're shutting down
-                        if shutdown_for_manager.load(Ordering::SeqCst) {
-                            tracing::error!(error = %e, pkgname = %pkgname.pkgname(), "Build error");
-                            continue;
                         }
 
                         // Find which thread errored and mark idle
@@ -2522,7 +2520,11 @@ impl Build {
             "Worker threads completed"
         );
 
-        // Save all completed results to database immediately
+        // Save all completed results to database.
+        // Important: We save results even on interrupt - these are builds that
+        // COMPLETED before the interrupt, and should be preserved. Only builds
+        // that were in-progress when interrupted are excluded (they never sent
+        // a result to the channel).
         let mut saved_count = 0;
         while let Ok(result) = completed_rx.try_recv() {
             if let Err(e) = db.store_build_by_name(&result) {

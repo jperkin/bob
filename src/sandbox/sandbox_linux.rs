@@ -228,9 +228,12 @@ impl Sandbox {
             // Scan all processes
             if let Ok(procs) = procfs::process::all_processes() {
                 for proc in procs.flatten() {
-                    if let Some(reason) = Self::process_uses_path(&proc, sandbox) {
+                    if let Some(reason) =
+                        Self::process_uses_path(&proc, sandbox)
+                    {
                         found_any = true;
-                        let comm = proc.stat().map(|s| s.comm).unwrap_or_default();
+                        let comm =
+                            proc.stat().map(|s| s.comm).unwrap_or_default();
                         trace!(
                             pid = proc.pid,
                             comm = %comm,
@@ -262,7 +265,10 @@ impl Sandbox {
 
     /// Check if a process has any references to paths under the given directory.
     /// Returns Some(reason) describing why the process matches, or None.
-    fn process_uses_path(proc: &procfs::process::Process, dir: &Path) -> Option<String> {
+    fn process_uses_path(
+        proc: &procfs::process::Process,
+        dir: &Path,
+    ) -> Option<String> {
         // Check cwd
         if let Ok(cwd) = proc.cwd() {
             if cwd.starts_with(dir) {
