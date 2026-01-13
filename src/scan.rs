@@ -53,6 +53,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{debug, error, info, trace};
 
+/// A scanned package with pre-serialized JSON for database storage.
+///
+/// JSON serialization is done in worker threads to parallelize the CPU work,
+/// rather than serializing in the main thread which would create a bottleneck.
+#[derive(Debug)]
+pub struct ScannedPackage {
+    /// The scan index data.
+    pub index: ScanIndex,
+    /// Pre-serialized JSON of the scan index for database storage.
+    pub scan_data_json: String,
+}
+
 /// Reason why a package was skipped (not built).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SkipReason {
@@ -845,10 +857,12 @@ impl Scan {
             }
 
             // Create bounded channel for streaming results
+            // Workers send ScannedPackage with pre-serialized JSON to avoid
+            // serialization bottleneck in the main thread.
             const CHANNEL_BUFFER_SIZE: usize = 128;
             let (tx, rx) = std::sync::mpsc::sync_channel::<(
                 PkgPath,
-                Result<Vec<ScanIndex>>,
+                Result<Vec<ScannedPackage>>,
             )>(CHANNEL_BUFFER_SIZE);
 
             let mut new_incoming: HashSet<PkgPath> = HashSet::new();
@@ -892,6 +906,20 @@ impl Scan {
                                 }
                             }
 
+                            // Serialize JSON in worker thread to parallelize CPU work.
+                            // This avoids a bottleneck in the main thread.
+                            let result = result.map(|indexes| {
+                                indexes
+                                    .into_iter()
+                                    .map(|index| {
+                                        let scan_data_json =
+                                            serde_json::to_string(&index)
+                                                .unwrap_or_default();
+                                        ScannedPackage { index, scan_data_json }
+                                    })
+                                    .collect()
+                            });
+
                             // Send result (blocks if buffer full = backpressure)
                             let _ = tx.send((pkgpath.clone(), result));
                         });
@@ -917,10 +945,13 @@ impl Scan {
                     };
                     self.done.insert(pkgpath.clone());
 
-                    // Save to database
+                    // Save to database (uses pre-serialized JSON from workers)
                     if !scanpkgs.is_empty() {
                         if let Err(e) = db
-                            .store_scan_pkgpath(&pkgpath.to_string(), &scanpkgs)
+                            .store_scan_pkgpath_preserialized(
+                                &pkgpath.to_string(),
+                                &scanpkgs,
+                            )
                         {
                             error!(error = %e, "Failed to store scan results");
                         }
@@ -934,7 +965,7 @@ impl Scan {
 
                     // Discover dependencies not yet seen
                     for pkg in &scanpkgs {
-                        if let Some(ref all_deps) = pkg.all_depends {
+                        if let Some(ref all_deps) = pkg.index.all_depends {
                             for dep in all_deps {
                                 let dep_path = dep.pkgpath();
                                 if self.done.contains(dep_path)

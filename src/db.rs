@@ -31,7 +31,7 @@
 //! - `metadata` - Key-value store for flags and cached data
 
 use crate::build::{BuildOutcome, BuildResult};
-use crate::scan::SkipReason;
+use crate::scan::{ScannedPackage, SkipReason};
 use anyhow::{Context, Result};
 use pkgsrc::{PkgName, PkgPath, ScanIndex};
 use rusqlite::{Connection, params};
@@ -447,6 +447,111 @@ impl Database {
             self.store_package(pkgpath, index)?;
         }
         Ok(())
+    }
+
+    /// Store scan results for a pkgpath using pre-serialized JSON.
+    ///
+    /// This is the preferred method when JSON serialization has already been
+    /// done in worker threads to parallelize the CPU work.
+    pub fn store_scan_pkgpath_preserialized(
+        &self,
+        pkgpath: &str,
+        packages: &[ScannedPackage],
+    ) -> Result<()> {
+        for pkg in packages {
+            self.store_package_preserialized(pkgpath, &pkg.index, &pkg.scan_data_json)?;
+        }
+        Ok(())
+    }
+
+    /// Store a package with pre-serialized scan_data JSON.
+    ///
+    /// This avoids JSON serialization in the main thread by accepting
+    /// pre-serialized data from worker threads.
+    pub fn store_package_preserialized(
+        &self,
+        pkgpath: &str,
+        index: &ScanIndex,
+        scan_data: &str,
+    ) -> Result<i64> {
+        let pkgname = index.pkgname.pkgname();
+        let (base, version) = split_pkgname(pkgname);
+
+        let skip_reason =
+            index.pkg_skip_reason.as_ref().filter(|s| !s.is_empty());
+        let fail_reason =
+            index.pkg_fail_reason.as_ref().filter(|s| !s.is_empty());
+        let is_bootstrap = index.bootstrap_pkg.as_deref() == Some("yes");
+        let pbulk_weight: i32 = index
+            .pbulk_weight
+            .as_ref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(100);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+
+        // Time package INSERT
+        let t1 = Instant::now();
+        {
+            let mut stmt = self.conn.prepare_cached(
+                "INSERT OR REPLACE INTO packages
+                 (pkgname, pkgpath, pkgname_base, version, skip_reason, fail_reason,
+                  is_bootstrap, pbulk_weight, scan_data, scanned_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            )?;
+            stmt.execute(params![
+                pkgname,
+                pkgpath,
+                base,
+                version,
+                skip_reason,
+                fail_reason,
+                is_bootstrap,
+                pbulk_weight,
+                scan_data,
+                now
+            ])?;
+        }
+        let pkg_insert_elapsed = t1.elapsed().as_nanos() as u64;
+        self.timing_pkg_insert_ns
+            .set(self.timing_pkg_insert_ns.get() + pkg_insert_elapsed);
+
+        let package_id = self.conn.last_insert_rowid();
+
+        // Time dependencies INSERT
+        let t2 = Instant::now();
+        let mut deps_count = 0u64;
+        if let Some(ref deps) = index.all_depends {
+            let mut stmt = self.conn.prepare_cached(
+                "INSERT OR IGNORE INTO depends (package_id, depend_pattern, depend_pkgpath)
+                 VALUES (?1, ?2, ?3)",
+            )?;
+            for dep in deps {
+                stmt.execute(params![
+                    package_id,
+                    dep.pattern().pattern(),
+                    dep.pkgpath().to_string()
+                ])?;
+                deps_count += 1;
+            }
+        }
+        let deps_insert_elapsed = t2.elapsed().as_nanos() as u64;
+        self.timing_deps_insert_ns
+            .set(self.timing_deps_insert_ns.get() + deps_insert_elapsed);
+        self.timing_deps_count
+            .set(self.timing_deps_count.get() + deps_count);
+
+        // Update count and report periodically
+        let count = self.timing_count.get() + 1;
+        self.timing_count.set(count);
+        if count % 1000 == 0 {
+            self.report_timing();
+        }
+
+        debug!(pkgname = pkgname, package_id = package_id, "Stored package");
+        Ok(package_id)
     }
 
     /// Get package by name.
