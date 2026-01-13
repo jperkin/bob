@@ -216,16 +216,41 @@ impl Sandbox {
     }
 
     /// Kill all processes using files within a sandbox path.
+    ///
+    /// Loop until no processes remain to handle the race condition where new
+    /// processes can spawn between listing and killing.
     pub fn kill_processes(&self, sandbox: &Path) {
-        // Use fuser -km to kill all processes using the mount point recursively
-        let _ = Command::new("fuser")
-            .arg("-k")
-            .arg(sandbox)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        const MAX_RETRIES: u32 = 10;
 
-        // Give processes a moment to die
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        for _ in 0..MAX_RETRIES {
+            // Use fuser -k to kill all processes using files under the sandbox
+            let _ = Command::new("fuser")
+                .arg("-k")
+                .arg(sandbox)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+
+            // Give processes a moment to die
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            // Check if any processes are still using the sandbox
+            let status = Command::new("fuser")
+                .arg(sandbox)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+
+            // fuser exits 0 if processes found, 1 if none found
+            if let Ok(s) = status {
+                if !s.success() {
+                    // No processes found, we're done
+                    return;
+                }
+            } else {
+                // fuser failed to run, bail out
+                return;
+            }
+        }
     }
 }

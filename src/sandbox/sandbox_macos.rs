@@ -178,10 +178,19 @@ impl Sandbox {
     }
 
     /// Kill all processes using files within a sandbox path.
+    ///
+    /// Loop until no processes remain to handle the race condition where new
+    /// processes can spawn between listing and killing.
     pub fn kill_processes(&self, sandbox: &Path) {
-        // Use lsof and kill on macOS (fuser behavior differs)
-        let output = Command::new("lsof").arg("+D").arg(sandbox).output();
-        if let Ok(out) = output {
+        const MAX_RETRIES: u32 = 10;
+
+        for _ in 0..MAX_RETRIES {
+            // Use lsof to find processes using files under the sandbox
+            let output = Command::new("lsof").arg("+D").arg(sandbox).output();
+            let Ok(out) = output else {
+                return;
+            };
+
             let stdout = String::from_utf8_lossy(&out.stdout);
             let mut pids = std::collections::HashSet::new();
             for line in stdout.lines().skip(1) {
@@ -193,6 +202,12 @@ impl Sandbox {
                     }
                 }
             }
+
+            // No processes found, we're done
+            if pids.is_empty() {
+                return;
+            }
+
             for pid in pids {
                 let _ = Command::new("kill")
                     .arg("-9")
@@ -200,9 +215,9 @@ impl Sandbox {
                     .stderr(std::process::Stdio::null())
                     .status();
             }
-        }
 
-        // Give processes a moment to die
-        std::thread::sleep(std::time::Duration::from_millis(100));
+            // Give processes a moment to die
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 }
