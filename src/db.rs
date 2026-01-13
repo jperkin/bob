@@ -42,7 +42,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 /// Current schema version for migrations.
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 /// Lightweight package row without full scan data.
 #[derive(Clone, Debug)]
@@ -157,20 +157,43 @@ impl Database {
                 if version == 1 {
                     self.migrate_v1_to_v2()?;
                 }
+                if version <= 2 {
+                    self.migrate_v2_to_v3()?;
+                }
             }
         }
 
         Ok(())
     }
 
-    /// Create the v2 schema from scratch.
+    /// Migrate from v2 to v3 (add scan_queue table).
+    fn migrate_v2_to_v3(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS scan_queue (
+                pkgpath TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'pending',
+                error TEXT,
+                created_at INTEGER NOT NULL,
+                scanned_at INTEGER
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_scan_queue_status ON scan_queue(status);
+
+            UPDATE schema_version SET version = 3 WHERE version = 2;
+            INSERT OR IGNORE INTO schema_version (version) VALUES (3);"
+        )?;
+        debug!("Migrated to schema v3");
+        Ok(())
+    }
+
+    /// Create the current schema from scratch.
     fn create_schema_v2(&self) -> Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY
             );
 
-            INSERT OR REPLACE INTO schema_version (version) VALUES (2);
+            INSERT OR REPLACE INTO schema_version (version) VALUES (3);
 
             CREATE TABLE IF NOT EXISTS packages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -228,10 +251,20 @@ impl Database {
             CREATE TABLE IF NOT EXISTS metadata (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            );"
+            );
+
+            CREATE TABLE IF NOT EXISTS scan_queue (
+                pkgpath TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'pending',
+                error TEXT,
+                created_at INTEGER NOT NULL,
+                scanned_at INTEGER
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_scan_queue_status ON scan_queue(status);"
         )?;
 
-        debug!("Created schema v2");
+        debug!("Created schema v3");
         Ok(())
     }
 
@@ -313,6 +346,136 @@ impl Database {
             "Migration to v2 complete"
         );
         Ok(())
+    }
+
+    // ========================================================================
+    // SCAN QUEUE OPERATIONS
+    // ========================================================================
+
+    /// Queue a pkgpath for scanning. Idempotent - ignores if already queued.
+    pub fn queue_pkgpath(&self, pkgpath: &str) -> Result<bool> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+
+        let rows = self.conn.execute(
+            "INSERT OR IGNORE INTO scan_queue (pkgpath, status, created_at)
+             VALUES (?1, 'pending', ?2)",
+            params![pkgpath, now],
+        )?;
+
+        Ok(rows > 0)
+    }
+
+    /// Queue multiple pkgpaths for scanning. Idempotent.
+    pub fn queue_pkgpaths(&self, pkgpaths: &[String]) -> Result<usize> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT OR IGNORE INTO scan_queue (pkgpath, status, created_at)
+             VALUES (?1, 'pending', ?2)",
+        )?;
+
+        let mut queued = 0;
+        for pkgpath in pkgpaths {
+            queued += stmt.execute(params![pkgpath, now])?;
+        }
+
+        Ok(queued)
+    }
+
+    /// Get pending pkgpaths to scan, up to the specified limit.
+    pub fn get_pending_pkgpaths(&self, limit: usize) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT pkgpath FROM scan_queue WHERE status = 'pending' LIMIT ?1",
+        )?;
+
+        let rows = stmt.query_map([limit as i64], |row| row.get(0))?;
+        let mut pkgpaths = Vec::new();
+        for row in rows {
+            pkgpaths.push(row?);
+        }
+
+        Ok(pkgpaths)
+    }
+
+    /// Mark a pkgpath as successfully scanned.
+    pub fn mark_scanned(&self, pkgpath: &str) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+
+        self.conn.execute(
+            "UPDATE scan_queue SET status = 'scanned', scanned_at = ?1 WHERE pkgpath = ?2",
+            params![now, pkgpath],
+        )?;
+
+        Ok(())
+    }
+
+    /// Mark a pkgpath as failed with an error message.
+    pub fn mark_failed(&self, pkgpath: &str, error: &str) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+
+        self.conn.execute(
+            "UPDATE scan_queue SET status = 'failed', error = ?1, scanned_at = ?2 WHERE pkgpath = ?3",
+            params![error, now, pkgpath],
+        )?;
+
+        Ok(())
+    }
+
+    /// Count pending pkgpaths.
+    pub fn count_pending(&self) -> Result<usize> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM scan_queue WHERE status = 'pending'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        Ok(count as usize)
+    }
+
+    /// Get counts by status.
+    pub fn scan_queue_counts(&self) -> Result<(usize, usize, usize)> {
+        let pending: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM scan_queue WHERE status = 'pending'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let scanned: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM scan_queue WHERE status = 'scanned'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let failed: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM scan_queue WHERE status = 'failed'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        Ok((pending as usize, scanned as usize, failed as usize))
+    }
+
+    /// Clear the scan queue (for fresh scans).
+    pub fn clear_scan_queue(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM scan_queue", [])?;
+        Ok(())
+    }
+
+    /// Reset failed entries to pending (for retry).
+    pub fn reset_failed_to_pending(&self) -> Result<usize> {
+        let rows = self.conn.execute(
+            "UPDATE scan_queue SET status = 'pending', error = NULL WHERE status = 'failed'",
+            [],
+        )?;
+        Ok(rows)
     }
 
     // ========================================================================
@@ -468,6 +631,10 @@ impl Database {
     ///
     /// This avoids JSON serialization in the main thread by accepting
     /// pre-serialized data from worker threads.
+    ///
+    /// Note: Dependencies are NOT stored in the depends table during scan.
+    /// The scan_data blob contains all_depends which is used by the resolver.
+    /// This eliminates ~287k INSERT statements during a full scan.
     pub fn store_package_preserialized(
         &self,
         pkgpath: &str,
@@ -519,29 +686,6 @@ impl Database {
             .set(self.timing_pkg_insert_ns.get() + pkg_insert_elapsed);
 
         let package_id = self.conn.last_insert_rowid();
-
-        // Time dependencies INSERT
-        let t2 = Instant::now();
-        let mut deps_count = 0u64;
-        if let Some(ref deps) = index.all_depends {
-            let mut stmt = self.conn.prepare_cached(
-                "INSERT OR IGNORE INTO depends (package_id, depend_pattern, depend_pkgpath)
-                 VALUES (?1, ?2, ?3)",
-            )?;
-            for dep in deps {
-                stmt.execute(params![
-                    package_id,
-                    dep.pattern().pattern(),
-                    dep.pkgpath().to_string()
-                ])?;
-                deps_count += 1;
-            }
-        }
-        let deps_insert_elapsed = t2.elapsed().as_nanos() as u64;
-        self.timing_deps_insert_ns
-            .set(self.timing_deps_insert_ns.get() + deps_insert_elapsed);
-        self.timing_deps_count
-            .set(self.timing_deps_count.get() + deps_count);
 
         // Update count and report periodically
         let count = self.timing_count.get() + 1;

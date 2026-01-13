@@ -511,10 +511,8 @@ pub struct Scan {
     incoming: HashSet<PkgPath>,
     /// Pkgpaths we've completed scanning (in this session).
     done: HashSet<PkgPath>,
-    /// Number of pkgpaths loaded from cache at start of scan.
+    /// Number of pkgpaths already scanned at start of scan.
     initial_cached: usize,
-    /// Number of pkgpaths discovered as cached during dependency discovery.
-    discovered_cached: usize,
     /// Packages loaded from scan, indexed by pkgname.
     packages: IndexMap<PkgName, ScanIndex>,
     /// Full tree scan - discover all packages, skip recursive dependency discovery.
@@ -542,7 +540,6 @@ impl Scan {
             incoming: HashSet::new(),
             done: HashSet::new(),
             initial_cached: 0,
-            discovered_cached: 0,
             packages: IndexMap::new(),
             full_tree: true,
             full_scan_complete: false,
@@ -568,59 +565,38 @@ impl Scan {
     }
 
     /// Initialize scan from database, checking what's already scanned.
-    /// Returns (cached_count, pending_deps_count) where pending_deps_count is the
-    /// number of dependencies discovered but not yet scanned (from interrupted scans).
+    /// Returns (scanned_count, pending_count, failed_count) from the scan queue.
     pub fn init_from_db(
         &mut self,
         db: &crate::db::Database,
-    ) -> Result<(usize, usize)> {
-        let scanned = db.get_scanned_pkgpaths()?;
-        let cached_count = scanned.len();
-        let mut pending_count = 0;
+    ) -> Result<(usize, usize, usize)> {
+        let (pending, scanned, failed) = db.scan_queue_counts()?;
 
-        if cached_count > 0 {
+        if scanned > 0 || pending > 0 || failed > 0 {
             info!(
-                cached_count = cached_count,
-                "Found cached scan results in database"
+                scanned = scanned,
+                pending = pending,
+                failed = failed,
+                "Found scan queue state in database"
             );
-
-            // For full tree scans with full_scan_complete, we'll skip scanning
-            // For limited scans, remove already-scanned from incoming
-            if !self.full_tree {
-                self.incoming.retain(|p| !scanned.contains(&p.to_string()));
-            }
-
-            // Add scanned pkgpaths to done set
-            for pkgpath_str in &scanned {
-                if let Ok(pkgpath) = PkgPath::new(pkgpath_str) {
-                    self.done.insert(pkgpath);
-                }
-            }
-
-            // Check for dependencies that were discovered but not yet scanned.
-            // This handles the case where a scan was interrupted partway through.
-            let unscanned = db.get_unscanned_dependencies()?;
-            if !unscanned.is_empty() {
-                info!(
-                    unscanned_count = unscanned.len(),
-                    "Found unscanned dependencies from interrupted scan"
-                );
-                for pkgpath_str in unscanned {
-                    if let Ok(pkgpath) = PkgPath::new(&pkgpath_str) {
-                        if !self.done.contains(&pkgpath) {
-                            self.incoming.insert(pkgpath);
-                            pending_count += 1;
-                        }
-                    }
-                }
-            }
         }
 
-        Ok((cached_count, pending_count))
+        // For limited scans, any pkgpaths added via add() need to be queued
+        // This happens in add() now, so nothing to do here
+
+        // Initial cached count is what's already scanned
+        self.initial_cached = scanned;
+
+        // If there are pending items, this is a resume
+        if pending > 0 {
+            info!(pending = pending, "Resuming interrupted scan");
+        }
+
+        Ok((scanned, pending, failed))
     }
 
-    /// Discover all packages in pkgsrc tree.
-    fn discover_packages(&mut self) -> anyhow::Result<()> {
+    /// Discover all packages in pkgsrc tree and queue them for scanning.
+    fn discover_packages(&mut self, db: &crate::db::Database) -> anyhow::Result<()> {
         println!("Discovering packages...");
         let pkgsrc = self.config.pkgsrc().display();
         let make = self.config.make().display();
@@ -643,12 +619,13 @@ impl Scan {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let entries: Vec<&str> = stdout.split_whitespace().collect();
 
+        // Collect all pkgpaths first, then batch queue them
+        let mut pkgpaths: Vec<String> = Vec::new();
+
         for entry in entries {
             if entry.contains('/') {
                 // USER_ADDITIONAL_PKGS - add directly as pkgpath
-                if let Ok(pkgpath) = PkgPath::new(entry) {
-                    self.incoming.insert(pkgpath);
-                }
+                pkgpaths.push(entry.to_string());
             } else {
                 // Category - get packages within it
                 let script = format!(
@@ -662,10 +639,7 @@ impl Scan {
                     Ok(o) if o.status.success() => {
                         let pkgs = String::from_utf8_lossy(&o.stdout);
                         for pkg in pkgs.split_whitespace() {
-                            let path = format!("{}/{}", entry, pkg);
-                            if let Ok(pkgpath) = PkgPath::new(&path) {
-                                self.incoming.insert(pkgpath);
-                            }
+                            pkgpaths.push(format!("{}/{}", entry, pkg));
                         }
                     }
                     Ok(o) => {
@@ -681,8 +655,16 @@ impl Scan {
             }
         }
 
-        info!(discovered = self.incoming.len(), "Package discovery complete");
-        println!("Discovered {} package paths", self.incoming.len());
+        // Queue all discovered pkgpaths to database
+        // This is idempotent - already queued/scanned paths are ignored
+        let queued = db.queue_pkgpaths(&pkgpaths)?;
+
+        info!(
+            discovered = pkgpaths.len(),
+            queued = queued,
+            "Package discovery complete"
+        );
+        println!("Discovered {} package paths ({} new)", pkgpaths.len(), queued);
 
         Ok(())
     }
@@ -705,26 +687,30 @@ impl Scan {
 
         let shutdown_flag = Arc::clone(&ctx.shutdown);
 
-        // For full tree scans where a previous scan completed, all packages
-        // are already cached - nothing to do.
-        if self.full_tree && self.full_scan_complete && !self.done.is_empty() {
-            println!("All {} package paths already scanned", self.done.len());
+        // Queue any packages added via add() to the database
+        if !self.incoming.is_empty() {
+            let paths: Vec<String> = self.incoming.iter()
+                .map(|p| p.to_string())
+                .collect();
+            db.queue_pkgpaths(&paths)?;
+            self.incoming.clear();
+        }
+
+        // Check scan queue status
+        let (pending, scanned, _failed) = db.scan_queue_counts()?;
+
+        // For full tree scans where a previous scan completed, check if done
+        if self.full_tree && self.full_scan_complete && scanned > 0 && pending == 0 {
+            println!("All {} package paths already scanned", scanned);
             return Ok(false);
         }
 
-        // For non-full-tree scans, prune already-cached packages from incoming
-        // before sandbox creation to avoid unnecessary setup/teardown.
-        if !self.full_tree {
-            self.incoming.retain(|p| !self.done.contains(p));
-            if self.incoming.is_empty() {
-                if !self.done.is_empty() {
-                    println!(
-                        "All {} package paths already scanned",
-                        self.done.len()
-                    );
-                }
-                return Ok(false);
+        // For non-full-tree scans with nothing pending and nothing new, we're done
+        if !self.full_tree && pending == 0 {
+            if scanned > 0 {
+                println!("All {} package paths already scanned", scanned);
             }
+            return Ok(false);
         }
 
         /*
@@ -752,19 +738,17 @@ impl Scan {
                 Some(PkgsrcEnv::fetch(&self.config, &self.sandbox)?);
         }
 
-        // For full tree scans, always discover all packages
+        // For full tree scans, discover all packages and queue them
         if self.full_tree {
-            self.discover_packages()?;
-            self.incoming.retain(|p| !self.done.contains(p));
+            self.discover_packages(db)?;
         }
 
-        // Nothing to scan - all packages are cached
-        if self.incoming.is_empty() {
-            if !self.done.is_empty() {
-                println!(
-                    "All {} package paths already scanned",
-                    self.done.len()
-                );
+        // Re-check pending count after discovery
+        let pending = db.count_pending()?;
+        if pending == 0 {
+            let scanned = db.scan_queue_counts()?.1;
+            if scanned > 0 {
+                println!("All {} package paths already scanned", scanned);
             }
 
             if self.sandbox.enabled() {
@@ -779,12 +763,12 @@ impl Scan {
 
         println!("Scanning packages...");
 
-        // Track initial cached count for final summary
-        self.initial_cached = self.done.len();
+        // Get initial scanned count for summary
+        self.initial_cached = db.scan_queue_counts()?.1;
 
         // Set up multi-line progress display using ratatui inline viewport
         // Note: finished_title is unused since we print our own summary
-        let total_count = self.initial_cached + self.incoming.len();
+        let total_count = self.initial_cached + pending;
         let progress = Arc::new(Mutex::new(
             MultiProgress::new(
                 "Scanning",
@@ -822,20 +806,15 @@ impl Scan {
             }
         });
 
-        // Start transaction for all writes
-        db.begin_transaction()?;
-
         let mut interrupted = false;
 
-        // Borrow config and sandbox separately for use in scanner thread,
-        // allowing main thread to mutate self.done, self.incoming, etc.
+        // Borrow config and sandbox separately for use in scanner thread
         let config = &self.config;
         let sandbox = &self.sandbox;
 
         /*
-         * Continuously iterate over incoming queue, moving to done once
-         * processed, and adding any dependencies to incoming to be processed
-         * next.
+         * Continuously process pending pkgpaths from the database queue.
+         * Each batch is committed for resumability on interrupt.
          */
         loop {
             // Check for shutdown signal
@@ -848,13 +827,25 @@ impl Scan {
                 break;
             }
 
-            /*
-             * Convert the incoming HashSet into a Vec for parallel processing.
-             */
-            let pkgpaths: Vec<PkgPath> = self.incoming.drain().collect();
+            // Get next batch of pending pkgpaths from database
+            const BATCH_SIZE: usize = 1000;
+            let pending_strs = db.get_pending_pkgpaths(BATCH_SIZE)?;
+            if pending_strs.is_empty() {
+                break;
+            }
+
+            // Convert to PkgPath for scanning
+            let pkgpaths: Vec<PkgPath> = pending_strs
+                .iter()
+                .filter_map(|s| PkgPath::new(s).ok())
+                .collect();
+
             if pkgpaths.is_empty() {
                 break;
             }
+
+            // Start transaction for this batch
+            db.begin_transaction()?;
 
             // Create bounded channel for streaming results
             // Workers send ScannedPackage with pre-serialized JSON to avoid
@@ -864,8 +855,6 @@ impl Scan {
                 PkgPath,
                 Result<Vec<ScannedPackage>>,
             )>(CHANNEL_BUFFER_SIZE);
-
-            let mut new_incoming: HashSet<PkgPath> = HashSet::new();
 
             std::thread::scope(|s| {
                 // Spawn scanning thread
@@ -931,25 +920,27 @@ impl Scan {
                 let was_interrupted = shutdown_flag.load(Ordering::Relaxed);
 
                 /*
-                 * Process results - write to DB and extract dependencies.
+                 * Process results - write to DB, mark as scanned, queue dependencies.
                  */
                 for (pkgpath, result) in rx {
+                    let pkgpath_str = pkgpath.to_string();
+
                     let scanpkgs = match result {
                         Ok(pkgs) => pkgs,
                         Err(e) => {
+                            // Mark as failed in database
+                            let _ = db.mark_failed(&pkgpath_str, &e.to_string());
                             self.scan_failures
                                 .push((pkgpath.clone(), e.to_string()));
-                            self.done.insert(pkgpath);
                             continue;
                         }
                     };
-                    self.done.insert(pkgpath.clone());
 
                     // Save to database (uses pre-serialized JSON from workers)
                     if !scanpkgs.is_empty() {
                         if let Err(e) = db
                             .store_scan_pkgpath_preserialized(
-                                &pkgpath.to_string(),
+                                &pkgpath_str,
                                 &scanpkgs,
                             )
                         {
@@ -957,47 +948,42 @@ impl Scan {
                         }
                     }
 
+                    // Mark as scanned in database
+                    let _ = db.mark_scanned(&pkgpath_str);
+
                     // Skip dependency discovery for full tree scans (all
                     // packages already discovered) or if interrupted
                     if self.full_tree || was_interrupted {
                         continue;
                     }
 
-                    // Discover dependencies not yet seen
+                    // Queue any new dependencies discovered
                     for pkg in &scanpkgs {
                         if let Some(ref all_deps) = pkg.index.all_depends {
                             for dep in all_deps {
-                                let dep_path = dep.pkgpath();
-                                if self.done.contains(dep_path)
-                                    || new_incoming.contains(dep_path)
-                                {
-                                    continue;
-                                }
-                                // Check database for cached dependency
-                                match db
-                                    .is_pkgpath_scanned(&dep_path.to_string())
-                                {
+                                let dep_path_str = dep.pkgpath().to_string();
+                                // queue_pkgpath is idempotent - already queued/scanned
+                                // paths are ignored via INSERT OR IGNORE
+                                match db.queue_pkgpath(&dep_path_str) {
                                     Ok(true) => {
-                                        self.done.insert(dep_path.clone());
-                                        self.discovered_cached += 1;
-                                        if let Ok(mut p) = progress.lock() {
-                                            p.state_mut().total += 1;
-                                            p.state_mut().cached += 1;
-                                        }
-                                    }
-                                    Ok(false) => {
-                                        new_incoming.insert(dep_path.clone());
+                                        // New dependency discovered
                                         if let Ok(mut p) = progress.lock() {
                                             p.state_mut().total += 1;
                                         }
                                     }
-                                    Err(_) => {}
+                                    Ok(false) => {} // Already queued
+                                    Err(e) => {
+                                        error!(error = %e, "Failed to queue dependency");
+                                    }
                                 }
                             }
                         }
                     }
                 }
             });
+
+            // Commit this batch for resumability
+            db.commit()?;
 
             // Check for interruption after batch
             if shutdown_flag.load(Ordering::Relaxed) {
@@ -1009,21 +995,8 @@ impl Scan {
                 break;
             }
 
-            /*
-             * We're finished with the current incoming, replace it with the
-             * new incoming list.  If it is empty then we've already processed
-             * all known PKGPATHs and are done.
-             *
-             * Filter out any pkgpaths that were already scanned this wave.
-             * This handles a race where dependency discovery finds a pkgpath
-             * before its parallel scan completes and adds it to done.
-             */
-            new_incoming.retain(|p| !self.done.contains(p));
-            self.incoming = new_incoming;
+            // Loop continues - next iteration will get more pending from DB
         }
-
-        // Commit transaction (partial on interrupt, full on success)
-        db.commit()?;
 
         // Stop the refresh thread and print final summary
         stop_refresh.store(true, Ordering::Relaxed);
@@ -1039,13 +1012,12 @@ impl Scan {
                 None
             };
 
-            // Print scan-specific summary from source of truth
-            // total = initial_cached + discovered_cached + actually_scanned
-            // where actually_scanned = succeeded + failed
-            let total = self.done.len();
-            let cached = self.initial_cached + self.discovered_cached;
+            // Print scan-specific summary from database
+            let (_pending, scanned, failed_count) = db.scan_queue_counts()?;
+            let total = scanned + failed_count;
+            let cached = self.initial_cached;
             let failed = self.scan_failures.len();
-            let succeeded = total.saturating_sub(cached).saturating_sub(failed);
+            let succeeded = scanned.saturating_sub(cached);
 
             let elapsed_str =
                 elapsed.map(format_duration).unwrap_or_else(|| "?".to_string());

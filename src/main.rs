@@ -93,14 +93,14 @@ impl BuildRunner {
         }
 
         // Initialize scan from database (checks what's already scanned)
-        let (cached_count, pending_count) = scan.init_from_db(&self.db)?;
-        if cached_count > 0 {
-            println!("Found {} cached package paths", cached_count);
+        let (scanned_count, pending_count, failed_count) = scan.init_from_db(&self.db)?;
+        if scanned_count > 0 || pending_count > 0 || failed_count > 0 {
+            println!(
+                "Found {} scanned, {} pending, {} failed package paths",
+                scanned_count, pending_count, failed_count
+            );
             if pending_count > 0 {
-                println!(
-                    "Resuming scan with {} pending dependencies",
-                    pending_count
-                );
+                println!("Resuming scan with {} pending packages", pending_count);
             }
         }
 
@@ -622,7 +622,7 @@ fn main() -> Result<()> {
             }
 
             let mut scan = Scan::new(&config);
-            scan.init_from_db(&db)?;
+            let _ = scan.init_from_db(&db)?;
 
             let result = scan.resolve(&db)?;
 
@@ -659,7 +659,7 @@ fn main() -> Result<()> {
             }
 
             let mut scan = Scan::new(&config);
-            scan.init_from_db(&db)?;
+            let _ = scan.init_from_db(&db)?;
 
             let result = scan.resolve(&db)?;
 
