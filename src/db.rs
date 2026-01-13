@@ -388,11 +388,18 @@ impl Database {
 
     /// Get pending pkgpaths to scan, up to the specified limit.
     pub fn get_pending_pkgpaths(&self, limit: usize) -> Result<Vec<String>> {
+        // SQLite LIMIT -1 means no limit
+        let sql_limit: i64 = if limit == usize::MAX {
+            -1
+        } else {
+            limit as i64
+        };
+
         let mut stmt = self.conn.prepare_cached(
             "SELECT pkgpath FROM scan_queue WHERE status = 'pending' LIMIT ?1",
         )?;
 
-        let rows = stmt.query_map([limit as i64], |row| row.get(0))?;
+        let rows = stmt.query_map([sql_limit], |row| row.get(0))?;
         let mut pkgpaths = Vec::new();
         for row in rows {
             pkgpaths.push(row?);

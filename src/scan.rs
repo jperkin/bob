@@ -812,9 +812,23 @@ impl Scan {
         let config = &self.config;
         let sandbox = &self.sandbox;
 
+        // For full tree scans, load all pending pkgpaths at once since we know
+        // the full set upfront. This avoids stalls between batches while workers
+        // wait for the next database query.
+        // For partial scans, we fetch in batches since new deps are discovered.
+        let mut all_pending: Vec<PkgPath> = if self.full_tree {
+            let pending_strs = db.get_pending_pkgpaths(usize::MAX)?;
+            pending_strs
+                .iter()
+                .filter_map(|s| PkgPath::new(s).ok())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         /*
-         * Continuously process pending pkgpaths from the database queue.
-         * Each batch is committed for resumability on interrupt.
+         * Process pending pkgpaths. For full tree scans, we have them all in memory.
+         * For partial scans, we fetch from database as new deps are discovered.
          */
         loop {
             // Check for shutdown signal
@@ -827,18 +841,25 @@ impl Scan {
                 break;
             }
 
-            // Get next batch of pending pkgpaths from database
-            const BATCH_SIZE: usize = 1000;
-            let pending_strs = db.get_pending_pkgpaths(BATCH_SIZE)?;
-            if pending_strs.is_empty() {
-                break;
-            }
-
-            // Convert to PkgPath for scanning
-            let pkgpaths: Vec<PkgPath> = pending_strs
-                .iter()
-                .filter_map(|s| PkgPath::new(s).ok())
-                .collect();
+            // Get next batch of pkgpaths to process
+            let pkgpaths: Vec<PkgPath> = if self.full_tree {
+                // For full tree: take from pre-loaded list
+                let batch_size = 1000.min(all_pending.len());
+                if batch_size == 0 {
+                    break;
+                }
+                all_pending.drain(..batch_size).collect()
+            } else {
+                // For partial scans: fetch from database (new deps may have been added)
+                let pending_strs = db.get_pending_pkgpaths(1000)?;
+                if pending_strs.is_empty() {
+                    break;
+                }
+                pending_strs
+                    .iter()
+                    .filter_map(|s| PkgPath::new(s).ok())
+                    .collect()
+            };
 
             if pkgpaths.is_empty() {
                 break;
