@@ -499,6 +499,9 @@ pub struct Scan {
     incoming: HashSet<PkgPath>,
     /// Pkgpaths we've completed scanning (in this session).
     done: HashSet<PkgPath>,
+    /// Pkgpaths already in database (loaded once at start for in-memory cache lookup).
+    /// This eliminates per-dependency database queries during dependency discovery.
+    cached_pkgpaths: HashSet<String>,
     /// Number of pkgpaths loaded from cache at start of scan.
     initial_cached: usize,
     /// Number of pkgpaths discovered as cached during dependency discovery.
@@ -529,6 +532,7 @@ impl Scan {
             sandbox,
             incoming: HashSet::new(),
             done: HashSet::new(),
+            cached_pkgpaths: HashSet::new(),
             initial_cached: 0,
             discovered_cached: 0,
             packages: IndexMap::new(),
@@ -571,6 +575,10 @@ impl Scan {
                 cached_count = cached_count,
                 "Found cached scan results in database"
             );
+
+            // Store scanned pkgpaths in memory for fast lookup during dependency discovery.
+            // This eliminates per-dependency database queries (major performance win).
+            self.cached_pkgpaths = scanned.clone();
 
             // For full tree scans with full_scan_complete, we'll skip scanning
             // For limited scans, remove already-scanned from incoming
@@ -906,6 +914,7 @@ impl Scan {
                  * Process results - write to DB and extract dependencies.
                  */
                 for (pkgpath, result) in rx {
+                    let pkgpath_str = pkgpath.to_string();
                     let scanpkgs = match result {
                         Ok(pkgs) => pkgs,
                         Err(e) => {
@@ -916,11 +925,13 @@ impl Scan {
                         }
                     };
                     self.done.insert(pkgpath.clone());
+                    // Also add to cached_pkgpaths for in-memory lookup in future iterations
+                    self.cached_pkgpaths.insert(pkgpath_str.clone());
 
                     // Save to database
                     if !scanpkgs.is_empty() {
                         if let Err(e) = db
-                            .store_scan_pkgpath(&pkgpath.to_string(), &scanpkgs)
+                            .store_scan_pkgpath(&pkgpath_str, &scanpkgs)
                         {
                             error!(error = %e, "Failed to store scan results");
                         }
@@ -942,25 +953,22 @@ impl Scan {
                                 {
                                     continue;
                                 }
-                                // Check database for cached dependency
-                                match db
-                                    .is_pkgpath_scanned(&dep_path.to_string())
-                                {
-                                    Ok(true) => {
-                                        self.done.insert(dep_path.clone());
-                                        self.discovered_cached += 1;
-                                        if let Ok(mut p) = progress.lock() {
-                                            p.state_mut().total += 1;
-                                            p.state_mut().cached += 1;
-                                        }
+                                // In-memory check for cached dependency (no database query).
+                                // This is a major performance win - eliminates ~100k queries
+                                // during a full scan with dependency discovery.
+                                let dep_path_str = dep_path.to_string();
+                                if self.cached_pkgpaths.contains(&dep_path_str) {
+                                    self.done.insert(dep_path.clone());
+                                    self.discovered_cached += 1;
+                                    if let Ok(mut p) = progress.lock() {
+                                        p.state_mut().total += 1;
+                                        p.state_mut().cached += 1;
                                     }
-                                    Ok(false) => {
-                                        new_incoming.insert(dep_path.clone());
-                                        if let Ok(mut p) = progress.lock() {
-                                            p.state_mut().total += 1;
-                                        }
+                                } else {
+                                    new_incoming.insert(dep_path.clone());
+                                    if let Ok(mut p) = progress.lock() {
+                                        p.state_mut().total += 1;
                                     }
-                                    Err(_) => {}
                                 }
                             }
                         }
@@ -1359,39 +1367,64 @@ impl Scan {
             pkg.all_depends = Some(all_deps);
         }
 
-        // Propagate failures: if A depends on B and B is failed/skipped, A is indirect-failed/skipped
-        loop {
-            let mut new_skip_reasons: Vec<(PkgName, SkipReason)> = Vec::new();
+        // Propagate failures using O(V+E) worklist algorithm instead of O(depth × V × E) iterative.
+        // If A depends on B and B is failed/skipped, A is indirect-failed/skipped.
+        //
+        // Algorithm:
+        // 1. Build reverse dependency map (who depends on each package)
+        // 2. Initialize worklist with directly failed packages
+        // 3. For each failed package, propagate to all dependents
+        // 4. Continue until worklist is empty
+        {
+            // Build reverse dependency map: pkgname -> packages that depend on it
+            let mut reverse_deps: HashMap<&PkgName, Vec<&PkgName>> = HashMap::new();
             for (pkgname, pkg_depends) in &depends {
-                if skip_reasons.contains_key(pkgname) {
-                    continue;
-                }
                 for dep in pkg_depends {
-                    if let Some(dep_reason) = skip_reasons.get(dep) {
-                        // Use indirect variants, preserving skip vs fail distinction
-                        let reason = match dep_reason {
-                            SkipReason::PkgSkip(_)
-                            | SkipReason::IndirectSkip(_) => {
-                                SkipReason::IndirectSkip(format!(
-                                    "dependency {} skipped",
-                                    dep.pkgname()
-                                ))
-                            }
-                            _ => SkipReason::IndirectFail(format!(
-                                "dependency {} failed",
-                                dep.pkgname()
-                            )),
-                        };
-                        new_skip_reasons.push((pkgname.clone(), reason));
-                        break;
-                    }
+                    reverse_deps.entry(dep).or_default().push(pkgname);
                 }
             }
-            if new_skip_reasons.is_empty() {
-                break;
-            }
-            for (pkgname, reason) in new_skip_reasons {
-                skip_reasons.insert(pkgname, reason);
+
+            // Initialize worklist with directly failed packages
+            let mut worklist: std::collections::VecDeque<PkgName> = skip_reasons
+                .keys()
+                .cloned()
+                .collect();
+
+            // Process worklist - propagate failures to dependents
+            while let Some(failed_pkg) = worklist.pop_front() {
+                let Some(dependents) = reverse_deps.get(&failed_pkg) else {
+                    continue;
+                };
+
+                // Get the reason for this failure (to determine skip vs fail)
+                let is_skip = skip_reasons
+                    .get(&failed_pkg)
+                    .map(|r| matches!(r, SkipReason::PkgSkip(_) | SkipReason::IndirectSkip(_)))
+                    .unwrap_or(false);
+
+                for dependent in dependents {
+                    // Skip if already marked
+                    if skip_reasons.contains_key(*dependent) {
+                        continue;
+                    }
+
+                    // Mark dependent as indirect-failed/skipped
+                    let reason = if is_skip {
+                        SkipReason::IndirectSkip(format!(
+                            "dependency {} skipped",
+                            failed_pkg.pkgname()
+                        ))
+                    } else {
+                        SkipReason::IndirectFail(format!(
+                            "dependency {} failed",
+                            failed_pkg.pkgname()
+                        ))
+                    };
+
+                    skip_reasons.insert((*dependent).clone(), reason);
+                    // Add to worklist to propagate further
+                    worklist.push_back((*dependent).clone());
+                }
             }
         }
 

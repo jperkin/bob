@@ -55,6 +55,17 @@ pub struct PackageRow {
     pub pbulk_weight: i32,
 }
 
+/// Minimal package data needed for dependency resolution.
+/// Much lighter than ScanIndex - only contains fields needed for pattern matching.
+#[derive(Clone, Debug)]
+pub struct ResolvePackage {
+    pub id: i64,
+    pub pkgname: String,
+    pub pkgbase: String,
+    pub skip_reason: Option<String>,
+    pub fail_reason: Option<String>,
+}
+
 /// SQLite database for scan and build caching.
 pub struct Database {
     conn: Connection,
@@ -353,23 +364,57 @@ impl Database {
 
         let package_id = self.conn.last_insert_rowid();
 
-        // Store raw dependencies
+        // Store raw dependencies using batched INSERT for performance
+        // This reduces N SQL operations to 1 (or ceil(N/100) for large dep counts)
         if let Some(ref deps) = index.all_depends {
-            let mut stmt = self.conn.prepare_cached(
-                "INSERT OR IGNORE INTO depends (package_id, depend_pattern, depend_pkgpath)
-                 VALUES (?1, ?2, ?3)",
-            )?;
-            for dep in deps {
-                stmt.execute(params![
-                    package_id,
-                    dep.pattern().pattern(),
-                    dep.pkgpath().to_string()
-                ])?;
-            }
+            self.store_dependencies_batch(package_id, deps)?;
         }
 
         debug!(pkgname = pkgname, package_id = package_id, "Stored package");
         Ok(package_id)
+    }
+
+    /// Store dependencies in batched INSERTs for performance.
+    /// SQLite has a limit on variables per statement (~999), so we batch
+    /// in groups of 100 dependencies (300 variables per batch).
+    fn store_dependencies_batch(
+        &self,
+        package_id: i64,
+        deps: &[pkgsrc::Depend],
+    ) -> Result<()> {
+        if deps.is_empty() {
+            return Ok(());
+        }
+
+        const BATCH_SIZE: usize = 100;
+
+        for chunk in deps.chunks(BATCH_SIZE) {
+            // Build VALUES placeholders: (?, ?, ?), (?, ?, ?), ...
+            let placeholders: String = chunk
+                .iter()
+                .map(|_| "(?, ?, ?)")
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let sql = format!(
+                "INSERT OR IGNORE INTO depends (package_id, depend_pattern, depend_pkgpath) VALUES {}",
+                placeholders
+            );
+
+            // Flatten parameters: [pkg_id, pattern1, path1, pkg_id, pattern2, path2, ...]
+            let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(chunk.len() * 3);
+            for dep in chunk {
+                params.push(Box::new(package_id));
+                params.push(Box::new(dep.pattern().pattern().to_string()));
+                params.push(Box::new(dep.pkgpath().to_string()));
+            }
+
+            let param_refs: Vec<&dyn rusqlite::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
+            self.conn.execute(&sql, param_refs.as_slice())?;
+        }
+
+        Ok(())
     }
 
     /// Store scan results for a pkgpath.
@@ -712,6 +757,104 @@ impl Database {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Get all packages with minimal data needed for resolution.
+    /// Much more efficient than get_all_scan_indexes() - no JSON parsing.
+    pub fn get_all_packages_for_resolve(&self) -> Result<Vec<ResolvePackage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, pkgname, pkgname_base, skip_reason, fail_reason
+             FROM packages ORDER BY id"
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(ResolvePackage {
+                id: row.get(0)?,
+                pkgname: row.get(1)?,
+                pkgbase: row.get(2)?,
+                skip_reason: row.get(3)?,
+                fail_reason: row.get(4)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Get resolved dependencies as package names.
+    pub fn get_resolved_deps_as_pkgnames(
+        &self,
+        package_id: i64,
+    ) -> Result<Vec<PkgName>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.pkgname FROM resolved_depends rd
+             JOIN packages p ON rd.depends_on_id = p.id
+             WHERE rd.package_id = ?1"
+        )?;
+
+        let rows = stmt.query_map([package_id], |row| {
+            let pkgname: String = row.get(0)?;
+            Ok(PkgName::new(&pkgname))
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Update package fail_reason (used during resolution for indirect failures).
+    pub fn set_package_fail_reason(
+        &self,
+        package_id: i64,
+        reason: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE packages SET fail_reason = ?2 WHERE id = ?1",
+            params![package_id, reason],
+        )?;
+        Ok(())
+    }
+
+    /// Check for cycles in the resolved dependency graph.
+    /// Returns Some(cycle) if a cycle is found, None otherwise.
+    pub fn detect_dependency_cycles(&self) -> Result<Option<Vec<String>>> {
+        // Use a recursive CTE to find cycles
+        // This finds paths and checks if any node appears twice in the path
+        let mut stmt = self.conn.prepare(
+            "WITH RECURSIVE
+             dep_chain(start_id, current_id, path, depth) AS (
+                 -- Start from each package
+                 SELECT id, id, pkgname, 0 FROM packages
+                 UNION ALL
+                 -- Follow dependencies
+                 SELECT dc.start_id, rd.depends_on_id,
+                        dc.path || ' -> ' || p.pkgname,
+                        dc.depth + 1
+                 FROM dep_chain dc
+                 JOIN resolved_depends rd ON rd.package_id = dc.current_id
+                 JOIN packages p ON rd.depends_on_id = p.id
+                 WHERE dc.depth < 100  -- Safety limit
+                   AND instr(dc.path || ' -> ', p.pkgname || ' -> ') = 0
+             )
+             SELECT path || ' -> ' || p.pkgname as cycle_path
+             FROM dep_chain dc
+             JOIN resolved_depends rd ON rd.package_id = dc.current_id
+             JOIN packages p ON rd.depends_on_id = p.id
+             WHERE rd.depends_on_id = dc.start_id
+             LIMIT 1"
+        )?;
+
+        let result = stmt.query_row([], |row| row.get::<_, String>(0));
+
+        match result {
+            Ok(cycle_path) => {
+                // Parse the cycle path into individual package names
+                let cycle: Vec<String> = cycle_path
+                    .split(" -> ")
+                    .map(|s| s.to_string())
+                    .collect();
+                Ok(Some(cycle))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     // ========================================================================
