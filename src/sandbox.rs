@@ -285,8 +285,7 @@ impl Sandbox {
             cmd.stdin(Stdio::piped());
         }
 
-        // Script handles its own output redirection to log files
-        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = cmd.spawn()?;
 
