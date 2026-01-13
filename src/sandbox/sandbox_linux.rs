@@ -174,6 +174,27 @@ impl Sandbox {
         // Use process_group(0) to put umount in its own process group.
         // This prevents it from receiving SIGINT when the user presses Ctrl+C,
         // ensuring cleanup can complete even during repeated interrupts.
+        //
+        // Retry unmount a few times - the filesystem may be briefly busy after
+        // killing processes, as the kernel cleans up file descriptors.
+        for _ in 0..5 {
+            let status = Command::new(cmd)
+                .arg(dest)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .status()
+                .context(format!("Unable to execute {}", cmd))?;
+
+            if status.success() {
+                return Ok(Some(status));
+            }
+
+            // Brief delay before retry
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        // Final attempt - return whatever status we get
         Ok(Some(
             Command::new(cmd)
                 .arg(dest)
