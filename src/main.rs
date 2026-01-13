@@ -43,11 +43,7 @@ struct BuildRunner {
 
 impl BuildRunner {
     /// Set up the build environment: config, logging, validation, db, signals.
-    fn new(
-        config_path: Option<&Path>,
-        verbose: bool,
-        for_build: bool,
-    ) -> Result<Self> {
+    fn new(config_path: Option<&Path>, verbose: bool) -> Result<Self> {
         let config = Config::load(config_path, verbose)?;
         let logs_dir = config.logdir().join("bob");
 
@@ -66,16 +62,8 @@ impl BuildRunner {
 
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let shutdown_for_handler = Arc::clone(&shutdown_flag);
-        let sandbox_for_handler = Sandbox::new(&config);
-        let sandbox_count = if for_build { config.build_threads() } else { 1 };
-
         ctrlc::set_handler(move || {
             shutdown_for_handler.store(true, Ordering::SeqCst);
-            if sandbox_for_handler.enabled() {
-                for i in 0..sandbox_count {
-                    sandbox_for_handler.kill_processes_by_id(i);
-                }
-            }
         })
         .expect("Error setting signal handler");
 
@@ -469,7 +457,7 @@ fn main() -> Result<()> {
     match args.cmd {
         Cmd::Build { pkgpaths: cmdline_pkgs } => {
             let mut runner =
-                BuildRunner::new(args.config.as_deref(), args.verbose, true)?;
+                BuildRunner::new(args.config.as_deref(), args.verbose)?;
             tracing::info!("Build command started");
 
             let mut scan = Scan::new(&runner.config);
@@ -495,7 +483,7 @@ fn main() -> Result<()> {
         }
         Cmd::Rebuild { force, packages } => {
             let mut runner =
-                BuildRunner::new(args.config.as_deref(), args.verbose, true)?;
+                BuildRunner::new(args.config.as_deref(), args.verbose)?;
 
             // Convert packages to pkgpaths and collect for dependent lookup
             let mut pkgpaths_to_rebuild: Vec<String> = Vec::new();
@@ -807,7 +795,7 @@ fn main() -> Result<()> {
         }
         Cmd::Scan => {
             let runner =
-                BuildRunner::new(args.config.as_deref(), args.verbose, false)?;
+                BuildRunner::new(args.config.as_deref(), args.verbose)?;
 
             let mut scan = Scan::new(&runner.config);
             if let Some(pkgs) = runner.config.pkgpaths() {

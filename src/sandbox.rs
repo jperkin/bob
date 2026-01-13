@@ -402,6 +402,8 @@ impl Sandbox {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 warn!(
+                    script = %script.display(),
+                    status = ?output.status,
                     stdout = %stdout.trim(),
                     stderr = %stderr.trim(),
                     "post-build script failed"
@@ -883,11 +885,19 @@ pub struct SandboxScope {
 
 impl SandboxScope {
     /// Create a new scope, creating `count` sandboxes if enabled.
-    pub fn new(sandbox: Sandbox, count: usize, verbose: bool) -> Result<Self> {
+    pub fn new(
+        sandbox: Sandbox,
+        count: usize,
+        verbose: bool,
+    ) -> Result<Self> {
         if sandbox.enabled() {
             sandbox.create_all(count, verbose)?;
         }
-        Ok(Self { sandbox, count, verbose })
+        Ok(Self {
+            sandbox,
+            count,
+            verbose,
+        })
     }
 
     /// Access the underlying sandbox for operations.

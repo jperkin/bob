@@ -55,7 +55,7 @@ use pkgsrc::{PkgName, PkgPath};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc, mpsc::Sender};
 use std::time::{Duration, Instant};
@@ -118,6 +118,7 @@ struct BuildSession {
     pkgsrc_env: PkgsrcEnv,
     sandbox: Sandbox,
     options: BuildOptions,
+    shutdown: Arc<AtomicBool>,
 }
 
 /// Package builder that executes build stages.
@@ -150,6 +151,25 @@ impl<'a> PkgBuilder<'a> {
             build_user,
             envs,
             output_tx,
+        }
+    }
+
+    /*
+     * Poll for child process exit while checking the shutdown flag.  If
+     * shutdown is requested, kill the child and return an error so that
+     * the worker can exit cleanly.
+     */
+    fn wait_with_shutdown(&self, child: &mut Child) -> anyhow::Result<ExitStatus> {
+        loop {
+            if self.session.shutdown.load(Ordering::SeqCst) {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("Build interrupted by shutdown");
+            }
+            match child.try_wait()? {
+                Some(status) => return Ok(status),
+                None => std::thread::sleep(Duration::from_millis(100)),
+            }
         }
     }
 
@@ -654,8 +674,17 @@ impl<'a> PkgBuilder<'a> {
                 }
             });
 
-            // Wait for command to exit
-            let status = child.wait()?;
+            let status = loop {
+                if self.session.shutdown.load(Ordering::SeqCst) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    bail!("Build interrupted by shutdown");
+                }
+                match child.try_wait()? {
+                    Some(status) => break status,
+                    None => std::thread::sleep(Duration::from_millis(100)),
+                }
+            };
 
             // Reader thread will exit when pipe closes (process exits)
             let _ = tee_handle.join();
@@ -688,11 +717,12 @@ impl<'a> PkgBuilder<'a> {
                     self.session.sandbox.command(self.sandbox_id, cmd);
                 command.args(args);
                 self.apply_envs(&mut command, extra_envs);
-                command
+                let mut child = command
                     .stdout(Stdio::from(log))
                     .stderr(Stdio::from(log_err))
-                    .status()
-                    .with_context(|| format!("Failed to run {}", cmd.display()))
+                    .spawn()
+                    .with_context(|| format!("Failed to spawn {}", cmd.display()))?;
+                self.wait_with_shutdown(&mut child)
             }
             RunAs::User => {
                 let user = self.build_user.as_ref().unwrap();
@@ -710,11 +740,12 @@ impl<'a> PkgBuilder<'a> {
                     .command(self.sandbox_id, Path::new("su"));
                 command.arg(user).arg("-c").arg(&inner_cmd);
                 self.apply_envs(&mut command, extra_envs);
-                command
+                let mut child = command
                     .stdout(Stdio::from(log))
                     .stderr(Stdio::from(log_err))
-                    .status()
-                    .context("Failed to run su command")
+                    .spawn()
+                    .context("Failed to spawn su command")?;
+                self.wait_with_shutdown(&mut child)
             }
         }
     }
@@ -2187,8 +2218,13 @@ impl Build {
             let (client_tx, client_rx) = mpsc::channel::<ChannelCommand>();
             clients.insert(i, client_tx);
             let manager_tx = manager_tx.clone();
+            let shutdown_for_worker = Arc::clone(&shutdown_flag);
             let thread = std::thread::spawn(move || {
                 loop {
+                    if shutdown_for_worker.load(Ordering::SeqCst) {
+                        break;
+                    }
+
                     // Use send() which can fail if receiver is dropped (manager shutdown)
                     if manager_tx.send(ChannelCommand::ClientReady(i)).is_err()
                     {
@@ -2211,6 +2247,12 @@ impl Build {
                             let result = pkg.build(&manager_tx);
                             let duration = build_start.elapsed();
                             trace!(pkgname = %pkgname.pkgname(), worker = i, elapsed_ms = duration.as_millis(), "Worker build() returned");
+
+                            if shutdown_for_worker.load(Ordering::SeqCst) {
+                                trace!(pkgname = %pkgname.pkgname(), worker = i, "Worker interrupted, exiting");
+                                break;
+                            }
+
                             match result {
                                 Ok(PackageBuildResult::Success) => {
                                     trace!(pkgname = %pkgname.pkgname(), "Worker sending JobSuccess");
@@ -2264,6 +2306,7 @@ impl Build {
             pkgsrc_env: self.pkgsrc_env.clone(),
             sandbox: self.scope.sandbox().clone(),
             options: self.options.clone(),
+            shutdown: Arc::clone(&shutdown_flag),
         });
         let progress_clone = Arc::clone(&progress);
         let shutdown_for_manager = Arc::clone(&shutdown_flag);
