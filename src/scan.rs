@@ -1216,20 +1216,21 @@ impl Scan {
         let pkgpath_str = pkgpath.as_path().display().to_string();
         debug!(pkgpath = %pkgpath_str, "Scanning package");
 
-        let bmake = config.make().display().to_string();
         let pkgsrcdir = config.pkgsrc().display().to_string();
-        let script = format!(
-            "cd {}/{} && {} pbulk-index\n",
-            pkgsrcdir, pkgpath_str, bmake
-        );
+        let workdir = format!("{}/{}", pkgsrcdir, pkgpath_str);
 
         let scan_env = config.scan_env();
         trace!(pkgpath = %pkgpath_str,
-            script = %script,
+            workdir = %workdir,
             scan_env = ?scan_env,
             "Executing pkg-scan"
         );
-        let child = sandbox.execute_script(0, &script, scan_env)?;
+        let child = sandbox.execute_command(
+            0,
+            config.make(),
+            ["-C", &workdir, "pbulk-index"],
+            scan_env,
+        )?;
         let output = child.wait_with_output()?;
 
         if !output.status.success() {
