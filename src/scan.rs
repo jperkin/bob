@@ -861,11 +861,29 @@ impl Scan {
 
             let mut new_incoming: HashSet<PkgPath> = HashSet::new();
 
+            // === BENCHMARK INSTRUMENTATION ===
+            // Track timing to identify performance bottlenecks
+            let bench_start = std::time::Instant::now();
+            let mut bench_db_write_total = std::time::Duration::ZERO;
+            let mut bench_dep_discovery_total = std::time::Duration::ZERO;
+            let mut bench_results_processed = 0usize;
+            let mut bench_last_report = std::time::Instant::now();
+            let mut bench_last_count = 0usize;
+            let mut bench_last_db_write = std::time::Duration::ZERO;
+            const BENCH_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+            // === END BENCHMARK SETUP ===
+
+            // Track channel send wait time (backpressure indicator)
+            let bench_send_wait = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let bench_scan_time = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
             std::thread::scope(|s| {
                 // Spawn scanning thread
                 let progress_clone = Arc::clone(&progress);
                 let shutdown_clone = Arc::clone(&shutdown_flag);
                 let pool_ref = &pool;
+                let bench_send_wait_clone = Arc::clone(&bench_send_wait);
+                let bench_scan_time_clone = Arc::clone(&bench_scan_time);
 
                 s.spawn(move || {
                     pool_ref.install(|| {
@@ -886,8 +904,14 @@ impl Scan {
                                     .set_worker_active(thread_id, &pathname);
                             }
 
+                            let scan_start = std::time::Instant::now();
                             let result = Self::scan_pkgpath_with(
                                 config, sandbox, pkgpath,
+                            );
+                            let scan_elapsed = scan_start.elapsed();
+                            bench_scan_time_clone.fetch_add(
+                                scan_elapsed.as_micros() as u64,
+                                std::sync::atomic::Ordering::Relaxed
                             );
 
                             // Update progress counter
@@ -901,7 +925,13 @@ impl Scan {
                             }
 
                             // Send result (blocks if buffer full = backpressure)
+                            let send_start = std::time::Instant::now();
                             let _ = tx.send((pkgpath.clone(), result));
+                            let send_elapsed = send_start.elapsed();
+                            bench_send_wait_clone.fetch_add(
+                                send_elapsed.as_micros() as u64,
+                                std::sync::atomic::Ordering::Relaxed
+                            );
                         });
                     });
                     drop(tx);
@@ -928,53 +958,137 @@ impl Scan {
                     // Also add to cached_pkgpaths for in-memory lookup in future iterations
                     self.cached_pkgpaths.insert(pkgpath_str.clone());
 
-                    // Save to database
+                    // Save to database (TIMED)
                     if !scanpkgs.is_empty() {
+                        let db_start = std::time::Instant::now();
                         if let Err(e) = db
                             .store_scan_pkgpath(&pkgpath_str, &scanpkgs)
                         {
                             error!(error = %e, "Failed to store scan results");
                         }
+                        bench_db_write_total += db_start.elapsed();
                     }
 
                     // Skip dependency discovery for full tree scans (all
                     // packages already discovered) or if interrupted
                     if self.full_tree || was_interrupted {
-                        continue;
-                    }
-
-                    // Discover dependencies not yet seen
-                    for pkg in &scanpkgs {
-                        if let Some(ref all_deps) = pkg.all_depends {
-                            for dep in all_deps {
-                                let dep_path = dep.pkgpath();
-                                if self.done.contains(dep_path)
-                                    || new_incoming.contains(dep_path)
-                                {
-                                    continue;
-                                }
-                                // In-memory check for cached dependency (no database query).
-                                // This is a major performance win - eliminates ~100k queries
-                                // during a full scan with dependency discovery.
-                                let dep_path_str = dep_path.to_string();
-                                if self.cached_pkgpaths.contains(&dep_path_str) {
-                                    self.done.insert(dep_path.clone());
-                                    self.discovered_cached += 1;
-                                    if let Ok(mut p) = progress.lock() {
-                                        p.state_mut().total += 1;
-                                        p.state_mut().cached += 1;
+                        bench_results_processed += 1;
+                    } else {
+                        // Discover dependencies not yet seen (TIMED)
+                        let dep_start = std::time::Instant::now();
+                        for pkg in &scanpkgs {
+                            if let Some(ref all_deps) = pkg.all_depends {
+                                for dep in all_deps {
+                                    let dep_path = dep.pkgpath();
+                                    if self.done.contains(dep_path)
+                                        || new_incoming.contains(dep_path)
+                                    {
+                                        continue;
                                     }
-                                } else {
-                                    new_incoming.insert(dep_path.clone());
-                                    if let Ok(mut p) = progress.lock() {
-                                        p.state_mut().total += 1;
+                                    // In-memory check for cached dependency (no database query).
+                                    // This is a major performance win - eliminates ~100k queries
+                                    // during a full scan with dependency discovery.
+                                    let dep_path_str = dep_path.to_string();
+                                    if self.cached_pkgpaths.contains(&dep_path_str) {
+                                        self.done.insert(dep_path.clone());
+                                        self.discovered_cached += 1;
+                                        if let Ok(mut p) = progress.lock() {
+                                            p.state_mut().total += 1;
+                                            p.state_mut().cached += 1;
+                                        }
+                                    } else {
+                                        new_incoming.insert(dep_path.clone());
+                                        if let Ok(mut p) = progress.lock() {
+                                            p.state_mut().total += 1;
+                                        }
                                     }
                                 }
                             }
                         }
+                        bench_dep_discovery_total += dep_start.elapsed();
+                        bench_results_processed += 1;
+                    }
+
+                    // === BENCHMARK PERIODIC REPORT ===
+                    if bench_last_report.elapsed() >= BENCH_REPORT_INTERVAL {
+                        let elapsed = bench_start.elapsed();
+                        let count_delta = bench_results_processed - bench_last_count;
+                        let interval_secs = bench_last_report.elapsed().as_secs_f64();
+                        let rate = count_delta as f64 / interval_secs;
+
+                        // Interval-specific metrics (to see degradation over time)
+                        let interval_db_write = bench_db_write_total - bench_last_db_write;
+                        let interval_db_ms = if count_delta > 0 {
+                            interval_db_write.as_millis() as f64 / count_delta as f64
+                        } else { 0.0 };
+
+                        // Cumulative metrics
+                        let db_pct = (bench_db_write_total.as_secs_f64() / elapsed.as_secs_f64()) * 100.0;
+                        let _dep_pct = (bench_dep_discovery_total.as_secs_f64() / elapsed.as_secs_f64()) * 100.0;
+                        let cumulative_db_ms = if bench_results_processed > 0 {
+                            bench_db_write_total.as_millis() as f64 / bench_results_processed as f64
+                        } else { 0.0 };
+
+                        eprintln!(
+                            "[BENCH] t={:.1}s done={} interval_rate={:.1}/s interval_db={:.2}ms/pkg cumulative_db={:.2}ms/pkg db%={:.1}",
+                            elapsed.as_secs_f64(),
+                            bench_results_processed,
+                            rate,
+                            interval_db_ms,
+                            cumulative_db_ms,
+                            db_pct
+                        );
+
+                        bench_last_report = std::time::Instant::now();
+                        bench_last_count = bench_results_processed;
+                        bench_last_db_write = bench_db_write_total;
                     }
                 }
             });
+
+            // === BENCHMARK BATCH SUMMARY ===
+            {
+                let batch_elapsed = bench_start.elapsed();
+                let send_wait_us = bench_send_wait.load(std::sync::atomic::Ordering::Relaxed);
+                let scan_time_us = bench_scan_time.load(std::sync::atomic::Ordering::Relaxed);
+                let send_wait_secs = send_wait_us as f64 / 1_000_000.0;
+                let scan_time_secs = scan_time_us as f64 / 1_000_000.0;
+
+                // Calculate what percentage of time is accounted for
+                let batch_secs = batch_elapsed.as_secs_f64();
+                let db_secs = bench_db_write_total.as_secs_f64();
+                let dep_secs = bench_dep_discovery_total.as_secs_f64();
+
+                // Worker efficiency: total scan time / (batch time * num threads)
+                // If workers were 100% efficient, scan_time would equal batch_time * threads
+                let num_threads = self.config.scan_threads();
+                let theoretical_max = batch_secs * num_threads as f64;
+                let worker_efficiency = if theoretical_max > 0.0 {
+                    (scan_time_secs / theoretical_max) * 100.0
+                } else { 0.0 };
+
+                eprintln!(
+                    "[BENCH SUMMARY] batch={:.1}s pkgs={} rate={:.1}/s",
+                    batch_secs,
+                    bench_results_processed,
+                    bench_results_processed as f64 / batch_secs
+                );
+                eprintln!(
+                    "[BENCH SUMMARY] main_thread: db_write={:.1}s ({:.1}%) dep_disc={:.1}s ({:.1}%)",
+                    db_secs, (db_secs / batch_secs) * 100.0,
+                    dep_secs, (dep_secs / batch_secs) * 100.0
+                );
+                eprintln!(
+                    "[BENCH SUMMARY] workers: scan_time={:.1}s send_wait={:.1}s ({:.1}% backpressure)",
+                    scan_time_secs,
+                    send_wait_secs,
+                    (send_wait_secs / scan_time_secs) * 100.0
+                );
+                eprintln!(
+                    "[BENCH SUMMARY] worker_efficiency={:.1}% (scan_time / batch_time*threads)",
+                    worker_efficiency
+                );
+            }
 
             // Check for interruption after batch
             if shutdown_flag.load(Ordering::Relaxed) {
