@@ -2222,11 +2222,6 @@ impl Build {
                             let duration = build_start.elapsed();
                             trace!(pkgname = %pkgname.pkgname(), worker = i, elapsed_ms = duration.as_millis(), "Worker build() returned");
 
-                            if shutdown_for_worker.load(Ordering::SeqCst) {
-                                trace!(pkgname = %pkgname.pkgname(), worker = i, "Worker interrupted, exiting");
-                                break;
-                            }
-
                             match result {
                                 Ok(PackageBuildResult::Success) => {
                                     trace!(pkgname = %pkgname.pkgname(), "Worker sending JobSuccess");
@@ -2251,13 +2246,20 @@ impl Build {
                                     );
                                 }
                                 Err(e) => {
-                                    trace!(pkgname = %pkgname.pkgname(), "Worker sending JobError");
-                                    let _ = manager_tx.send(
-                                        ChannelCommand::JobError((
-                                            pkgname, duration, e,
-                                        )),
-                                    );
+                                    // Don't report errors caused by shutdown
+                                    if !shutdown_for_worker.load(Ordering::SeqCst) {
+                                        trace!(pkgname = %pkgname.pkgname(), "Worker sending JobError");
+                                        let _ = manager_tx.send(
+                                            ChannelCommand::JobError((
+                                                pkgname, duration, e,
+                                            )),
+                                        );
+                                    }
                                 }
+                            }
+
+                            if shutdown_for_worker.load(Ordering::SeqCst) {
+                                break;
                             }
                             continue;
                         }
@@ -2318,11 +2320,6 @@ impl Build {
                         Err(mpsc::RecvTimeoutError::Timeout) => continue,
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     };
-
-                // Check shutdown before processing - don't save results or update UI
-                if shutdown_for_manager.load(Ordering::SeqCst) {
-                    continue;
-                }
 
                 match command {
                     ChannelCommand::ClientReady(c) => {
