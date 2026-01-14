@@ -38,10 +38,10 @@ use rusqlite::{Connection, params};
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
-/// Current schema version for migrations.
-const SCHEMA_VERSION: i32 = 2;
+/// Schema version - update when schema changes.
+const SCHEMA_VERSION: i32 = 3;
 
 /// Lightweight package row without full scan data.
 #[derive(Clone, Debug)]
@@ -70,7 +70,7 @@ impl Database {
         let conn = Connection::open(path).context("Failed to open database")?;
         let db = Self { conn };
         db.configure_pragmas()?;
-        db.init_or_migrate()?;
+        db.init()?;
         Ok(db)
     }
 
@@ -99,8 +99,8 @@ impl Database {
         Ok(())
     }
 
-    /// Initialize schema or migrate from older versions.
-    fn init_or_migrate(&self) -> Result<()> {
+    /// Initialize schema or fail if version mismatch.
+    fn init(&self) -> Result<()> {
         // Check if schema_version table exists
         let has_schema_version: bool = self.conn.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_version'",
@@ -109,184 +109,91 @@ impl Database {
         )?;
 
         if !has_schema_version {
-            // Check for old schema (v1)
-            let has_old_scan: bool = self.conn.query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='scan'",
-                [],
-                |row| row.get::<_, i32>(0).map(|c| c > 0),
-            )?;
-
-            if has_old_scan {
-                info!("Migrating from schema v1 to v{}", SCHEMA_VERSION);
-                self.migrate_v1_to_v2()?;
-            } else {
-                self.create_schema_v2()?;
-            }
+            // Fresh database, create schema
+            self.create_schema()?;
         } else {
+            // Check version matches
             let version: i32 = self.conn.query_row(
-                "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1",
+                "SELECT version FROM schema_version LIMIT 1",
                 [],
                 |row| row.get(0),
-            ).unwrap_or(1);
+            )?;
 
-            if version < SCHEMA_VERSION {
-                info!(
-                    "Migrating from schema v{} to v{}",
-                    version, SCHEMA_VERSION
+            if version != SCHEMA_VERSION {
+                anyhow::bail!(
+                    "Schema mismatch: found v{}, expected v{}. \
+                     Run 'bob clean' to restart.",
+                    version,
+                    SCHEMA_VERSION
                 );
-                if version == 1 {
-                    self.migrate_v1_to_v2()?;
-                }
             }
         }
 
         Ok(())
     }
 
-    /// Create the v2 schema from scratch.
-    fn create_schema_v2(&self) -> Result<()> {
-        self.conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS schema_version (
-                version INTEGER PRIMARY KEY
-            );
+    /// Create the database schema.
+    fn create_schema(&self) -> Result<()> {
+        self.conn.execute_batch(&format!(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL);
+             INSERT INTO schema_version (version) VALUES ({});
 
-            INSERT OR REPLACE INTO schema_version (version) VALUES (2);
+             CREATE TABLE packages (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 pkgname TEXT UNIQUE NOT NULL,
+                 pkgpath TEXT NOT NULL,
+                 skip_reason TEXT,
+                 fail_reason TEXT,
+                 is_bootstrap INTEGER DEFAULT 0,
+                 pbulk_weight INTEGER DEFAULT 100,
+                 scan_data TEXT
+             );
 
-            CREATE TABLE IF NOT EXISTS packages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                pkgname TEXT UNIQUE NOT NULL,
-                pkgpath TEXT NOT NULL,
-                skip_reason TEXT,
-                fail_reason TEXT,
-                is_bootstrap INTEGER DEFAULT 0,
-                pbulk_weight INTEGER DEFAULT 100,
-                scan_data TEXT
-            );
+             CREATE INDEX idx_packages_pkgpath ON packages(pkgpath);
+             CREATE INDEX idx_packages_status ON packages(skip_reason, fail_reason);
 
-            CREATE INDEX IF NOT EXISTS idx_packages_pkgpath ON packages(pkgpath);
-            CREATE INDEX IF NOT EXISTS idx_packages_status ON packages(skip_reason, fail_reason);
+             CREATE TABLE depends (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
+                 depend_pattern TEXT NOT NULL,
+                 depend_pkgpath TEXT NOT NULL,
+                 UNIQUE(package_id, depend_pattern)
+             );
 
-            CREATE TABLE IF NOT EXISTS depends (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
-                depend_pattern TEXT NOT NULL,
-                depend_pkgpath TEXT NOT NULL,
-                UNIQUE(package_id, depend_pattern)
-            );
+             CREATE INDEX idx_depends_package ON depends(package_id);
+             CREATE INDEX idx_depends_pkgpath ON depends(depend_pkgpath);
 
-            CREATE INDEX IF NOT EXISTS idx_depends_package ON depends(package_id);
-            CREATE INDEX IF NOT EXISTS idx_depends_pkgpath ON depends(depend_pkgpath);
+             CREATE TABLE resolved_depends (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
+                 depends_on_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
+                 UNIQUE(package_id, depends_on_id)
+             );
 
-            CREATE TABLE IF NOT EXISTS resolved_depends (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
-                depends_on_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
-                UNIQUE(package_id, depends_on_id)
-            );
+             CREATE INDEX idx_resolved_depends_package ON resolved_depends(package_id);
+             CREATE INDEX idx_resolved_depends_depends_on ON resolved_depends(depends_on_id);
 
-            CREATE INDEX IF NOT EXISTS idx_resolved_depends_package ON resolved_depends(package_id);
-            CREATE INDEX IF NOT EXISTS idx_resolved_depends_depends_on ON resolved_depends(depends_on_id);
+             CREATE TABLE builds (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
+                 outcome TEXT NOT NULL,
+                 outcome_detail TEXT,
+                 duration_ms INTEGER NOT NULL DEFAULT 0,
+                 log_dir TEXT,
+                 UNIQUE(package_id)
+             );
 
-            CREATE TABLE IF NOT EXISTS builds (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
-                outcome TEXT NOT NULL,
-                outcome_detail TEXT,
-                duration_ms INTEGER NOT NULL DEFAULT 0,
-                log_dir TEXT,
-                UNIQUE(package_id)
-            );
+             CREATE INDEX idx_builds_outcome ON builds(outcome);
+             CREATE INDEX idx_builds_package ON builds(package_id);
 
-            CREATE INDEX IF NOT EXISTS idx_builds_outcome ON builds(outcome);
-            CREATE INDEX IF NOT EXISTS idx_builds_package ON builds(package_id);
+             CREATE TABLE metadata (
+                 key TEXT PRIMARY KEY,
+                 value TEXT NOT NULL
+             );",
+            SCHEMA_VERSION
+        ))?;
 
-            CREATE TABLE IF NOT EXISTS metadata (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );"
-        )?;
-
-        debug!("Created schema v2");
-        Ok(())
-    }
-
-    /// Migrate from v1 (old scan/build tables) to v2.
-    fn migrate_v1_to_v2(&self) -> Result<()> {
-        // Create new schema first
-        self.create_schema_v2()?;
-
-        // Migrate scan data
-        let mut stmt = self
-            .conn
-            .prepare("SELECT pkgpath, data FROM scan ORDER BY rowid")?;
-
-        let rows: Vec<(String, String)> = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        let mut migrated_count = 0;
-        for (pkgpath, json) in rows {
-            let indexes: Vec<ScanIndex> = match serde_json::from_str(&json) {
-                Ok(idx) => idx,
-                Err(e) => {
-                    warn!(pkgpath = %pkgpath, error = %e, "Failed to parse scan data during migration");
-                    continue;
-                }
-            };
-
-            for idx in indexes {
-                if let Err(e) = self.store_package(&pkgpath, &idx) {
-                    warn!(pkgpath = %pkgpath, error = %e, "Failed to migrate package");
-                }
-            }
-            migrated_count += 1;
-        }
-
-        // Migrate build data
-        let mut stmt = self
-            .conn
-            .prepare("SELECT pkgname, data FROM build ORDER BY rowid")?;
-
-        let rows: Vec<(String, String)> = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        let mut build_count = 0;
-        for (pkgname, json) in rows {
-            let result: BuildResult = match serde_json::from_str(&json) {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!(pkgname = %pkgname, error = %e, "Failed to parse build data during migration");
-                    continue;
-                }
-            };
-
-            // Look up package_id
-            if let Ok(Some(pkg)) = self.get_package_by_name(&pkgname) {
-                if let Err(e) = self.store_build_result(pkg.id, &result) {
-                    warn!(pkgname = %pkgname, error = %e, "Failed to migrate build result");
-                }
-                build_count += 1;
-            }
-        }
-
-        // Drop old tables
-        self.conn.execute_batch(
-            "DROP TABLE IF EXISTS scan;
-             DROP TABLE IF EXISTS build;",
-        )?;
-
-        info!(
-            packages = migrated_count,
-            builds = build_count,
-            "Migration to v2 complete"
-        );
+        debug!(version = SCHEMA_VERSION, "Created schema");
         Ok(())
     }
 
@@ -745,12 +652,6 @@ impl Database {
             .context("Failed to count builds")
     }
 
-    /// Clear all build data.
-    pub fn clear_build(&self) -> Result<()> {
-        self.conn.execute("DELETE FROM builds", [])?;
-        Ok(())
-    }
-
     /// Delete build result for a pkgname.
     pub fn delete_build_by_name(&self, pkgname: &str) -> Result<bool> {
         let rows = self.conn.execute(
@@ -1010,45 +911,6 @@ impl Database {
         Ok(())
     }
 
-    // ========================================================================
-    // CHANGE DETECTION
-    // ========================================================================
-
-    /// Compare requested pkgpaths against cached ones.
-    pub fn compare_pkgpath_lists(
-        &self,
-        requested: &[&str],
-    ) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
-        let scanned = self.get_scanned_pkgpaths()?;
-        let requested_set: HashSet<_> =
-            requested.iter().map(|s| s.to_string()).collect();
-
-        let to_add: Vec<_> =
-            requested_set.difference(&scanned).cloned().collect();
-        let to_remove: Vec<_> =
-            scanned.difference(&requested_set).cloned().collect();
-        let unchanged: Vec<_> =
-            scanned.intersection(&requested_set).cloned().collect();
-
-        Ok((to_add, to_remove, unchanged))
-    }
-
-    /// Delete packages for pkgpaths no longer in the list.
-    pub fn delete_pkgpaths(&self, pkgpaths: &[&str]) -> Result<usize> {
-        if pkgpaths.is_empty() {
-            return Ok(0);
-        }
-
-        let mut count = 0;
-        for pkgpath in pkgpaths {
-            count += self.conn.execute(
-                "DELETE FROM packages WHERE pkgpath = ?1",
-                [pkgpath],
-            )?;
-        }
-        Ok(count)
-    }
-
     /// Execute arbitrary SQL and print results.
     pub fn execute_raw(&self, sql: &str) -> Result<()> {
         let mut stmt = self.conn.prepare(sql)?;
@@ -1133,25 +995,20 @@ fn db_outcome_to_build(outcome: &str, detail: Option<String>) -> BuildOutcome {
         "success" => BuildOutcome::Success,
         "up_to_date" => BuildOutcome::UpToDate,
         "failed" => BuildOutcome::Failed(detail.unwrap_or_default()),
-        "pkg_skip" => BuildOutcome::Skipped(SkipReason::PkgSkip(
+        "pkg_skip" => {
+            BuildOutcome::Skipped(SkipReason::PkgSkip(detail.unwrap_or_default()))
+        }
+        "pkg_fail" => {
+            BuildOutcome::Skipped(SkipReason::PkgFail(detail.unwrap_or_default()))
+        }
+        "indirect_skip" => BuildOutcome::Skipped(SkipReason::IndirectSkip(
             detail.unwrap_or_default(),
         )),
-        "pkg_fail" | "pre_failed" => BuildOutcome::Skipped(
-            SkipReason::PkgFail(detail.unwrap_or_default()),
-        ),
-        "indirect_skip" | "indirect_pre_failed" => BuildOutcome::Skipped(
-            SkipReason::IndirectSkip(detail.unwrap_or_default()),
-        ),
         "indirect_fail" | "indirect_failed" => BuildOutcome::Skipped(
             SkipReason::IndirectFail(detail.unwrap_or_default()),
         ),
         "unresolved_dep" => BuildOutcome::Skipped(SkipReason::UnresolvedDep(
             detail.unwrap_or_default(),
-        )),
-        // Legacy: scan_fail was previously wrapped in Skipped, now treat as Failed
-        "scan_fail" => BuildOutcome::Failed(format!(
-            "Scan failed: {}",
-            detail.unwrap_or_default()
         )),
         _ => BuildOutcome::Failed(format!("Unknown outcome: {}", outcome)),
     }
