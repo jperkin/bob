@@ -14,7 +14,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use bob::Init;
 use bob::RunContext;
 use bob::build::{self, Build};
@@ -361,9 +361,9 @@ pub struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
-    /// Create a new configuration area
+    /// Initialise a new build directory and configuration file
     Init { dir: PathBuf },
-    /// Perform recursive scan of packages to calculate dependencies
+    /// Perform recursive scan of packages and resolve dependencies
     Scan,
     /// Build all scanned packages
     Build {
@@ -371,7 +371,7 @@ enum Cmd {
         #[arg(value_name = "PKGPATH")]
         pkgpaths: Vec<String>,
     },
-    /// Rebuild specific packages, clearing cached results
+    /// Rebuild specific packages
     Rebuild {
         /// Force rebuild even if package is up-to-date
         #[arg(short, long)]
@@ -380,7 +380,7 @@ enum Cmd {
         #[arg(required = true, value_name = "PKGPATH|PKGNAME")]
         packages: Vec<String>,
     },
-    /// Clear all cached scan and build state from the database
+    /// Remove current build state (database and build logs)
     Clean,
     /// Run SQL commands against the database
     Db {
@@ -580,20 +580,11 @@ fn main() -> Result<()> {
         }
         Cmd::Clean => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
-            let logs_dir = config.logdir().join("bob");
-            let db_path = logs_dir.join("bob.db");
-            let db = Database::open(&db_path)?;
 
-            let scan_count = db.count_scan()?;
-            let build_count = db.count_build()?;
-
-            db.clear_scan()?;
-            db.clear_build()?;
-
-            println!(
-                "Cleared {} cached scan entries and {} cached build entries",
-                scan_count, build_count
-            );
+            if config.logdir().exists() {
+                std::fs::remove_dir_all(config.logdir())
+                    .context("Failed to remove logs directory")?;
+            }
         }
         Cmd::Db { sql } => {
             let config = Config::load(args.config.as_deref(), args.verbose)?;
