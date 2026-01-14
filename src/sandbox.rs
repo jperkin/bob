@@ -658,15 +658,15 @@ impl Sandbox {
 
     /// Run a custom action command.
     ///
-    /// When `chrooted` is false (default), the command runs on the host system
-    /// with `cwd` interpreted as a path relative to the sandbox root on the
-    /// host filesystem. For example, `cwd = "/tmp"` becomes `<sandbox>/tmp`.
-    /// If no `cwd` is specified, the sandbox root is used.
+    /// When `chrooted` is true (default), the command runs inside the sandbox
+    /// via chroot with `cwd` interpreted as an absolute path within the
+    /// sandbox. For example, `cwd = "/tmp"` means `/tmp` inside the chroot.
+    /// If no `cwd` is specified, `/` is used as the working directory.
     ///
-    /// When `chrooted` is true, the command runs inside the sandbox via chroot
-    /// with `cwd` interpreted as an absolute path within the sandbox. For
-    /// example, `cwd = "/tmp"` means `/tmp` inside the chroot. If no `cwd` is
-    /// specified, `/` is used as the working directory inside the chroot.
+    /// When `chrooted` is false, the command runs on the host system with
+    /// `cwd` interpreted as a path relative to the sandbox root on the host
+    /// filesystem. For example, `cwd = "/tmp"` becomes `<sandbox>/tmp`.
+    /// If no `cwd` is specified, the sandbox root is used.
     fn run_action_cmd(
         &self,
         id: usize,

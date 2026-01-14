@@ -68,11 +68,14 @@ sandboxes = {
 
     actions = {
         -- NetBSD does not have devfs; device nodes are created via MAKEDEV.
-        -- The cwd is relative to the sandbox (e.g., /dev means $SANDBOX/dev).
-        -- Commands run on the host, so /dev/MAKEDEV refers to the host file.
+        -- First copy the MAKEDEV scripts from host into sandbox.
+        { action = "cmd", cwd = "/dev", chrooted = false,
+          create = "cp /dev/MAKEDEV /dev/MAKEDEV.local .",
+          destroy = "rm -f MAKEDEV MAKEDEV.local" },
+        -- Then run MAKEDEV inside the sandbox to create device nodes.
         { action = "cmd", cwd = "/dev",
-          create = "cp /dev/MAKEDEV /dev/MAKEDEV.local . && ./MAKEDEV all",
-          destroy = "rm -rf *" },
+          create = "./MAKEDEV all",
+          destroy = "rm -rf [a-z]*" },
 
         { action = "mount", fs = "proc", dir = "/proc" },
         { action = "mount", fs = "tmp", dir = "/tmp" },

@@ -58,17 +58,17 @@
 //!         -- Create symbolic link
 //!         { action = "symlink", src = "usr/bin", dest = "/bin" },
 //!
-//!         -- Run command on host (default, working directory is sandbox root on host)
-//!         { action = "cmd", create = "chmod 1777 tmp" },
+//!         -- Run command inside sandbox via chroot (default)
+//!         { action = "cmd", create = "ldconfig" },
 //!
-//!         -- Run command inside sandbox via chroot
-//!         { action = "cmd", create = "ldconfig", chrooted = true },
+//!         -- Run chrooted command with specific working directory
+//!         { action = "cmd", create = "npm install", cwd = "/build" },
 //!
-//!         -- Run chrooted command with specific working directory inside sandbox
-//!         { action = "cmd", create = "npm install", cwd = "/build", chrooted = true },
+//!         -- Run command on host (working directory is sandbox root on host)
+//!         { action = "cmd", create = "touch .stamp", chrooted = false },
 //!
 //!         -- Run different commands on create and destroy
-//!         { action = "cmd", create = "mkdir -p home/builder", destroy = "rm -rf home/builder" },
+//!         { action = "cmd", create = "mkdir -p /home/builder", destroy = "rm -rf /home/builder" },
 //!
 //!         -- Only mount if source exists on host
 //!         { action = "mount", fs = "bind", dir = "/opt/local", ifexists = true },
@@ -132,16 +132,17 @@ use std::str::FromStr;
 /// | `create` | no | Command to run during sandbox creation |
 /// | `destroy` | no | Command to run during sandbox destruction |
 /// | `cwd` | no | Working directory for the command |
-/// | `chrooted` | no | If true, run command inside sandbox via chroot (default: false) |
+/// | `chrooted` | no | If false, run command on host instead of in sandbox (default: true) |
 ///
-/// When `chrooted = false` (default), commands run on the host system with
-/// `cwd` interpreted as a path relative to the sandbox root on the host
-/// filesystem (e.g., `cwd = "/tmp"` becomes `<sandbox>/tmp`).
+/// When `chrooted = true` (default), commands run inside the sandbox via
+/// chroot with `cwd` interpreted as an absolute path within the sandbox
+/// (e.g., `cwd = "/tmp"` means `/tmp` inside the chroot). If no `cwd` is
+/// specified, the command runs with `/` as the working directory.
 ///
-/// When `chrooted = true`, commands run inside the sandbox via chroot with
-/// `cwd` interpreted as an absolute path within the sandbox (e.g.,
-/// `cwd = "/tmp"` means `/tmp` inside the chroot). If no `cwd` is specified,
-/// the command runs with `/` as the working directory inside the chroot.
+/// When `chrooted = false`, commands run on the host system with `cwd`
+/// interpreted as a path relative to the sandbox root on the host filesystem
+/// (e.g., `cwd = "/tmp"` becomes `<sandbox>/tmp`). If no `cwd` is specified,
+/// the sandbox root directory is used.
 #[derive(Clone, Debug, Default)]
 pub struct Action {
     action: String,
@@ -329,7 +330,7 @@ impl Action {
             create: t.get("create").ok(),
             destroy: t.get("destroy").ok(),
             cwd: t.get::<Option<String>>("cwd")?.map(PathBuf::from),
-            chrooted: t.get("chrooted").unwrap_or(false),
+            chrooted: t.get("chrooted").unwrap_or(true),
             ifexists: t.get("ifexists").unwrap_or(false),
         })
     }
