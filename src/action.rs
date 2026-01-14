@@ -58,8 +58,14 @@
 //!         -- Create symbolic link
 //!         { action = "symlink", src = "usr/bin", dest = "/bin" },
 //!
-//!         -- Run command on setup (working directory is sandbox root)
+//!         -- Run command on host (default, working directory is sandbox root on host)
 //!         { action = "cmd", create = "chmod 1777 tmp" },
+//!
+//!         -- Run command inside sandbox via chroot
+//!         { action = "cmd", create = "ldconfig", chrooted = true },
+//!
+//!         -- Run chrooted command with specific working directory inside sandbox
+//!         { action = "cmd", create = "npm install", cwd = "/build", chrooted = true },
 //!
 //!         -- Run different commands on create and destroy
 //!         { action = "cmd", create = "mkdir -p home/builder", destroy = "rm -rf home/builder" },
@@ -125,7 +131,17 @@ use std::str::FromStr;
 /// |-------|----------|-------------|
 /// | `create` | no | Command to run during sandbox creation |
 /// | `destroy` | no | Command to run during sandbox destruction |
-/// | `cwd` | no | Working directory relative to sandbox root |
+/// | `cwd` | no | Working directory for the command |
+/// | `chrooted` | no | If true, run command inside sandbox via chroot (default: false) |
+///
+/// When `chrooted = false` (default), commands run on the host system with
+/// `cwd` interpreted as a path relative to the sandbox root on the host
+/// filesystem (e.g., `cwd = "/tmp"` becomes `<sandbox>/tmp`).
+///
+/// When `chrooted = true`, commands run inside the sandbox via chroot with
+/// `cwd` interpreted as an absolute path within the sandbox (e.g.,
+/// `cwd = "/tmp"` means `/tmp` inside the chroot). If no `cwd` is specified,
+/// the command runs with `/` as the working directory inside the chroot.
 #[derive(Clone, Debug, Default)]
 pub struct Action {
     action: String,
@@ -136,6 +152,7 @@ pub struct Action {
     create: Option<String>,
     destroy: Option<String>,
     cwd: Option<PathBuf>,
+    chrooted: bool,
     ifexists: bool,
 }
 
@@ -312,6 +329,7 @@ impl Action {
             create: t.get("create").ok(),
             destroy: t.get("destroy").ok(),
             cwd: t.get::<Option<String>>("cwd")?.map(PathBuf::from),
+            chrooted: t.get("chrooted").unwrap_or(false),
             ifexists: t.get("ifexists").unwrap_or(false),
         })
     }
@@ -349,6 +367,10 @@ impl Action {
 
     pub fn cwd(&self) -> Option<&PathBuf> {
         self.cwd.as_ref()
+    }
+
+    pub fn chrooted(&self) -> bool {
+        self.chrooted
     }
 
     pub fn ifexists(&self) -> bool {
