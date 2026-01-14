@@ -43,7 +43,9 @@
 //! - `clean` - Clean up build artifacts
 
 use crate::config::PkgsrcEnv;
-use crate::sandbox::{SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
+use crate::sandbox::{
+    SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown,
+};
 use crate::scan::{ResolvedPackage, SkipReason, SkippedCounts};
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, RunContext, Sandbox};
@@ -2139,7 +2141,9 @@ impl Build {
                                 }
                                 Err(e) => {
                                     // Don't report errors caused by shutdown
-                                    if !shutdown_for_worker.load(Ordering::SeqCst) {
+                                    if !shutdown_for_worker
+                                        .load(Ordering::SeqCst)
+                                    {
                                         trace!(pkgname = %pkgname.pkgname(), "Worker sending JobError");
                                         let _ = manager_tx.send(
                                             ChannelCommand::JobError((

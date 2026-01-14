@@ -138,7 +138,9 @@ pub fn wait_output_with_shutdown(
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
-            unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
             let _ = rx.recv();
             bail!("Interrupted by shutdown");
         }

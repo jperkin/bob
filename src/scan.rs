@@ -365,7 +365,6 @@ impl ScanSummary {
             _ => None,
         })
     }
-
 }
 
 impl std::fmt::Display for ScanSummary {

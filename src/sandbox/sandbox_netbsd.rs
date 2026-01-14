@@ -203,10 +203,8 @@ impl Sandbox {
         for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
             // Use fstat to find processes using files under the sandbox
             // Use process_group(0) to isolate from terminal signals
-            let output = Command::new("fstat")
-                .arg(sandbox)
-                .process_group(0)
-                .output();
+            let output =
+                Command::new("fstat").arg(sandbox).process_group(0).output();
             let Ok(out) = output else {
                 return;
             };
