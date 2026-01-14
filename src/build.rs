@@ -1107,48 +1107,6 @@ impl BuildSummary {
             .collect()
     }
 
-    /// Get all up-to-date results.
-    pub fn up_to_date(&self) -> Vec<&BuildResult> {
-        self.results
-            .iter()
-            .filter(|r| matches!(r.outcome, BuildOutcome::UpToDate))
-            .collect()
-    }
-
-    /// Get all pre-failed results.
-    pub fn prefailed(&self) -> Vec<&BuildResult> {
-        self.results
-            .iter()
-            .filter(|r| matches!(&r.outcome, BuildOutcome::Skipped(s) if s.is_direct()))
-            .collect()
-    }
-
-    /// Get all indirect failed results.
-    pub fn indirect_failed(&self) -> Vec<&BuildResult> {
-        self.results
-            .iter()
-            .filter(|r| {
-                matches!(
-                    r.outcome,
-                    BuildOutcome::Skipped(SkipReason::IndirectFail(_))
-                )
-            })
-            .collect()
-    }
-
-    /// Get all indirect pre-failed results.
-    pub fn indirect_prefailed(&self) -> Vec<&BuildResult> {
-        self.results
-            .iter()
-            .filter(|r| {
-                matches!(
-                    r.outcome,
-                    BuildOutcome::Skipped(SkipReason::IndirectSkip(_))
-                )
-            })
-            .collect()
-    }
-
     /// Get all skipped results.
     pub fn skipped(&self) -> Vec<&BuildResult> {
         self.results
@@ -1246,24 +1204,6 @@ impl<'a> MakeQuery<'a> {
     /// Get the WRKDIR for this package.
     fn wrkdir(&self) -> Option<PathBuf> {
         self.var_path("WRKDIR")
-    }
-
-    /// Get the WRKSRC for this package.
-    #[allow(dead_code)]
-    fn wrksrc(&self) -> Option<PathBuf> {
-        self.var_path("WRKSRC")
-    }
-
-    /// Get the DESTDIR for this package.
-    #[allow(dead_code)]
-    fn destdir(&self) -> Option<PathBuf> {
-        self.var_path("DESTDIR")
-    }
-
-    /// Get the PREFIX for this package.
-    #[allow(dead_code)]
-    fn prefix(&self) -> Option<PathBuf> {
-        self.var_path("PREFIX")
     }
 
     /// Resolve a path to its actual location on the host filesystem.
@@ -1694,9 +1634,6 @@ struct BuildJobs {
     failed: HashSet<PkgName>,
     results: Vec<BuildResult>,
     logdir: PathBuf,
-    /// Number of packages loaded from cache.
-    #[allow(dead_code)]
-    cached_count: usize,
 }
 
 impl BuildJobs {
@@ -1817,56 +1754,6 @@ impl BuildJobs {
     }
 
     /**
-     * Recursively mark a package as pre-failed and its dependents as
-     * indirect-pre-failed.
-     */
-    #[allow(dead_code)]
-    fn mark_prefailed(&mut self, pkgname: &PkgName, reason: String) {
-        let mut broken: HashSet<PkgName> = HashSet::new();
-        let mut to_check: Vec<PkgName> = vec![];
-        to_check.push(pkgname.clone());
-
-        loop {
-            let Some(badpkg) = to_check.pop() else {
-                break;
-            };
-            if broken.contains(&badpkg) {
-                continue;
-            }
-            for (pkg, deps) in &self.incoming {
-                if deps.contains(&badpkg) {
-                    to_check.push(pkg.clone());
-                }
-            }
-            broken.insert(badpkg);
-        }
-
-        let is_original = |p: &PkgName| p == pkgname;
-        for pkg in broken {
-            self.incoming.remove(&pkg);
-            self.failed.insert(pkg.clone());
-
-            let scanpkg = self.scanpkgs.get(&pkg);
-            let log_dir = Some(self.logdir.join(pkg.pkgname()));
-            let outcome = if is_original(&pkg) {
-                BuildOutcome::Skipped(SkipReason::PkgFail(reason.clone()))
-            } else {
-                BuildOutcome::Skipped(SkipReason::IndirectSkip(format!(
-                    "dependency {} skipped",
-                    pkgname.pkgname()
-                )))
-            };
-            self.results.push(BuildResult {
-                pkgname: pkg,
-                pkgpath: scanpkg.map(|s| s.pkgpath.clone()),
-                outcome,
-                duration: Duration::ZERO,
-                log_dir,
-            });
-        }
-    }
-
-    /**
      * Get next package status.
      */
     fn get_next_build(&self) -> BuildStatus {
@@ -1964,11 +1851,6 @@ impl Build {
             );
         }
         Ok(count)
-    }
-
-    /// Access completed build results.
-    pub fn cached(&self) -> &IndexMap<PkgName, BuildResult> {
-        &self.cached
     }
 
     pub fn start(
@@ -2139,7 +2021,6 @@ impl Build {
             failed,
             results,
             logdir,
-            cached_count,
         };
 
         println!("Building packages...");

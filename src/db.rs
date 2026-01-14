@@ -86,12 +86,6 @@ impl Database {
         Ok(())
     }
 
-    /// Rollback the current transaction.
-    pub fn rollback(&self) -> Result<()> {
-        self.conn.execute("ROLLBACK", [])?;
-        Ok(())
-    }
-
     /// Configure SQLite for performance.
     fn configure_pragmas(&self) -> Result<()> {
         self.conn.execute_batch(
@@ -162,18 +156,14 @@ impl Database {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 pkgname TEXT UNIQUE NOT NULL,
                 pkgpath TEXT NOT NULL,
-                pkgname_base TEXT NOT NULL,
-                version TEXT NOT NULL,
                 skip_reason TEXT,
                 fail_reason TEXT,
                 is_bootstrap INTEGER DEFAULT 0,
                 pbulk_weight INTEGER DEFAULT 100,
-                scan_data TEXT,
-                scanned_at INTEGER NOT NULL
+                scan_data TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_packages_pkgpath ON packages(pkgpath);
-            CREATE INDEX IF NOT EXISTS idx_packages_pkgname_base ON packages(pkgname_base);
             CREATE INDEX IF NOT EXISTS idx_packages_status ON packages(skip_reason, fail_reason);
 
             CREATE TABLE IF NOT EXISTS depends (
@@ -203,7 +193,6 @@ impl Database {
                 outcome TEXT NOT NULL,
                 outcome_detail TEXT,
                 duration_ms INTEGER NOT NULL DEFAULT 0,
-                built_at INTEGER NOT NULL,
                 log_dir TEXT,
                 UNIQUE(package_id)
             );
@@ -312,7 +301,6 @@ impl Database {
         index: &ScanIndex,
     ) -> Result<i64> {
         let pkgname = index.pkgname.pkgname();
-        let (base, version) = split_pkgname(pkgname);
 
         let skip_reason =
             index.pkg_skip_reason.as_ref().filter(|s| !s.is_empty());
@@ -326,28 +314,22 @@ impl Database {
             .unwrap_or(100);
 
         let scan_data = serde_json::to_string(index)?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs() as i64;
 
         {
             let mut stmt = self.conn.prepare_cached(
                 "INSERT OR REPLACE INTO packages
-                 (pkgname, pkgpath, pkgname_base, version, skip_reason, fail_reason,
-                  is_bootstrap, pbulk_weight, scan_data, scanned_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 (pkgname, pkgpath, skip_reason, fail_reason,
+                  is_bootstrap, pbulk_weight, scan_data)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
             stmt.execute(params![
                 pkgname,
                 pkgpath,
-                base,
-                version,
                 skip_reason,
                 fail_reason,
                 is_bootstrap,
                 pbulk_weight,
-                scan_data,
-                now
+                scan_data
             ])?;
         }
 
@@ -616,26 +598,12 @@ impl Database {
     pub fn clear_scan(&self) -> Result<()> {
         self.conn.execute("DELETE FROM packages", [])?;
         self.clear_full_scan_complete()?;
-        self.clear_resolved_depends()?;
         Ok(())
     }
 
     // ========================================================================
     // DEPENDENCY QUERIES
     // ========================================================================
-
-    /// Store a resolved dependency.
-    pub fn store_resolved_dependency(
-        &self,
-        package_id: i64,
-        depends_on_id: i64,
-    ) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR IGNORE INTO resolved_depends (package_id, depends_on_id) VALUES (?1, ?2)",
-            params![package_id, depends_on_id],
-        )?;
-        Ok(())
-    }
 
     /// Store resolved dependencies in batch.
     pub fn store_resolved_dependencies_batch(
@@ -652,27 +620,6 @@ impl Database {
         drop(stmt);
         self.conn.execute("COMMIT", [])?;
         Ok(())
-    }
-
-    /// Get direct dependencies of a package.
-    pub fn get_dependencies(&self, package_id: i64) -> Result<Vec<i64>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT depends_on_id FROM resolved_depends WHERE package_id = ?1",
-        )?;
-        let rows = stmt.query_map([package_id], |row| row.get::<_, i64>(0))?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
-    /// Get reverse dependencies (packages that depend on this one).
-    pub fn get_reverse_dependencies(
-        &self,
-        package_id: i64,
-    ) -> Result<Vec<i64>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT package_id FROM resolved_depends WHERE depends_on_id = ?1",
-        )?;
-        let rows = stmt.query_map([package_id], |row| row.get::<_, i64>(0))?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /// Get all transitive reverse dependencies using recursive CTE.
@@ -700,20 +647,6 @@ impl Database {
         Ok(())
     }
 
-    /// Get raw dependencies for pattern matching.
-    pub fn get_raw_dependencies(
-        &self,
-        package_id: i64,
-    ) -> Result<Vec<(String, String)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT depend_pattern, depend_pkgpath FROM depends WHERE package_id = ?1"
-        )?;
-        let rows = stmt.query_map([package_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
     // ========================================================================
     // BUILD QUERIES
     // ========================================================================
@@ -726,16 +659,13 @@ impl Database {
     ) -> Result<()> {
         let (outcome, detail) = build_outcome_to_db(&result.outcome);
         let duration_ms = result.duration.as_millis() as i64;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs() as i64;
         let log_dir = result.log_dir.as_ref().map(|p| p.display().to_string());
 
         self.conn.execute(
             "INSERT OR REPLACE INTO builds
-             (package_id, outcome, outcome_detail, duration_ms, built_at, log_dir)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![package_id, outcome, detail, duration_ms, now, log_dir],
+             (package_id, outcome, outcome_detail, duration_ms, log_dir)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![package_id, outcome, detail, duration_ms, log_dir],
         )?;
 
         debug!(
@@ -806,54 +736,6 @@ impl Database {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
-    }
-
-    /// Check if a package is already built (success or up_to_date).
-    pub fn is_package_complete(&self, package_id: i64) -> Result<bool> {
-        let result = self.conn.query_row(
-            "SELECT outcome FROM builds WHERE package_id = ?1",
-            [package_id],
-            |row| row.get::<_, String>(0),
-        );
-
-        match result {
-            Ok(outcome) => Ok(outcome == "success" || outcome == "up_to_date"),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Check if a package build has failed.
-    pub fn is_package_failed(&self, package_id: i64) -> Result<bool> {
-        let result = self.conn.query_row(
-            "SELECT outcome FROM builds WHERE package_id = ?1",
-            [package_id],
-            |row| row.get::<_, String>(0),
-        );
-
-        match result {
-            Ok(outcome) => Ok(outcome != "success" && outcome != "up_to_date"),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Get all completed package IDs.
-    pub fn get_completed_package_ids(&self) -> Result<HashSet<i64>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT package_id FROM builds WHERE outcome IN ('success', 'up_to_date')"
-        )?;
-        let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
-        rows.collect::<Result<HashSet<_>, _>>().map_err(Into::into)
-    }
-
-    /// Get all failed package IDs.
-    pub fn get_failed_package_ids(&self) -> Result<HashSet<i64>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT package_id FROM builds WHERE outcome NOT IN ('success', 'up_to_date')"
-        )?;
-        let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
-        rows.collect::<Result<HashSet<_>, _>>().map_err(Into::into)
     }
 
     /// Count of build results.
@@ -1045,10 +927,6 @@ impl Database {
         reason: &str,
         duration: Duration,
     ) -> Result<usize> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs() as i64;
-
         let pkgname = self.get_pkgname(package_id)?;
 
         // Get all affected packages using recursive CTE
@@ -1082,9 +960,9 @@ impl Database {
 
             self.conn.execute(
                 "INSERT OR REPLACE INTO builds
-                 (package_id, outcome, outcome_detail, duration_ms, built_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![id, outcome, detail, dur, now],
+                 (package_id, outcome, outcome_detail, duration_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![id, outcome, detail, dur],
             )?;
         }
 
@@ -1230,22 +1108,6 @@ impl Database {
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
-
-/// Split pkgname into base and version.
-fn split_pkgname(pkgname: &str) -> (String, String) {
-    // Find the last dash that's followed by a digit
-    let bytes = pkgname.as_bytes();
-    for i in (0..bytes.len()).rev() {
-        if bytes[i] == b'-'
-            && i + 1 < bytes.len()
-            && bytes[i + 1].is_ascii_digit()
-        {
-            return (pkgname[..i].to_string(), pkgname[i + 1..].to_string());
-        }
-    }
-    // No version found
-    (pkgname.to_string(), String::new())
-}
 
 /// Convert BuildOutcome to database format.
 fn build_outcome_to_db(
