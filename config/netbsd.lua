@@ -1,5 +1,8 @@
 -- Example configuration file for NetBSD.
 
+-- Configuration format version (required).
+config_version = 1
+
 -- Common variables
 local initdir = "@INITDIR@"
 

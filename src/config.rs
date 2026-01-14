@@ -21,12 +21,23 @@
 //!
 //! # Configuration File Structure
 //!
-//! A configuration file has four main sections:
+//! A configuration file has the following sections:
 //!
+//! - [`config_version`](#config-version) - Configuration format version (required)
 //! - [`options`](#options-section) - General build options (optional)
 //! - [`pkgsrc`](#pkgsrc-section) - pkgsrc paths and package list (required)
 //! - [`scripts`](#scripts-section) - Build script paths (required)
 //! - [`sandboxes`](#sandboxes-section) - Sandbox configuration (optional)
+//!
+//! # Config Version
+//!
+//! The `config_version` field is required and must be set to the current config
+//! format version. This allows bob to detect outdated configuration files and
+//! provide helpful upgrade guidance.
+//!
+//! ```lua
+//! config_version = 1
+//! ```
 //!
 //! # Options Section
 //!
@@ -144,6 +155,17 @@ use pkgsrc::PkgPath;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+/// Current configuration file format version.
+///
+/// Increment this when making breaking changes to the config format.
+/// Users will be prompted to update their config files when they don't
+/// match the current version.
+///
+/// Version history:
+/// - 1: Initial versioned config format. Changed cmd action default
+///      `chrooted` from false to true.
+pub const CONFIG_VERSION: u32 = 1;
 
 /// Environment variables retrieved from pkgsrc.
 ///
@@ -444,6 +466,8 @@ pub struct Config {
 /// Parsed configuration file contents.
 #[derive(Clone, Debug, Default)]
 pub struct ConfigFile {
+    /// The `config_version` field.
+    pub config_version: Option<u32>,
     /// The `options` section.
     pub options: Option<Options>,
     /// The `pkgsrc` section.
@@ -580,6 +604,55 @@ impl Config {
                     filename.display()
                 )
             })?;
+
+        /*
+         * Validate config_version.
+         */
+        match file.config_version {
+            None => {
+                bail!(
+                    "Configuration file {} is missing 'config_version'.\n\
+                     \n\
+                     Add the following line to the top of your config file:\n\
+                     \n\
+                     config_version = {}\n\
+                     \n\
+                     Note: The default behavior of cmd actions has changed.\n\
+                     Commands now run inside the sandbox (chrooted) by default.\n\
+                     Use 'chrooted = false' for commands that must run on the host.",
+                    filename.display(),
+                    CONFIG_VERSION
+                );
+            }
+            Some(v) if v > CONFIG_VERSION => {
+                bail!(
+                    "Configuration file {} has config_version = {}, \
+                     but this version of bob only supports up to version {}.\n\
+                     Please upgrade bob or use a compatible configuration file.",
+                    filename.display(),
+                    v,
+                    CONFIG_VERSION
+                );
+            }
+            Some(v) if v < CONFIG_VERSION => {
+                bail!(
+                    "Configuration file {} has config_version = {}, \
+                     but the current version is {}.\n\
+                     \n\
+                     Please update your configuration file. Key changes:\n\
+                     - Version 1: cmd actions now run inside the sandbox (chrooted) \
+                     by default.\n\
+                       Use 'chrooted = false' for commands that must run on the host.\n\
+                     \n\
+                     After updating, set config_version = {} at the top of your config.",
+                    filename.display(),
+                    v,
+                    CONFIG_VERSION,
+                    CONFIG_VERSION
+                );
+            }
+            Some(_) => {} // Version matches, all good
+        }
 
         /*
          * Parse scripts section.  Paths are resolved relative to config dir
@@ -854,6 +927,9 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
     // Get the global table (Lua script should set global variables)
     let globals = lua.globals();
 
+    // Parse config_version first
+    let config_version: Option<u32> = globals.get("config_version").ok();
+
     // Parse each section
     let options = parse_options(&globals)
         .map_err(|e| format!("Error parsing options config: {}", e))?;
@@ -883,7 +959,8 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
 
     let lua_env = LuaEnv { lua: Arc::new(Mutex::new(lua)), env_key };
 
-    let config = ConfigFile { options, pkgsrc, scripts, sandboxes };
+    let config =
+        ConfigFile { config_version, options, pkgsrc, scripts, sandboxes };
 
     Ok((config, lua_env))
 }

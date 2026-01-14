@@ -1,6 +1,9 @@
 -- Generic configuration file for unsupported systems.
 -- Does not provide a sandboxes section as it is highly OS-specific.
 
+-- Configuration format version (required).
+config_version = 1
+
 -- Common variables
 local initdir = "@INITDIR@"
 

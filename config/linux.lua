@@ -1,5 +1,8 @@
 -- Example configuration file for Linux (Lua format).
 
+-- Configuration format version (required).
+config_version = 1
+
 -- Common variables
 local initdir = "@INITDIR@"
 

@@ -1,5 +1,8 @@
 -- Example configuration file for illumos.
 
+-- Configuration format version (required).
+config_version = 1
+
 -- Common variables
 local initdir = "@INITDIR@"
 
