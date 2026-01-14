@@ -264,8 +264,9 @@ impl Sandbox {
                 return;
             }
 
-            // Give processes a moment to die
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            // Give processes a moment to die (exponential backoff)
+            let delay_ms = super::KILL_PROCESSES_INITIAL_DELAY_MS << iteration;
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
         }
         trace!(
             sandbox = %sandbox.display(),

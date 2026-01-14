@@ -43,7 +43,7 @@
 //! - `clean` - Clean up build artifacts
 
 use crate::config::PkgsrcEnv;
-use crate::sandbox::{SandboxScope, wait_with_shutdown};
+use crate::sandbox::{SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
 use crate::scan::{ResolvedPackage, SkipReason, SkippedCounts};
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, RunContext, Sandbox};
@@ -60,6 +60,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc, mpsc::Sender};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, trace, warn};
+
+/// How often to batch and send build output lines to the UI channel.
+/// This is the floor on log display responsiveness — output cannot appear
+/// faster than this regardless of UI refresh rate. 100ms (10fps) is
+/// imperceptible for build logs while reducing channel overhead.
+const OUTPUT_BATCH_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How long a worker thread sleeps when told no work is available.
+/// This prevents busy-spinning when all pending builds are blocked on
+/// dependencies. 100ms balances responsiveness with CPU efficiency.
+const WORKER_BACKOFF_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Build stages in order of execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -621,7 +632,7 @@ impl<'a> PkgBuilder<'a> {
                 let mut buf = Vec::new();
                 let mut batch = Vec::with_capacity(50);
                 let mut last_send = Instant::now();
-                let send_interval = Duration::from_millis(100);
+                let send_interval = OUTPUT_BATCH_INTERVAL;
 
                 loop {
                     buf.clear();
@@ -2211,7 +2222,7 @@ impl Build {
 
                     match msg {
                         ChannelCommand::ComeBackLater => {
-                            std::thread::sleep(Duration::from_millis(100));
+                            std::thread::sleep(WORKER_BACKOFF_INTERVAL);
                             continue;
                         }
                         ChannelCommand::JobData(pkg) => {
@@ -2313,9 +2324,8 @@ impl Build {
                     break;
                 }
 
-                // Use recv_timeout to check shutdown flag periodically
                 let command =
-                    match manager_rx.recv_timeout(Duration::from_millis(50)) {
+                    match manager_rx.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
                         Ok(cmd) => cmd,
                         Err(mpsc::RecvTimeoutError::Timeout) => continue,
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,

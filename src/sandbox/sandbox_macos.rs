@@ -189,7 +189,7 @@ impl Sandbox {
 
     /// Kill all processes with open file handles within a sandbox path.
     pub fn kill_processes(&self, sandbox: &Path) {
-        for _ in 0..super::KILL_PROCESSES_MAX_RETRIES {
+        for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
             // Use lsof to find processes using files under the sandbox
             // Use process_group(0) to isolate from terminal signals
             let output = Command::new("lsof")
@@ -222,8 +222,9 @@ impl Sandbox {
                 .process_group(0)
                 .status();
 
-            // Give processes a moment to die
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            // Give processes a moment to die (exponential backoff)
+            let delay_ms = super::KILL_PROCESSES_INITIAL_DELAY_MS << iteration;
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
         }
     }
 }

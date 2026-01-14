@@ -204,7 +204,7 @@ impl Sandbox {
     pub fn kill_processes(&self, sandbox: &Path) {
         use std::process::Stdio;
 
-        for _ in 0..super::KILL_PROCESSES_MAX_RETRIES {
+        for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
             // Use fuser -k to kill all processes using files under the sandbox
             // Use process_group(0) to isolate from terminal signals
             let _ = Command::new("fuser")
@@ -215,8 +215,9 @@ impl Sandbox {
                 .process_group(0)
                 .status();
 
-            // Give processes a moment to die
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            // Give processes a moment to die (exponential backoff)
+            let delay_ms = super::KILL_PROCESSES_INITIAL_DELAY_MS << iteration;
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
 
             // Check if any processes are still using the sandbox
             let status = Command::new("fuser")

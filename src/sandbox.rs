@@ -84,8 +84,15 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
 use tracing::warn;
 
+/// How often to check the shutdown flag while waiting for something else.
+/// This determines the maximum latency between Ctrl+C and response.
+/// 100ms provides responsive feel without excessive polling overhead.
+pub(crate) const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Maximum number of retries when killing processes in a sandbox.
-const KILL_PROCESSES_MAX_RETRIES: u32 = 10;
+/// Uses exponential backoff: 64ms, 128ms, 256ms, 512ms, 1024ms = ~2s total.
+pub(crate) const KILL_PROCESSES_MAX_RETRIES: u32 = 5;
+pub(crate) const KILL_PROCESSES_INITIAL_DELAY_MS: u64 = 64;
 
 /*
  * Poll for child process exit while checking a shutdown flag.  If shutdown
@@ -103,7 +110,7 @@ pub fn wait_with_shutdown(
         }
         match child.try_wait()? {
             Some(status) => return Ok(status),
-            None => std::thread::sleep(Duration::from_millis(100)),
+            None => std::thread::sleep(SHUTDOWN_POLL_INTERVAL),
         }
     }
 }
@@ -135,7 +142,7 @@ pub fn wait_output_with_shutdown(
             let _ = rx.recv();
             bail!("Interrupted by shutdown");
         }
-        match rx.recv_timeout(Duration::from_millis(100)) {
+        match rx.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
             Ok(result) => return result.map_err(Into::into),
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => {
