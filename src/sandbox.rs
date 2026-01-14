@@ -76,11 +76,11 @@ use crate::action::{ActionType, FSType};
 use crate::config::Config;
 use anyhow::{Result, bail};
 use std::fs;
-use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
 use tracing::warn;
 
@@ -109,42 +109,38 @@ pub fn wait_with_shutdown(
 }
 
 /*
- * Poll for child process exit while checking a shutdown flag, returning
+ * Wait for child process exit while checking a shutdown flag, returning
  * the full output (stdout/stderr).  If shutdown is requested, kill the
  * child and return an error.
+ *
+ * Uses a single helper thread that calls wait_with_output() (which handles
+ * pipe draining correctly via internal threads).  The main thread polls a
+ * channel for results while checking the shutdown flag.  This avoids the
+ * polling latency of try_wait() while still allowing shutdown interruption.
  */
 pub fn wait_output_with_shutdown(
-    mut child: Child,
+    child: Child,
     shutdown: &AtomicBool,
 ) -> Result<Output> {
-    let stdout = child.stdout.take().map(|s| (s, Vec::new()));
-    let stderr = child.stderr.take().map(|s| (s, Vec::new()));
+    let pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
-            let _ = child.kill();
-            let _ = child.wait();
+            unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+            let _ = rx.recv();
             bail!("Interrupted by shutdown");
         }
-        match child.try_wait()? {
-            Some(status) => {
-                let mut stdout_bytes = Vec::new();
-                let mut stderr_bytes = Vec::new();
-                if let Some((mut r, mut buf)) = stdout {
-                    let _ = r.read_to_end(&mut buf);
-                    stdout_bytes = buf;
-                }
-                if let Some((mut r, mut buf)) = stderr {
-                    let _ = r.read_to_end(&mut buf);
-                    stderr_bytes = buf;
-                }
-                return Ok(Output {
-                    status,
-                    stdout: stdout_bytes,
-                    stderr: stderr_bytes,
-                });
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(result) => return result.map_err(Into::into),
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => {
+                bail!("wait thread disconnected unexpectedly");
             }
-            None => std::thread::sleep(Duration::from_millis(100)),
         }
     }
 }
