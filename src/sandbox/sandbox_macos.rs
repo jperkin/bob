@@ -17,6 +17,7 @@
 use crate::sandbox::Sandbox;
 use anyhow::{Context, bail};
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitStatus};
 
@@ -34,6 +35,7 @@ impl Sandbox {
                 .args(opts)
                 .arg(src)
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
@@ -52,6 +54,7 @@ impl Sandbox {
                 .arg("devfs")
                 .args(opts)
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
@@ -79,6 +82,7 @@ impl Sandbox {
                 .args(opts)
                 .arg(src)
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
@@ -105,6 +109,7 @@ impl Sandbox {
             Command::new(cmd)
                 .args(opts)
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
@@ -122,12 +127,17 @@ impl Sandbox {
          * macOS is notorious for not unmounting file systems, even with
          * "diskutil unmount force" in some cases, so for now we just skip
          * straight to "umount -f" which appears to work.
+         *
+         * Use process_group(0) to put umount in its own process group.
+         * This prevents it from receiving SIGINT when the user presses Ctrl+C,
+         * ensuring cleanup can complete even during repeated interrupts.
          */
         let cmd = "/sbin/umount";
         Ok(Some(
             Command::new(cmd)
                 .arg("-f")
                 .arg(dest)
+                .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
@@ -181,7 +191,12 @@ impl Sandbox {
     pub fn kill_processes(&self, sandbox: &Path) {
         for _ in 0..super::KILL_PROCESSES_MAX_RETRIES {
             // Use lsof to find processes using files under the sandbox
-            let output = Command::new("lsof").arg("+D").arg(sandbox).output();
+            // Use process_group(0) to isolate from terminal signals
+            let output = Command::new("lsof")
+                .arg("+D")
+                .arg(sandbox)
+                .process_group(0)
+                .output();
             let Ok(out) = output else {
                 return;
             };
@@ -204,6 +219,7 @@ impl Sandbox {
                 .arg("-9")
                 .args(&pids)
                 .stderr(std::process::Stdio::null())
+                .process_group(0)
                 .status();
 
             // Give processes a moment to die
