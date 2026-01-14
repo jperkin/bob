@@ -89,14 +89,6 @@ impl SkipReason {
                 | SkipReason::UnresolvedDep(_)
         )
     }
-
-    /// Returns true if this is an indirect skip (inherited from a dependency).
-    pub fn is_indirect(&self) -> bool {
-        matches!(
-            self,
-            SkipReason::IndirectSkip(_) | SkipReason::IndirectFail(_)
-        )
-    }
 }
 
 impl std::fmt::Display for SkipReason {
@@ -247,15 +239,6 @@ impl ScanResult {
         }
     }
 
-    /// Returns the underlying ScanIndex if available.
-    pub fn index(&self) -> Option<&ScanIndex> {
-        match self {
-            ScanResult::Buildable(pkg) => Some(&pkg.index),
-            ScanResult::Skipped { index, .. } => index.as_ref(),
-            ScanResult::ScanFail { .. } => None,
-        }
-    }
-
     /// Returns resolved dependencies.
     pub fn depends(&self) -> &[PkgName] {
         match self {
@@ -371,88 +354,6 @@ impl ScanSummary {
         self.packages.iter().filter(|p| p.is_buildable()).count()
     }
 
-    /// Count of packages with PKG_SKIP_REASON.
-    pub fn count_preskip(&self) -> usize {
-        self.packages
-            .iter()
-            .filter(|p| {
-                matches!(
-                    p,
-                    ScanResult::Skipped { reason: SkipReason::PkgSkip(_), .. }
-                )
-            })
-            .count()
-    }
-
-    /// Count of packages with PKG_FAIL_REASON.
-    pub fn count_prefail(&self) -> usize {
-        self.packages
-            .iter()
-            .filter(|p| {
-                matches!(
-                    p,
-                    ScanResult::Skipped { reason: SkipReason::PkgFail(_), .. }
-                )
-            })
-            .count()
-    }
-
-    /// Count of packages with unresolved dependencies.
-    pub fn count_unresolved(&self) -> usize {
-        self.packages
-            .iter()
-            .filter(|p| {
-                matches!(
-                    p,
-                    ScanResult::Skipped {
-                        reason: SkipReason::UnresolvedDep(_),
-                        ..
-                    }
-                )
-            })
-            .count()
-    }
-
-    /// Count of packages that failed to scan.
-    pub fn count_scanfail(&self) -> usize {
-        self.packages
-            .iter()
-            .filter(|p| matches!(p, ScanResult::ScanFail { .. }))
-            .count()
-    }
-
-    /// Count of packages skipped due to dependency being skipped.
-    pub fn count_indirect_skip(&self) -> usize {
-        self.packages
-            .iter()
-            .filter(|p| {
-                matches!(
-                    p,
-                    ScanResult::Skipped {
-                        reason: SkipReason::IndirectSkip(_),
-                        ..
-                    }
-                )
-            })
-            .count()
-    }
-
-    /// Count of packages failed due to dependency failure.
-    pub fn count_indirect_fail(&self) -> usize {
-        self.packages
-            .iter()
-            .filter(|p| {
-                matches!(
-                    p,
-                    ScanResult::Skipped {
-                        reason: SkipReason::IndirectFail(_),
-                        ..
-                    }
-                )
-            })
-            .count()
-    }
-
     /// Errors derived from scan failures and unresolved dependencies.
     pub fn errors(&self) -> impl Iterator<Item = &str> {
         self.packages.iter().filter_map(|p| match p {
@@ -465,13 +366,6 @@ impl ScanSummary {
         })
     }
 
-    /// Get a buildable package by name.
-    pub fn get(&self, pkgname: &PkgName) -> Option<&ResolvedPackage> {
-        self.packages.iter().find_map(|p| match p {
-            ScanResult::Buildable(pkg) if pkg.pkgname() == pkgname => Some(pkg),
-            _ => None,
-        })
-    }
 }
 
 impl std::fmt::Display for ScanSummary {
@@ -1084,11 +978,6 @@ impl Scan {
     /// Returns scan failures as formatted error strings.
     pub fn scan_errors(&self) -> impl Iterator<Item = &str> {
         self.scan_failures.iter().map(|(_, e)| e.as_str())
-    }
-
-    /// Returns scan failures with pkgpath information.
-    pub fn scan_failures(&self) -> &[(PkgPath, String)] {
-        &self.scan_failures
     }
 
     /**

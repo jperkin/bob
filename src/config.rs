@@ -113,17 +113,6 @@
 //! | `bob_tar` | Path to the tar binary. |
 //! | `bob_build_user` | Unprivileged build user, if configured. |
 //! | `bob_bootstrap` | Path to the bootstrap tarball, if configured. |
-//! | `bob_status_fd` | File descriptor for sending status messages back to bob. |
-//!
-//! ## Status Messages
-//!
-//! Scripts can send status updates to bob by writing to the file descriptor
-//! in `bob_status_fd`:
-//!
-//! | Message | Description |
-//! |---------|-------------|
-//! | `stage:<name>` | Build entered a new phase (e.g., `stage:configure`). Displayed in the TUI. |
-//! | `skipped` | Package was skipped (e.g., already up-to-date). |
 //!
 //! # Sandboxes Section
 //!
@@ -436,7 +425,6 @@ impl LuaEnv {
 #[derive(Clone, Debug, Default)]
 pub struct Config {
     file: ConfigFile,
-    filename: PathBuf,
     verbose: bool,
     lua_env: LuaEnv,
 }
@@ -617,7 +605,7 @@ impl Config {
             false
         };
 
-        Ok(Config { file, filename, verbose, lua_env })
+        Ok(Config { file, verbose, lua_env })
     }
 
     pub fn build_threads(&self) -> usize {
@@ -666,15 +654,6 @@ impl Config {
 
     pub fn verbose(&self) -> bool {
         self.verbose
-    }
-
-    /// Return the path to the configuration file.
-    pub fn config_path(&self) -> Option<&Path> {
-        if self.filename.as_os_str().is_empty() {
-            None
-        } else {
-            Some(&self.filename)
-        }
     }
 
     pub fn logdir(&self) -> &PathBuf {

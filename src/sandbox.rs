@@ -319,8 +319,7 @@ impl Sandbox {
 
     /**
      * Execute a script file with supplied environment variables and optional
-     * stdin data. If status_fd is provided, it will be passed to the child
-     * process via the bob_status_fd environment variable.
+     * stdin data.
      *
      * If protected is true, the process is placed in its own process group
      * to isolate it from terminal signals (Ctrl+C). Use this for cleanup
@@ -330,19 +329,14 @@ impl Sandbox {
         &self,
         id: usize,
         script: &Path,
-        mut envs: Vec<(String, String)>,
+        envs: Vec<(String, String)>,
         stdin_data: Option<&str>,
-        status_fd: Option<i32>,
         protected: bool,
     ) -> Result<Child> {
         use std::io::Write;
 
         let mut cmd = self.command(id, script);
         cmd.current_dir("/");
-
-        if let Some(fd) = status_fd {
-            envs.push(("bob_status_fd".to_string(), fd.to_string()));
-        }
 
         for (key, val) in envs {
             cmd.env(key, val);
@@ -439,7 +433,7 @@ impl Sandbox {
         envs: Vec<(String, String)>,
     ) -> Result<bool> {
         if let Some(script) = config.script("pre-build") {
-            let child = self.execute(id, script, envs, None, None, false)?;
+            let child = self.execute(id, script, envs, None, false)?;
             let output = child.wait_with_output()?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -471,7 +465,7 @@ impl Sandbox {
     ) -> Result<bool> {
         if let Some(script) = config.script("post-build") {
             // Use protected=true to ensure cleanup completes during shutdown
-            let child = self.execute(id, script, envs, None, None, true)?;
+            let child = self.execute(id, script, envs, None, true)?;
             let output = child.wait_with_output()?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
