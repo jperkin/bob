@@ -123,10 +123,15 @@ impl BuildRunner {
         println!("Resolving dependencies...");
         let result = scan.resolve(&self.db)?;
 
-        // Check for unresolved dependency errors in strict_scan mode
+        // Check for unresolved dependency errors
         let errors: Vec<_> = result.errors().collect();
-        if self.config.strict_scan() && !errors.is_empty() {
-            bail!("Unresolved dependencies:\n  {}", errors.join("\n  "));
+        if !errors.is_empty() {
+            eprintln!("Unresolved dependencies:\n  {}", errors.join("\n  "));
+            if self.config.strict_scan() {
+                bail!(
+                    "Aborting due to unresolved dependencies (strict_scan enabled)"
+                );
+            }
         }
 
         Ok(result)
