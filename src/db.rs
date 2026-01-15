@@ -995,12 +995,12 @@ fn db_outcome_to_build(outcome: &str, detail: Option<String>) -> BuildOutcome {
         "success" => BuildOutcome::Success,
         "up_to_date" => BuildOutcome::UpToDate,
         "failed" => BuildOutcome::Failed(detail.unwrap_or_default()),
-        "pkg_skip" => {
-            BuildOutcome::Skipped(SkipReason::PkgSkip(detail.unwrap_or_default()))
-        }
-        "pkg_fail" => {
-            BuildOutcome::Skipped(SkipReason::PkgFail(detail.unwrap_or_default()))
-        }
+        "pkg_skip" => BuildOutcome::Skipped(SkipReason::PkgSkip(
+            detail.unwrap_or_default(),
+        )),
+        "pkg_fail" => BuildOutcome::Skipped(SkipReason::PkgFail(
+            detail.unwrap_or_default(),
+        )),
         "indirect_skip" => BuildOutcome::Skipped(SkipReason::IndirectSkip(
             detail.unwrap_or_default(),
         )),
