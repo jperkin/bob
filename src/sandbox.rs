@@ -623,7 +623,7 @@ impl Sandbox {
                             id,
                             create_cmd,
                             action.cwd(),
-                            action.chrooted(),
+                            action.chroot(),
                         )?
                     } else {
                         None
@@ -658,23 +658,23 @@ impl Sandbox {
 
     /// Run a custom action command.
     ///
-    /// When `chrooted` is true (default), the command runs inside the sandbox
-    /// via chroot with `cwd` interpreted as an absolute path within the
-    /// sandbox. For example, `cwd = "/tmp"` means `/tmp` inside the chroot.
-    /// If no `cwd` is specified, `/` is used as the working directory.
-    ///
-    /// When `chrooted` is false, the command runs on the host system with
-    /// `cwd` interpreted as a path relative to the sandbox root on the host
-    /// filesystem. For example, `cwd = "/tmp"` becomes `<sandbox>/tmp`.
+    /// When `chroot` is false (default), the command runs on the host system
+    /// with `cwd` interpreted as a path relative to the sandbox root on the
+    /// host filesystem. For example, `cwd = "/tmp"` becomes `<sandbox>/tmp`.
     /// If no `cwd` is specified, the sandbox root is used.
+    ///
+    /// When `chroot` is true, the command runs inside the sandbox via chroot
+    /// with `cwd` interpreted as an absolute path within the sandbox. For
+    /// example, `cwd = "/tmp"` means `/tmp` inside the chroot. If no `cwd`
+    /// is specified, `/` is used as the working directory.
     fn run_action_cmd(
         &self,
         id: usize,
         cmd: &str,
         cwd: Option<&PathBuf>,
-        chrooted: bool,
+        chroot: bool,
     ) -> Result<Option<std::process::ExitStatus>> {
-        if chrooted {
+        if chroot {
             // Run inside sandbox via chroot
             // cwd is an absolute path inside the sandbox (default: /)
             let work_dir = cwd
@@ -745,7 +745,7 @@ impl Sandbox {
                             id,
                             destroy_cmd,
                             action.cwd(),
-                            action.chrooted(),
+                            action.chroot(),
                         )?;
                         if let Some(s) = status {
                             if !s.success() {

@@ -163,8 +163,9 @@ use std::sync::{Arc, Mutex};
 /// match the current version.
 ///
 /// Version history:
-/// - 1: Initial versioned config format. Changed cmd action default
-///      `chrooted` from false to true.
+/// - 1: Initial versioned config format. Added `chroot` flag to cmd actions
+///      (default: false). Set `chroot = true` to run commands inside the
+///      sandbox via chroot instead of on the host.
 pub const CONFIG_VERSION: u32 = 1;
 
 /// Environment variables retrieved from pkgsrc.
@@ -617,9 +618,8 @@ impl Config {
                      \n\
                      config_version = {}\n\
                      \n\
-                     Note: The default behavior of cmd actions has changed.\n\
-                     Commands now run inside the sandbox (chrooted) by default.\n\
-                     Use 'chrooted = false' for commands that must run on the host.",
+                     Note: cmd actions now support a 'chroot' flag. Set 'chroot = true'\n\
+                     to run commands inside the sandbox instead of on the host.",
                     filename.display(),
                     CONFIG_VERSION
                 );
@@ -640,9 +640,8 @@ impl Config {
                      but the current version is {}.\n\
                      \n\
                      Please update your configuration file. Key changes:\n\
-                     - Version 1: cmd actions now run inside the sandbox (chrooted) \
-                     by default.\n\
-                       Use 'chrooted = false' for commands that must run on the host.\n\
+                     - Version 1: Added 'chroot' flag to cmd actions. Set 'chroot = true'\n\
+                       to run commands inside the sandbox instead of on the host.\n\
                      \n\
                      After updating, set config_version = {} at the top of your config.",
                     filename.display(),
