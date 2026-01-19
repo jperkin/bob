@@ -1077,6 +1077,7 @@ dependencies = [
  "copy_dir",
  "crossterm",
  "ctrlc",
+ "flate2",
  "glob",
  "indexmap 2.13.0",
  "libc",

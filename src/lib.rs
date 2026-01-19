@@ -23,6 +23,7 @@ pub mod db;
 pub mod report;
 pub mod sandbox;
 pub mod scan;
+pub mod summary;
 
 // Internal modules - exposed for binary use but not primary API
 mod init;
@@ -56,6 +57,7 @@ pub use sandbox::Sandbox;
 pub use scan::{
     ResolvedPackage, Scan, ScanResult, ScanSummary, SkipReason, SkippedCounts,
 };
+pub use summary::generate_pkg_summary;
 
 // Re-export init for CLI use
 pub use init::Init;

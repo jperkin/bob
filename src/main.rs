@@ -282,6 +282,33 @@ impl BuildRunner {
         }
     }
 
+    /// Generate pkg_summary.gz for all successful packages.
+    fn generate_pkg_summary(&self) {
+        print!("Generating pkg_summary.gz...");
+        if std::io::Write::flush(&mut std::io::stdout()).is_err() {
+            return;
+        }
+        tracing::debug!("Generating pkg_summary.gz");
+        let start = std::time::Instant::now();
+        match bob::generate_pkg_summary(&self.db, self.config.build_threads()) {
+            Ok(()) => {
+                println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
+                tracing::debug!(
+                    elapsed_ms = start.elapsed().as_millis(),
+                    "Finished generating pkg_summary.gz"
+                );
+                if let Ok(env) = self.db.load_pkgsrc_env() {
+                    let path = env.packages.join("All/pkg_summary.gz");
+                    println!("pkg_summary.gz written to: {}", path.display());
+                }
+            }
+            Err(e) => {
+                println!();
+                eprintln!("Warning: Failed to generate pkg_summary.gz: {}", e);
+            }
+        }
+    }
+
     /// Look up pkgpath for a pkgname from database.
     fn find_pkgpath_for_pkgname(
         &self,
@@ -500,6 +527,7 @@ fn main() -> Result<()> {
             let summary = runner.run_build(scan_result)?;
             print_summary(&summary);
             runner.generate_report();
+            runner.generate_pkg_summary();
         }
         Cmd::Rebuild { force, packages } => {
             let mut runner =
