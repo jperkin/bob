@@ -269,117 +269,205 @@ fn format_duration_short(d: Duration) -> String {
     if secs < 60.0 { format!("{:.1}s", secs) } else { format_duration(d) }
 }
 
-/// Calculate grid layout for N panels with height optimization.
-/// If terminal width < 160, use vertical stack with idle panels collapsed.
-/// Otherwise use a roughly square grid with equal sizing.
-/// Elapsed times are used to prioritize extra lines to longer-running panels.
-fn calculate_panel_layout(
-    area: Rect,
-    num_panels: usize,
+/**
+ * Represents a group of workers for display purposes.
+ * Active workers get their own panel; consecutive idle workers are collapsed.
+ */
+#[derive(Clone, Debug)]
+enum PanelGroup {
+    Active(usize),
+    Idle(Vec<usize>),
+}
+
+impl PanelGroup {
+    fn is_active(&self) -> bool {
+        matches!(self, PanelGroup::Active(_))
+    }
+
+    fn format_title(&self) -> String {
+        match self {
+            PanelGroup::Active(i) => format!("[{}] ", i),
+            PanelGroup::Idle(ids) => {
+                let id_strs: Vec<String> =
+                    ids.iter().map(|i| i.to_string()).collect();
+                format!("[{}] idle ", id_strs.join(","))
+            }
+        }
+    }
+}
+
+/**
+ * Group consecutive idle workers together for collapsed display (linear layout).
+ */
+fn group_workers_linear(is_active: &[bool]) -> Vec<PanelGroup> {
+    let mut groups = Vec::new();
+    let mut i = 0;
+
+    while i < is_active.len() {
+        if is_active[i] {
+            groups.push(PanelGroup::Active(i));
+            i += 1;
+        } else {
+            let start = i;
+            while i < is_active.len() && !is_active[i] {
+                i += 1;
+            }
+            let ids: Vec<usize> = (start..i).collect();
+            groups.push(PanelGroup::Idle(ids));
+        }
+    }
+
+    groups
+}
+
+/**
+ * Group workers by column for grid layout, collapsing consecutive idle workers
+ * within each column. Returns (groups, grid_info) where grid_info contains the
+ * column assignments for rendering.
+ */
+fn group_workers_grid(
     is_active: &[bool],
+    cols: usize,
+) -> (Vec<Vec<PanelGroup>>, usize) {
+    let num_workers = is_active.len();
+    let rows = num_workers.div_ceil(cols);
+
+    // Build groups for each column
+    let mut column_groups: Vec<Vec<PanelGroup>> = vec![Vec::new(); cols];
+
+    for (col, groups) in column_groups.iter_mut().enumerate() {
+        // Workers in this column: col, col+cols, col+2*cols, ...
+        let workers_in_col: Vec<usize> = (0..rows)
+            .map(|r| r * cols + col)
+            .filter(|&w| w < num_workers)
+            .collect();
+
+        let mut i = 0;
+        while i < workers_in_col.len() {
+            let w = workers_in_col[i];
+            if is_active[w] {
+                groups.push(PanelGroup::Active(w));
+                i += 1;
+            } else {
+                let mut idle_ids = vec![w];
+                i += 1;
+                while i < workers_in_col.len() && !is_active[workers_in_col[i]]
+                {
+                    idle_ids.push(workers_in_col[i]);
+                    i += 1;
+                }
+                groups.push(PanelGroup::Idle(idle_ids));
+            }
+        }
+    }
+
+    (column_groups, rows)
+}
+
+/**
+ * Calculate linear layout for narrow terminals with height optimization.
+ * Idle groups get minimal height, active panels share remaining space.
+ * Elapsed times are used to prioritize extra lines to longer-running panels.
+ */
+fn calculate_linear_layout(
+    area: Rect,
+    groups: &[PanelGroup],
     elapsed_secs: &[u64],
 ) -> Vec<Rect> {
-    if num_panels == 0 {
+    let num_groups = groups.len();
+    if num_groups == 0 {
         return vec![];
     }
 
-    // For narrow terminals, stack vertically with height optimization
-    if area.width < 160 {
-        let active_count = is_active.iter().filter(|&&a| a).count();
-        let idle_height = 2u16;
-        let idle_count = num_panels - active_count;
-        let total_idle_height = idle_count as u16 * idle_height;
-        let active_space = area.height.saturating_sub(total_idle_height);
+    let active_count = groups.iter().filter(|g| g.is_active()).count();
+    let idle_height = 2u16;
+    let idle_count = num_groups - active_count;
+    let total_idle_height = idle_count as u16 * idle_height;
+    let active_space = area.height.saturating_sub(total_idle_height);
 
-        // Base height for each active panel, plus remainder to distribute
-        let base_height = if active_count > 0 {
-            active_space / active_count as u16
+    // Base height for each active panel, plus remainder to distribute
+    let base_height =
+        if active_count > 0 { active_space / active_count as u16 } else { 0 };
+    let remainder = if active_count > 0 {
+        (active_space % active_count as u16) as usize
+    } else {
+        0
+    };
+
+    // Sort active group indices by elapsed time (descending) to determine
+    // which panels get extra lines. Use worker ID as tiebreaker when times
+    // are within 10 seconds to avoid flickering when builds start together.
+    let mut active_indices: Vec<(usize, usize)> = groups
+        .iter()
+        .enumerate()
+        .filter_map(|(i, g)| match g {
+            PanelGroup::Active(w) => Some((i, *w)),
+            PanelGroup::Idle(..) => None,
+        })
+        .collect();
+    active_indices.sort_by(|&(_, wa), &(_, wb)| {
+        let time_a = elapsed_secs.get(wa).copied().unwrap_or(0);
+        let time_b = elapsed_secs.get(wb).copied().unwrap_or(0);
+        if time_a.abs_diff(time_b) > 10 {
+            time_b.cmp(&time_a)
         } else {
-            0
-        };
-        let remainder = if active_count > 0 {
-            (active_space % active_count as u16) as usize
-        } else {
-            0
-        };
-
-        // Sort active panel indices by elapsed time (descending) to determine
-        // which panels get extra lines. Use worker ID as tiebreaker when times
-        // are within 10 seconds to avoid flickering when builds start together.
-        let mut active_indices: Vec<usize> = is_active
-            .iter()
-            .enumerate()
-            .filter(|&(_, &a)| a)
-            .map(|(i, _)| i)
-            .collect();
-        active_indices.sort_by(|&a, &b| {
-            let time_a = elapsed_secs[a];
-            let time_b = elapsed_secs[b];
-            // If times differ by more than 10 seconds, sort by time
-            if time_a.abs_diff(time_b) > 10 {
-                time_b.cmp(&time_a)
-            } else {
-                // Otherwise use worker ID for stability
-                a.cmp(&b)
-            }
-        });
-
-        // Mark which panels get an extra line
-        let mut extra_line = vec![false; num_panels];
-        for &idx in active_indices.iter().take(remainder) {
-            extra_line[idx] = true;
+            wa.cmp(&wb)
         }
+    });
 
-        // Build rects maintaining order
-        let mut rects = Vec::with_capacity(num_panels);
-        let mut y = area.y;
-
-        for (i, &active) in is_active.iter().enumerate() {
-            let h = if active && active_count > 0 {
-                base_height + if extra_line[i] { 1 } else { 0 }
-            } else {
-                idle_height
-            };
-            rects.push(Rect { x: area.x, y, width: area.width, height: h });
-            y += h;
-        }
-
-        return rects;
+    // Mark which groups get an extra line
+    let mut extra_line = vec![false; num_groups];
+    for &(idx, _) in active_indices.iter().take(remainder) {
+        extra_line[idx] = true;
     }
 
-    // For wide terminals, use grid layout.
-    // Scale columns based on width: require ~80 chars per column minimum.
-    // This prefers 2x4 over 3x3 until the terminal is very wide.
-    let max_cols_by_count = (num_panels as f64).sqrt().ceil() as usize;
-    let max_cols_by_width = (area.width as usize) / 80;
-    let cols = max_cols_by_count.min(max_cols_by_width).max(1);
-    let rows = num_panels.div_ceil(cols);
+    // Build rects maintaining order
+    let mut rects = Vec::with_capacity(num_groups);
+    let mut y = area.y;
 
-    let row_constraints: Vec<Constraint> =
-        (0..rows).map(|_| Constraint::Ratio(1, rows as u32)).collect();
+    for (i, group) in groups.iter().enumerate() {
+        let h = if group.is_active() && active_count > 0 {
+            base_height + if extra_line[i] { 1 } else { 0 }
+        } else {
+            idle_height
+        };
+        rects.push(Rect { x: area.x, y, width: area.width, height: h });
+        y += h;
+    }
+
+    rects
+}
+
+/**
+ * Calculate grid layout for column-grouped panels.
+ * Each column has its own set of groups, with idle groups getting minimal height.
+ */
+fn calculate_grid_layout(
+    area: Rect,
+    column_groups: &[Vec<PanelGroup>],
+    elapsed_secs: &[u64],
+) -> Vec<Vec<Rect>> {
+    let cols = column_groups.len();
+    if cols == 0 {
+        return vec![];
+    }
+
+    // Split area into columns
     let col_constraints: Vec<Constraint> =
         (0..cols).map(|_| Constraint::Ratio(1, cols as u32)).collect();
-
-    let row_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(row_constraints)
+    let col_areas = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(col_constraints)
         .split(area);
 
-    let mut panels = Vec::with_capacity(num_panels);
-    for (row_idx, row_area) in row_chunks.iter().enumerate() {
-        let col_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(col_constraints.clone())
-            .split(*row_area);
-
-        for (col_idx, col_area) in col_chunks.iter().enumerate() {
-            let panel_idx = row_idx * cols + col_idx;
-            if panel_idx < num_panels {
-                panels.push(*col_area);
-            }
-        }
-    }
-    panels
+    // Calculate layout for each column independently
+    column_groups
+        .iter()
+        .enumerate()
+        .map(|(col_idx, groups)| {
+            calculate_linear_layout(col_areas[col_idx], groups, elapsed_secs)
+        })
+        .collect()
 }
 
 /// Line-based progress display using ratatui inline viewport.
@@ -684,51 +772,45 @@ impl MultiProgress {
             })
             .collect();
 
-        // Pre-compute titles
-        let titles: Vec<String> = (0..num_workers)
-            .map(|i| {
-                if let Some(w) = self.state.workers.get(i) {
-                    if let Some(pkg) = &w.package {
-                        let stage = w.stage.as_deref().unwrap_or("");
-                        let elapsed = w
-                            .elapsed()
-                            .map(format_duration_short)
-                            .unwrap_or_default();
-                        if stage.is_empty() {
-                            format!("[{}] {} {} ", i, pkg, elapsed)
-                        } else {
-                            format!("[{}] {} ({}) {} ", i, pkg, stage, elapsed)
-                        }
-                    } else {
-                        format!("[{}] idle ", i)
-                    }
-                } else {
-                    format!("[{}] ", i)
-                }
-            })
-            .collect();
-
-        // Calculate layout first to know how many lines each panel needs
         let size = self.terminal.size()?;
         let area = Rect::new(0, 0, size.width, size.height);
-        let panels = calculate_panel_layout(
-            area,
-            num_workers,
-            &is_active,
-            &elapsed_secs,
-        );
 
-        // Collect only the lines needed for each panel (height * 2 for wrapping)
+        // Use different grouping strategy based on terminal width
+        if area.width < 160 {
+            self.render_multipanel_linear(&is_active, &elapsed_secs, area)
+        } else {
+            self.render_multipanel_grid(&is_active, &elapsed_secs, area)
+        }
+    }
+
+    fn render_multipanel_linear(
+        &mut self,
+        is_active: &[bool],
+        elapsed_secs: &[u64],
+        area: Rect,
+    ) -> io::Result<()> {
+        let groups = group_workers_linear(is_active);
+        let panels = calculate_linear_layout(area, &groups, elapsed_secs);
+
+        // Pre-compute titles
+        let titles: Vec<String> =
+            groups.iter().map(|group| self.format_group_title(group)).collect();
+
+        // Collect output lines for each panel
         let panel_lines: Vec<Vec<String>> = panels
             .iter()
             .enumerate()
-            .map(|(i, panel_area)| {
+            .map(|(gi, panel_area)| {
                 let inner_height = panel_area.height.saturating_sub(2) as usize;
                 let lines_needed = (inner_height * 2).max(10);
-                self.output_buffers
-                    .get(i)
-                    .map(|buf| buf.last_n(lines_needed).cloned().collect())
-                    .unwrap_or_default()
+                match &groups[gi] {
+                    PanelGroup::Active(i) => self
+                        .output_buffers
+                        .get(*i)
+                        .map(|buf| buf.last_n(lines_needed).cloned().collect())
+                        .unwrap_or_default(),
+                    PanelGroup::Idle(..) => Vec::new(),
+                }
             })
             .collect();
 
@@ -750,12 +832,117 @@ impl MultiProgress {
                 );
 
                 let paragraph = Paragraph::new(visible).block(block);
-
                 frame.render_widget(paragraph, *panel_area);
             }
         })?;
 
         Ok(())
+    }
+
+    fn render_multipanel_grid(
+        &mut self,
+        is_active: &[bool],
+        elapsed_secs: &[u64],
+        area: Rect,
+    ) -> io::Result<()> {
+        let num_workers = is_active.len();
+
+        // Calculate grid dimensions based on worker count and width
+        let max_cols_by_count = (num_workers as f64).sqrt().ceil() as usize;
+        let max_cols_by_width = (area.width as usize) / 80;
+        let cols = max_cols_by_count.min(max_cols_by_width).max(1);
+
+        let (column_groups, _rows) = group_workers_grid(is_active, cols);
+        let column_rects =
+            calculate_grid_layout(area, &column_groups, elapsed_secs);
+
+        // Pre-compute titles for each group in each column
+        let column_titles: Vec<Vec<String>> = column_groups
+            .iter()
+            .map(|groups| {
+                groups.iter().map(|g| self.format_group_title(g)).collect()
+            })
+            .collect();
+
+        // Collect output lines for each panel in each column
+        let column_lines: Vec<Vec<Vec<String>>> = column_groups
+            .iter()
+            .zip(column_rects.iter())
+            .map(|(groups, rects)| {
+                groups
+                    .iter()
+                    .zip(rects.iter())
+                    .map(|(group, rect)| {
+                        let inner_height =
+                            rect.height.saturating_sub(2) as usize;
+                        let lines_needed = (inner_height * 2).max(10);
+                        match group {
+                            PanelGroup::Active(i) => self
+                                .output_buffers
+                                .get(*i)
+                                .map(|buf| {
+                                    buf.last_n(lines_needed).cloned().collect()
+                                })
+                                .unwrap_or_default(),
+                            PanelGroup::Idle(..) => Vec::new(),
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+
+        self.terminal.draw(|frame| {
+            for (col_idx, rects) in column_rects.iter().enumerate() {
+                for (row_idx, panel_area) in rects.iter().enumerate() {
+                    frame.render_widget(Clear, *panel_area);
+
+                    let title = &column_titles[col_idx][row_idx];
+                    let block = Block::default()
+                        .title(title.as_str())
+                        .borders(Borders::ALL);
+
+                    let inner_width =
+                        panel_area.width.saturating_sub(2) as usize;
+                    let inner_height =
+                        panel_area.height.saturating_sub(2) as usize;
+
+                    let lines = &column_lines[col_idx][row_idx];
+                    let visible =
+                        build_visible_lines(lines, inner_width, inner_height);
+
+                    let paragraph = Paragraph::new(visible).block(block);
+                    frame.render_widget(paragraph, *panel_area);
+                }
+            }
+        })?;
+
+        Ok(())
+    }
+
+    fn format_group_title(&self, group: &PanelGroup) -> String {
+        match group {
+            PanelGroup::Active(i) => {
+                if let Some(w) = self.state.workers.get(*i) {
+                    if let Some(pkg) = &w.package {
+                        let stage = w.stage.as_deref().unwrap_or("");
+                        let elapsed = w
+                            .elapsed()
+                            .map(format_duration_short)
+                            .unwrap_or_default();
+                        if stage.is_empty() {
+                            format!("[{}] {} {} ", i, pkg, elapsed)
+                        } else {
+                            format!("[{}] {} ({}) {} ", i, pkg, stage, elapsed)
+                        }
+                    } else {
+                        format!("[{}] idle ", i)
+                    }
+                } else {
+                    format!("[{}] ", i)
+                }
+            }
+            PanelGroup::Idle(_) => group.format_title(),
+        }
     }
 
     /// Finish display and print a summary line.
