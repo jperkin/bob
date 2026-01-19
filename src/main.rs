@@ -219,25 +219,6 @@ impl BuildRunner {
             std::process::exit(EXIT_INTERRUPTED);
         }
 
-        // Store build results to database. Note: results may have already been
-        // saved during build.start() via the completed_tx channel, but storing
-        // them again is harmless (INSERT OR REPLACE) and ensures consistency.
-        if !summary.results.is_empty() {
-            print!("Saving {} build results...", summary.results.len());
-            std::io::Write::flush(&mut std::io::stdout())?;
-            tracing::debug!(
-                result_count = summary.results.len(),
-                "Storing build results to database"
-            );
-            let store_start = std::time::Instant::now();
-            self.db.store_build_batch(&summary.results)?;
-            println!(" done ({:.1}s)", store_start.elapsed().as_secs_f32());
-            tracing::debug!(
-                elapsed_ms = store_start.elapsed().as_millis(),
-                "Finished storing build results"
-            );
-        }
-
         // Add pre-skipped/failed/unresolved packages from scan to summary
         for pkg in scan_result.packages.iter() {
             match pkg {

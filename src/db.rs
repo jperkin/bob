@@ -661,22 +661,6 @@ impl Database {
     }
 
     /**
-     * Store multiple build results in a transaction.
-     */
-    pub fn store_build_batch(&self, results: &[BuildResult]) -> Result<()> {
-        self.conn.execute("BEGIN TRANSACTION", [])?;
-        for result in results {
-            if let Err(e) = self.store_build_by_name(result) {
-                let _ = self.conn.execute("ROLLBACK", []);
-                return Err(e);
-            }
-        }
-        self.conn.execute("COMMIT", [])?;
-        debug!(count = results.len(), "Stored build results batch");
-        Ok(())
-    }
-
-    /**
      * Get build result for a package.
      */
     pub fn get_build_result(
