@@ -412,11 +412,14 @@ enum Cmd {
     },
     /// Rebuild specific packages
     Rebuild {
+        /// Rebuild all packages from scan cache.
+        #[arg(short, long)]
+        all: bool,
         /// Force rebuild even if package is up-to-date
         #[arg(short, long)]
         force: bool,
         /// Package paths or package names to rebuild
-        #[arg(required = true, value_name = "PKGPATH|PKGNAME")]
+        #[arg(value_name = "PKGPATH|PKGNAME")]
         packages: Vec<String>,
     },
     /// Remove current build state (database and build logs)
@@ -529,66 +532,87 @@ fn main() -> Result<()> {
             runner.generate_report();
             runner.generate_pkg_summary();
         }
-        Cmd::Rebuild { force, packages } => {
+        Cmd::Rebuild { all, force, packages } => {
+            if !all && packages.is_empty() {
+                bail!(
+                    "Either specify packages to rebuild or use -a to rebuild all"
+                );
+            }
+
             let mut runner =
                 BuildRunner::new(args.config.as_deref(), args.verbose)?;
 
-            // Convert packages to pkgpaths and collect for dependent lookup
-            let mut pkgpaths_to_rebuild: Vec<String> = Vec::new();
             let mut scan = Scan::new(&runner.config);
 
-            for pkg in &packages {
-                if pkg.contains('/') {
-                    match pkgsrc::PkgPath::new(pkg) {
-                        Ok(pkgpath) => {
-                            pkgpaths_to_rebuild.push(pkgpath.to_string());
+            if all {
+                let cleared = runner.db.clear_builds()?;
+                if cleared > 0 {
+                    println!("Cleared {} cached build result(s)", cleared);
+                }
+                if let Some(pkgs) = runner.config.pkgpaths() {
+                    for p in pkgs {
+                        scan.add(p);
+                    }
+                }
+            } else {
+                // Convert packages to pkgpaths and collect for dependent lookup
+                let mut pkgpaths_to_rebuild: Vec<String> = Vec::new();
+
+                for pkg in &packages {
+                    if pkg.contains('/') {
+                        match pkgsrc::PkgPath::new(pkg) {
+                            Ok(pkgpath) => {
+                                pkgpaths_to_rebuild.push(pkgpath.to_string());
+                                scan.add(&pkgpath);
+                            }
+                            Err(e) => bail!("Invalid PKGPATH '{}': {}", pkg, e),
+                        }
+                    } else {
+                        match runner.find_pkgpath_for_pkgname(pkg)? {
+                            Some(pkgpath) => {
+                                pkgpaths_to_rebuild.push(pkgpath.to_string());
+                                scan.add(&pkgpath);
+                            }
+                            None => bail!(
+                                "Package '{}' not found in scan cache. \
+                                 Run 'bob scan' first or specify the full \
+                                 PKGPATH.",
+                                pkg
+                            ),
+                        }
+                    }
+                }
+
+                // Clear cached build results for specified packages
+                let mut cleared = 0;
+                for pkg in &packages {
+                    if pkg.contains('/') {
+                        cleared += runner.db.delete_build_by_pkgpath(pkg)?;
+                    } else if runner.db.delete_build_by_name(pkg)? {
+                        cleared += 1;
+                    }
+                }
+
+                // Also clear dependents (packages that depend on what we're
+                // rebuilding)
+                let pkgpath_refs: Vec<&str> =
+                    pkgpaths_to_rebuild.iter().map(|s| s.as_str()).collect();
+                let (dependents, pkgname_to_pkgpath) =
+                    runner.find_dependents(&pkgpath_refs)?;
+                for dep in &dependents {
+                    if runner.db.delete_build_by_name(dep)? {
+                        cleared += 1;
+                    }
+                    if let Some(pkgpath) = pkgname_to_pkgpath.get(dep) {
+                        if let Ok(pkgpath) = pkgsrc::PkgPath::new(pkgpath) {
                             scan.add(&pkgpath);
                         }
-                        Err(e) => bail!("Invalid PKGPATH '{}': {}", pkg, e),
-                    }
-                } else {
-                    match runner.find_pkgpath_for_pkgname(pkg)? {
-                        Some(pkgpath) => {
-                            pkgpaths_to_rebuild.push(pkgpath.to_string());
-                            scan.add(&pkgpath);
-                        }
-                        None => bail!(
-                            "Package '{}' not found in scan cache. \
-                             Run 'bob scan' first or specify the full PKGPATH.",
-                            pkg
-                        ),
                     }
                 }
-            }
 
-            // Clear cached build results for specified packages
-            let mut cleared = 0;
-            for pkg in &packages {
-                if pkg.contains('/') {
-                    cleared += runner.db.delete_build_by_pkgpath(pkg)?;
-                } else if runner.db.delete_build_by_name(pkg)? {
-                    cleared += 1;
+                if cleared > 0 {
+                    println!("Cleared {} cached build result(s)", cleared);
                 }
-            }
-
-            // Also clear dependents (packages that depend on what we're rebuilding)
-            let pkgpath_refs: Vec<&str> =
-                pkgpaths_to_rebuild.iter().map(|s| s.as_str()).collect();
-            let (dependents, pkgname_to_pkgpath) =
-                runner.find_dependents(&pkgpath_refs)?;
-            for dep in &dependents {
-                if runner.db.delete_build_by_name(dep)? {
-                    cleared += 1;
-                }
-                if let Some(pkgpath) = pkgname_to_pkgpath.get(dep) {
-                    if let Ok(pkgpath) = pkgsrc::PkgPath::new(pkgpath) {
-                        scan.add(&pkgpath);
-                    }
-                }
-            }
-
-            if cleared > 0 {
-                println!("Cleared {} cached build result(s)", cleared);
             }
 
             let scan_result = runner.run_scan(&mut scan)?;

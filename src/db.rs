@@ -748,6 +748,14 @@ impl Database {
     }
 
     /**
+     * Clear all build results.
+     */
+    pub fn clear_builds(&self) -> Result<usize> {
+        let rows = self.conn.execute("DELETE FROM builds", [])?;
+        Ok(rows)
+    }
+
+    /**
      * Get all build results from the database.
      */
     pub fn get_all_build_results(&self) -> Result<Vec<BuildResult>> {
