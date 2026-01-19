@@ -20,7 +20,7 @@ use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
-use tracing::trace;
+use tracing::{debug, info, warn};
 
 impl Sandbox {
     pub fn mount_bindfs(
@@ -234,24 +234,13 @@ impl Sandbox {
     /// `fuser` which only checks the exact path, not files within subdirs.
     pub fn kill_processes(&self, sandbox: &Path) {
         for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
-            let mut found_any = false;
+            let mut killed: Vec<i32> = Vec::new();
 
             // Scan all processes
             if let Ok(procs) = procfs::process::all_processes() {
                 for proc in procs.flatten() {
-                    if let Some(reason) =
-                        Self::process_uses_path(&proc, sandbox)
-                    {
-                        found_any = true;
-                        let comm =
-                            proc.stat().map(|s| s.comm).unwrap_or_default();
-                        trace!(
-                            pid = proc.pid,
-                            comm = %comm,
-                            reason = %reason,
-                            iteration,
-                            "Killing process using sandbox"
-                        );
+                    if Self::process_uses_path(&proc, sandbox).is_some() {
+                        killed.push(proc.pid);
                         unsafe {
                             libc::kill(proc.pid, libc::SIGKILL);
                         }
@@ -259,20 +248,43 @@ impl Sandbox {
                 }
             }
 
-            if !found_any {
-                trace!(sandbox = %sandbox.display(), iteration, "No processes found using sandbox");
+            if killed.is_empty() {
+                debug!(retries = iteration, "No processes found in sandbox");
                 return;
             }
+
+            let pids: Vec<String> =
+                killed.iter().map(|p| p.to_string()).collect();
+            info!(pids = %pids.join(" "), "Killed processes using sandbox");
 
             // Give processes a moment to die (exponential backoff)
             let delay_ms = super::KILL_PROCESSES_INITIAL_DELAY_MS << iteration;
             std::thread::sleep(std::time::Duration::from_millis(delay_ms));
         }
-        trace!(
-            sandbox = %sandbox.display(),
+        // Get info about remaining processes for the warning
+        let proc_info = Self::get_process_info(sandbox);
+        warn!(
             max_retries = super::KILL_PROCESSES_MAX_RETRIES,
+            remaining = %proc_info,
             "Gave up killing processes after max retries"
         );
+    }
+
+    /// Get info about processes using files in a directory.
+    fn get_process_info(sandbox: &Path) -> String {
+        let mut info = Vec::new();
+        if let Ok(procs) = procfs::process::all_processes() {
+            for proc in procs.flatten() {
+                if Self::process_uses_path(&proc, sandbox).is_some() {
+                    let cmdline = proc
+                        .cmdline()
+                        .map(|c| c.join(" "))
+                        .unwrap_or_else(|_| String::from("?"));
+                    info.push(format!("pid={} cmd='{}'", proc.pid, cmdline));
+                }
+            }
+        }
+        if info.is_empty() { String::from("(none)") } else { info.join(", ") }
     }
 
     /// Check if a process has any references to paths under the given directory.

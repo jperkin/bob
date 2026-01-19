@@ -8,7 +8,8 @@ local initdir = "@INITDIR@"
 options = {
     build_threads = 4,
     scan_threads = 4,
-    verbose = true,
+    -- Log level: error, warn, info, debug, trace. Override with RUST_LOG env.
+    log_level = "info",
 }
 
 -- Variables that configure pkgsrc, where it is, what packages to build, etc.

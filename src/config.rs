@@ -37,7 +37,7 @@
 //! | `build_threads` | integer | 1 | Number of parallel build sandboxes. Each sandbox builds one package at a time. |
 //! | `scan_threads` | integer | 1 | Number of parallel scan processes for dependency discovery. |
 //! | `strict_scan` | boolean | false | If true, abort on scan errors. If false, continue and report failures separately. |
-//! | `verbose` | boolean | false | Enable verbose output. Can be overridden by the `-v` command line flag. |
+//! | `log_level` | string | "info" | Log level: "trace", "debug", "info", "warn", or "error". Can be overridden by `RUST_LOG` env var. |
 //!
 //! # Pkgsrc Section
 //!
@@ -425,7 +425,7 @@ impl LuaEnv {
 #[derive(Clone, Debug, Default)]
 pub struct Config {
     file: ConfigFile,
-    verbose: bool,
+    log_level: String,
     lua_env: LuaEnv,
 }
 
@@ -447,7 +447,7 @@ pub struct ConfigFile {
 /// All fields are optional; defaults are used when not specified:
 /// - `build_threads`: 1
 /// - `scan_threads`: 1
-/// - `verbose`: false
+/// - `log_level`: "info"
 #[derive(Clone, Debug, Default)]
 pub struct Options {
     /// Number of parallel build sandboxes.
@@ -456,8 +456,8 @@ pub struct Options {
     pub scan_threads: Option<usize>,
     /// If true, abort on scan errors. If false, continue and report failures.
     pub strict_scan: Option<bool>,
-    /// Enable verbose output.
-    pub verbose: Option<bool>,
+    /// Log level: "trace", "debug", "info", "warn", or "error".
+    pub log_level: Option<String>,
 }
 
 /// pkgsrc-related configuration from the `pkgsrc` section.
@@ -532,13 +532,12 @@ impl Config {
     /// # Arguments
     ///
     /// * `config_path` - Path to configuration file, or `None` to use `./config.lua`
-    /// * `verbose` - Enable verbose output (overrides config file setting)
     ///
     /// # Errors
     ///
     /// Returns an error if the configuration file doesn't exist or contains
     /// invalid Lua syntax.
-    pub fn load(config_path: Option<&Path>, verbose: bool) -> Result<Config> {
+    pub fn load(config_path: Option<&Path>) -> Result<Config> {
         /*
          * Load user-supplied configuration file, or the default location.
          */
@@ -595,17 +594,15 @@ impl Config {
         }
 
         /*
-         * Set verbose from command line option, falling back to config file.
+         * Set log_level from config file, defaulting to "info".
          */
-        let verbose = if verbose {
-            true
-        } else if let Some(v) = &file.options {
-            v.verbose.unwrap_or(false)
+        let log_level = if let Some(opts) = &file.options {
+            opts.log_level.clone().unwrap_or_else(|| "info".to_string())
         } else {
-            false
+            "info".to_string()
         };
 
-        Ok(Config { file, verbose, lua_env })
+        Ok(Config { file, log_level, lua_env })
     }
 
     pub fn build_threads(&self) -> usize {
@@ -652,8 +649,8 @@ impl Config {
         &self.file.sandboxes
     }
 
-    pub fn verbose(&self) -> bool {
-        self.verbose
+    pub fn log_level(&self) -> &str {
+        &self.log_level
     }
 
     pub fn logdir(&self) -> &PathBuf {
@@ -878,14 +875,14 @@ fn parse_options(globals: &Table) -> LuaResult<Option<Options>> {
         .ok_or_else(|| mlua::Error::runtime("'options' must be a table"))?;
 
     const KNOWN_KEYS: &[&str] =
-        &["build_threads", "scan_threads", "strict_scan", "verbose"];
+        &["build_threads", "scan_threads", "strict_scan", "log_level"];
     warn_unknown_keys(table, "options", KNOWN_KEYS);
 
     Ok(Some(Options {
         build_threads: table.get("build_threads").ok(),
         scan_threads: table.get("scan_threads").ok(),
         strict_scan: table.get("strict_scan").ok(),
-        verbose: table.get("verbose").ok(),
+        log_level: table.get("log_level").ok(),
     }))
 }
 

@@ -61,7 +61,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc, mpsc::Sender};
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, info_span, trace, warn};
 
 /// How often to batch and send build output lines to the UI channel.
 /// This is the floor on log display responsiveness — output cannot appear
@@ -205,7 +205,7 @@ impl<'a> PkgBuilder<'a> {
 
         // Check if package file exists
         if !pkgfile.exists() {
-            debug!(pkgname, path = %pkgfile.display(), "package file not found");
+            debug!(path = %pkgfile.display(), "Package file not found");
             return Ok(false);
         }
 
@@ -216,14 +216,10 @@ impl<'a> PkgBuilder<'a> {
         // Get BUILD_INFO and verify source files
         let Some(build_info) = self.run_cmd(&pkg_info, &["-qb", &pkgfile_str])
         else {
-            debug!(pkgname, "pkg_info -qb failed or returned empty");
+            debug!("pkg_info -qb failed or returned empty");
             return Ok(false);
         };
-        debug!(
-            pkgname,
-            lines = build_info.lines().count(),
-            "checking BUILD_INFO"
-        );
+        debug!(lines = build_info.lines().count(), "Checking BUILD_INFO");
 
         for line in build_info.lines() {
             let Some((file, file_id)) = line.split_once(':') else {
@@ -236,7 +232,7 @@ impl<'a> PkgBuilder<'a> {
 
             let src_file = self.session.config.pkgsrc().join(file);
             if !src_file.exists() {
-                debug!(pkgname, file, "source file missing");
+                debug!(file, "Source file missing");
                 return Ok(false);
             }
 
@@ -254,7 +250,7 @@ impl<'a> PkgBuilder<'a> {
                     None
                 });
                 if id != Some(file_id) {
-                    debug!(pkgname, file, "CVS ID mismatch");
+                    debug!(file, "CVS ID mismatch");
                     return Ok(false);
                 }
             } else {
@@ -263,18 +259,17 @@ impl<'a> PkgBuilder<'a> {
                 let Some(hash) =
                     self.run_cmd(&pkg_admin, &["digest", &src_file_str])
                 else {
-                    debug!(pkgname, file, "pkg_admin digest failed");
+                    debug!(file, "pkg_admin digest failed");
                     return Ok(false);
                 };
                 let hash = hash.trim();
                 if hash != file_id {
                     debug!(
-                        pkgname,
                         file,
                         path = %src_file.display(),
                         expected = file_id,
                         actual = hash,
-                        "hash mismatch"
+                        "Hash mismatch"
                     );
                     return Ok(false);
                 }
@@ -299,10 +294,9 @@ impl<'a> PkgBuilder<'a> {
         // If dependency list has changed in any way, rebuild
         if recorded_deps != expected_deps {
             debug!(
-                pkgname,
                 recorded = recorded_deps.len(),
                 expected = expected_deps.len(),
-                "dependency list changed"
+                "Dependency list changed"
             );
             return Ok(false);
         }
@@ -322,7 +316,7 @@ impl<'a> PkgBuilder<'a> {
                 .join("All")
                 .join(format!("{}.tgz", dep));
             if !dep_pkg.exists() {
-                debug!(pkgname, dep, "dependency package missing");
+                debug!(dep, "Dependency package missing");
                 return Ok(false);
             }
 
@@ -333,12 +327,12 @@ impl<'a> PkgBuilder<'a> {
             };
 
             if dep_mtime > pkgfile_mtime {
-                debug!(pkgname, dep, "dependency is newer");
+                debug!(dep, "Dependency is newer");
                 return Ok(false);
             }
         }
 
-        debug!(pkgname, "package is up-to-date");
+        debug!("Package is up-to-date");
         Ok(true)
     }
 
@@ -565,7 +559,7 @@ impl<'a> PkgBuilder<'a> {
         // Convert to slice of &str for the command
         let args: Vec<&str> = owned_args.iter().map(|s| s.as_str()).collect();
 
-        debug!(stage = stage.as_str(), targets = ?targets, "Running make stage");
+        info!(stage = stage.as_str(), "Running make stage");
 
         let status = self.run_command_logged(
             self.session.config.make(),
@@ -1233,16 +1227,23 @@ enum PackageBuildResult {
     Skipped,
 }
 
+impl std::fmt::Display for PackageBuildResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Success => write!(f, "success"),
+            Self::Failed => write!(f, "failed"),
+            Self::Skipped => write!(f, "skipped"),
+        }
+    }
+}
+
 impl PackageBuild {
     fn build(
         &self,
         status_tx: &Sender<ChannelCommand>,
     ) -> anyhow::Result<PackageBuildResult> {
         let pkgname = self.pkginfo.index.pkgname.pkgname();
-        info!(pkgname = %pkgname,
-            sandbox_id = self.sandbox_id,
-            "Starting package build"
-        );
+        info!("Starting package build");
 
         let pkgpath = &self.pkginfo.pkgpath;
 
@@ -1252,7 +1253,7 @@ impl PackageBuild {
         let pkg_env = match self.session.config.get_pkg_env(&self.pkginfo) {
             Ok(env) => env,
             Err(e) => {
-                error!(pkgname = %pkgname, error = %e, "Failed to get env from Lua config");
+                error!(error = %e, "Failed to get env from Lua config");
                 HashMap::new()
             }
         };
@@ -1271,7 +1272,7 @@ impl PackageBuild {
             &self.session.config,
             envs.clone(),
         )? {
-            warn!(pkgname = %pkgname, "pre-build script failed");
+            warn!("pre-build script failed");
         }
 
         // Run the build using PkgBuilder
@@ -1292,15 +1293,15 @@ impl PackageBuild {
 
         let result = match &result {
             Ok(PkgBuildResult::Success) => {
-                info!(pkgname = %pkgname, "package build completed successfully");
+                info!("Package build completed successfully");
                 PackageBuildResult::Success
             }
             Ok(PkgBuildResult::Skipped) => {
-                info!(pkgname = %pkgname, "package build skipped (up-to-date)");
+                info!("Package build skipped (up-to-date)");
                 PackageBuildResult::Skipped
             }
             Ok(PkgBuildResult::Failed) => {
-                error!(pkgname = %pkgname, "package build failed");
+                error!("Package build failed");
                 // Show cleanup stage to user
                 let _ = status_tx.send(ChannelCommand::StageUpdate(
                     self.sandbox_id,
@@ -1309,32 +1310,40 @@ impl PackageBuild {
                 // Kill any orphaned processes in the sandbox before cleanup.
                 // Failed builds may leave processes running that would block
                 // subsequent commands like bmake show-var or bmake clean.
-                debug!(pkgname = %pkgname, "Calling kill_processes_by_id");
                 let kill_start = Instant::now();
                 self.session.sandbox.kill_processes_by_id(self.sandbox_id);
-                debug!(pkgname = %pkgname, elapsed_ms = kill_start.elapsed().as_millis(), "kill_processes_by_id completed");
+                trace!(
+                    elapsed_ms = kill_start.elapsed().as_millis(),
+                    "kill_processes_by_id completed"
+                );
                 // Save wrkdir files matching configured patterns, then clean up
                 if !patterns.is_empty() {
-                    debug!(pkgname = %pkgname, "Calling save_wrkdir_files");
                     let save_start = Instant::now();
                     self.save_wrkdir_files(
                         pkgname, pkgpath, logdir, patterns, &pkg_env,
                     );
-                    debug!(pkgname = %pkgname, elapsed_ms = save_start.elapsed().as_millis(), "save_wrkdir_files completed");
-                    debug!(pkgname = %pkgname, "Calling run_clean");
+                    trace!(
+                        elapsed_ms = save_start.elapsed().as_millis(),
+                        "save_wrkdir_files completed"
+                    );
                     let clean_start = Instant::now();
                     self.run_clean(pkgpath, &envs);
-                    debug!(pkgname = %pkgname, elapsed_ms = clean_start.elapsed().as_millis(), "run_clean completed");
+                    trace!(
+                        elapsed_ms = clean_start.elapsed().as_millis(),
+                        "run_clean completed"
+                    );
                 } else {
-                    debug!(pkgname = %pkgname, "Calling run_clean (no patterns)");
                     let clean_start = Instant::now();
                     self.run_clean(pkgpath, &envs);
-                    debug!(pkgname = %pkgname, elapsed_ms = clean_start.elapsed().as_millis(), "run_clean completed");
+                    trace!(
+                        elapsed_ms = clean_start.elapsed().as_millis(),
+                        "run_clean completed"
+                    );
                 }
                 PackageBuildResult::Failed
             }
             Err(e) => {
-                error!(pkgname = %pkgname, error = %e, "package build error");
+                error!(error = %e, "Package build error");
                 // Show cleanup stage to user
                 let _ = status_tx.send(ChannelCommand::StageUpdate(
                     self.sandbox_id,
@@ -1343,27 +1352,35 @@ impl PackageBuild {
                 // Kill any orphaned processes in the sandbox before cleanup.
                 // Failed builds may leave processes running that would block
                 // subsequent commands like bmake show-var or bmake clean.
-                debug!(pkgname = %pkgname, "Calling kill_processes_by_id");
                 let kill_start = Instant::now();
                 self.session.sandbox.kill_processes_by_id(self.sandbox_id);
-                debug!(pkgname = %pkgname, elapsed_ms = kill_start.elapsed().as_millis(), "kill_processes_by_id completed");
+                trace!(
+                    elapsed_ms = kill_start.elapsed().as_millis(),
+                    "kill_processes_by_id completed"
+                );
                 // Save wrkdir files matching configured patterns, then clean up
                 if !patterns.is_empty() {
-                    debug!(pkgname = %pkgname, "Calling save_wrkdir_files");
                     let save_start = Instant::now();
                     self.save_wrkdir_files(
                         pkgname, pkgpath, logdir, patterns, &pkg_env,
                     );
-                    debug!(pkgname = %pkgname, elapsed_ms = save_start.elapsed().as_millis(), "save_wrkdir_files completed");
-                    debug!(pkgname = %pkgname, "Calling run_clean");
+                    trace!(
+                        elapsed_ms = save_start.elapsed().as_millis(),
+                        "save_wrkdir_files completed"
+                    );
                     let clean_start = Instant::now();
                     self.run_clean(pkgpath, &envs);
-                    debug!(pkgname = %pkgname, elapsed_ms = clean_start.elapsed().as_millis(), "run_clean completed");
+                    trace!(
+                        elapsed_ms = clean_start.elapsed().as_millis(),
+                        "run_clean completed"
+                    );
                 } else {
-                    debug!(pkgname = %pkgname, "Calling run_clean (no patterns)");
                     let clean_start = Instant::now();
                     self.run_clean(pkgpath, &envs);
-                    debug!(pkgname = %pkgname, elapsed_ms = clean_start.elapsed().as_millis(), "run_clean completed");
+                    trace!(
+                        elapsed_ms = clean_start.elapsed().as_millis(),
+                        "run_clean completed"
+                    );
                 }
                 PackageBuildResult::Failed
             }
@@ -1376,9 +1393,9 @@ impl PackageBuild {
             envs,
         ) {
             Ok(true) => {}
-            Ok(false) => warn!(pkgname = %pkgname, "post-build script failed"),
+            Ok(false) => warn!("post-build script failed"),
             Err(e) => {
-                warn!(pkgname = %pkgname, error = %e, "post-build script error")
+                warn!(error = %e, "post-build script error")
             }
         }
 
@@ -1691,7 +1708,7 @@ impl BuildJobs {
      * Recursively mark a package and its dependents as failed.
      */
     fn mark_failure(&mut self, pkgname: &PkgName, duration: Duration) {
-        debug!(pkgname = %pkgname.pkgname(), "mark_failure called");
+        trace!(pkgname = %pkgname.pkgname(), "mark_failure called");
         let start = std::time::Instant::now();
         let mut broken: HashSet<PkgName> = HashSet::new();
         let mut to_check: Vec<PkgName> = vec![];
@@ -1718,7 +1735,7 @@ impl BuildJobs {
             }
             broken.insert(badpkg);
         }
-        debug!(pkgname = %pkgname.pkgname(), broken_count = broken.len(), elapsed_ms = start.elapsed().as_millis(), "mark_failure found broken packages");
+        trace!(pkgname = %pkgname.pkgname(), broken_count = broken.len(), elapsed_ms = start.elapsed().as_millis(), "mark_failure found broken packages");
         /*
          * We now have a full HashSet of affected packages.  Remove them from
          * incoming and move to failed.  The original failed package will
@@ -1752,7 +1769,7 @@ impl BuildJobs {
                 log_dir,
             });
         }
-        debug!(pkgname = %pkgname.pkgname(), total_results = self.results.len(), elapsed_ms = start.elapsed().as_millis(), "mark_failure completed");
+        trace!(pkgname = %pkgname.pkgname(), total_results = self.results.len(), elapsed_ms = start.elapsed().as_millis(), "mark_failure completed");
     }
 
     /**
@@ -2110,15 +2127,26 @@ impl Build {
                         }
                         ChannelCommand::JobData(pkg) => {
                             let pkgname = pkg.pkginfo.index.pkgname.clone();
-                            trace!(pkgname = %pkgname.pkgname(), worker = i, "Worker starting build");
+                            let pkgpath = &pkg.pkginfo.pkgpath;
+                            let span = info_span!(
+                                "build",
+                                sandbox_id = pkg.sandbox_id,
+                                pkgpath = %pkgpath,
+                                pkgname = %pkgname.pkgname(),
+                            );
+                            let _guard = span.enter();
+
                             let build_start = Instant::now();
                             let result = pkg.build(&manager_tx);
                             let duration = build_start.elapsed();
-                            trace!(pkgname = %pkgname.pkgname(), worker = i, elapsed_ms = duration.as_millis(), "Worker build() returned");
+                            trace!(
+                                elapsed_ms = duration.as_millis(),
+                                result = %result.as_ref().map_or("error".to_string(), |r| r.to_string()),
+                                "Build finished"
+                            );
 
                             match result {
                                 Ok(PackageBuildResult::Success) => {
-                                    trace!(pkgname = %pkgname.pkgname(), "Worker sending JobSuccess");
                                     let _ = manager_tx.send(
                                         ChannelCommand::JobSuccess(
                                             pkgname, duration,
@@ -2126,13 +2154,11 @@ impl Build {
                                     );
                                 }
                                 Ok(PackageBuildResult::Skipped) => {
-                                    trace!(pkgname = %pkgname.pkgname(), "Worker sending JobSkipped");
                                     let _ = manager_tx.send(
                                         ChannelCommand::JobSkipped(pkgname),
                                     );
                                 }
                                 Ok(PackageBuildResult::Failed) => {
-                                    trace!(pkgname = %pkgname.pkgname(), "Worker sending JobFailed");
                                     let _ = manager_tx.send(
                                         ChannelCommand::JobFailed(
                                             pkgname, duration,
@@ -2144,7 +2170,6 @@ impl Build {
                                     if !shutdown_for_worker
                                         .load(Ordering::SeqCst)
                                     {
-                                        trace!(pkgname = %pkgname.pkgname(), "Worker sending JobError");
                                         let _ = manager_tx.send(
                                             ChannelCommand::JobError((
                                                 pkgname, duration, e,

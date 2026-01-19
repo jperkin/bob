@@ -51,7 +51,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, info_span, trace, warn};
 
 /// Reason why a package was skipped (not built).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -642,10 +642,7 @@ impl Scan {
          * Create scope which handles sandbox lifecycle - creates on construction,
          * destroys on drop. This ensures cleanup even on error paths.
          */
-        let _scope = SingleSandboxScope::new(
-            self.sandbox.clone(),
-            self.config.verbose(),
-        )?;
+        let _scope = SingleSandboxScope::new(self.sandbox.clone())?;
 
         if self.sandbox.enabled() {
             // Run pre-build script if defined
@@ -654,7 +651,7 @@ impl Scan {
                 &self.config,
                 self.config.script_env(None),
             )? {
-                error!("pre-build script failed");
+                warn!("pre-build script failed");
             }
             let env = match db.load_pkgsrc_env() {
                 Ok(env) => env,
@@ -976,7 +973,7 @@ impl Scan {
             &self.config,
             self.config.script_env(self.pkgsrc_env.as_ref()),
         )? {
-            error!("post-build script failed");
+            warn!("post-build script failed");
         }
         Ok(())
     }
@@ -1014,13 +1011,15 @@ impl Scan {
         shutdown: &AtomicBool,
     ) -> anyhow::Result<Vec<ScanIndex>> {
         let pkgpath_str = pkgpath.as_path().display().to_string();
-        debug!(pkgpath = %pkgpath_str, "Scanning package");
+        let span = info_span!("scan", pkgpath = %pkgpath_str);
+        let _guard = span.enter();
+        debug!("Scanning package");
 
         let pkgsrcdir = config.pkgsrc().display().to_string();
         let workdir = format!("{}/{}", pkgsrcdir, pkgpath_str);
 
         let scan_env = config.scan_env();
-        trace!(pkgpath = %pkgpath_str,
+        trace!(
             workdir = %workdir,
             scan_env = ?scan_env,
             "Executing pkg-scan"
@@ -1035,7 +1034,7 @@ impl Scan {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            error!(pkgpath = %pkgpath_str,
+            error!(
                 exit_code = ?output.status.code(),
                 stderr = %stderr,
                 "pkg-scan script failed"
@@ -1050,7 +1049,7 @@ impl Scan {
         }
 
         let stdout_str = String::from_utf8_lossy(&output.stdout);
-        trace!(pkgpath = %pkgpath_str,
+        trace!(
             stdout_len = stdout_str.len(),
             stdout = %stdout_str,
             "pkg-scan script output"
@@ -1073,17 +1072,14 @@ impl Scan {
             }
         }
 
-        info!(pkgpath = %pkgpath_str,
-            packages_found = index.len(),
-            "Scan complete for pkgpath"
-        );
+        info!(packages_found = index.len(), "Scan complete");
 
         /*
          * Set PKGPATH (PKG_LOCATION) as for some reason pbulk-index doesn't.
          */
         for pkg in &mut index {
             pkg.pkg_location = Some(pkgpath.clone());
-            debug!(pkgpath = %pkgpath_str,
+            debug!(
                 pkgname = %pkg.pkgname.pkgname(),
                 skip_reason = ?pkg.pkg_skip_reason,
                 fail_reason = ?pkg.pkg_fail_reason,

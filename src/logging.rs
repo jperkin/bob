@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025 Jonathan Perkin <jonathan@perkin.org.uk>
+ * Copyright (c) 2026 Jonathan Perkin <jonathan@perkin.org.uk>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -31,8 +31,7 @@ static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 
 /// Initialize the logging system.
 /// Creates a logs directory and writes JSON-formatted logs there.
-/// Also logs to stderr if verbose mode is enabled.
-pub fn init(logs_dir: &PathBuf, verbose: bool) -> Result<()> {
+pub fn init(logs_dir: &PathBuf, log_level: &str) -> Result<()> {
     // Create logs directory
     fs::create_dir_all(logs_dir).with_context(|| {
         format!("Failed to create logs directory {:?}", logs_dir)
@@ -52,21 +51,21 @@ pub fn init(logs_dir: &PathBuf, verbose: bool) -> Result<()> {
         .json()
         .with_writer(non_blocking)
         .with_target(true)
-        .with_thread_ids(true)
-        .with_thread_names(true)
-        .with_file(true)
-        .with_line_number(true);
+        .with_thread_ids(false)
+        .with_thread_names(false)
+        .with_file(false)
+        .with_line_number(false)
+        .with_span_list(false);
 
     // Set up env filter - allow RUST_LOG to override
-    // verbose mode uses debug level, otherwise info level
-    let default_filter = if verbose { "bob=debug" } else { "bob=info" };
+    let default_filter = format!("bob={}", log_level);
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(default_filter));
+        .unwrap_or_else(|_| EnvFilter::new(&default_filter));
 
     tracing_subscriber::registry().with(filter).with(file_layer).init();
 
     tracing::info!(logs_dir = %logs_dir.display(),
-        verbose = verbose,
+        log_level = log_level,
         "Logging initialized"
     );
 

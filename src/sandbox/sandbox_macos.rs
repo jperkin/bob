@@ -20,6 +20,7 @@ use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitStatus};
+use tracing::{debug, info, warn};
 
 impl Sandbox {
     pub fn mount_bindfs(
@@ -212,8 +213,11 @@ impl Sandbox {
 
             // No processes found, we're done
             if pids.is_empty() {
+                debug!(retries = iteration, "No processes found in sandbox");
                 return;
             }
+
+            info!(pids = %pids.join(" "), "Killed processes using sandbox");
 
             let _ = Command::new("kill")
                 .arg("-9")
@@ -225,6 +229,65 @@ impl Sandbox {
             // Give processes a moment to die (exponential backoff)
             let delay_ms = super::KILL_PROCESSES_INITIAL_DELAY_MS << iteration;
             std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        }
+        // Get info about remaining processes for the warning
+        let proc_info = self.get_process_info(sandbox);
+        warn!(
+            max_retries = super::KILL_PROCESSES_MAX_RETRIES,
+            remaining = %proc_info,
+            "Gave up killing processes after max retries"
+        );
+    }
+
+    /// Get info about processes using files in a directory.
+    fn get_process_info(&self, sandbox: &Path) -> String {
+        // Get PIDs using lsof
+        let output = Command::new("lsof")
+            .arg("+D")
+            .arg(sandbox)
+            .process_group(0)
+            .output();
+        let Ok(out) = output else {
+            return String::from("(failed to query)");
+        };
+
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let pids: Vec<&str> = stdout
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.split_whitespace().nth(1))
+            .collect();
+
+        if pids.is_empty() {
+            return String::from("(none)");
+        }
+
+        let ps_output = Command::new("ps")
+            .arg("-ww")
+            .arg("-o")
+            .arg("pid,args")
+            .arg("-p")
+            .arg(pids.join(","))
+            .process_group(0)
+            .output();
+
+        match ps_output {
+            Ok(out) => String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .skip(1)
+                .filter_map(|line| {
+                    let mut parts = line.split_whitespace();
+                    let pid = parts.next()?;
+                    let cmd: String = parts.collect::<Vec<_>>().join(" ");
+                    Some(format!("pid={} cmd='{}'", pid, cmd))
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+            Err(_) => pids
+                .iter()
+                .map(|p| format!("pid={}", p))
+                .collect::<Vec<_>>()
+                .join(", "),
         }
     }
 }

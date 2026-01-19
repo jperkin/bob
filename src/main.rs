@@ -43,11 +43,11 @@ struct BuildRunner {
 
 impl BuildRunner {
     /// Set up the build environment: config, logging, validation, db, signals.
-    fn new(config_path: Option<&Path>, verbose: bool) -> Result<Self> {
-        let config = Config::load(config_path, verbose)?;
+    fn new(config_path: Option<&Path>) -> Result<Self> {
+        let config = Config::load(config_path)?;
         let logs_dir = config.logdir().join("bob");
 
-        logging::init(&logs_dir, config.verbose())?;
+        logging::init(&logs_dir, config.log_level())?;
 
         if let Err(errors) = config.validate() {
             eprintln!("Configuration errors:");
@@ -162,11 +162,7 @@ impl BuildRunner {
 
         // Create sandbox scope - automatically destroys sandboxes on drop
         let sandbox = Sandbox::new(&self.config);
-        let scope = SandboxScope::new(
-            sandbox,
-            self.config.build_threads(),
-            self.config.verbose(),
-        )?;
+        let scope = SandboxScope::new(sandbox, self.config.build_threads())?;
 
         if scope.enabled()
             && !scope.sandbox().run_pre_build(
@@ -390,10 +386,6 @@ pub struct Args {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
-    /// Enable verbose output
-    #[arg(short, long)]
-    verbose: bool,
-
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -506,8 +498,7 @@ fn main() -> Result<()> {
 
     match args.cmd {
         Cmd::Build { pkgpaths: cmdline_pkgs } => {
-            let mut runner =
-                BuildRunner::new(args.config.as_deref(), args.verbose)?;
+            let mut runner = BuildRunner::new(args.config.as_deref())?;
             tracing::info!("Build command started");
 
             let mut scan = Scan::new(&runner.config);
@@ -539,8 +530,7 @@ fn main() -> Result<()> {
                 );
             }
 
-            let mut runner =
-                BuildRunner::new(args.config.as_deref(), args.verbose)?;
+            let mut runner = BuildRunner::new(args.config.as_deref())?;
 
             let mut scan = Scan::new(&runner.config);
 
@@ -621,7 +611,7 @@ fn main() -> Result<()> {
             print_summary(&summary);
         }
         Cmd::Util { cmd: UtilCmd::GenerateReport } => {
-            let config = Config::load(args.config.as_deref(), args.verbose)?;
+            let config = Config::load(args.config.as_deref())?;
             let logdir = config.logdir();
             let logs_dir = logdir.join("bob");
             let db_path = logs_dir.join("bob.db");
@@ -643,7 +633,7 @@ fn main() -> Result<()> {
             Init::create(arg)?;
         }
         Cmd::Clean => {
-            let config = Config::load(args.config.as_deref(), args.verbose)?;
+            let config = Config::load(args.config.as_deref())?;
 
             if config.logdir().exists() {
                 std::fs::remove_dir_all(config.logdir())
@@ -651,7 +641,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Db { sql } => {
-            let config = Config::load(args.config.as_deref(), args.verbose)?;
+            let config = Config::load(args.config.as_deref())?;
             let db_path = config.logdir().join("bob").join("bob.db");
             let db = Database::open(&db_path)?;
 
@@ -662,7 +652,7 @@ fn main() -> Result<()> {
             db.execute_raw(&sql)?;
         }
         Cmd::Util { cmd: UtilCmd::PrintDepGraph { output } } => {
-            let config = Config::load(args.config.as_deref(), args.verbose)?;
+            let config = Config::load(args.config.as_deref())?;
             let logs_dir = config.logdir().join("bob");
             let db_path = logs_dir.join("bob.db");
             let db = Database::open(&db_path)?;
@@ -699,7 +689,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Util { cmd: UtilCmd::PrintPresolve { output } } => {
-            let config = Config::load(args.config.as_deref(), args.verbose)?;
+            let config = Config::load(args.config.as_deref())?;
             let logs_dir = config.logdir().join("bob");
             let db_path = logs_dir.join("bob.db");
             let db = Database::open(&db_path)?;
@@ -751,7 +741,7 @@ fn main() -> Result<()> {
             use std::fs::File;
             use std::io::BufReader;
 
-            let config = Config::load(args.config.as_deref(), args.verbose)?;
+            let config = Config::load(args.config.as_deref())?;
             let logs_dir = config.logdir().join("bob");
             let db_path = logs_dir.join("bob.db");
             let db = Database::open(&db_path)?;
@@ -802,7 +792,7 @@ fn main() -> Result<()> {
             );
         }
         Cmd::Util { cmd: UtilCmd::PrintPscan { output } } => {
-            let config = Config::load(args.config.as_deref(), args.verbose)?;
+            let config = Config::load(args.config.as_deref())?;
             let logs_dir = config.logdir().join("bob");
             let db_path = logs_dir.join("bob.db");
             let db = Database::open(&db_path)?;
@@ -833,23 +823,23 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Util { cmd: UtilCmd::Sandbox { cmd: SandboxCmd::Create } } => {
-            let config = Config::load(args.config.as_deref(), args.verbose)?;
+            let config = Config::load(args.config.as_deref())?;
             let sandbox = Sandbox::new(&config);
             if !sandbox.enabled() {
                 bail!("No sandboxes configured");
             }
-            sandbox.create_all(config.build_threads(), config.verbose())?;
+            sandbox.create_all(config.build_threads())?;
         }
         Cmd::Util { cmd: UtilCmd::Sandbox { cmd: SandboxCmd::Destroy } } => {
-            let config = Config::load(args.config.as_deref(), args.verbose)?;
+            let config = Config::load(args.config.as_deref())?;
             let sandbox = Sandbox::new(&config);
             if !sandbox.enabled() {
                 bail!("No sandboxes configured");
             }
-            sandbox.destroy_all(config.build_threads(), config.verbose())?;
+            sandbox.destroy_all(config.build_threads())?;
         }
         Cmd::Util { cmd: UtilCmd::Sandbox { cmd: SandboxCmd::List } } => {
-            let config = Config::load(args.config.as_deref(), args.verbose)?;
+            let config = Config::load(args.config.as_deref())?;
             let sandbox = Sandbox::new(&config);
             if !sandbox.enabled() {
                 bail!("No sandboxes configured");
@@ -857,8 +847,7 @@ fn main() -> Result<()> {
             sandbox.list_all(config.build_threads());
         }
         Cmd::Scan => {
-            let runner =
-                BuildRunner::new(args.config.as_deref(), args.verbose)?;
+            let runner = BuildRunner::new(args.config.as_deref())?;
 
             let mut scan = Scan::new(&runner.config);
             if let Some(pkgs) = runner.config.pkgpaths() {

@@ -20,6 +20,7 @@ use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitStatus};
+use tracing::{debug, info, warn};
 
 impl Sandbox {
     pub fn mount_bindfs(
@@ -205,6 +206,34 @@ impl Sandbox {
         use std::process::Stdio;
 
         for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
+            // Query fuser first to get PIDs for logging
+            let output = Command::new("fuser")
+                .arg(sandbox)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .output();
+
+            // Check if any processes are using the sandbox
+            let has_processes = match &output {
+                Ok(out) => out.status.success(),
+                Err(_) => return,
+            };
+
+            if !has_processes {
+                debug!(retries = iteration, "No processes found in sandbox");
+                return;
+            }
+
+            // Log the PIDs being killed
+            if let Ok(out) = &output {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let pids: Vec<&str> = stdout.split_whitespace().collect();
+                if !pids.is_empty() {
+                    info!(pids = %pids.join(" "), "Killed processes using sandbox");
+                }
+            }
+
             // Use fuser -k to kill all processes using files under the sandbox
             // Use process_group(0) to isolate from terminal signals
             let _ = Command::new("fuser")
@@ -218,25 +247,56 @@ impl Sandbox {
             // Give processes a moment to die (exponential backoff)
             let delay_ms = super::KILL_PROCESSES_INITIAL_DELAY_MS << iteration;
             std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        }
+        // Get info about remaining processes for the warning
+        let proc_info = self.get_process_info(sandbox);
+        warn!(
+            max_retries = super::KILL_PROCESSES_MAX_RETRIES,
+            remaining = %proc_info,
+            "Gave up killing processes after max retries"
+        );
+    }
 
-            // Check if any processes are still using the sandbox
-            let status = Command::new("fuser")
-                .arg(sandbox)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .process_group(0)
-                .status();
+    /// Get info about processes using files in a directory.
+    fn get_process_info(&self, sandbox: &Path) -> String {
+        use std::process::Stdio;
 
-            // fuser exits 0 if processes found, non-zero if none found
-            if let Ok(s) = status {
-                if !s.success() {
-                    // No processes found, we're done
-                    return;
+        // Get PIDs using fuser
+        let output = Command::new("fuser")
+            .arg(sandbox)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .output();
+        let Ok(out) = output else {
+            return String::from("(failed to query)");
+        };
+
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let pids: Vec<&str> = stdout.split_whitespace().collect();
+
+        if pids.is_empty() {
+            return String::from("(none)");
+        }
+
+        // Use pargs to get full command line (ps truncates on illumos)
+        let mut info = Vec::new();
+        for pid in &pids {
+            let pargs_output =
+                Command::new("pargs").arg(pid).process_group(0).output();
+            match pargs_output {
+                Ok(out) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let args: Vec<&str> = stdout
+                        .lines()
+                        .filter_map(|l| l.strip_prefix("argv["))
+                        .filter_map(|l| l.split("]: ").nth(1))
+                        .collect();
+                    info.push(format!("pid={} cmd='{}'", pid, args.join(" ")));
                 }
-            } else {
-                // fuser failed to run, bail out
-                return;
+                Err(_) => info.push(format!("pid={}", pid)),
             }
         }
+        if info.is_empty() { String::from("(none)") } else { info.join(", ") }
     }
 }
