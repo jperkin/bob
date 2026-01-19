@@ -75,6 +75,7 @@ mod sandbox_sunos;
 use crate::action::{ActionType, FSType};
 use crate::config::Config;
 use anyhow::{Result, bail};
+use rayon::prelude::*;
 use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -524,7 +525,7 @@ impl Sandbox {
     }
 
     /**
-     * Create all sandboxes, rolling back on failure.
+     * Create all sandboxes in parallel, rolling back on failure.
      */
     pub fn create_all(&self, count: usize) -> Result<()> {
         if count == 1 {
@@ -532,26 +533,33 @@ impl Sandbox {
         } else {
             println!("Creating {} sandboxes...", count);
         }
-        for i in 0..count {
-            if let Err(e) = self.create(i) {
-                // Rollback: destroy sandboxes including the failed one (may be partial)
-                for j in (0..=i).rev() {
-                    if let Err(destroy_err) = self.destroy(j) {
-                        eprintln!(
-                            "Warning: failed to destroy sandbox {}: {}",
-                            j, destroy_err
-                        );
-                    }
+        let results: Vec<(usize, Result<()>)> =
+            (0..count).into_par_iter().map(|i| (i, self.create(i))).collect();
+        let mut first_error: Option<anyhow::Error> = None;
+        for (i, result) in &results {
+            if let Err(e) = result {
+                if first_error.is_none() {
+                    first_error = Some(anyhow::anyhow!("sandbox {}: {}", i, e));
                 }
-                return Err(e);
             }
+        }
+        if let Some(e) = first_error {
+            for (i, _) in &results {
+                if let Err(destroy_err) = self.destroy(*i) {
+                    eprintln!(
+                        "Warning: failed to destroy sandbox {}: {}",
+                        i, destroy_err
+                    );
+                }
+            }
+            return Err(e);
         }
         Ok(())
     }
 
     /**
-     * Destroy all sandboxes.  Continue on errors to ensure all sandboxes
-     * are attempted, printing each error as it occurs.
+     * Destroy all sandboxes in parallel.  Continue on errors to ensure all
+     * sandboxes are attempted, printing each error as it occurs.
      */
     pub fn destroy_all(&self, count: usize) -> Result<()> {
         if count == 1 {
@@ -559,9 +567,11 @@ impl Sandbox {
         } else {
             println!("Destroying {} sandboxes...", count);
         }
+        let results: Vec<(usize, Result<()>)> =
+            (0..count).into_par_iter().map(|i| (i, self.destroy(i))).collect();
         let mut failed = 0;
-        for i in 0..count {
-            if let Err(e) = self.destroy(i) {
+        for (i, result) in results {
+            if let Err(e) = result {
                 eprintln!("sandbox {}: {}", i, e);
                 failed += 1;
             }
