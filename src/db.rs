@@ -14,21 +14,23 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-//! SQLite database for caching scan and build results.
-//!
-//! This module provides optimized database access with:
-//! - Lazy loading to minimize memory usage
-//! - Indexed reverse dependency lookups for fast failure cascades
-//! - Normalized dependency tables for efficient queries
-//! - Hybrid storage: columns for hot fields, JSON for cold data
-//!
-//! # Schema
-//!
-//! - `packages` - Core package identity and status
-//! - `depends` - Raw dependency patterns from scans
-//! - `resolved_depends` - Resolved dependencies after pattern matching
-//! - `builds` - Build results with indexed outcome
-//! - `metadata` - Key-value store for flags and cached data
+/*!
+ * SQLite database for caching scan and build results.
+ *
+ * This module provides optimized database access with:
+ * - Lazy loading to minimize memory usage
+ * - Indexed reverse dependency lookups for fast failure cascades
+ * - Normalized dependency tables for efficient queries
+ * - Hybrid storage: columns for hot fields, JSON for cold data
+ *
+ * # Schema
+ *
+ * - `packages` - Core package identity and status
+ * - `depends` - Raw dependency patterns from scans
+ * - `resolved_depends` - Resolved dependencies after pattern matching
+ * - `builds` - Build results with indexed outcome
+ * - `metadata` - Key-value store for flags and cached data
+ */
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -43,10 +45,14 @@ use crate::build::{BuildOutcome, BuildResult};
 use crate::config::PkgsrcEnv;
 use crate::scan::SkipReason;
 
-/// Schema version - update when schema changes.
+/**
+ * Schema version - update when schema changes.
+ */
 const SCHEMA_VERSION: i32 = 3;
 
-/// Lightweight package row without full scan data.
+/**
+ * Lightweight package row without full scan data.
+ */
 #[derive(Clone, Debug)]
 pub struct PackageRow {
     pub id: i64,
@@ -58,13 +64,17 @@ pub struct PackageRow {
     pub pbulk_weight: i32,
 }
 
-/// SQLite database for scan and build caching.
+/**
+ * SQLite database for scan and build caching.
+ */
 pub struct Database {
     conn: Connection,
 }
 
 impl Database {
-    /// Open or create a database at the given path.
+    /**
+     * Open or create a database at the given path.
+     */
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -77,19 +87,25 @@ impl Database {
         Ok(db)
     }
 
-    /// Begin a transaction.
+    /**
+     * Begin a transaction.
+     */
     pub fn begin_transaction(&self) -> Result<()> {
         self.conn.execute("BEGIN TRANSACTION", [])?;
         Ok(())
     }
 
-    /// Commit the current transaction.
+    /**
+     * Commit the current transaction.
+     */
     pub fn commit(&self) -> Result<()> {
         self.conn.execute("COMMIT", [])?;
         Ok(())
     }
 
-    /// Configure SQLite for performance.
+    /**
+     * Configure SQLite for performance.
+     */
     fn configure_pragmas(&self) -> Result<()> {
         self.conn.execute_batch(
             "PRAGMA journal_mode = WAL;
@@ -102,7 +118,9 @@ impl Database {
         Ok(())
     }
 
-    /// Initialize schema or fail if version mismatch.
+    /**
+     * Initialize schema or fail if version mismatch.
+     */
     fn init(&self) -> Result<()> {
         // Check if schema_version table exists
         let has_schema_version: bool = self.conn.query_row(
@@ -135,7 +153,9 @@ impl Database {
         Ok(())
     }
 
-    /// Create the database schema.
+    /**
+     * Create the database schema.
+     */
     fn create_schema(&self) -> Result<()> {
         self.conn.execute_batch(&format!(
             "CREATE TABLE schema_version (version INTEGER NOT NULL);
@@ -204,7 +224,9 @@ impl Database {
     // PACKAGE QUERIES
     // ========================================================================
 
-    /// Store a package from scan results.
+    /**
+     * Store a package from scan results.
+     */
     pub fn store_package(
         &self,
         pkgpath: &str,
@@ -264,7 +286,9 @@ impl Database {
         Ok(package_id)
     }
 
-    /// Store scan results for a pkgpath.
+    /**
+     * Store scan results for a pkgpath.
+     */
     pub fn store_scan_pkgpath(
         &self,
         pkgpath: &str,
@@ -276,7 +300,9 @@ impl Database {
         Ok(())
     }
 
-    /// Get package by name.
+    /**
+     * Get package by name.
+     */
     pub fn get_package_by_name(
         &self,
         pkgname: &str,
@@ -303,7 +329,9 @@ impl Database {
         }
     }
 
-    /// Get package ID by name.
+    /**
+     * Get package ID by name.
+     */
     pub fn get_package_id(&self, pkgname: &str) -> Result<Option<i64>> {
         let result = self.conn.query_row(
             "SELECT id FROM packages WHERE pkgname = ?1",
@@ -318,7 +346,9 @@ impl Database {
         }
     }
 
-    /// Get pkgname by package ID.
+    /**
+     * Get pkgname by package ID.
+     */
     pub fn get_pkgname(&self, package_id: i64) -> Result<String> {
         self.conn
             .query_row(
@@ -329,7 +359,9 @@ impl Database {
             .context("Package not found")
     }
 
-    /// Get packages by pkgpath.
+    /**
+     * Get packages by pkgpath.
+     */
     pub fn get_packages_by_path(
         &self,
         pkgpath: &str,
@@ -354,7 +386,9 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    /// Check if pkgpath is scanned.
+    /**
+     * Check if pkgpath is scanned.
+     */
     pub fn is_pkgpath_scanned(&self, pkgpath: &str) -> Result<bool> {
         let count: i32 = self.conn.query_row(
             "SELECT COUNT(*) FROM packages WHERE pkgpath = ?1",
@@ -364,7 +398,9 @@ impl Database {
         Ok(count > 0)
     }
 
-    /// Get all scanned pkgpaths.
+    /**
+     * Get all scanned pkgpaths.
+     */
     pub fn get_scanned_pkgpaths(&self) -> Result<HashSet<String>> {
         let mut stmt =
             self.conn.prepare("SELECT DISTINCT pkgpath FROM packages")?;
@@ -372,9 +408,11 @@ impl Database {
         rows.collect::<Result<HashSet<_>, _>>().map_err(Into::into)
     }
 
-    /// Get pkgpaths that are referenced as dependencies but haven't been scanned yet.
-    /// These are dependencies that were discovered during scanning but the scan was
-    /// interrupted before they could be processed.
+    /**
+     * Get pkgpaths that are referenced as dependencies but haven't been scanned
+     * yet. These are dependencies that were discovered during scanning but the
+     * scan was interrupted before they could be processed.
+     */
     pub fn get_unscanned_dependencies(&self) -> Result<HashSet<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT d.depend_pkgpath
@@ -385,14 +423,18 @@ impl Database {
         rows.collect::<Result<HashSet<_>, _>>().map_err(Into::into)
     }
 
-    /// Count of scanned packages.
+    /**
+     * Count of scanned packages.
+     */
     pub fn count_packages(&self) -> Result<i64> {
         self.conn
             .query_row("SELECT COUNT(*) FROM packages", [], |row| row.get(0))
             .context("Failed to count packages")
     }
 
-    /// Count of scanned pkgpaths.
+    /**
+     * Count of scanned pkgpaths.
+     */
     pub fn count_scan(&self) -> Result<i64> {
         self.conn
             .query_row(
@@ -403,7 +445,9 @@ impl Database {
             .context("Failed to count scan")
     }
 
-    /// Get all packages (lightweight).
+    /**
+     * Get all packages (lightweight).
+     */
     pub fn get_all_packages(&self) -> Result<Vec<PackageRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight
@@ -425,7 +469,9 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    /// Get all buildable packages (no skip/fail reason).
+    /**
+     * Get all buildable packages (no skip/fail reason).
+     */
     pub fn get_buildable_packages(&self) -> Result<Vec<PackageRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight
@@ -447,7 +493,9 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    /// Load full ScanIndex for a package.
+    /**
+     * Load full ScanIndex for a package.
+     */
     pub fn get_full_scan_index(&self, package_id: i64) -> Result<ScanIndex> {
         let json: String = self.conn.query_row(
             "SELECT scan_data FROM packages WHERE id = ?1",
@@ -457,7 +505,9 @@ impl Database {
         serde_json::from_str(&json).context("Failed to deserialize scan data")
     }
 
-    /// Load all ScanIndex data in one query.
+    /**
+     * Load all ScanIndex data in one query.
+     */
     pub fn get_all_scan_indexes(&self) -> Result<Vec<(i64, ScanIndex)>> {
         let mut stmt = self
             .conn
@@ -482,7 +532,9 @@ impl Database {
         Ok(results)
     }
 
-    /// Load full ScanIndex by pkgname.
+    /**
+     * Load full ScanIndex by pkgname.
+     */
     pub fn get_scan_index_by_name(
         &self,
         pkgname: &str,
@@ -504,7 +556,9 @@ impl Database {
         }
     }
 
-    /// Clear all scan data.
+    /**
+     * Clear all scan data.
+     */
     pub fn clear_scan(&self) -> Result<()> {
         self.conn.execute("DELETE FROM packages", [])?;
         self.clear_full_scan_complete()?;
@@ -515,7 +569,9 @@ impl Database {
     // DEPENDENCY QUERIES
     // ========================================================================
 
-    /// Store resolved dependencies in batch.
+    /**
+     * Store resolved dependencies in batch.
+     */
     pub fn store_resolved_dependencies_batch(
         &self,
         deps: &[(i64, i64)],
@@ -532,7 +588,9 @@ impl Database {
         Ok(())
     }
 
-    /// Get all transitive reverse dependencies using recursive CTE.
+    /**
+     * Get all transitive reverse dependencies using recursive CTE.
+     */
     pub fn get_transitive_reverse_deps(
         &self,
         package_id: i64,
@@ -551,7 +609,9 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    /// Clear all resolved dependencies.
+    /**
+     * Clear all resolved dependencies.
+     */
     pub fn clear_resolved_depends(&self) -> Result<()> {
         self.conn.execute("DELETE FROM resolved_depends", [])?;
         Ok(())
@@ -561,7 +621,9 @@ impl Database {
     // BUILD QUERIES
     // ========================================================================
 
-    /// Store a build result by package ID.
+    /**
+     * Store a build result by package ID.
+     */
     pub fn store_build_result(
         &self,
         package_id: i64,
@@ -586,7 +648,9 @@ impl Database {
         Ok(())
     }
 
-    /// Store a build result by pkgname.
+    /**
+     * Store a build result by pkgname.
+     */
     pub fn store_build_by_name(&self, result: &BuildResult) -> Result<()> {
         if let Some(pkg) = self.get_package_by_name(result.pkgname.pkgname())? {
             self.store_build_result(pkg.id, result)
@@ -596,7 +660,9 @@ impl Database {
         }
     }
 
-    /// Store multiple build results in a transaction.
+    /**
+     * Store multiple build results in a transaction.
+     */
     pub fn store_build_batch(&self, results: &[BuildResult]) -> Result<()> {
         self.conn.execute("BEGIN TRANSACTION", [])?;
         for result in results {
@@ -610,7 +676,9 @@ impl Database {
         Ok(())
     }
 
-    /// Get build result for a package.
+    /**
+     * Get build result for a package.
+     */
     pub fn get_build_result(
         &self,
         package_id: i64,
@@ -648,14 +716,18 @@ impl Database {
         }
     }
 
-    /// Count of build results.
+    /**
+     * Count of build results.
+     */
     pub fn count_build(&self) -> Result<i64> {
         self.conn
             .query_row("SELECT COUNT(*) FROM builds", [], |row| row.get(0))
             .context("Failed to count builds")
     }
 
-    /// Delete build result for a pkgname.
+    /**
+     * Delete build result for a pkgname.
+     */
     pub fn delete_build_by_name(&self, pkgname: &str) -> Result<bool> {
         let rows = self.conn.execute(
             "DELETE FROM builds WHERE package_id IN (SELECT id FROM packages WHERE pkgname = ?1)",
@@ -664,7 +736,9 @@ impl Database {
         Ok(rows > 0)
     }
 
-    /// Delete build results by pkgpath.
+    /**
+     * Delete build results by pkgpath.
+     */
     pub fn delete_build_by_pkgpath(&self, pkgpath: &str) -> Result<usize> {
         let rows = self.conn.execute(
             "DELETE FROM builds WHERE package_id IN (SELECT id FROM packages WHERE pkgpath = ?1)",
@@ -673,7 +747,9 @@ impl Database {
         Ok(rows)
     }
 
-    /// Get all build results from the database.
+    /**
+     * Get all build results from the database.
+     */
     pub fn get_all_build_results(&self) -> Result<Vec<BuildResult>> {
         let mut stmt = self.conn.prepare(
             "SELECT p.pkgname, p.pkgpath, b.outcome, b.outcome_detail, b.duration_ms, b.log_dir
@@ -709,8 +785,10 @@ impl Database {
         Ok(results)
     }
 
-    /// Count how many packages are broken by each failed package.
-    /// Returns a map from pkgname to the count of packages that depend on it.
+    /**
+     * Count how many packages are broken by each failed package.
+     * Returns a map from pkgname to the count of packages that depend on it.
+     */
     pub fn count_breaks_for_failed(
         &self,
     ) -> Result<std::collections::HashMap<String, usize>> {
@@ -746,7 +824,9 @@ impl Database {
         Ok(counts)
     }
 
-    /// Get total build duration from all builds.
+    /**
+     * Get total build duration from all builds.
+     */
     pub fn get_total_build_duration(&self) -> Result<Duration> {
         let total_ms: i64 = self.conn.query_row(
             "SELECT COALESCE(SUM(duration_ms), 0) FROM builds",
@@ -756,8 +836,10 @@ impl Database {
         Ok(Duration::from_millis(total_ms as u64))
     }
 
-    /// Get pre-failed packages (those with skip_reason or fail_reason but no build result).
-    /// Returns (pkgname, pkgpath, reason).
+    /**
+     * Get pre-failed packages (those with skip_reason or fail_reason but no
+     * build result). Returns (pkgname, pkgpath, reason).
+     */
     pub fn get_prefailed_packages(
         &self,
     ) -> Result<Vec<(String, Option<String>, String)>> {
@@ -776,10 +858,13 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    /// Get packages without build results that depend on failed packages.
-    /// Returns (pkgname, pkgpath, failed_deps) where failed_deps is comma-separated.
-    /// Excludes packages that have skip_reason or fail_reason (they're pre-failed).
-    /// Only lists root failures (direct failures), not indirect failures.
+    /**
+     * Get packages without build results that depend on failed packages.
+     * Returns (pkgname, pkgpath, failed_deps) where failed_deps is
+     * comma-separated. Excludes packages that have skip_reason or fail_reason
+     * (they're pre-failed). Only lists root failures (direct failures), not
+     * indirect failures.
+     */
     pub fn get_indirect_failures(
         &self,
     ) -> Result<Vec<(String, Option<String>, String)>> {
@@ -823,8 +908,10 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    /// Mark a package and all its transitive reverse dependencies as failed.
-    /// Returns the count of packages marked.
+    /**
+     * Mark a package and all its transitive reverse dependencies as failed.
+     * Returns the count of packages marked.
+     */
     pub fn mark_failure_cascade(
         &self,
         package_id: i64,
@@ -884,7 +971,9 @@ impl Database {
     // METADATA
     // ========================================================================
 
-    /// Check if a full tree scan has been completed.
+    /**
+     * Check if a full tree scan has been completed.
+     */
     pub fn full_scan_complete(&self) -> bool {
         self.conn
             .query_row(
@@ -896,7 +985,9 @@ impl Database {
             .unwrap_or(false)
     }
 
-    /// Mark a full tree scan as complete.
+    /**
+     * Mark a full tree scan as complete.
+     */
     pub fn set_full_scan_complete(&self) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO metadata (key, value) VALUES ('full_scan_complete', 'true')",
@@ -905,7 +996,9 @@ impl Database {
         Ok(())
     }
 
-    /// Clear the full tree scan complete marker.
+    /**
+     * Clear the full tree scan complete marker.
+     */
     pub fn clear_full_scan_complete(&self) -> Result<()> {
         self.conn.execute(
             "DELETE FROM metadata WHERE key = 'full_scan_complete'",
@@ -914,7 +1007,9 @@ impl Database {
         Ok(())
     }
 
-    /// Store the pkgsrc environment to the database if not already present.
+    /**
+     * Store the pkgsrc environment to the database if not already present.
+     */
     pub fn store_pkgsrc_env(&self, env: &PkgsrcEnv) -> Result<()> {
         let json = serde_json::json!({
             "packages": env.packages,
@@ -930,7 +1025,9 @@ impl Database {
         Ok(())
     }
 
-    /// Load the pkgsrc environment from the database.
+    /**
+     * Load the pkgsrc environment from the database.
+     */
     pub fn load_pkgsrc_env(&self) -> Result<PkgsrcEnv> {
         let json_str: String = self
             .conn
@@ -960,7 +1057,9 @@ impl Database {
         })
     }
 
-    /// Execute arbitrary SQL and print results.
+    /**
+     * Execute arbitrary SQL and print results.
+     */
     pub fn execute_raw(&self, sql: &str) -> Result<()> {
         let mut stmt = self.conn.prepare(sql)?;
         let column_count = stmt.column_count();
@@ -1020,7 +1119,9 @@ impl Database {
 // HELPER FUNCTIONS
 // ============================================================================
 
-/// Convert BuildOutcome to database format.
+/**
+ * Convert BuildOutcome to database format.
+ */
 fn build_outcome_to_db(
     outcome: &BuildOutcome,
 ) -> (&'static str, Option<String>) {
@@ -1038,7 +1139,9 @@ fn build_outcome_to_db(
     }
 }
 
-/// Convert database format to BuildOutcome.
+/**
+ * Convert database format to BuildOutcome.
+ */
 fn db_outcome_to_build(outcome: &str, detail: Option<String>) -> BuildOutcome {
     match outcome {
         "success" => BuildOutcome::Success,
