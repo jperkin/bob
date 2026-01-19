@@ -656,8 +656,15 @@ impl Scan {
             )? {
                 error!("pre-build script failed");
             }
-            self.pkgsrc_env =
-                Some(PkgsrcEnv::fetch(&self.config, &self.sandbox)?);
+            let env = match db.load_pkgsrc_env() {
+                Ok(env) => env,
+                Err(_) => {
+                    let env = PkgsrcEnv::fetch(&self.config, &self.sandbox)?;
+                    db.store_pkgsrc_env(&env)?;
+                    env
+                }
+            };
+            self.pkgsrc_env = Some(env);
         }
 
         // For full tree scans, always discover all packages

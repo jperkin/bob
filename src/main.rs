@@ -177,7 +177,14 @@ impl BuildRunner {
         {
             bail!("pre-build script failed");
         }
-        let pkgsrc_env = PkgsrcEnv::fetch(&self.config, scope.sandbox())?;
+        let pkgsrc_env = match self.db.load_pkgsrc_env() {
+            Ok(env) => env,
+            Err(_) => {
+                let env = PkgsrcEnv::fetch(&self.config, scope.sandbox())?;
+                self.db.store_pkgsrc_env(&env)?;
+                env
+            }
+        };
 
         if scope.enabled()
             && !scope.sandbox().run_post_build(

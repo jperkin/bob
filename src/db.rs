@@ -30,15 +30,18 @@
 //! - `builds` - Build results with indexed outcome
 //! - `metadata` - Key-value store for flags and cached data
 
-use crate::build::{BuildOutcome, BuildResult};
-use crate::scan::SkipReason;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use pkgsrc::{PkgName, PkgPath, ScanIndex};
 use rusqlite::{Connection, params};
-use std::collections::HashSet;
-use std::path::Path;
-use std::time::Duration;
 use tracing::{debug, warn};
+
+use crate::build::{BuildOutcome, BuildResult};
+use crate::config::PkgsrcEnv;
+use crate::scan::SkipReason;
 
 /// Schema version - update when schema changes.
 const SCHEMA_VERSION: i32 = 3;
@@ -909,6 +912,52 @@ impl Database {
             [],
         )?;
         Ok(())
+    }
+
+    /// Store the pkgsrc environment to the database if not already present.
+    pub fn store_pkgsrc_env(&self, env: &PkgsrcEnv) -> Result<()> {
+        let json = serde_json::json!({
+            "packages": env.packages,
+            "pkgtools": env.pkgtools,
+            "prefix": env.prefix,
+            "pkg_dbdir": env.pkg_dbdir,
+            "pkg_refcount_dbdir": env.pkg_refcount_dbdir,
+        });
+        self.conn.execute(
+            "INSERT OR IGNORE INTO metadata (key, value) VALUES ('pkgsrc_env', ?1)",
+            params![json.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Load the pkgsrc environment from the database.
+    pub fn load_pkgsrc_env(&self) -> Result<PkgsrcEnv> {
+        let json_str: String = self
+            .conn
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'pkgsrc_env'",
+                [],
+                |row| row.get(0),
+            )
+            .context("pkgsrc environment not found in database")?;
+
+        let json: serde_json::Value = serde_json::from_str(&json_str)
+            .context("Invalid pkgsrc_env JSON")?;
+
+        let get_path = |key: &str| -> Result<PathBuf> {
+            json.get(key)
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .ok_or_else(|| anyhow::anyhow!("Missing {} in pkgsrc_env", key))
+        };
+
+        Ok(PkgsrcEnv {
+            packages: get_path("packages")?,
+            pkgtools: get_path("pkgtools")?,
+            prefix: get_path("prefix")?,
+            pkg_dbdir: get_path("pkg_dbdir")?,
+            pkg_refcount_dbdir: get_path("pkg_refcount_dbdir")?,
+        })
     }
 
     /// Execute arbitrary SQL and print results.
