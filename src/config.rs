@@ -506,7 +506,7 @@ pub struct Pkgsrc {
 ///
 /// ```lua
 /// sandboxes = {
-///     basedir = "/data/chroot/bob",
+///     basedir = "/data/chroot",
 ///     actions = {
 ///         { action = "mount", fs = "proc", dir = "/proc" },
 ///         { action = "copy", dir = "/etc" },
@@ -515,7 +515,7 @@ pub struct Pkgsrc {
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct Sandboxes {
-    /// Base directory for sandbox roots (e.g., `/data/chroot/bob`).
+    /// Base directory for sandbox roots (e.g., `/data/chroot`).
     ///
     /// Individual sandboxes are created as numbered subdirectories:
     /// `basedir/0`, `basedir/1`, etc.

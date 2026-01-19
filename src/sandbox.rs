@@ -42,7 +42,7 @@
 //!
 //! ```lua
 //! sandboxes = {
-//!     basedir = "/data/chroot/bob",
+//!     basedir = "/data/chroot",
 //!     actions = {
 //!         { action = "mount", fs = "proc", dir = "/proc" },
 //!         { action = "mount", fs = "dev", dir = "/dev" },
@@ -59,10 +59,10 @@
 //! of `basedir`.
 //!
 //! With `build_threads = 4`, sandboxes are created at:
-//! - `/data/chroot/bob/0`
-//! - `/data/chroot/bob/1`
-//! - `/data/chroot/bob/2`
-//! - `/data/chroot/bob/3`
+//! - `/data/chroot/0`
+//! - `/data/chroot/1`
+//! - `/data/chroot/2`
+//! - `/data/chroot/3`
 #[cfg(target_os = "linux")]
 mod sandbox_linux;
 #[cfg(target_os = "macos")]
@@ -728,7 +728,12 @@ impl Sandbox {
                 }
                 ActionType::Cmd => {
                     if let Some(create_cmd) = action.create_cmd() {
-                        self.run_action_cmd(id, create_cmd, action.cwd())?
+                        self.run_action_cmd(
+                            id,
+                            create_cmd,
+                            action.cwd(),
+                            action.chroot(),
+                        )?
                     } else {
                         None
                     }
@@ -761,36 +766,50 @@ impl Sandbox {
     }
 
     /// Run a custom action command.
-    /// The command is run via /bin/sh -c with environment variables set.
-    /// If cwd is specified, the directory is created if it doesn't exist.
-    /// Uses process_group(0) to isolate from terminal signals during cleanup.
+    ///
+    /// When `chroot` is false (default), the command runs on the host system
+    /// with `cwd` interpreted as a path relative to the sandbox root on the
+    /// host filesystem. For example, `cwd = "/tmp"` becomes `<sandbox>/tmp`.
+    /// If no `cwd` is specified, the sandbox root is used.
+    ///
+    /// When `chroot` is true, the command runs inside the sandbox via chroot
+    /// with `/` as the working directory. The `cwd` parameter is ignored; use
+    /// `cd /path &&` in the command if a different directory is needed.
     fn run_action_cmd(
         &self,
         id: usize,
         cmd: &str,
         cwd: Option<&PathBuf>,
+        chroot: bool,
     ) -> Result<Option<std::process::ExitStatus>> {
-        let sandbox_path = self.path(id);
-        let work_dir = if let Some(c) = cwd {
-            self.mountpath(id, c)
+        if chroot {
+            let status = Command::new("/usr/sbin/chroot")
+                .arg(self.path(id))
+                .arg("/bin/sh")
+                .arg("-c")
+                .arg(cmd)
+                .process_group(0)
+                .status()?;
+
+            Ok(Some(status))
         } else {
-            sandbox_path.clone()
-        };
-        self.verify_path_in_sandbox(id, &work_dir)?;
+            let sandbox_path = self.path(id);
+            let work_dir = if let Some(c) = cwd {
+                self.mountpath(id, c)
+            } else {
+                sandbox_path.clone()
+            };
+            self.verify_path_in_sandbox(id, &work_dir)?;
 
-        // Create the working directory if it doesn't exist
-        if !work_dir.exists() {
-            fs::create_dir_all(&work_dir)?;
+            let status = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(cmd)
+                .current_dir(&work_dir)
+                .process_group(0)
+                .status()?;
+
+            Ok(Some(status))
         }
-
-        let status = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(cmd)
-            .current_dir(&work_dir)
-            .process_group(0)
-            .status()?;
-
-        Ok(Some(status))
     }
 
     fn reverse_actions(&self, id: usize) -> anyhow::Result<()> {
@@ -809,8 +828,12 @@ impl Sandbox {
                 ActionType::Cmd => {
                     // For cmd actions, we run the destroy command
                     if let Some(destroy_cmd) = action.destroy_cmd() {
-                        let status =
-                            self.run_action_cmd(id, destroy_cmd, action.cwd())?;
+                        let status = self.run_action_cmd(
+                            id,
+                            destroy_cmd,
+                            action.cwd(),
+                            action.chroot(),
+                        )?;
                         if let Some(s) = status {
                             if !s.success() {
                                 bail!(

@@ -67,17 +67,17 @@ sandboxes = {
     basedir = "/data/chroot",
 
     actions = {
-        -- NetBSD does not have devfs; device nodes are created via MAKEDEV.
-        -- The cwd is relative to the sandbox (e.g., /dev means $SANDBOX/dev).
-        -- Commands run on the host, so /dev/MAKEDEV refers to the host file.
-        { action = "cmd", cwd = "/dev",
-          create = "cp /dev/MAKEDEV /dev/MAKEDEV.local . && ./MAKEDEV all",
-          destroy = "rm -rf *" },
+        -- Configure NetBSD device nodes.  Note that it is too early to be able
+        -- to execute commands inside chroot context, so this is done carefully
+        -- outside the chroot.
+        { action = "cmd",
+          create = "mkdir dev && cp /dev/MAKEDEV /dev/MAKEDEV.local dev/"
+                .. " && cd dev && ./MAKEDEV all",
+          destroy = "rm -rf dev" },
 
         { action = "mount", fs = "proc", dir = "/proc" },
         { action = "mount", fs = "tmp", dir = "/tmp" },
         { action = "mount", fs = "tmp", dir = "/var/tmp" },
-        { action = "cmd", create = "chmod 1777 tmp var/tmp" },
 
         { action = "copy", dir = "/etc" },
 
@@ -96,6 +96,10 @@ sandboxes = {
         { action = "mount", fs = "null", dir = "/usr/share", opts = "-o ro" },
         { action = "mount", fs = "null", dir = "/usr/sbin", opts = "-o ro" },
         { action = "mount", fs = "null", dir = "/var/mail", opts = "-o ro" },
+
+	-- At this point everything should be configured correctly to enable
+	-- commands to execute inside chroot context.
+        { action = "cmd", chroot = true, create = "chmod 1777 /tmp /var/tmp" },
 
         -- It is recommended to mount pkgsrc read-only, but you will first need
         -- to configure DISTDIR, PACKAGES, and WRKOBJDIR to other directories.

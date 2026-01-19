@@ -77,7 +77,6 @@ sandboxes = {
 
         { action = "mount", fs = "tmp", dir = "/tmp", opts = "-o size=1g" },
         { action = "mount", fs = "tmp", dir = "/var/tmp", opts = "-o size=1g"  },
-        { action = "cmd", create = "chmod 1777 tmp var/tmp" },
 
         { action = "mount", fs = "lofs", dir = "/lib", opts = "-o ro" },
         { action = "mount", fs = "lofs", dir = "/sbin", opts = "-o ro" },
@@ -85,6 +84,10 @@ sandboxes = {
         { action = "symlink", src = "usr/bin", dest = "/bin" },
 
         { action = "copy", dir = "/etc" },
+
+        -- At this point everything should be set up so that chrooted commands
+        -- will execute successfully.  Perform additional chroot setup.
+        { action = "cmd", chroot = true, create = "chmod 1777 /tmp /var/tmp" },
 
         -- It is recommended to mount pkgsrc read-only, but you will first need
         -- to configure DISTDIR, PACKAGES, and WRKOBJDIR to other directories.

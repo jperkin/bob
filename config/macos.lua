@@ -72,7 +72,6 @@ sandboxes = {
         { action = "mount", fs = "dev", dir = "/dev" },
         { action = "mount", fs = "tmp", dir = "/tmp", opts = "-e -s 384m" },
         { action = "mount", fs = "tmp", dir = "/var", opts = "-e -s 512m" },
-        { action = "cmd", create = "chmod 1777 tmp var/tmp" },
 
         -- Read-only system mounts.
         { action = "mount", fs = "bind", dir = "/Library", opts = "-r" },
@@ -84,6 +83,10 @@ sandboxes = {
 
         -- Postfix spool needs to be read-write
         { action = "mount", fs = "bind", dir = "/private/var/spool/postfix" },
+
+        -- At this point everything should be set up so that chrooted commands
+        -- will execute successfully.  Perform additional chroot setup.
+        { action = "cmd", chroot = true, create = "chmod 1777 /tmp /var/tmp" },
 
         -- It is recommended to mount pkgsrc read-only, but you will first need
         -- to configure DISTDIR, PACKAGES, and WRKOBJDIR to other directories.

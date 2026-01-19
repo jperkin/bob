@@ -71,7 +71,7 @@ scripts = {
 -- During creation the actions list is processed in order, and when destroying
 -- sandboxes it is processed in reverse order.
 sandboxes = {
-    basedir = "/data/chroot/bob",
+    basedir = "/data/chroot",
 
     actions = {
         { action = "mount", fs = "proc", dir = "/proc" },
@@ -79,7 +79,6 @@ sandboxes = {
 
         { action = "mount", fs = "tmp", dir = "/tmp", opts = "size=1G" },
         { action = "mount", fs = "tmp", dir = "/var/tmp", opts = "size=1G" },
-        { action = "cmd", create = "chmod 1777 tmp var/tmp" },
 
         { action = "mount", fs = "bind", dir = "/usr/bin", opts = "ro" },
         { action = "mount", fs = "bind", dir = "/usr/sbin", opts = "ro" },
@@ -95,6 +94,10 @@ sandboxes = {
         { action = "symlink", src = "usr/lib", dest = "/lib" },
         { action = "symlink", src = "usr/lib64", dest = "/lib64" },
         { action = "symlink", src = "usr/sbin", dest = "/sbin" },
+
+        -- At this point everything should be set up so that chrooted commands
+        -- will execute successfully.  Perform additional chroot setup.
+        { action = "cmd", chroot = true, create = "chmod 1777 /tmp /var/tmp" },
 
         -- It is recommended to mount pkgsrc read-only, but you will first need
         -- to configure DISTDIR, PACKAGES, and WRKOBJDIR to other directories.

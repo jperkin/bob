@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025 Jonathan Perkin <jonathan@perkin.org.uk>
+ * Copyright (c) 2026 Jonathan Perkin <jonathan@perkin.org.uk>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -38,7 +38,7 @@
 //!
 //! ```lua
 //! sandboxes = {
-//!     basedir = "/data/chroot/bob",
+//!     basedir = "/data/chroot",
 //!     actions = {
 //!         -- Mount procfs
 //!         { action = "mount", fs = "proc", dir = "/proc" },
@@ -58,11 +58,16 @@
 //!         -- Create symbolic link
 //!         { action = "symlink", src = "usr/bin", dest = "/bin" },
 //!
-//!         -- Run command on setup (working directory is sandbox root)
-//!         { action = "cmd", create = "chmod 1777 tmp" },
+//!         -- Run command inside sandbox via chroot
+//!         { action = "cmd", chroot = true, create = "ldconfig" },
+//!
+//!         -- Run command on host (working directory is sandbox root on host)
+//!         { action = "cmd", create = "touch .stamp" },
 //!
 //!         -- Run different commands on create and destroy
-//!         { action = "cmd", create = "mkdir -p home/builder", destroy = "rm -rf home/builder" },
+//!         { action = "cmd", chroot = true,
+//!           create = "mkdir -p /home/builder",
+//!           destroy = "rm -rf /home/builder" },
 //!
 //!         -- Only mount if source exists on host
 //!         { action = "mount", fs = "bind", dir = "/opt/local", ifexists = true },
@@ -125,7 +130,17 @@ use std::str::FromStr;
 /// |-------|----------|-------------|
 /// | `create` | no | Command to run during sandbox creation |
 /// | `destroy` | no | Command to run during sandbox destruction |
-/// | `cwd` | no | Working directory relative to sandbox root |
+/// | `cwd` | no | Working directory for host commands (ignored when chroot=true) |
+/// | `chroot` | no | If true, run command inside sandbox chroot (default: false) |
+///
+/// When `chroot = true`, commands run inside the sandbox via chroot with `/`
+/// as the working directory. Use `cd /path &&` in the command if a different
+/// working directory is needed.
+///
+/// When `chroot = false` (default), commands run on the host system with `cwd`
+/// interpreted as a path relative to the sandbox root on the host filesystem
+/// (e.g., `cwd = "/tmp"` becomes `<sandbox>/tmp`). If no `cwd` is specified,
+/// the sandbox root directory is used.
 #[derive(Clone, Debug, Default)]
 pub struct Action {
     action: String,
@@ -136,6 +151,7 @@ pub struct Action {
     create: Option<String>,
     destroy: Option<String>,
     cwd: Option<PathBuf>,
+    chroot: bool,
     ifexists: bool,
 }
 
@@ -312,6 +328,7 @@ impl Action {
             create: t.get("create").ok(),
             destroy: t.get("destroy").ok(),
             cwd: t.get::<Option<String>>("cwd")?.map(PathBuf::from),
+            chroot: t.get("chroot").unwrap_or(false),
             ifexists: t.get("ifexists").unwrap_or(false),
         })
     }
@@ -349,6 +366,10 @@ impl Action {
 
     pub fn cwd(&self) -> Option<&PathBuf> {
         self.cwd.as_ref()
+    }
+
+    pub fn chroot(&self) -> bool {
+        self.chroot
     }
 
     pub fn ifexists(&self) -> bool {
