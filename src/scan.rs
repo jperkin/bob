@@ -746,6 +746,16 @@ impl Scan {
         // allowing main thread to mutate self.done, self.incoming, etc.
         let config = &self.config;
         let sandbox = &self.sandbox;
+        let scan_env: Vec<(String, String)> = self
+            .pkgsrc_env
+            .as_ref()
+            .map(|e| {
+                e.cachevars
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         /*
          * Continuously iterate over incoming queue, moving to done once
@@ -787,6 +797,7 @@ impl Scan {
                 let progress_clone = Arc::clone(&progress);
                 let shutdown_clone = Arc::clone(&shutdown_flag);
                 let pool_ref = &pool;
+                let scan_env_ref = &scan_env;
 
                 s.spawn(move || {
                     pool_ref.install(|| {
@@ -811,6 +822,7 @@ impl Scan {
                                 config,
                                 sandbox,
                                 pkgpath,
+                                scan_env_ref,
                                 &shutdown_clone,
                             );
 
@@ -992,10 +1004,21 @@ impl Scan {
         pkgpath: &PkgPath,
     ) -> anyhow::Result<Vec<ScanIndex>> {
         static NO_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+        let scan_env: Vec<(String, String)> = self
+            .pkgsrc_env
+            .as_ref()
+            .map(|e| {
+                e.cachevars
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
         Self::scan_pkgpath_with(
             &self.config,
             &self.sandbox,
             pkgpath,
+            &scan_env,
             &NO_SHUTDOWN,
         )
     }
@@ -1008,6 +1031,7 @@ impl Scan {
         config: &Config,
         sandbox: &Sandbox,
         pkgpath: &PkgPath,
+        scan_env: &[(String, String)],
         shutdown: &AtomicBool,
     ) -> anyhow::Result<Vec<ScanIndex>> {
         let pkgpath_str = pkgpath.as_path().display().to_string();
@@ -1018,7 +1042,6 @@ impl Scan {
         let pkgsrcdir = config.pkgsrc().display().to_string();
         let workdir = format!("{}/{}", pkgsrcdir, pkgpath_str);
 
-        let scan_env = config.scan_env();
         trace!(
             workdir = %workdir,
             scan_env = ?scan_env,
@@ -1028,7 +1051,7 @@ impl Scan {
             0,
             config.make(),
             ["-C", &workdir, "pbulk-index"],
-            scan_env,
+            scan_env.to_vec(),
         )?;
         let output = wait_output_with_shutdown(child, shutdown)?;
 

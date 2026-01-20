@@ -32,7 +32,7 @@
  * - `metadata` - Key-value store for flags and cached data
  */
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -1009,6 +1009,7 @@ impl Database {
             "prefix": env.prefix,
             "pkg_dbdir": env.pkg_dbdir,
             "pkg_refcount_dbdir": env.pkg_refcount_dbdir,
+            "cachevars": env.cachevars,
         });
         self.conn.execute(
             "INSERT OR IGNORE INTO metadata (key, value) VALUES ('pkgsrc_env', ?1)",
@@ -1040,12 +1041,18 @@ impl Database {
                 .ok_or_else(|| anyhow::anyhow!("Missing {} in pkgsrc_env", key))
         };
 
+        let cachevars: HashMap<String, String> = json
+            .get("cachevars")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
         Ok(PkgsrcEnv {
             packages: get_path("packages")?,
             pkgtools: get_path("pkgtools")?,
             prefix: get_path("prefix")?,
             pkg_dbdir: get_path("pkg_dbdir")?,
             pkg_refcount_dbdir: get_path("pkg_refcount_dbdir")?,
+            cachevars,
         })
     }
 

@@ -28,13 +28,13 @@ pkgsrc = {
     -- the sandbox and that work directories are writeable.
     -- build_user = "builder",
 
-    -- Set environment variables for scan processes. This is deliberately
-    -- separate from env as only a few specific variables are useful here.
-    -- Only add pre-computed variables to avoid forking and speed up scans.
-    scanenv = {
-        NATIVE_OPSYS = "SunOS",
-        -- NATIVE_OPSYS_VERSION = "<insert correct value>",
-        -- NATIVE_OS_VERSION = "<insert correct value>",
+    -- List of pkgsrc variables to fetch once and cache. These are then set in
+    -- the environment for scans and builds, avoiding expensive forks. Only add
+    -- variables that are calculated prior to mk.conf being included.
+    cachevars = {
+        "NATIVE_OPSYS",
+        "NATIVE_OPSYS_VERSION",
+        "NATIVE_OS_VERSION",
     },
 
     -- Set environment variables for each build. The pkg object allows you to

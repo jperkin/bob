@@ -56,11 +56,12 @@
 //! | Field | Type | Default | Description |
 //! |-------|------|---------|-------------|
 //! | `bootstrap` | string | none | Path to a bootstrap tarball. Required on non-NetBSD systems. Unpacked into each sandbox before builds. |
-//! | `tar` | string | `tar` | Path to a tar binary capable of extracting the bootstrap kit. Defaults to `tar` in PATH. |
 //! | `build_user` | string | none | Unprivileged user to run builds as. If set, builds run as this user instead of root. |
+//! | `cachevars` | table | `{}` | List of pkgsrc variable names to fetch once and cache. These are set in the environment for scans and builds (e.g., `{"NATIVE_OPSYS", "NATIVE_OS_VERSION"}`). |
+//! | `env` | function or table | `{}` | Environment variables for builds. Can be a table of key-value pairs, or a function receiving package metadata and returning a table. See [Environment Function](#environment-function). |
 //! | `pkgpaths` | table | `{}` | List of package paths to build (e.g., `{"mail/mutt", "www/curl"}`). Dependencies are discovered automatically. |
 //! | `save_wrkdir_patterns` | table | `{}` | Glob patterns for files to preserve from WRKDIR on build failure (e.g., `{"**/config.log"}`). |
-//! | `env` | function or table | `{}` | Environment variables for builds. Can be a table of key-value pairs, or a function receiving package metadata and returning a table. See [Environment Function](#environment-function). |
+//! | `tar` | string | `tar` | Path to a tar binary capable of extracting the bootstrap kit. Defaults to `tar` in PATH. |
 //!
 //! ## Environment Function
 //!
@@ -151,6 +152,8 @@ pub struct PkgsrcEnv {
     pub pkg_dbdir: PathBuf,
     /// PKG_REFCOUNT_DBDIR for refcounted files database.
     pub pkg_refcount_dbdir: PathBuf,
+    /// Cached pkgsrc variables from the `cachevars` config option.
+    pub cachevars: HashMap<String, String>,
 }
 
 impl PkgsrcEnv {
@@ -159,7 +162,7 @@ impl PkgsrcEnv {
     /// This must be called after sandbox 0 is created if sandboxes are enabled,
     /// since bmake may only exist inside the sandbox.
     pub fn fetch(config: &Config, sandbox: &Sandbox) -> Result<Self> {
-        const VARNAMES: &[&str] = &[
+        const REQUIRED_VARS: &[&str] = &[
             "PACKAGES",
             "PKG_DBDIR",
             "PKG_REFCOUNT_DBDIR",
@@ -167,7 +170,13 @@ impl PkgsrcEnv {
             "PREFIX",
         ];
 
-        let varnames_arg = VARNAMES.join(" ");
+        let user_cachevars = config.cachevars();
+        let mut all_varnames: Vec<&str> = REQUIRED_VARS.to_vec();
+        for v in user_cachevars {
+            all_varnames.push(v.as_str());
+        }
+
+        let varnames_arg = all_varnames.join(" ");
         let script = format!(
             "cd {}/pkgtools/pkg_install && {} show-vars VARNAMES=\"{}\"\n",
             config.pkgsrc().display(),
@@ -188,20 +197,32 @@ impl PkgsrcEnv {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let lines: Vec<&str> = stdout.lines().collect();
 
-        if lines.len() != VARNAMES.len() {
+        if lines.len() != all_varnames.len() {
             bail!(
                 "Expected {} variables from pkgsrc, got {}",
-                VARNAMES.len(),
+                all_varnames.len(),
                 lines.len()
             );
         }
 
         let mut values: HashMap<&str, &str> = HashMap::new();
-        for (varname, value) in VARNAMES.iter().zip(lines) {
-            if value.is_empty() {
+        for (varname, value) in all_varnames.iter().zip(&lines) {
+            values.insert(varname, value);
+        }
+
+        for varname in REQUIRED_VARS {
+            if values.get(varname).is_none_or(|v| v.is_empty()) {
                 bail!("pkgsrc returned empty value for {}", varname);
             }
-            values.insert(varname, value);
+        }
+
+        let mut cachevars: HashMap<String, String> = HashMap::new();
+        for varname in user_cachevars {
+            if let Some(value) = values.get(varname.as_str()) {
+                if !value.is_empty() {
+                    cachevars.insert(varname.clone(), (*value).to_string());
+                }
+            }
         }
 
         Ok(PkgsrcEnv {
@@ -210,6 +231,7 @@ impl PkgsrcEnv {
             prefix: PathBuf::from(values["PREFIX"]),
             pkg_dbdir: PathBuf::from(values["PKG_DBDIR"]),
             pkg_refcount_dbdir: PathBuf::from(values["PKG_REFCOUNT_DBDIR"]),
+            cachevars,
         })
     }
 }
@@ -491,8 +513,8 @@ pub struct Pkgsrc {
     pub pkgpaths: Option<Vec<PkgPath>>,
     /// Glob patterns for files to save from WRKDIR on failure.
     pub save_wrkdir_patterns: Vec<String>,
-    /// Environment variables for scan processes.
-    pub scanenv: HashMap<String, String>,
+    /// pkgsrc variables to cache and re-set in each environment run.
+    pub cachevars: Vec<String>,
     /// Path to tar binary (defaults to `tar` in PATH).
     pub tar: Option<PathBuf>,
 }
@@ -673,6 +695,11 @@ impl Config {
         self.file.pkgsrc.bootstrap.as_ref()
     }
 
+    /// Return list of pkgsrc variable names to cache.
+    pub fn cachevars(&self) -> &[String] {
+        self.file.pkgsrc.cachevars.as_slice()
+    }
+
     /// Get environment variables for a package from the Lua env function/table.
     pub fn get_pkg_env(
         &self,
@@ -685,6 +712,11 @@ impl Config {
     ///
     /// If `pkgsrc_env` is provided, includes the pkgsrc-derived variables
     /// (packages, pkgtools, prefix, pkg_dbdir, pkg_refcount_dbdir).
+    /// Return environment variables for script execution.
+    ///
+    /// If `pkgsrc_env` is provided, includes the pkgsrc-derived variables
+    /// (packages, pkgtools, prefix, pkg_dbdir, pkg_refcount_dbdir) as well
+    /// as the cached variables from the `cachevars` config option.
     pub fn script_env(
         &self,
         pkgsrc_env: Option<&PkgsrcEnv>,
@@ -715,6 +747,9 @@ impl Config {
                 "bob_pkg_refcount_dbdir".to_string(),
                 env.pkg_refcount_dbdir.display().to_string(),
             ));
+            for (key, value) in &env.cachevars {
+                envs.push((key.clone(), value.clone()));
+            }
         }
         let tar_value = self
             .tar()
@@ -731,16 +766,6 @@ impl Config {
             ));
         }
         envs
-    }
-
-    /// Return environment variables for scan processes.
-    pub fn scan_env(&self) -> Vec<(String, String)> {
-        self.file
-            .pkgsrc
-            .scanenv
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
     }
 
     /// Validate the configuration, checking that required paths and files exist.
@@ -920,12 +945,12 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         "basedir",
         "bootstrap",
         "build_user",
+        "cachevars",
         "env",
         "logdir",
         "make",
         "pkgpaths",
         "save_wrkdir_patterns",
-        "scanenv",
         "tar",
     ];
     warn_unknown_keys(&pkgsrc, "pkgsrc", KNOWN_KEYS);
@@ -963,24 +988,23 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
             _ => Vec::new(),
         };
 
-    let scanenv: HashMap<String, String> =
-        match pkgsrc.get::<Value>("scanenv")? {
-            Value::Nil => HashMap::new(),
-            Value::Table(t) => {
-                t.pairs::<String, String>().filter_map(|r| r.ok()).collect()
-            }
-            _ => HashMap::new(),
-        };
+    let cachevars: Vec<String> = match pkgsrc.get::<Value>("cachevars")? {
+        Value::Nil => Vec::new(),
+        Value::Table(t) => {
+            t.sequence_values::<String>().filter_map(|r| r.ok()).collect()
+        }
+        _ => Vec::new(),
+    };
 
     Ok(Pkgsrc {
         basedir: PathBuf::from(basedir),
         bootstrap,
         build_user,
+        cachevars,
         logdir: PathBuf::from(logdir),
         make: PathBuf::from(make),
         pkgpaths,
         save_wrkdir_patterns,
-        scanenv,
         tar,
     })
 }
