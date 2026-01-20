@@ -274,10 +274,6 @@ impl BuildRunner {
                     elapsed_ms = start.elapsed().as_millis(),
                     "Finished generating pkg_summary.gz"
                 );
-                if let Ok(env) = self.db.load_pkgsrc_env() {
-                    let path = env.packages.join("All/pkg_summary.gz");
-                    println!("pkg_summary.gz written to: {}", path.display());
-                }
             }
             Err(e) => {
                 println!();
