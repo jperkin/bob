@@ -130,17 +130,14 @@ use std::str::FromStr;
 /// |-------|----------|-------------|
 /// | `create` | no | Command to run during sandbox creation |
 /// | `destroy` | no | Command to run during sandbox destruction |
-/// | `cwd` | no | Working directory for host commands (ignored when chroot=true) |
 /// | `chroot` | no | If true, run command inside sandbox chroot (default: false) |
 ///
 /// When `chroot = true`, commands run inside the sandbox via chroot with `/`
 /// as the working directory. Use `cd /path &&` in the command if a different
 /// working directory is needed.
 ///
-/// When `chroot = false` (default), commands run on the host system with `cwd`
-/// interpreted as a path relative to the sandbox root on the host filesystem
-/// (e.g., `cwd = "/tmp"` becomes `<sandbox>/tmp`). If no `cwd` is specified,
-/// the sandbox root directory is used.
+/// When `chroot = false` (default), commands run on the host system with the
+/// sandbox root as the working directory.
 #[derive(Clone, Debug, Default)]
 pub struct Action {
     action: String,
@@ -150,7 +147,6 @@ pub struct Action {
     opts: Option<String>,
     create: Option<String>,
     destroy: Option<String>,
-    cwd: Option<PathBuf>,
     chroot: bool,
     ifexists: bool,
 }
@@ -327,7 +323,6 @@ impl Action {
             opts: t.get("opts").ok(),
             create: t.get("create").ok(),
             destroy: t.get("destroy").ok(),
-            cwd: t.get::<Option<String>>("cwd")?.map(PathBuf::from),
             chroot: t.get("chroot").unwrap_or(false),
             ifexists: t.get("ifexists").unwrap_or(false),
         })
@@ -362,10 +357,6 @@ impl Action {
 
     pub fn destroy_cmd(&self) -> Option<&String> {
         self.destroy.as_ref()
-    }
-
-    pub fn cwd(&self) -> Option<&PathBuf> {
-        self.cwd.as_ref()
     }
 
     pub fn chroot(&self) -> bool {

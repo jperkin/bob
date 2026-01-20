@@ -791,12 +791,7 @@ impl Sandbox {
                             chroot = action.chroot(),
                             "Running create command"
                         );
-                        self.run_action_cmd(
-                            id,
-                            create_cmd,
-                            action.cwd(),
-                            action.chroot(),
-                        )?
+                        self.run_action_cmd(id, create_cmd, action.chroot())?
                     } else {
                         None
                     }
@@ -837,18 +832,14 @@ impl Sandbox {
     /// Run a custom action command.
     ///
     /// When `chroot` is false (default), the command runs on the host system
-    /// with `cwd` interpreted as a path relative to the sandbox root on the
-    /// host filesystem. For example, `cwd = "/tmp"` becomes `<sandbox>/tmp`.
-    /// If no `cwd` is specified, the sandbox root is used.
+    /// with the sandbox root as the working directory.
     ///
     /// When `chroot` is true, the command runs inside the sandbox via chroot
-    /// with `/` as the working directory. The `cwd` parameter is ignored; use
-    /// `cd /path &&` in the command if a different directory is needed.
+    /// with `/` as the working directory.
     fn run_action_cmd(
         &self,
         id: usize,
         cmd: &str,
-        cwd: Option<&PathBuf>,
         chroot: bool,
     ) -> Result<Option<std::process::ExitStatus>> {
         if chroot {
@@ -862,19 +853,10 @@ impl Sandbox {
 
             Ok(Some(status))
         } else {
-            let sandbox_path = self.path(id);
-            let work_dir = if let Some(c) = cwd {
-                let p = self.mountpath(id, c);
-                self.verify_path_in_sandbox(id, &p)?;
-                p
-            } else {
-                sandbox_path.clone()
-            };
-
             let status = Command::new("/bin/sh")
                 .arg("-c")
                 .arg(cmd)
-                .current_dir(&work_dir)
+                .current_dir(self.path(id))
                 .process_group(0)
                 .status()?;
 
@@ -907,7 +889,6 @@ impl Sandbox {
                         let status = self.run_action_cmd(
                             id,
                             destroy_cmd,
-                            action.cwd(),
                             action.chroot(),
                         )?;
                         if let Some(s) = status {
@@ -918,10 +899,6 @@ impl Sandbox {
                                 );
                             }
                         }
-                    }
-                    if let Some(cwd) = action.cwd() {
-                        let cwd_path = self.mountpath(id, cwd);
-                        self.remove_empty_dirs(id, &cwd_path);
                     }
                 }
                 ActionType::Copy => {
