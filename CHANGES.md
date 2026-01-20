@@ -1,5 +1,44 @@
 # Changelog
 
+## Version 0.6.0 (2026-01-20)
+
+* Overhaul pkgsrc variable configuration.  Variables are fetched directly via
+  `show-vars` at the start of a run, leaving `mk.conf` to be the single source
+  of truth.  Rename `scanenv` to `cachevars`, which is now simply a list of
+  variable names to fetch and cache.
+
+* Collapse idle workers in the TUI, leaving more vertical space for active
+  build logs.  More efficient TUI updates and refresh handling.
+
+* Add `rebuild -a` flag to rebuild all packages, clearing any cached build
+  results but reusing the scan and dependency resolution.
+
+* Add `pkg_summary.gz` generation with `FILE_CKSUM` support.
+
+* Add `chroot` flag to `cmd` actions to run commands inside sandbox.  Remove
+  `cwd` argument, the semantics were too confusing with too much magic.
+
+* Parallel sandbox creation/destruction, and parallel package discovery during
+  full scans.
+
+* Execute bmake directly rather than via shell for scan phase.
+
+* Overhaul logging: use `log_level` in config, override with `RUST_LOG`.
+  Improve many output messages and ensure consistency.
+
+* Improve sandbox shutdown and cleanup reliability, especially during
+  interruptions.
+
+* `bob clean` now removes the entire log directory, `bob clean -l` removes just
+  the package log directories.
+
+* `bob db` no longer prints column headers.
+
+* Add `bob report` command.  HTML reports are no longer generated
+  automatically.
+
+* Default `tar` to "tar" in PATH, only required when bootstrap is enabled.
+
 ## Version 0.5.0 (2026-01-08)
 
 * Add `bob db` command for arbitrary SQL queries.
