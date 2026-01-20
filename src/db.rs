@@ -1090,18 +1090,9 @@ impl Database {
             }
         } else {
             // Query statement (SELECT, PRAGMA, etc.)
-            let column_names: Vec<String> =
-                stmt.column_names().iter().map(|s| s.to_string()).collect();
-
             let mut rows = stmt.query([])?;
-            let mut first = true;
 
             while let Some(row) = rows.next()? {
-                if first {
-                    println!("{}", column_names.join("|"));
-                    first = false;
-                }
-
                 let values: Vec<String> = (0..column_count)
                     .map(|i| {
                         row.get_ref(i)
