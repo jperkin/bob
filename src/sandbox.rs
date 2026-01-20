@@ -864,11 +864,12 @@ impl Sandbox {
         } else {
             let sandbox_path = self.path(id);
             let work_dir = if let Some(c) = cwd {
-                self.mountpath(id, c)
+                let p = self.mountpath(id, c);
+                self.verify_path_in_sandbox(id, &p)?;
+                p
             } else {
                 sandbox_path.clone()
             };
-            self.verify_path_in_sandbox(id, &work_dir)?;
 
             let status = Command::new("/bin/sh")
                 .arg("-c")
