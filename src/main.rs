@@ -245,20 +245,6 @@ impl BuildRunner {
         Ok(summary)
     }
 
-    /// Generate and print the HTML report.
-    fn generate_report(&self) {
-        println!("Generating reports...");
-        let logdir = self.config.logdir();
-        let report_path = logdir.join("report.html");
-        if let Err(e) =
-            report::write_html_report(&self.db, logdir, &report_path)
-        {
-            eprintln!("Warning: Failed to write HTML report: {}", e);
-        } else {
-            println!("HTML report written to: {}", report_path.display());
-        }
-    }
-
     /// Generate pkg_summary.gz for all successful packages.
     fn generate_pkg_summary(&self) {
         print!("Generating pkg_summary.gz...");
@@ -391,6 +377,8 @@ enum Cmd {
         #[arg(value_name = "PKGPATH|PKGNAME")]
         packages: Vec<String>,
     },
+    /// Generate HTML report from current build logs
+    Report,
     /// Remove current build state (database and build logs)
     Clean,
     /// Run SQL commands against the database
@@ -418,8 +406,6 @@ enum SandboxCmd {
 
 #[derive(Debug, Subcommand)]
 enum UtilCmd {
-    /// Generate HTML report from existing logdir data
-    GenerateReport,
     /// Create and destroy build sandboxes
     Sandbox {
         #[command(subcommand)]
@@ -454,6 +440,22 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     match args.cmd {
+        Cmd::Init { dir: ref arg } => {
+            Init::create(arg)?;
+        }
+        Cmd::Scan => {
+            let runner = BuildRunner::new(args.config.as_deref())?;
+
+            let mut scan = Scan::new(&runner.config);
+            if let Some(pkgs) = runner.config.pkgpaths() {
+                for p in pkgs {
+                    scan.add(p);
+                }
+            }
+
+            let result = runner.run_scan(&mut scan)?;
+            println!("{result}");
+        }
         Cmd::Build { pkgpaths: cmdline_pkgs } => {
             let mut runner = BuildRunner::new(args.config.as_deref())?;
             tracing::info!("Build command started");
@@ -476,7 +478,6 @@ fn main() -> Result<()> {
 
             let scan_result = runner.run_scan(&mut scan)?;
             runner.run_build(scan_result)?;
-            runner.generate_report();
             runner.generate_pkg_summary();
         }
         Cmd::Rebuild { all, force, packages } => {
@@ -565,27 +566,23 @@ fn main() -> Result<()> {
             let options = build::BuildOptions { force_rebuild: force };
             runner.run_build_with(scan_result, options)?;
         }
-        Cmd::Util { cmd: UtilCmd::GenerateReport } => {
+        Cmd::Report => {
             let config = Config::load(args.config.as_deref())?;
             let logdir = config.logdir();
-            let logs_dir = logdir.join("bob");
-            let db_path = logs_dir.join("bob.db");
+            let db_path = logdir.join("bob").join("bob.db");
 
             if !db_path.exists() {
                 bail!(
-                    "No database found at {}. Run a build first.",
+                    "No database found at {}.  Perform a build first.",
                     db_path.display()
                 );
             }
 
-            println!("Generating reports...");
+            println!("Generating report...");
             let db = Database::open(&db_path)?;
             let report_path = logdir.join("report.html");
             report::write_html_report(&db, logdir, &report_path)?;
             println!("HTML report written to: {}", report_path.display());
-        }
-        Cmd::Init { dir: ref arg } => {
-            Init::create(arg)?;
         }
         Cmd::Clean => {
             let config = Config::load(args.config.as_deref())?;
@@ -800,19 +797,6 @@ fn main() -> Result<()> {
                 bail!("No sandboxes configured");
             }
             sandbox.list_all(config.build_threads());
-        }
-        Cmd::Scan => {
-            let runner = BuildRunner::new(args.config.as_deref())?;
-
-            let mut scan = Scan::new(&runner.config);
-            if let Some(pkgs) = runner.config.pkgpaths() {
-                for p in pkgs {
-                    scan.add(p);
-                }
-            }
-
-            let result = runner.run_scan(&mut scan)?;
-            println!("{result}");
         }
     };
 
