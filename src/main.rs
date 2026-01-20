@@ -450,26 +450,6 @@ enum UtilCmd {
     },
 }
 
-fn print_summary(summary: &build::BuildSummary) {
-    let c = summary.counts();
-    let s = &c.skipped;
-    println!();
-    println!("Build Summary");
-    println!("=============");
-    println!("  Succeeded:          {}", c.success);
-    println!("  Failed:             {}", c.failed);
-    println!("  Up-to-date:         {}", c.up_to_date);
-    println!("  Pkg skip:           {}", s.pkg_skip);
-    println!("  Pkg fail:           {}", s.pkg_fail);
-    println!("  Unresolved:         {}", s.unresolved);
-    println!("  Indirect skip:      {}", s.indirect_skip);
-    println!("  Indirect fail:      {}", s.indirect_fail);
-    if c.scanfail > 0 {
-        println!("  Scan failed:        {}", c.scanfail);
-    }
-    println!();
-}
-
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -495,8 +475,7 @@ fn main() -> Result<()> {
             }
 
             let scan_result = runner.run_scan(&mut scan)?;
-            let summary = runner.run_build(scan_result)?;
-            print_summary(&summary);
+            runner.run_build(scan_result)?;
             runner.generate_report();
             runner.generate_pkg_summary();
         }
@@ -584,8 +563,7 @@ fn main() -> Result<()> {
 
             let scan_result = runner.run_scan(&mut scan)?;
             let options = build::BuildOptions { force_rebuild: force };
-            let summary = runner.run_build_with(scan_result, options)?;
-            print_summary(&summary);
+            runner.run_build_with(scan_result, options)?;
         }
         Cmd::Util { cmd: UtilCmd::GenerateReport } => {
             let config = Config::load(args.config.as_deref())?;
