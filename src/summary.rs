@@ -28,7 +28,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use pkgsrc::archive::BinaryPackage;
+use pkgsrc::archive::{BinaryPackage, SummaryOptions};
 use rayon::prelude::*;
 use tracing::{debug, warn};
 
@@ -83,8 +83,10 @@ fn generate_summary_entry(pkgfile: &Path) -> Option<String> {
         return None;
     }
 
+    let opts = SummaryOptions { compute_file_cksum: true };
+
     match BinaryPackage::open(pkgfile) {
-        Ok(pkg) => match pkg.to_summary() {
+        Ok(pkg) => match pkg.to_summary_with_opts(&opts) {
             Ok(summary) => Some(format!("{}\n", summary)),
             Err(e) => {
                 warn!(
