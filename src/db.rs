@@ -1000,7 +1000,8 @@ impl Database {
     }
 
     /**
-     * Store the pkgsrc environment to the database if not already present.
+     * Store the pkgsrc environment to the database.  Errors if already present
+     * as this should only ever be done once.
      */
     pub fn store_pkgsrc_env(&self, env: &PkgsrcEnv) -> Result<()> {
         let json = serde_json::json!({
@@ -1012,7 +1013,7 @@ impl Database {
             "cachevars": env.cachevars,
         });
         self.conn.execute(
-            "INSERT OR IGNORE INTO metadata (key, value) VALUES ('pkgsrc_env', ?1)",
+            "INSERT INTO metadata (key, value) VALUES ('pkgsrc_env', ?1)",
             params![json.to_string()],
         )?;
         Ok(())
