@@ -77,12 +77,13 @@ use crate::config::Config;
 use anyhow::{Result, bail};
 use rayon::prelude::*;
 use std::fs;
+use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, info_span, warn};
 
 /// How often to check the shutdown flag while waiting for something else.
@@ -316,7 +317,8 @@ impl Sandbox {
                 return Ok(());
             }
             bail!(
-                "Sandbox exists but is incomplete: {}. Destroy it first.",
+                "Sandbox exists but is incomplete: {}.\n\
+                 Run 'bob util sandbox destroy' first.",
                 sandbox.display()
             );
         }
@@ -529,10 +531,12 @@ impl Sandbox {
      */
     pub fn create_all(&self, count: usize) -> Result<()> {
         if count == 1 {
-            println!("Creating sandbox...");
+            print!("Creating sandbox...");
         } else {
-            println!("Creating {} sandboxes...", count);
+            print!("Creating {} sandboxes...", count);
         }
+        let _ = std::io::stdout().flush();
+        let start = Instant::now();
         let results: Vec<(usize, Result<()>)> =
             (0..count).into_par_iter().map(|i| (i, self.create(i))).collect();
         let mut first_error: Option<anyhow::Error> = None;
@@ -544,6 +548,7 @@ impl Sandbox {
             }
         }
         if let Some(e) = first_error {
+            println!();
             for (i, _) in &results {
                 if let Err(destroy_err) = self.destroy(*i) {
                     eprintln!(
@@ -554,6 +559,7 @@ impl Sandbox {
             }
             return Err(e);
         }
+        println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
         Ok(())
     }
 
@@ -562,25 +568,36 @@ impl Sandbox {
      * sandboxes are attempted, printing each error as it occurs.
      */
     pub fn destroy_all(&self, count: usize) -> Result<()> {
-        if count == 1 {
-            println!("Destroying sandbox...");
-        } else {
-            println!("Destroying {} sandboxes...", count);
+        let existing = self.count_existing(count);
+        if existing == 0 {
+            return Ok(());
         }
+        if existing == 1 {
+            print!("Destroying sandbox...");
+        } else {
+            print!("Destroying {} sandboxes...", existing);
+        }
+        let _ = std::io::stdout().flush();
+        let start = Instant::now();
         let results: Vec<(usize, Result<()>)> =
             (0..count).into_par_iter().map(|i| (i, self.destroy(i))).collect();
         let mut failed = 0;
         for (i, result) in results {
             if let Err(e) = result {
+                if failed == 0 {
+                    println!();
+                }
                 eprintln!("sandbox {}: {}", i, e);
                 failed += 1;
             }
         }
         if failed == 0 {
+            println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
             Ok(())
         } else {
             Err(anyhow::anyhow!(
-                "Failed to destroy {} sandbox{}\nRemove unexpected files, then run 'bob util sandbox destroy'",
+                "Failed to destroy {} sandbox{}.\n\
+                 Remove unexpected files, then run 'bob util sandbox destroy'.",
                 failed,
                 if failed == 1 { "" } else { "es" }
             ))
@@ -601,6 +618,13 @@ impl Sandbox {
                 }
             }
         }
+    }
+
+    /**
+     * Count existing sandboxes (complete or incomplete).
+     */
+    pub fn count_existing(&self, count: usize) -> usize {
+        (0..count).filter(|i| self.path(*i).exists()).count()
     }
 
     /*
@@ -1093,8 +1117,11 @@ impl SingleSandboxScope {
     /// Create a new scope, creating sandbox 0 if enabled.
     pub fn new(sandbox: Sandbox) -> Result<Self> {
         if sandbox.enabled() {
-            println!("Creating sandbox...");
+            print!("Creating sandbox...");
+            let _ = std::io::stdout().flush();
+            let start = Instant::now();
             sandbox.create(0)?;
+            println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
         }
         Ok(Self { sandbox })
     }
@@ -1113,9 +1140,14 @@ impl SingleSandboxScope {
 impl Drop for SingleSandboxScope {
     fn drop(&mut self) {
         if self.sandbox.enabled() {
-            println!("Destroying sandbox...");
+            print!("Destroying sandbox...");
+            let _ = std::io::stdout().flush();
+            let start = Instant::now();
             if let Err(e) = self.sandbox.destroy(0) {
+                println!();
                 eprintln!("Warning: failed to destroy sandbox: {}", e);
+            } else {
+                println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
             }
         }
     }
