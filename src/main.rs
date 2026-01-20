@@ -380,7 +380,11 @@ enum Cmd {
     /// Generate HTML report from current build logs
     Report,
     /// Remove current build state (database and build logs)
-    Clean,
+    Clean {
+        /// Only remove package log directories, preserve database
+        #[arg(short = 'l', long = "logs-only")]
+        logs_only: bool,
+    },
     /// Run SQL commands against the database
     Db {
         /// SQL command to execute (omit for interactive mode)
@@ -584,11 +588,26 @@ fn main() -> Result<()> {
             report::write_html_report(&db, logdir, &report_path)?;
             println!("HTML report written to: {}", report_path.display());
         }
-        Cmd::Clean => {
+        Cmd::Clean { logs_only } => {
             let config = Config::load(args.config.as_deref())?;
+            let logdir = config.logdir();
 
-            if config.logdir().exists() {
-                std::fs::remove_dir_all(config.logdir())
+            if !logdir.exists() {
+                return Ok(());
+            }
+
+            if logs_only {
+                for entry in std::fs::read_dir(logdir)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.is_dir() && entry.file_name() != "bob" {
+                        std::fs::remove_dir_all(&path).with_context(|| {
+                            format!("Failed to remove {}", path.display())
+                        })?;
+                    }
+                }
+            } else {
+                std::fs::remove_dir_all(logdir)
                     .context("Failed to remove logs directory")?;
             }
         }
