@@ -842,9 +842,10 @@ impl Sandbox {
         cmd: &str,
         chroot: bool,
     ) -> Result<Option<std::process::ExitStatus>> {
+        let sandbox_path = self.path(id);
         if chroot {
             let status = Command::new("/usr/sbin/chroot")
-                .arg(self.path(id))
+                .arg(&sandbox_path)
                 .arg("/bin/sh")
                 .arg("-c")
                 .arg(cmd)
@@ -856,7 +857,8 @@ impl Sandbox {
             let status = Command::new("/bin/sh")
                 .arg("-c")
                 .arg(cmd)
-                .current_dir(self.path(id))
+                .env("bob_sandbox_path", &sandbox_path)
+                .current_dir(&sandbox_path)
                 .process_group(0)
                 .status()?;
 
