@@ -575,7 +575,7 @@ impl Sandbox {
         if existing == 1 {
             print!("Destroying sandbox...");
         } else {
-            print!("Destroying {} sandboxes...", existing);
+            print!("Destroying sandboxes...");
         }
         let _ = std::io::stdout().flush();
         let start = Instant::now();
@@ -1045,9 +1045,12 @@ impl Sandbox {
 
 /// RAII scope for multiple sandboxes (used by build).
 ///
-/// Creates sandboxes on construction, destroys them on drop.
-/// This ensures sandboxes are always cleaned up, even on error paths.
-/// If sandboxes are disabled, this is a no-op.
+/**
+ * RAII scope for sandbox lifecycle management.
+ *
+ * Creates sandbox 0 on construction, optionally adds more for parallel builds,
+ * and destroys all sandboxes on drop.
+ */
 #[derive(Debug)]
 pub struct SandboxScope {
     sandbox: Sandbox,
@@ -1055,12 +1058,57 @@ pub struct SandboxScope {
 }
 
 impl SandboxScope {
-    /// Create a new scope, creating `count` sandboxes if enabled.
-    pub fn new(sandbox: Sandbox, count: usize) -> Result<Self> {
+    /// Create a new scope with sandbox 0.
+    pub fn new(sandbox: Sandbox) -> Result<Self> {
         if sandbox.enabled() {
-            sandbox.create_all(count)?;
+            print!("Creating scan sandbox...");
+            let _ = std::io::stdout().flush();
+            let start = Instant::now();
+            if let Err(e) = sandbox.create(0) {
+                println!();
+                return Err(e);
+            }
+            println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
         }
-        Ok(Self { sandbox, count })
+        Ok(Self { sandbox, count: 1 })
+    }
+
+    /// Add additional sandboxes for the build phase (1..total_count).
+    pub fn add_build_sandboxes(&mut self, total_count: usize) -> Result<()> {
+        if !self.sandbox.enabled() || total_count <= 1 {
+            self.count = total_count;
+            return Ok(());
+        }
+        let additional = total_count - 1;
+        if additional == 1 {
+            print!("Creating additional build sandbox...");
+        } else {
+            print!("Creating {} additional build sandboxes...", additional);
+        }
+        let _ = std::io::stdout().flush();
+        let start = Instant::now();
+        let results: Vec<(usize, Result<()>)> = (1..total_count)
+            .into_par_iter()
+            .map(|i| (i, self.sandbox.create(i)))
+            .collect();
+        let mut first_error: Option<anyhow::Error> = None;
+        for (i, result) in &results {
+            if let Err(e) = result {
+                if first_error.is_none() {
+                    first_error = Some(anyhow::anyhow!("sandbox {}: {}", i, e));
+                }
+            }
+        }
+        if let Some(e) = first_error {
+            println!();
+            for (i, _) in &results {
+                let _ = self.sandbox.destroy(*i);
+            }
+            return Err(e);
+        }
+        println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
+        self.count = total_count;
+        Ok(())
     }
 
     /// Access the underlying sandbox for operations.
@@ -1079,55 +1127,6 @@ impl Drop for SandboxScope {
         if self.sandbox.enabled() {
             if let Err(e) = self.sandbox.destroy_all(self.count) {
                 eprintln!("Warning: failed to destroy sandboxes: {}", e);
-            }
-        }
-    }
-}
-
-/// RAII scope for a single sandbox (used by scan).
-///
-/// Creates sandbox 0 on construction, destroys it on drop.
-/// If sandboxes are disabled, this is a no-op.
-#[derive(Debug)]
-pub struct SingleSandboxScope {
-    sandbox: Sandbox,
-}
-
-impl SingleSandboxScope {
-    /// Create a new scope, creating sandbox 0 if enabled.
-    pub fn new(sandbox: Sandbox) -> Result<Self> {
-        if sandbox.enabled() {
-            print!("Creating sandbox...");
-            let _ = std::io::stdout().flush();
-            let start = Instant::now();
-            sandbox.create(0)?;
-            println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
-        }
-        Ok(Self { sandbox })
-    }
-
-    /// Access the underlying sandbox for operations.
-    pub fn sandbox(&self) -> &Sandbox {
-        &self.sandbox
-    }
-
-    /// Return whether sandboxes are enabled.
-    pub fn enabled(&self) -> bool {
-        self.sandbox.enabled()
-    }
-}
-
-impl Drop for SingleSandboxScope {
-    fn drop(&mut self) {
-        if self.sandbox.enabled() {
-            print!("Destroying sandbox...");
-            let _ = std::io::stdout().flush();
-            let start = Instant::now();
-            if let Err(e) = self.sandbox.destroy(0) {
-                println!();
-                eprintln!("Warning: failed to destroy sandbox: {}", e);
-            } else {
-                println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
             }
         }
     }

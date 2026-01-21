@@ -18,7 +18,7 @@ use anyhow::{Context, Result, bail};
 use bob::Init;
 use bob::RunContext;
 use bob::build::{self, Build};
-use bob::config::{Config, PkgsrcEnv};
+use bob::config::Config;
 use bob::db::Database;
 use bob::logging;
 use bob::report;
@@ -73,7 +73,11 @@ impl BuildRunner {
     }
 
     /// Run the scan phase, returning the resolved scan result.
-    fn run_scan(&self, scan: &mut Scan) -> Result<bob::scan::ScanSummary> {
+    fn run_scan(
+        &self,
+        scan: &mut Scan,
+        scope: &SandboxScope,
+    ) -> Result<bob::scan::ScanSummary> {
         // For full tree scans with full_scan_complete, we might be able to
         // skip scanning entirely
         if scan.is_full_tree() && self.db.full_scan_complete() {
@@ -92,7 +96,7 @@ impl BuildRunner {
             }
         }
 
-        let interrupted = scan.start(&self.ctx, &self.db)?;
+        let interrupted = scan.start(&self.ctx, &self.db, scope)?;
 
         if interrupted {
             std::process::exit(EXIT_INTERRUPTED);
@@ -137,18 +141,19 @@ impl BuildRunner {
         Ok(result)
     }
 
-    /// Run the build phase, returning the build summary.
-    fn run_build(
-        &mut self,
-        scan_result: bob::scan::ScanSummary,
-    ) -> Result<build::BuildSummary> {
-        self.run_build_with(scan_result, build::BuildOptions::default())
-    }
-
-    fn run_build_with(
+    /**
+     * Run the build phase using an existing [`SandboxScope`].
+     *
+     * This is used when sandbox 0 was already created and prepared during
+     * the scan phase. Only creates additional sandboxes 1..build_threads
+     * if needed, and skips pre-build/post-build setup since that was done
+     * during scan.
+     */
+    fn run_build_with_scope(
         &mut self,
         scan_result: bob::scan::ScanSummary,
         options: build::BuildOptions,
+        scope: SandboxScope,
     ) -> Result<build::BuildSummary> {
         // Validate config before sandbox creation
         if scan_result.count_buildable() == 0 {
@@ -160,37 +165,15 @@ impl BuildRunner {
             .map(|p| (p.pkgname().clone(), p.clone()))
             .collect();
 
-        // Create sandbox scope - automatically destroys sandboxes on drop
-        let sandbox = Sandbox::new(&self.config);
-        let scope = SandboxScope::new(sandbox, self.config.build_threads())?;
+        // Create additional sandboxes for build phase (1..build_threads)
+        // Sandbox 0 was already created and prepared during scan
+        let mut scope = scope;
+        scope.add_build_sandboxes(self.config.build_threads())?;
 
-        if scope.enabled()
-            && !scope.sandbox().run_pre_build(
-                0,
-                &self.config,
-                self.config.script_env(None),
-            )?
-        {
-            bail!("pre-build script failed");
-        }
-        let pkgsrc_env = match self.db.load_pkgsrc_env() {
-            Ok(env) => env,
-            Err(_) => {
-                let env = PkgsrcEnv::fetch(&self.config, scope.sandbox())?;
-                self.db.store_pkgsrc_env(&env)?;
-                env
-            }
-        };
-
-        if scope.enabled()
-            && !scope.sandbox().run_post_build(
-                0,
-                &self.config,
-                self.config.script_env(Some(&pkgsrc_env)),
-            )?
-        {
-            bail!("post-build script failed");
-        }
+        // PkgsrcEnv was already fetched/stored during scan phase
+        let pkgsrc_env = self.db.load_pkgsrc_env().context(
+            "PkgsrcEnv not found in database - scan phase should have stored it",
+        )?;
 
         let mut build =
             Build::new(&self.config, pkgsrc_env, scope, buildable, options);
@@ -206,15 +189,8 @@ impl BuildRunner {
             "build.start() returned"
         );
 
-        // Check if we were interrupted. All builds that completed before the
-        // interrupt have already been saved to the database inside build.start().
-        // Builds that were in-progress when interrupted were killed and their
-        // results discarded (not saved). This ensures:
-        //   - Completed builds are preserved
-        //   - Interrupted (partial) builds are not saved
-        //   - Dependencies of interrupted builds are not saved
+        // Check if we were interrupted
         if self.ctx.shutdown.load(Ordering::SeqCst) {
-            // Drop build explicitly to trigger sandbox cleanup before exit
             drop(build);
             std::process::exit(EXIT_INTERRUPTED);
         }
@@ -457,7 +433,9 @@ fn main() -> Result<()> {
                 }
             }
 
-            let result = runner.run_scan(&mut scan)?;
+            let sandbox = Sandbox::new(&runner.config);
+            let scope = SandboxScope::new(sandbox)?;
+            let result = runner.run_scan(&mut scan, &scope)?;
             println!("{result}");
         }
         Cmd::Build { pkgpaths: cmdline_pkgs } => {
@@ -480,8 +458,17 @@ fn main() -> Result<()> {
                 }
             }
 
-            let scan_result = runner.run_scan(&mut scan)?;
-            runner.run_build(scan_result)?;
+            // Use combined sandbox workflow: create sandbox 0 once for both
+            // scan and build phases
+            let sandbox = Sandbox::new(&runner.config);
+            let scope = SandboxScope::new(sandbox)?;
+
+            let scan_result = runner.run_scan(&mut scan, &scope)?;
+            runner.run_build_with_scope(
+                scan_result,
+                build::BuildOptions::default(),
+                scope,
+            )?;
             runner.generate_pkg_summary();
         }
         Cmd::Rebuild { all, force, packages } => {
@@ -566,9 +553,13 @@ fn main() -> Result<()> {
                 }
             }
 
-            let scan_result = runner.run_scan(&mut scan)?;
+            // Use combined sandbox workflow
+            let sandbox = Sandbox::new(&runner.config);
+            let scope = SandboxScope::new(sandbox)?;
+
+            let scan_result = runner.run_scan(&mut scan, &scope)?;
             let options = build::BuildOptions { force_rebuild: force };
-            runner.run_build_with(scan_result, options)?;
+            runner.run_build_with_scope(scan_result, options, scope)?;
         }
         Cmd::Report => {
             let config = Config::load(args.config.as_deref())?;

@@ -38,7 +38,7 @@
 //! - Circular dependencies - Package has a dependency cycle
 
 use crate::config::PkgsrcEnv;
-use crate::sandbox::{SingleSandboxScope, wait_output_with_shutdown};
+use crate::sandbox::{SandboxScope, wait_output_with_shutdown};
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, RunContext, Sandbox};
 use anyhow::{Context, Result, bail};
@@ -599,10 +599,11 @@ impl Scan {
         &mut self,
         ctx: &RunContext,
         db: &crate::db::Database,
+        scope: &SandboxScope,
     ) -> anyhow::Result<bool> {
         info!(
             incoming_count = self.incoming.len(),
-            sandbox_enabled = self.sandbox.enabled(),
+            sandbox_enabled = scope.enabled(),
             "Starting package scan"
         );
 
@@ -635,15 +636,8 @@ impl Scan {
             }
         }
 
-        /*
-         * Only a single sandbox is required, 'make pbulk-index' can safely be
-         * run in parallel inside one sandbox.
-         *
-         * Create scope which handles sandbox lifecycle - creates on construction,
-         * destroys on drop. This ensures cleanup even on error paths.
-         */
-        let _scope = SingleSandboxScope::new(self.sandbox.clone())?;
-
+        // Use the sandbox from the external scope
+        self.sandbox = scope.sandbox().clone();
         if self.sandbox.enabled() {
             // Run pre-build script if defined
             if !self.sandbox.run_pre_build(
@@ -683,7 +677,6 @@ impl Scan {
             if self.sandbox.enabled() {
                 self.run_post_build()?;
             }
-            // Guard dropped here, destroys sandbox
             return Ok(false);
         }
 
@@ -971,7 +964,6 @@ impl Scan {
             self.run_post_build()?;
         }
 
-        // Guard dropped here, destroys sandbox
         if interrupted {
             return Ok(true);
         }

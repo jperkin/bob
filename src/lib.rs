@@ -53,7 +53,7 @@ pub use build::{
 pub use config::{Config, Options, Pkgsrc, PkgsrcEnv, Sandboxes};
 pub use db::Database;
 pub use report::write_html_report;
-pub use sandbox::Sandbox;
+pub use sandbox::{Sandbox, SandboxScope};
 pub use scan::{
     ResolvedPackage, Scan, ScanResult, ScanSummary, SkipReason, SkippedCounts,
 };
