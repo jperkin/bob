@@ -50,18 +50,18 @@ impl Init {
 
         println!("Initialising new configuration directory {}:", initdir_str);
 
-        let confstr = match env::consts::OS {
-            "illumos" => include_str!("../config/illumos.lua"),
-            "linux" => include_str!("../config/linux.lua"),
-            "macos" => include_str!("../config/macos.lua"),
-            "netbsd" => include_str!("../config/netbsd.lua"),
-            "solaris" => include_str!("../config/illumos.lua"),
+        let (current_os, confstr) = match env::consts::OS {
+            "illumos" => ("illumos", include_str!("../config/illumos.lua")),
+            "linux" => ("linux", include_str!("../config/linux.lua")),
+            "macos" => ("macos", include_str!("../config/macos.lua")),
+            "netbsd" => ("netbsd", include_str!("../config/netbsd.lua")),
+            "solaris" => ("illumos", include_str!("../config/illumos.lua")),
             os => {
                 eprintln!(
                     "WARNING: OS '{}' not explicitly supported, using generic config",
                     os
                 );
-                include_str!("../config/generic.lua")
+                (os, include_str!("../config/generic.lua"))
             }
         };
 
@@ -72,8 +72,26 @@ impl Init {
         println!("\t{}", conffile.display());
 
         for script in Scripts::iter() {
+            let script_path = PathBuf::from(&*script);
+            let components: Vec<_> = script_path.components().collect();
+
+            /*
+             * Scripts may be placed in OS-specific subdirectories (e.g.,
+             * scripts/macos/foo).  If present, the first path component is
+             * compared against the current OS and skipped if it doesn't match.
+             * Matching scripts have the OS prefix stripped from the destination.
+             */
+            let dest = if components.len() > 1 {
+                if components[0].as_os_str().to_str() != Some(current_os) {
+                    continue;
+                }
+                components[1..].iter().collect()
+            } else {
+                script_path
+            };
+
             if let Some(content) = Scripts::get(&script) {
-                let fp = initdir.join("scripts").join(&*script);
+                let fp = initdir.join("scripts").join(&dest);
                 fs::create_dir_all(fp.parent().unwrap())?;
                 fs::write(&fp, content.data)?;
                 #[cfg(unix)]
