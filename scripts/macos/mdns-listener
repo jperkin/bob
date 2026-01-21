@@ -1,0 +1,105 @@
+#!/bin/bash
+#
+# Manage mDNSResponder Unix socket listeners for sandbox DNS resolution.
+#
+# macOS does not support name resolution inside a chroot by default as the
+# mDNSResponder listening socket is not available inside.  In order to support
+# DNS we need to modify the mDNSResponder launchd service to listen on an
+# additional Unix socket inside each sandbox.
+#
+# Notes:
+#
+# - We may be trying to create or destroy multiple sandboxes simultaneously,
+#   so use a lock directory to ensure only one writer at a time.
+#
+# - We write to a copy of the original plist to support SIP on newer macOS,
+#   and on older releases this ensures mDNSResponder works after a reboot as
+#   it will not start if sockets do not exist.
+#
+
+if [ -z "${bob_sandbox_path}" ]; then
+	echo "error: bob_sandbox_path is not set" >&2
+	exit 1
+fi
+
+if [ "$1" != "create" ] && [ "$1" != "destroy" ]; then
+	echo "usage: mdns-listener create|destroy" >&2
+	exit 1
+fi
+action=$1
+shift
+
+PB="/usr/libexec/PlistBuddy"
+PLIST="/var/run/com.apple.mDNSResponder.plist"
+PLIST_SYSTEM="/System/Library/LaunchDaemons/com.apple.mDNSResponder.plist"
+ENTRY="Sockets:Listeners"
+SOCKPATH="${bob_sandbox_path}/var/run/mDNSResponder"
+RETRIES=60
+
+if [ ${action} = "create" ]; then
+	mkdir -p "${bob_sandbox_path}/var/run"
+	addlist="${bob_sandbox_path}/var/run/add.plist"
+	cat >"${addlist}" <<-EOF
+	<array>
+		<dict>
+			<key>SockFamily</key>
+			<string>Unix</string>
+			<key>SockPathName</key>
+			<string>${SOCKPATH}</string>
+			<key>SockPathMode</key>
+			<integer>438</integer>
+		</dict>
+	</array>
+	EOF
+fi
+
+for ((i=0; i<RETRIES; i++)); do
+	# No need to do anything if we're cleaning up after a reboot.
+	[ ${action} = "destroy" ] && [ ! -f ${PLIST} ] && exit 0
+
+	# Ensure only one process updates the plist at a time.
+	if ! mkdir /tmp/updatemdns.lock 2>/dev/null; then
+		sleep 1.$((RANDOM % 10))
+		continue
+	fi
+
+	if [ ${action} = "create" ]; then
+		# Copy the system plist on first use after reboot and convert
+		# Sockets:Listeners from a dict to an array.
+		if [ ! -f ${PLIST} ]; then
+			cp ${PLIST_SYSTEM} ${PLIST}
+			tmplist="${bob_sandbox_path}/var/run/import.plist"
+			${PB} -x -c "Print ${ENTRY}" ${PLIST} >"${tmplist}"
+			${PB} ${PLIST} >/dev/null <<-EOF
+				Delete ${ENTRY}
+				Add ${ENTRY} array
+				Add ${ENTRY}:0 dict
+				Merge ${tmplist} ${ENTRY}:0
+				Save
+			EOF
+			rm -f "${tmplist}"
+			launchctl unload ${PLIST_SYSTEM} 2>/dev/null
+			launchctl load -w ${PLIST}
+		fi
+		${PB} -c "Merge ${addlist} ${ENTRY}" ${PLIST}
+	else
+		# Find and remove the listener entry for this sandbox.
+		entries=$(${PB} -c "Print ${ENTRY}" ${PLIST} 2>/dev/null | grep -c " Dict {")
+		for ((e=0; e<entries; e++)); do
+			sockpath="$(${PB} -c "Print ${ENTRY}:${e}:SockPathName" ${PLIST})"
+			if [ "${sockpath}" = "${SOCKPATH}" ]; then
+				${PB} -c "Delete ${ENTRY}:${e}" ${PLIST}
+				break
+			fi
+		done
+	fi
+
+	launchctl unload ${PLIST} 2>/dev/null
+	launchctl load -w ${PLIST}
+	rmdir /tmp/updatemdns.lock
+	[ ${action} = "create" ] && rm -f "${addlist}"
+	exit 0
+done
+
+[ ${action} = "create" ] && rm -f "${addlist}"
+exit 1

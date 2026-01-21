@@ -96,6 +96,10 @@ sandboxes = {
         -- Postfix spool needs to be read-write
         { action = "mount", fs = "bind", dir = "/private/var/spool/postfix" },
 
+        -- Enable DNS resolution via mDNSResponder socket per-sandbox
+        { action = "cmd", create = initdir .. "/scripts/mdns-listener create",
+                         destroy = initdir .. "/scripts/mdns-listener destroy" },
+
         -- At this point everything should be set up so that chrooted commands
         -- will execute successfully.  Perform additional chroot setup.
         { action = "cmd", chroot = true, create = "chmod 1777 /tmp /var/tmp" },
