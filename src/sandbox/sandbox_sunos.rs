@@ -201,6 +201,46 @@ impl Sandbox {
         self.unmount_common(dest)
     }
 
+    /**
+     * Kill processes using a specific mount point.
+     *
+     * Uses fuser -ck (illumos mount point mode + kill) to identify and kill
+     * processes using the mount point.
+     */
+    pub fn kill_processes_for_path(&self, path: &Path) {
+        use std::process::Stdio;
+
+        for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
+            let output = Command::new("fuser")
+                .arg("-c")
+                .arg(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .output();
+
+            let Ok(out) = output else { return };
+
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if stdout.split_whitespace().next().is_none() {
+                return;
+            }
+
+            debug!(path = %path.display(), "Killing processes for mount");
+
+            let _ = Command::new("fuser")
+                .arg("-ck")
+                .arg(path)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .status();
+
+            let delay_ms = super::KILL_PROCESSES_INITIAL_DELAY_MS << iteration;
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        }
+    }
+
     /// Kill all processes with open file handles within a sandbox path.
     pub fn kill_processes(&self, sandbox: &Path) {
         use std::process::Stdio;

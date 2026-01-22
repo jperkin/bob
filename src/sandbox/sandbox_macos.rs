@@ -22,6 +22,11 @@ use std::path::Path;
 use std::process::{Command, ExitStatus};
 use tracing::{debug, info, warn};
 
+/// Processes that should not be killed during sandbox cleanup.
+/// These are system daemons that hold file handles but cannot be killed.
+const PROCESS_SKIP_LIST: &[&str] =
+    &["kextd", "mds", "mds_stores", "mdworker", "mdworker_shared", "notifyd"];
+
 impl Sandbox {
     pub fn mount_bindfs(
         &self,
@@ -186,6 +191,92 @@ impl Sandbox {
         dest: &Path,
     ) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
+    }
+
+    /**
+     * Kill processes using a specific mount point.
+     *
+     * Uses fuser -c (mount point mode on BSD) to identify processes, filters
+     * out processes in PROCESS_SKIP_LIST, then kills the remaining processes.
+     */
+    pub fn kill_processes_for_path(&self, path: &Path) {
+        for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
+            let output = Command::new("fuser")
+                .arg("-c")
+                .arg(path)
+                .process_group(0)
+                .output();
+
+            let Ok(out) = output else { return };
+
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let pids: Vec<&str> = stdout.split_whitespace().collect();
+
+            if pids.is_empty() {
+                return;
+            }
+
+            let pids_to_kill = self.filter_skip_list(&pids);
+
+            if pids_to_kill.is_empty() {
+                debug!(
+                    path = %path.display(),
+                    "All processes in skip list, skipping"
+                );
+                return;
+            }
+
+            debug!(
+                path = %path.display(),
+                pids = %pids_to_kill.join(" "),
+                "Killing processes for mount"
+            );
+
+            let _ = Command::new("kill")
+                .arg("-9")
+                .args(&pids_to_kill)
+                .stderr(std::process::Stdio::null())
+                .process_group(0)
+                .status();
+
+            let delay_ms = super::KILL_PROCESSES_INITIAL_DELAY_MS << iteration;
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        }
+    }
+
+    /**
+     * Filter PIDs, removing any in PROCESS_SKIP_LIST by checking process names.
+     */
+    fn filter_skip_list(&self, pids: &[&str]) -> Vec<String> {
+        if PROCESS_SKIP_LIST.is_empty() {
+            return pids.iter().map(|s| (*s).to_string()).collect();
+        }
+
+        let output = Command::new("ps")
+            .arg("-o")
+            .arg("pid=,comm=")
+            .arg("-p")
+            .arg(pids.join(","))
+            .process_group(0)
+            .output();
+
+        let Ok(out) = output else {
+            return pids.iter().map(|s| (*s).to_string()).collect();
+        };
+
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                let pid = parts.next()?;
+                let comm = parts.next()?;
+                if PROCESS_SKIP_LIST.contains(&comm) {
+                    debug!(pid, name = comm, "Skipping protected process");
+                    return None;
+                }
+                Some(pid.to_string())
+            })
+            .collect()
     }
 
     /// Kill all processes with open file handles within a sandbox path.

@@ -512,9 +512,14 @@ impl Sandbox {
         if !sandbox.exists() {
             return Ok(());
         }
-        self.kill_processes(&sandbox);
         self.delete_lock(id)?;
         self.reverse_actions(id)?;
+        /*
+         * Final cleanup: kill any remaining processes before removing the
+         * sandbox directory.  Per-mount killing already happened in
+         * reverse_actions(), but this catches anything that slipped through.
+         */
+        self.kill_processes(&sandbox);
         /*
          * After unmounting, try to remove the sandbox directory.  Use
          * remove_empty_hierarchy which only removes empty directories.
@@ -971,6 +976,12 @@ impl Sandbox {
                     if fs::remove_dir(&mntdest).is_ok() {
                         continue;
                     }
+
+                    /*
+                     * Kill any processes using this mount point before
+                     * attempting to unmount.
+                     */
+                    self.kill_processes_for_path(&mntdest);
 
                     /*
                      * Unmount the filesystem.  Check return codes and bail on
