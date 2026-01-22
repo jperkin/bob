@@ -836,13 +836,18 @@ impl Sandbox {
         Ok(())
     }
 
-    /// Run a custom action command.
-    ///
-    /// When `chroot` is false (default), the command runs on the host system
-    /// with the sandbox root as the working directory.
-    ///
-    /// When `chroot` is true, the command runs inside the sandbox via chroot
-    /// with `/` as the working directory.
+    /**
+     * Run a custom action command.
+     *
+     * When `chroot` is false (default), the command runs on the host system
+     * with the sandbox root as the working directory.
+     *
+     * When `chroot` is true, the command runs inside the sandbox via chroot
+     * with `/` as the working directory.
+     *
+     * Stdin is redirected from /dev/null to prevent commands like `su` from
+     * trying to read from the terminal and stopping the process.
+     */
     fn run_action_cmd(
         &self,
         id: usize,
@@ -856,6 +861,7 @@ impl Sandbox {
                 .arg("/bin/sh")
                 .arg("-c")
                 .arg(cmd)
+                .stdin(Stdio::null())
                 .process_group(0)
                 .status()?;
 
@@ -866,6 +872,7 @@ impl Sandbox {
                 .arg(cmd)
                 .env("bob_sandbox_path", &sandbox_path)
                 .current_dir(&sandbox_path)
+                .stdin(Stdio::null())
                 .process_group(0)
                 .status()?;
 
