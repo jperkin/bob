@@ -1008,9 +1008,6 @@ impl MultiProgress {
         // Restore cursor
         stdout().execute(Show)?;
 
-        // Print interrupted message
-        println!("Interrupted, shutting down...");
-
         Ok(())
     }
 }

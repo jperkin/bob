@@ -16,9 +16,10 @@
 
 use anyhow::{Context, Result, bail};
 use bob::Init;
+use bob::Interrupted;
 use bob::RunContext;
 use bob::build::{self, Build};
-use bob::config::{Config, PkgsrcEnv};
+use bob::config::Config;
 use bob::db::Database;
 use bob::logging;
 use bob::report;
@@ -26,13 +27,14 @@ use bob::sandbox::{Sandbox, SandboxScope};
 use bob::scan::{Scan, ScanResult};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::str;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::error;
 
 /// Exit code when interrupted.  We do not know what exact signal this was.
-const EXIT_INTERRUPTED: i32 = 128 + libc::SIGINT;
+const EXIT_INTERRUPTED: u8 = 128 + libc::SIGINT as u8;
 
 /// Common context for build operations.
 struct BuildRunner {
@@ -63,7 +65,10 @@ impl BuildRunner {
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let shutdown_for_handler = Arc::clone(&shutdown_flag);
         ctrlc::set_handler(move || {
-            shutdown_for_handler.store(true, Ordering::SeqCst);
+            // Print message only on first interrupt (swap returns previous value)
+            if !shutdown_for_handler.swap(true, Ordering::SeqCst) {
+                eprintln!("\nInterrupted, shutting down...");
+            }
         })
         .expect("Error setting signal handler");
 
@@ -72,8 +77,17 @@ impl BuildRunner {
         Ok(Self { config, db, ctx })
     }
 
-    /// Run the scan phase, returning the resolved scan result.
-    fn run_scan(&self, scan: &mut Scan) -> Result<bob::scan::ScanSummary> {
+    /**
+     * Run scan phase with a provided scope (for scan+build flow).
+     *
+     * The scope is managed by the caller, allowing it to persist for a
+     * subsequent build phase. Returns `Err(Interrupted)` if interrupted.
+     */
+    fn run_scan_with_scope(
+        &self,
+        scan: &mut Scan,
+        scope: &mut SandboxScope,
+    ) -> Result<bob::scan::ScanSummary> {
         // For full tree scans with full_scan_complete, we might be able to
         // skip scanning entirely
         if scan.is_full_tree() && self.db.full_scan_complete() {
@@ -92,11 +106,7 @@ impl BuildRunner {
             }
         }
 
-        let interrupted = scan.start(&self.ctx, &self.db)?;
-
-        if interrupted {
-            std::process::exit(EXIT_INTERRUPTED);
-        }
+        scan.start(&self.db, scope)?;
 
         // Handle scan errors
         let scan_errors: Vec<_> = scan.scan_errors().collect();
@@ -137,20 +147,24 @@ impl BuildRunner {
         Ok(result)
     }
 
-    /// Run the build phase, returning the build summary.
-    fn run_build(
-        &mut self,
-        scan_result: bob::scan::ScanSummary,
-    ) -> Result<build::BuildSummary> {
-        self.run_build_with(scan_result, build::BuildOptions::default())
+    /**
+     * Run scan phase standalone (creates its own scope).
+     *
+     * The scope is destroyed when this function returns (or on error).
+     */
+    fn run_scan(&self, scan: &mut Scan) -> Result<bob::scan::ScanSummary> {
+        let sandbox = Sandbox::new(&self.config);
+        let mut scope = SandboxScope::new(sandbox, self.ctx.clone());
+        self.run_scan_with_scope(scan, &mut scope)
     }
 
     fn run_build_with(
         &mut self,
         scan_result: bob::scan::ScanSummary,
         options: build::BuildOptions,
+        mut scope: SandboxScope,
     ) -> Result<build::BuildSummary> {
-        // Validate config before sandbox creation
+        // Validate config before sandbox expansion
         if scan_result.count_buildable() == 0 {
             bail!("No packages to build");
         }
@@ -160,37 +174,13 @@ impl BuildRunner {
             .map(|p| (p.pkgname().clone(), p.clone()))
             .collect();
 
-        // Create sandbox scope - automatically destroys sandboxes on drop
-        let sandbox = Sandbox::new(&self.config);
-        let scope = SandboxScope::new(sandbox, self.config.build_threads())?;
+        // Expand to build_threads sandboxes (creates any that don't exist)
+        scope.ensure(self.config.build_threads())?;
 
-        if scope.enabled()
-            && !scope.sandbox().run_pre_build(
-                0,
-                &self.config,
-                self.config.script_env(None),
-            )?
-        {
-            bail!("pre-build script failed");
-        }
-        let pkgsrc_env = match self.db.load_pkgsrc_env() {
-            Ok(env) => env,
-            Err(_) => {
-                let env = PkgsrcEnv::fetch(&self.config, scope.sandbox())?;
-                self.db.store_pkgsrc_env(&env)?;
-                env
-            }
-        };
-
-        if scope.enabled()
-            && !scope.sandbox().run_post_build(
-                0,
-                &self.config,
-                self.config.script_env(Some(&pkgsrc_env)),
-            )?
-        {
-            bail!("post-build script failed");
-        }
+        let pkgsrc_env = self
+            .db
+            .load_pkgsrc_env()
+            .context("PkgsrcEnv not cached - try 'bob clean' first")?;
 
         let mut build =
             Build::new(&self.config, pkgsrc_env, scope, buildable, options);
@@ -214,9 +204,7 @@ impl BuildRunner {
         //   - Interrupted (partial) builds are not saved
         //   - Dependencies of interrupted builds are not saved
         if self.ctx.shutdown.load(Ordering::SeqCst) {
-            // Drop build explicitly to trigger sandbox cleanup before exit
-            drop(build);
-            std::process::exit(EXIT_INTERRUPTED);
+            return Err(Interrupted.into());
         }
 
         // Add pre-skipped/failed/unresolved packages from scan to summary
@@ -440,7 +428,20 @@ enum UtilCmd {
     },
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) if e.downcast_ref::<Interrupted>().is_some() => {
+            ExitCode::from(EXIT_INTERRUPTED)
+        }
+        Err(e) => {
+            eprintln!("Error: {e:?}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<()> {
     let args = Args::parse();
 
     match args.cmd {
@@ -480,8 +481,15 @@ fn main() -> Result<()> {
                 }
             }
 
-            let scan_result = runner.run_scan(&mut scan)?;
-            runner.run_build(scan_result)?;
+            let sandbox = Sandbox::new(&runner.config);
+            let mut scope = SandboxScope::new(sandbox, runner.ctx.clone());
+            let scan_result =
+                runner.run_scan_with_scope(&mut scan, &mut scope)?;
+            runner.run_build_with(
+                scan_result,
+                build::BuildOptions::default(),
+                scope,
+            )?;
             runner.generate_pkg_summary();
         }
         Cmd::Rebuild { all, force, packages } => {
@@ -566,9 +574,12 @@ fn main() -> Result<()> {
                 }
             }
 
-            let scan_result = runner.run_scan(&mut scan)?;
+            let sandbox = Sandbox::new(&runner.config);
+            let mut scope = SandboxScope::new(sandbox, runner.ctx.clone());
+            let scan_result =
+                runner.run_scan_with_scope(&mut scan, &mut scope)?;
             let options = build::BuildOptions { force_rebuild: force };
-            runner.run_build_with(scan_result, options)?;
+            runner.run_build_with(scan_result, options, scope)?;
         }
         Cmd::Report => {
             let config = Config::load(args.config.as_deref())?;

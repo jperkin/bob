@@ -33,7 +33,20 @@ mod tui;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+/// Error indicating the operation was interrupted (e.g., by Ctrl+C).
+#[derive(Debug)]
+pub struct Interrupted;
+
+impl std::fmt::Display for Interrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Interrupted")
+    }
+}
+
+impl std::error::Error for Interrupted {}
+
 /// Shared context for a build or scan run.
+#[derive(Clone, Debug)]
 pub struct RunContext {
     /// Flag to signal graceful shutdown.
     pub shutdown: Arc<AtomicBool>,

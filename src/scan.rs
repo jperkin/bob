@@ -38,9 +38,9 @@
 //! - Circular dependencies - Package has a dependency cycle
 
 use crate::config::PkgsrcEnv;
-use crate::sandbox::{SingleSandboxScope, wait_output_with_shutdown};
+use crate::sandbox::{SandboxScope, wait_output_with_shutdown};
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
-use crate::{Config, RunContext, Sandbox};
+use crate::{Config, Interrupted, Sandbox};
 use anyhow::{Context, Result, bail};
 use crossterm::event;
 use indexmap::IndexMap;
@@ -597,9 +597,9 @@ impl Scan {
 
     pub fn start(
         &mut self,
-        ctx: &RunContext,
         db: &crate::db::Database,
-    ) -> anyhow::Result<bool> {
+        scope: &mut SandboxScope,
+    ) -> anyhow::Result<()> {
         info!(
             incoming_count = self.incoming.len(),
             sandbox_enabled = self.sandbox.enabled(),
@@ -611,13 +611,13 @@ impl Scan {
             .build()
             .context("Failed to build scan thread pool")?;
 
-        let shutdown_flag = Arc::clone(&ctx.shutdown);
+        let shutdown_flag = Arc::clone(scope.shutdown());
 
         // For full tree scans where a previous scan completed, all packages
         // are already cached - nothing to do.
         if self.full_tree && self.full_scan_complete && !self.done.is_empty() {
             println!("All {} package paths already scanned", self.done.len());
-            return Ok(false);
+            return Ok(());
         }
 
         // For non-full-tree scans, prune already-cached packages from incoming
@@ -631,7 +631,7 @@ impl Scan {
                         self.done.len()
                     );
                 }
-                return Ok(false);
+                return Ok(());
             }
         }
 
@@ -639,12 +639,11 @@ impl Scan {
          * Only a single sandbox is required, 'make pbulk-index' can safely be
          * run in parallel inside one sandbox.
          *
-         * Create scope which handles sandbox lifecycle - creates on construction,
-         * destroys on drop. This ensures cleanup even on error paths.
+         * Ensure sandbox 0 exists. The caller manages overall lifecycle.
          */
-        let _scope = SingleSandboxScope::new(self.sandbox.clone())?;
+        scope.ensure(1)?;
 
-        if self.sandbox.enabled() {
+        if scope.enabled() {
             // Run pre-build script if defined
             if !self.sandbox.run_pre_build(
                 0,
@@ -680,11 +679,10 @@ impl Scan {
                 );
             }
 
-            if self.sandbox.enabled() {
+            if scope.enabled() {
                 self.run_post_build()?;
             }
-            // Guard dropped here, destroys sandbox
-            return Ok(false);
+            return Ok(());
         }
 
         // Clear resolved dependencies since we're scanning new packages
@@ -741,8 +739,6 @@ impl Scan {
         // Start transaction for all writes
         db.begin_transaction()?;
 
-        let mut interrupted = false;
-
         // Borrow config and sandbox separately for use in scanner thread,
         // allowing main thread to mutate self.done, self.incoming, etc.
         let config = &self.config;
@@ -772,7 +768,6 @@ impl Scan {
                 if let Ok(mut p) = progress.lock() {
                     let _ = p.finish_interrupted();
                 }
-                interrupted = true;
                 break;
             }
 
@@ -935,7 +930,7 @@ impl Scan {
 
         // Only print summary for normal completion; finish_interrupted()
         // was already called immediately when interrupt was detected
-        if !interrupted {
+        if !shutdown_flag.load(Ordering::SeqCst) {
             // Get elapsed time and clean up TUI without printing generic summary
             let elapsed = if let Ok(mut p) = progress.lock() {
                 p.finish_silent().ok()
@@ -967,16 +962,15 @@ impl Scan {
             }
         }
 
-        if self.sandbox.enabled() {
+        if scope.enabled() {
             self.run_post_build()?;
         }
 
-        // Guard dropped here, destroys sandbox
-        if interrupted {
-            return Ok(true);
+        if shutdown_flag.load(Ordering::SeqCst) {
+            return Err(Interrupted.into());
         }
 
-        Ok(false)
+        Ok(())
     }
 
     /// Run post-build script if configured.
