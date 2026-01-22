@@ -124,24 +124,34 @@ impl Sandbox {
     /*
      * General unmount routine common to file system types that involve
      * mounted file systems.
+     *
+     * Uses diskutil unmount with retries (every second, up to 2 minutes).
+     * Use process_group(0) to put diskutil in its own process group,
+     * preventing it from receiving SIGINT when the user presses Ctrl+C.
      */
     fn unmount_common(
         &self,
         dest: &Path,
     ) -> anyhow::Result<Option<ExitStatus>> {
-        /*
-         * macOS is notorious for not unmounting file systems, even with
-         * "diskutil unmount force" in some cases, so for now we just skip
-         * straight to "umount -f" which appears to work.
-         *
-         * Use process_group(0) to put umount in its own process group.
-         * This prevents it from receiving SIGINT when the user presses Ctrl+C,
-         * ensuring cleanup can complete even during repeated interrupts.
-         */
-        let cmd = "/sbin/umount";
+        let cmd = "diskutil";
+        for _ in 0..120 {
+            let status = Command::new(cmd)
+                .arg("unmount")
+                .arg(dest)
+                .process_group(0)
+                .status()
+                .context(format!("Unable to execute {}", cmd))?;
+
+            if status.success() {
+                return Ok(Some(status));
+            }
+
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+
         Ok(Some(
             Command::new(cmd)
-                .arg("-f")
+                .arg("unmount")
                 .arg(dest)
                 .process_group(0)
                 .status()
