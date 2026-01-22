@@ -79,7 +79,7 @@ scripts = {
 sandboxes = {
     basedir = "/Volumes/data/chroot",
     -- If bindfs is not in PATH you can set it here.
-    -- bindfs = "/usr/local/bin/bindfs"
+    -- bindfs = "/usr/local/bin/bindfs",
 
     actions = {
         { action = "mount", fs = "dev", dir = "/dev" },
