@@ -185,6 +185,10 @@ impl Sandbox {
         self.config.sandboxes().is_some()
     }
 
+    fn basedir(&self) -> Option<&PathBuf> {
+        self.config.sandboxes().as_ref().map(|s| &s.basedir)
+    }
+
     /**
      * Return full path to a sandbox by id.
      */
@@ -287,24 +291,78 @@ impl Sandbox {
     }
 
     /*
-     * Functions to create/destroy lock directory inside a sandbox to
-     * indicate that it has successfully been created.  An empty directory
-     * is used as it provides a handy way to guarantee(?) atomicity.
+     * Marker directory functions for sandbox lifecycle management.
+     *
+     * Each sandbox has a .bob directory that marks it as bob-managed.
+     * Inside .bob, a "created" directory indicates successful creation.
+     * This two-stage marker allows detecting incomplete sandboxes.
      */
-    fn lockpath(&self, id: usize) -> PathBuf {
-        let mut p = self.path(id);
-        p.push(".created");
-        p
+    fn bobmarker(&self, id: usize) -> PathBuf {
+        self.path(id).join(".bob")
     }
+
+    fn lockpath(&self, id: usize) -> PathBuf {
+        self.bobmarker(id).join("created")
+    }
+
+    fn create_marker(&self, id: usize) -> Result<()> {
+        Ok(fs::create_dir(self.bobmarker(id))?)
+    }
+
     fn create_lock(&self, id: usize) -> Result<()> {
         Ok(fs::create_dir(self.lockpath(id))?)
     }
+
     fn delete_lock(&self, id: usize) -> Result<()> {
         let lockdir = self.lockpath(id);
         if lockdir.exists() {
-            fs::remove_dir(self.lockpath(id))?
+            fs::remove_dir(&lockdir)?;
+        }
+        let bobmarker = self.bobmarker(id);
+        if bobmarker.exists() {
+            fs::remove_dir(&bobmarker)?;
         }
         Ok(())
+    }
+
+    fn is_bob_sandbox(&self, id: usize) -> bool {
+        self.bobmarker(id).exists()
+    }
+
+    fn is_sandbox_complete(&self, id: usize) -> bool {
+        self.lockpath(id).exists()
+    }
+
+    /**
+     * Discover all bob-managed sandboxes by scanning basedir.
+     * Returns sorted list of sandbox IDs.
+     */
+    fn discover_sandboxes(&self) -> Result<Vec<usize>> {
+        let Some(basedir) = self.basedir() else {
+            return Ok(vec![]);
+        };
+        if !basedir.exists() {
+            return Ok(vec![]);
+        }
+        let mut ids = Vec::new();
+        for entry in fs::read_dir(basedir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Ok(id) = name.parse::<usize>() else {
+                continue;
+            };
+            if self.is_bob_sandbox(id) {
+                ids.push(id);
+            }
+        }
+        ids.sort();
+        Ok(ids)
     }
 
     /**
@@ -314,8 +372,7 @@ impl Sandbox {
     pub fn create(&self, id: usize) -> Result<()> {
         let sandbox = self.path(id);
         if sandbox.exists() {
-            if self.lockpath(id).exists() {
-                // Sandbox already exists and is valid
+            if self.is_sandbox_complete(id) {
                 return Ok(());
             }
             bail!(
@@ -325,6 +382,7 @@ impl Sandbox {
             );
         }
         fs::create_dir_all(&sandbox)?;
+        self.create_marker(id)?;
         self.perform_actions(id)?;
         self.create_lock(id)?;
         Ok(())
@@ -571,17 +629,17 @@ impl Sandbox {
     }
 
     /**
-     * Destroy all sandboxes in parallel.  Runs post-build cleanup on each
-     * sandbox first, then destroys them.  Continue on errors to ensure all
-     * sandboxes are attempted, printing each error as it occurs.
+     * Destroy all discovered sandboxes in parallel.  Runs post-build cleanup
+     * on each sandbox first, then destroys them.  Continue on errors to ensure
+     * all sandboxes are attempted, printing each error as it occurs.
      */
-    pub fn destroy_all(&self, count: usize) -> Result<()> {
-        let existing = self.count_existing(count);
-        if existing == 0 {
+    pub fn destroy_all(&self) -> Result<()> {
+        let sandboxes = self.discover_sandboxes()?;
+        if sandboxes.is_empty() {
             return Ok(());
         }
         let envs = self.config.script_env(None);
-        for id in 0..count {
+        for &id in &sandboxes {
             if self.path(id).exists() {
                 match self.run_post_build(id, &self.config, envs.clone()) {
                     Ok(true) => {}
@@ -594,15 +652,15 @@ impl Sandbox {
                 }
             }
         }
-        if existing == 1 {
+        if sandboxes.len() == 1 {
             print!("Destroying sandbox...");
         } else {
-            print!("Destroying {} sandboxes...", existing);
+            print!("Destroying {} sandboxes...", sandboxes.len());
         }
         let _ = std::io::stdout().flush();
         let start = Instant::now();
         let results: Vec<(usize, Result<()>)> =
-            (0..count).into_par_iter().map(|i| (i, self.destroy(i))).collect();
+            sandboxes.into_par_iter().map(|i| (i, self.destroy(i))).collect();
         let mut failed = 0;
         for (i, result) in results {
             if let Err(e) = result {
@@ -627,26 +685,25 @@ impl Sandbox {
     }
 
     /**
-     * List all sandboxes.
+     * List all discovered sandboxes.
      */
-    pub fn list_all(&self, count: usize) {
-        for i in 0..count {
-            let sandbox = self.path(i);
-            if sandbox.exists() {
-                if self.lockpath(i).exists() {
-                    println!("{}", sandbox.display())
-                } else {
-                    println!("{} (incomplete)", sandbox.display())
-                }
+    pub fn list_all(&self) -> Result<()> {
+        for id in self.discover_sandboxes()? {
+            let sandbox = self.path(id);
+            if self.is_sandbox_complete(id) {
+                println!("{}", sandbox.display())
+            } else {
+                println!("{} (incomplete)", sandbox.display())
             }
         }
+        Ok(())
     }
 
     /**
-     * Count existing sandboxes (complete or incomplete).
+     * Count discovered sandboxes (complete or incomplete).
      */
-    pub fn count_existing(&self, count: usize) -> usize {
-        (0..count).filter(|i| self.path(*i).exists()).count()
+    pub fn count_existing(&self) -> Result<usize> {
+        Ok(self.discover_sandboxes()?.len())
     }
 
     /*
@@ -1195,7 +1252,7 @@ impl SandboxScope {
 impl Drop for SandboxScope {
     fn drop(&mut self) {
         if self.sandbox.enabled() && self.count > 0 {
-            if let Err(e) = self.sandbox.destroy_all(self.count) {
+            if let Err(e) = self.sandbox.destroy_all() {
                 eprintln!("Warning: failed to destroy sandboxes: {}", e);
             }
         }

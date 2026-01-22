@@ -820,7 +820,7 @@ fn run() -> Result<()> {
             if !sandbox.enabled() {
                 bail!("No sandboxes configured");
             }
-            sandbox.destroy_all(config.build_threads())?;
+            sandbox.destroy_all()?;
         }
         Cmd::Util { cmd: UtilCmd::Sandbox { cmd: SandboxCmd::List } } => {
             let config = Config::load(args.config.as_deref())?;
@@ -828,7 +828,7 @@ fn run() -> Result<()> {
             if !sandbox.enabled() {
                 bail!("No sandboxes configured");
             }
-            sandbox.list_all(config.build_threads());
+            sandbox.list_all()?;
         }
     };
 
