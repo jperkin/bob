@@ -19,7 +19,7 @@ use anyhow::{Context, bail};
 use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
 use tracing::{debug, info, warn};
 
 /// Processes that should not be killed during sandbox cleanup.
@@ -134,29 +134,40 @@ impl Sandbox {
         dest: &Path,
     ) -> anyhow::Result<Option<ExitStatus>> {
         let cmd = "diskutil";
-        for _ in 0..120 {
+        for attempt in 0..120 {
             let status = Command::new(cmd)
                 .arg("unmount")
                 .arg(dest)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .process_group(0)
                 .status()
                 .context(format!("Unable to execute {}", cmd))?;
 
             if status.success() {
+                if attempt > 0 {
+                    debug!(
+                        path = %dest.display(),
+                        retries = attempt,
+                        "Unmount succeeded after retries"
+                    );
+                }
                 return Ok(Some(status));
             }
 
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
 
-        Ok(Some(
-            Command::new(cmd)
-                .arg("unmount")
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        let status = Command::new(cmd)
+            .arg("unmount")
+            .arg(dest)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .status()
+            .context(format!("Unable to execute {}", cmd))?;
+
+        Ok(Some(status))
     }
 
     pub fn unmount_bindfs(
@@ -170,7 +181,14 @@ impl Sandbox {
         &self,
         dest: &Path,
     ) -> anyhow::Result<Option<ExitStatus>> {
-        self.unmount_common(dest)
+        let cmd = "/sbin/umount";
+        Ok(Some(
+            Command::new(cmd)
+                .arg(dest)
+                .process_group(0)
+                .status()
+                .context(format!("Unable to execute {}", cmd))?,
+        ))
     }
 
     /* Not actually supported but try to unmount it anyway. */
