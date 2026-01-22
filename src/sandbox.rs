@@ -571,13 +571,28 @@ impl Sandbox {
     }
 
     /**
-     * Destroy all sandboxes in parallel.  Continue on errors to ensure all
+     * Destroy all sandboxes in parallel.  Runs post-build cleanup on each
+     * sandbox first, then destroys them.  Continue on errors to ensure all
      * sandboxes are attempted, printing each error as it occurs.
      */
     pub fn destroy_all(&self, count: usize) -> Result<()> {
         let existing = self.count_existing(count);
         if existing == 0 {
             return Ok(());
+        }
+        let envs = self.config.script_env(None);
+        for id in 0..count {
+            if self.path(id).exists() {
+                match self.run_post_build(id, &self.config, envs.clone()) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        warn!("post-build script failed for sandbox {}", id)
+                    }
+                    Err(e) => {
+                        warn!(error = %e, sandbox = id, "post-build script error")
+                    }
+                }
+            }
         }
         if existing == 1 {
             print!("Destroying sandbox...");
