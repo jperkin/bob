@@ -436,8 +436,10 @@ fn main() -> Result<()> {
             let sandbox = Sandbox::new(&runner.config);
             let _scope = SandboxScope::new(sandbox.clone());
             sandbox.create_for_scan()?;
-            if let Some(result) = runner.run_scan(&mut scan)? {
-                println!("{result}");
+            if !runner.ctx.shutdown.load(Ordering::SeqCst) {
+                if let Some(result) = runner.run_scan(&mut scan)? {
+                    println!("{result}");
+                }
             }
         }
         Cmd::Build { pkgpaths: cmdline_pkgs } => {
@@ -466,16 +468,18 @@ fn main() -> Result<()> {
             let _scope = SandboxScope::new(sandbox.clone());
             sandbox.create_for_scan()?;
 
-            if let Some(scan_result) = runner.run_scan(&mut scan)? {
-                if runner
-                    .run_build(
-                        scan_result,
-                        build::BuildOptions::default(),
-                        &sandbox,
-                    )?
-                    .is_some()
-                {
-                    runner.generate_pkg_summary();
+            if !runner.ctx.shutdown.load(Ordering::SeqCst) {
+                if let Some(scan_result) = runner.run_scan(&mut scan)? {
+                    if runner
+                        .run_build(
+                            scan_result,
+                            build::BuildOptions::default(),
+                            &sandbox,
+                        )?
+                        .is_some()
+                    {
+                        runner.generate_pkg_summary();
+                    }
                 }
             }
         }
@@ -566,9 +570,11 @@ fn main() -> Result<()> {
             let _scope = SandboxScope::new(sandbox.clone());
             sandbox.create_for_scan()?;
 
-            if let Some(scan_result) = runner.run_scan(&mut scan)? {
-                let options = build::BuildOptions { force_rebuild: force };
-                runner.run_build(scan_result, options, &sandbox)?;
+            if !runner.ctx.shutdown.load(Ordering::SeqCst) {
+                if let Some(scan_result) = runner.run_scan(&mut scan)? {
+                    let options = build::BuildOptions { force_rebuild: force };
+                    runner.run_build(scan_result, options, &sandbox)?;
+                }
             }
         }
         Cmd::Report => {
