@@ -35,7 +35,7 @@ impl Sandbox {
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest)?;
-        let cmd = "bindfs";
+        let cmd = self.config.bindfs();
         Ok(Some(
             Command::new(cmd)
                 .args(opts)
