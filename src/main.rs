@@ -73,11 +73,7 @@ impl BuildRunner {
     }
 
     /// Run the scan phase, returning the resolved scan result.
-    fn run_scan(
-        &self,
-        scan: &mut Scan,
-        scope: &SandboxScope,
-    ) -> Result<bob::scan::ScanSummary> {
+    fn run_scan(&self, scan: &mut Scan) -> Result<bob::scan::ScanSummary> {
         // For full tree scans with full_scan_complete, we might be able to
         // skip scanning entirely
         if scan.is_full_tree() && self.db.full_scan_complete() {
@@ -96,7 +92,7 @@ impl BuildRunner {
             }
         }
 
-        let interrupted = scan.start(&self.ctx, &self.db, scope)?;
+        let interrupted = scan.start(&self.ctx, &self.db)?;
 
         if interrupted {
             std::process::exit(EXIT_INTERRUPTED);
@@ -142,18 +138,16 @@ impl BuildRunner {
     }
 
     /**
-     * Run the build phase using an existing [`SandboxScope`].
+     * Run the build phase.
      *
-     * This is used when sandbox 0 was already created and prepared during
-     * the scan phase. Only creates additional sandboxes 1..build_threads
-     * if needed, and skips pre-build/post-build setup since that was done
-     * during scan.
+     * If sandbox 0 already exists (from scan phase), only creates additional
+     * sandboxes 1..build_threads. Otherwise creates all sandboxes.
      */
-    fn run_build_with_scope(
+    fn run_build(
         &mut self,
         scan_result: bob::scan::ScanSummary,
         options: build::BuildOptions,
-        scope: SandboxScope,
+        sandbox: &Sandbox,
     ) -> Result<build::BuildSummary> {
         // Validate config before sandbox creation
         if scan_result.count_buildable() == 0 {
@@ -165,18 +159,22 @@ impl BuildRunner {
             .map(|p| (p.pkgname().clone(), p.clone()))
             .collect();
 
-        // Create additional sandboxes for build phase (1..build_threads)
-        // Sandbox 0 was already created and prepared during scan
-        let mut scope = scope;
-        scope.add_build_sandboxes(self.config.build_threads())?;
+        // Create sandboxes for build phase (1..build_threads if scan already
+        // ran, otherwise 0..build_threads)
+        sandbox.create_for_build()?;
 
         // PkgsrcEnv was already fetched/stored during scan phase
         let pkgsrc_env = self.db.load_pkgsrc_env().context(
             "PkgsrcEnv not found in database - scan phase should have stored it",
         )?;
 
-        let mut build =
-            Build::new(&self.config, pkgsrc_env, scope, buildable, options);
+        let mut build = Build::new(
+            &self.config,
+            pkgsrc_env,
+            sandbox.clone(),
+            buildable,
+            options,
+        );
 
         // Load cached build results from database
         build.load_cached_from_db(&self.db)?;
@@ -434,8 +432,9 @@ fn main() -> Result<()> {
             }
 
             let sandbox = Sandbox::new(&runner.config);
-            let scope = SandboxScope::new(sandbox)?;
-            let result = runner.run_scan(&mut scan, &scope)?;
+            let _scope = SandboxScope::new(sandbox.clone());
+            sandbox.create_for_scan()?;
+            let result = runner.run_scan(&mut scan)?;
             println!("{result}");
         }
         Cmd::Build { pkgpaths: cmdline_pkgs } => {
@@ -461,13 +460,14 @@ fn main() -> Result<()> {
             // Use combined sandbox workflow: create sandbox 0 once for both
             // scan and build phases
             let sandbox = Sandbox::new(&runner.config);
-            let scope = SandboxScope::new(sandbox)?;
+            let _scope = SandboxScope::new(sandbox.clone());
+            sandbox.create_for_scan()?;
 
-            let scan_result = runner.run_scan(&mut scan, &scope)?;
-            runner.run_build_with_scope(
+            let scan_result = runner.run_scan(&mut scan)?;
+            runner.run_build(
                 scan_result,
                 build::BuildOptions::default(),
-                scope,
+                &sandbox,
             )?;
             runner.generate_pkg_summary();
         }
@@ -555,11 +555,12 @@ fn main() -> Result<()> {
 
             // Use combined sandbox workflow
             let sandbox = Sandbox::new(&runner.config);
-            let scope = SandboxScope::new(sandbox)?;
+            let _scope = SandboxScope::new(sandbox.clone());
+            sandbox.create_for_scan()?;
 
-            let scan_result = runner.run_scan(&mut scan, &scope)?;
+            let scan_result = runner.run_scan(&mut scan)?;
             let options = build::BuildOptions { force_rebuild: force };
-            runner.run_build_with_scope(scan_result, options, scope)?;
+            runner.run_build(scan_result, options, &sandbox)?;
         }
         Cmd::Report => {
             let config = Config::load(args.config.as_deref())?;
@@ -790,7 +791,7 @@ fn main() -> Result<()> {
             if !sandbox.enabled() {
                 bail!("No sandboxes configured");
             }
-            sandbox.create_all(config.build_threads())?;
+            sandbox.create_for_build()?;
         }
         Cmd::Util { cmd: UtilCmd::Sandbox { cmd: SandboxCmd::Destroy } } => {
             let config = Config::load(args.config.as_deref())?;
@@ -798,7 +799,7 @@ fn main() -> Result<()> {
             if !sandbox.enabled() {
                 bail!("No sandboxes configured");
             }
-            sandbox.destroy_all(config.build_threads())?;
+            sandbox.destroy_all()?;
         }
         Cmd::Util { cmd: UtilCmd::Sandbox { cmd: SandboxCmd::List } } => {
             let config = Config::load(args.config.as_deref())?;

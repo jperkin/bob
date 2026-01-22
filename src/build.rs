@@ -43,9 +43,7 @@
 //! - `clean` - Clean up build artifacts
 
 use crate::config::PkgsrcEnv;
-use crate::sandbox::{
-    SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown,
-};
+use crate::sandbox::{SHUTDOWN_POLL_INTERVAL, wait_with_shutdown};
 use crate::scan::{ResolvedPackage, SkipReason, SkippedCounts};
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, RunContext, Sandbox};
@@ -1125,8 +1123,8 @@ pub struct Build {
     config: Config,
     /// Pkgsrc environment variables.
     pkgsrc_env: PkgsrcEnv,
-    /// Sandbox scope - owns created sandboxes, destroys on drop.
-    scope: SandboxScope,
+    /// Sandbox for executing commands.
+    sandbox: Sandbox,
     /// List of packages to build, as input from Scan::resolve.
     scanpkgs: IndexMap<PkgName, ResolvedPackage>,
     /// Cached build results from previous run.
@@ -1817,13 +1815,13 @@ impl Build {
     pub fn new(
         config: &Config,
         pkgsrc_env: PkgsrcEnv,
-        scope: SandboxScope,
+        sandbox: Sandbox,
         scanpkgs: IndexMap<PkgName, ResolvedPackage>,
         options: BuildOptions,
     ) -> Build {
         info!(
             package_count = scanpkgs.len(),
-            sandbox_enabled = scope.enabled(),
+            sandbox_enabled = sandbox.enabled(),
             build_threads = config.build_threads(),
             ?options,
             "Creating new Build instance"
@@ -1839,7 +1837,7 @@ impl Build {
         Build {
             config: config.clone(),
             pkgsrc_env,
-            scope,
+            sandbox,
             scanpkgs,
             cached: IndexMap::new(),
             options,
@@ -2201,7 +2199,7 @@ impl Build {
         let session = Arc::new(BuildSession {
             config: self.config.clone(),
             pkgsrc_env: self.pkgsrc_env.clone(),
-            sandbox: self.scope.sandbox().clone(),
+            sandbox: self.sandbox.clone(),
             options: self.options.clone(),
             shutdown: Arc::clone(&shutdown_flag),
         });

@@ -160,6 +160,7 @@ pub fn wait_output_with_shutdown(
 #[derive(Clone, Debug, Default)]
 pub struct Sandbox {
     config: Config,
+    build_threads: usize,
 }
 
 impl Sandbox {
@@ -172,7 +173,10 @@ impl Sandbox {
      * [`execute`]: Sandbox::execute
      */
     pub fn new(config: &Config) -> Sandbox {
-        Sandbox { config: config.clone() }
+        Sandbox {
+            build_threads: config.build_threads(),
+            config: config.clone(),
+        }
     }
 
     /// Return whether sandboxes have been enabled.
@@ -181,6 +185,11 @@ impl Sandbox {
     /// specified in the config file.
     pub fn enabled(&self) -> bool {
         self.config.sandboxes().is_some()
+    }
+
+    /// Check if a sandbox exists by id.
+    pub fn exists(&self, id: usize) -> bool {
+        self.enabled() && self.path(id).exists()
     }
 
     /**
@@ -526,19 +535,57 @@ impl Sandbox {
         Ok(())
     }
 
-    /**
-     * Create all sandboxes in parallel, rolling back on failure.
-     */
-    pub fn create_all(&self, count: usize) -> Result<()> {
-        if count == 1 {
-            print!("Creating sandbox...");
-        } else {
-            print!("Creating {} sandboxes...", count);
+    /// Create sandbox 0 for the scan phase.
+    pub fn create_for_scan(&self) -> Result<()> {
+        if !self.enabled() {
+            return Ok(());
         }
+        print!("Creating scan sandbox...");
         let _ = std::io::stdout().flush();
         let start = Instant::now();
-        let results: Vec<(usize, Result<()>)> =
-            (0..count).into_par_iter().map(|i| (i, self.create(i))).collect();
+        self.create(0)?;
+        println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
+        Ok(())
+    }
+
+    /// Create sandboxes for the build phase.
+    /// If sandbox 0 exists (from scan), creates 1..build_threads.
+    /// Otherwise creates all 0..build_threads.
+    pub fn create_for_build(&self) -> Result<()> {
+        if !self.enabled() {
+            return Ok(());
+        }
+        let scan_exists = self.exists(0);
+        let (start_idx, msg) = if scan_exists {
+            if self.build_threads <= 1 {
+                return Ok(());
+            }
+            let n = self.build_threads - 1;
+            (
+                1,
+                if n == 1 {
+                    "Creating additional build sandbox...".to_string()
+                } else {
+                    format!("Creating {} additional build sandboxes...", n)
+                },
+            )
+        } else {
+            (
+                0,
+                if self.build_threads == 1 {
+                    "Creating sandbox...".to_string()
+                } else {
+                    format!("Creating {} sandboxes...", self.build_threads)
+                },
+            )
+        };
+        print!("{}", msg);
+        let _ = std::io::stdout().flush();
+        let start = Instant::now();
+        let results: Vec<(usize, Result<()>)> = (start_idx..self.build_threads)
+            .into_par_iter()
+            .map(|i| (i, self.create(i)))
+            .collect();
         let mut first_error: Option<anyhow::Error> = None;
         for (i, result) in &results {
             if let Err(e) = result {
@@ -550,12 +597,7 @@ impl Sandbox {
         if let Some(e) = first_error {
             println!();
             for (i, _) in &results {
-                if let Err(destroy_err) = self.destroy(*i) {
-                    eprintln!(
-                        "Warning: failed to destroy sandbox {}: {}",
-                        i, destroy_err
-                    );
-                }
+                let _ = self.destroy(*i);
             }
             return Err(e);
         }
@@ -563,12 +605,12 @@ impl Sandbox {
         Ok(())
     }
 
-    /**
-     * Destroy all sandboxes in parallel.  Continue on errors to ensure all
-     * sandboxes are attempted, printing each error as it occurs.
-     */
-    pub fn destroy_all(&self, count: usize) -> Result<()> {
-        let existing = self.count_existing(count);
+    /// Destroy all sandboxes that exist.
+    pub fn destroy_all(&self) -> Result<()> {
+        if !self.enabled() {
+            return Ok(());
+        }
+        let existing = self.count_existing(self.build_threads);
         if existing == 0 {
             return Ok(());
         }
@@ -579,8 +621,10 @@ impl Sandbox {
         }
         let _ = std::io::stdout().flush();
         let start = Instant::now();
-        let results: Vec<(usize, Result<()>)> =
-            (0..count).into_par_iter().map(|i| (i, self.destroy(i))).collect();
+        let results: Vec<(usize, Result<()>)> = (0..self.build_threads)
+            .into_par_iter()
+            .map(|i| (i, self.destroy(i)))
+            .collect();
         let mut failed = 0;
         for (i, result) in results {
             if let Err(e) = result {
@@ -1043,91 +1087,33 @@ impl Sandbox {
     }
 }
 
-/// RAII scope for multiple sandboxes (used by build).
-///
 /**
- * RAII scope for sandbox lifecycle management.
+ * RAII wrapper that ensures sandboxes are destroyed on drop.
  *
- * Creates sandbox 0 on construction, optionally adds more for parallel builds,
- * and destroys all sandboxes on drop.
+ * Use this to manage sandbox lifecycle. Creating a scope does not create
+ * any sandboxes - use the inner [`Sandbox`] methods for that. The scope
+ * ensures cleanup happens even on early return or panic.
  */
-#[derive(Debug)]
 pub struct SandboxScope {
     sandbox: Sandbox,
-    count: usize,
 }
 
 impl SandboxScope {
-    /// Create a new scope with sandbox 0.
-    pub fn new(sandbox: Sandbox) -> Result<Self> {
-        if sandbox.enabled() {
-            print!("Creating scan sandbox...");
-            let _ = std::io::stdout().flush();
-            let start = Instant::now();
-            if let Err(e) = sandbox.create(0) {
-                println!();
-                return Err(e);
-            }
-            println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
-        }
-        Ok(Self { sandbox, count: 1 })
+    /// Create a new scope wrapping a sandbox.
+    pub fn new(sandbox: Sandbox) -> Self {
+        Self { sandbox }
     }
 
-    /// Add additional sandboxes for the build phase (1..total_count).
-    pub fn add_build_sandboxes(&mut self, total_count: usize) -> Result<()> {
-        if !self.sandbox.enabled() || total_count <= 1 {
-            self.count = total_count;
-            return Ok(());
-        }
-        let additional = total_count - 1;
-        if additional == 1 {
-            print!("Creating additional build sandbox...");
-        } else {
-            print!("Creating {} additional build sandboxes...", additional);
-        }
-        let _ = std::io::stdout().flush();
-        let start = Instant::now();
-        let results: Vec<(usize, Result<()>)> = (1..total_count)
-            .into_par_iter()
-            .map(|i| (i, self.sandbox.create(i)))
-            .collect();
-        let mut first_error: Option<anyhow::Error> = None;
-        for (i, result) in &results {
-            if let Err(e) = result {
-                if first_error.is_none() {
-                    first_error = Some(anyhow::anyhow!("sandbox {}: {}", i, e));
-                }
-            }
-        }
-        if let Some(e) = first_error {
-            println!();
-            for (i, _) in &results {
-                let _ = self.sandbox.destroy(*i);
-            }
-            return Err(e);
-        }
-        println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
-        self.count = total_count;
-        Ok(())
-    }
-
-    /// Access the underlying sandbox for operations.
+    /// Get a reference to the inner sandbox.
     pub fn sandbox(&self) -> &Sandbox {
         &self.sandbox
-    }
-
-    /// Return whether sandboxes are enabled.
-    pub fn enabled(&self) -> bool {
-        self.sandbox.enabled()
     }
 }
 
 impl Drop for SandboxScope {
     fn drop(&mut self) {
-        if self.sandbox.enabled() {
-            if let Err(e) = self.sandbox.destroy_all(self.count) {
-                eprintln!("Warning: failed to destroy sandboxes: {}", e);
-            }
+        if let Err(e) = self.sandbox.destroy_all() {
+            eprintln!("Warning: failed to destroy sandboxes: {}", e);
         }
     }
 }

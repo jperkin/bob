@@ -38,7 +38,7 @@
 //! - Circular dependencies - Package has a dependency cycle
 
 use crate::config::PkgsrcEnv;
-use crate::sandbox::{SandboxScope, wait_output_with_shutdown};
+use crate::sandbox::wait_output_with_shutdown;
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, RunContext, Sandbox};
 use anyhow::{Context, Result, bail};
@@ -599,11 +599,10 @@ impl Scan {
         &mut self,
         ctx: &RunContext,
         db: &crate::db::Database,
-        scope: &SandboxScope,
     ) -> anyhow::Result<bool> {
         info!(
             incoming_count = self.incoming.len(),
-            sandbox_enabled = scope.enabled(),
+            sandbox_enabled = self.sandbox.enabled(),
             "Starting package scan"
         );
 
@@ -635,9 +634,6 @@ impl Scan {
                 return Ok(false);
             }
         }
-
-        // Use the sandbox from the external scope
-        self.sandbox = scope.sandbox().clone();
         if self.sandbox.enabled() {
             // Run pre-build script if defined
             if !self.sandbox.run_pre_build(
