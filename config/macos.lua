@@ -110,8 +110,8 @@ sandboxes = {
                 # If you enable a builder user then uncomment these
                 #homedir=$(su builder -c 'echo $HOME')
                 #tempdir=$(su builder -c 'getconf DARWIN_USER_TEMP_DIR')
-                #mkdir -p ${homedir}/build $userdir
-                #chown -R builder $homedir $userdir
+                #mkdir -p ${homedir}/build $tempdir
+                #chown -R builder $homedir $tempdir
 		]] },
 
         -- It is recommended to mount pkgsrc read-only, but you will first need
