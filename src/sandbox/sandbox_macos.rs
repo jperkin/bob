@@ -19,7 +19,7 @@ use anyhow::{Context, bail};
 use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
 use tracing::{debug, info, warn};
 
 /// Processes that should not be killed during sandbox cleanup.
@@ -124,29 +124,48 @@ impl Sandbox {
     /*
      * General unmount routine common to file system types that involve
      * mounted file systems.
+     *
+     * Uses diskutil unmount with retries (every second, up to 3 minutes).
+     * Use process_group(0) to put diskutil in its own process group,
+     * preventing it from receiving SIGINT when the user presses Ctrl+C.
      */
     fn unmount_common(
         &self,
         dest: &Path,
     ) -> anyhow::Result<Option<ExitStatus>> {
-        /*
-         * macOS is notorious for not unmounting file systems, even with
-         * "diskutil unmount force" in some cases, so for now we just skip
-         * straight to "umount -f" which appears to work.
-         *
-         * Use process_group(0) to put umount in its own process group.
-         * This prevents it from receiving SIGINT when the user presses Ctrl+C,
-         * ensuring cleanup can complete even during repeated interrupts.
-         */
-        let cmd = "/sbin/umount";
-        Ok(Some(
-            Command::new(cmd)
-                .arg("-f")
+        let cmd = "/usr/sbin/diskutil";
+        let max_retries = 180;
+        let mut last_status = None;
+
+        for attempt in 0..max_retries {
+            let status = Command::new(cmd)
+                .arg("unmount")
                 .arg(dest)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .process_group(0)
                 .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+                .context(format!("Unable to execute {}", cmd))?;
+
+            if status.success() {
+                if attempt > 0 {
+                    debug!(
+                        path = %dest.display(),
+                        retries = attempt,
+                        "Unmount succeeded after retries"
+                    );
+                }
+                return Ok(Some(status));
+            }
+
+            last_status = Some(status);
+
+            if attempt < max_retries - 1 {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
+
+        Ok(last_status)
     }
 
     pub fn unmount_bindfs(
@@ -160,7 +179,14 @@ impl Sandbox {
         &self,
         dest: &Path,
     ) -> anyhow::Result<Option<ExitStatus>> {
-        self.unmount_common(dest)
+        let cmd = "/sbin/umount";
+        Ok(Some(
+            Command::new(cmd)
+                .arg(dest)
+                .process_group(0)
+                .status()
+                .context(format!("Unable to execute {}", cmd))?,
+        ))
     }
 
     /* Not actually supported but try to unmount it anyway. */
