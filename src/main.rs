@@ -805,6 +805,7 @@ fn run() -> Result<()> {
             }
         }
         Cmd::Util { cmd: UtilCmd::Sandbox { cmd: SandboxCmd::Create } } => {
+            logging::init_stderr_if_enabled();
             let config = Config::load(args.config.as_deref())?;
             let sandbox = Sandbox::new(&config);
             if !sandbox.enabled() {
@@ -813,6 +814,7 @@ fn run() -> Result<()> {
             sandbox.create_all(config.build_threads())?;
         }
         Cmd::Util { cmd: UtilCmd::Sandbox { cmd: SandboxCmd::Destroy } } => {
+            logging::init_stderr_if_enabled();
             let config = Config::load(args.config.as_deref())?;
             let sandbox = Sandbox::new(&config);
             if !sandbox.enabled() {
