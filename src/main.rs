@@ -73,7 +73,11 @@ impl BuildRunner {
     }
 
     /// Run the scan phase, returning the resolved scan result.
-    fn run_scan(&self, scan: &mut Scan) -> Result<bob::scan::ScanSummary> {
+    /// Returns Ok(None) if interrupted.
+    fn run_scan(
+        &self,
+        scan: &mut Scan,
+    ) -> Result<Option<bob::scan::ScanSummary>> {
         // For full tree scans with full_scan_complete, we might be able to
         // skip scanning entirely
         if scan.is_full_tree() && self.db.full_scan_complete() {
@@ -95,7 +99,7 @@ impl BuildRunner {
         let interrupted = scan.start(&self.ctx, &self.db)?;
 
         if interrupted {
-            std::process::exit(EXIT_INTERRUPTED);
+            return Ok(None);
         }
 
         // Handle scan errors
@@ -134,7 +138,7 @@ impl BuildRunner {
             }
         }
 
-        Ok(result)
+        Ok(Some(result))
     }
 
     /**
@@ -142,13 +146,15 @@ impl BuildRunner {
      *
      * If sandbox 0 already exists (from scan phase), only creates additional
      * sandboxes 1..build_threads. Otherwise creates all sandboxes.
+     *
+     * Returns Ok(None) if interrupted.
      */
     fn run_build(
         &mut self,
         scan_result: bob::scan::ScanSummary,
         options: build::BuildOptions,
         sandbox: &Sandbox,
-    ) -> Result<build::BuildSummary> {
+    ) -> Result<Option<build::BuildSummary>> {
         // Validate config before sandbox creation
         if scan_result.count_buildable() == 0 {
             bail!("No packages to build");
@@ -189,8 +195,7 @@ impl BuildRunner {
 
         // Check if we were interrupted
         if self.ctx.shutdown.load(Ordering::SeqCst) {
-            drop(build);
-            std::process::exit(EXIT_INTERRUPTED);
+            return Ok(None);
         }
 
         // Add pre-skipped/failed/unresolved packages from scan to summary
@@ -216,7 +221,7 @@ impl BuildRunner {
                 ScanResult::Buildable(_) => {}
             }
         }
-        Ok(summary)
+        Ok(Some(summary))
     }
 
     /// Generate pkg_summary.gz for all successful packages.
@@ -432,10 +437,18 @@ fn main() -> Result<()> {
             }
 
             let sandbox = Sandbox::new(&runner.config);
-            let _scope = SandboxScope::new(sandbox.clone());
-            sandbox.create_for_scan()?;
-            let result = runner.run_scan(&mut scan)?;
-            println!("{result}");
+            let interrupted = 'scan: {
+                let _scope = SandboxScope::new(sandbox.clone());
+                sandbox.create_for_scan()?;
+                let Some(result) = runner.run_scan(&mut scan)? else {
+                    break 'scan true;
+                };
+                println!("{result}");
+                false
+            };
+            if interrupted {
+                std::process::exit(EXIT_INTERRUPTED);
+            }
         }
         Cmd::Build { pkgpaths: cmdline_pkgs } => {
             let mut runner = BuildRunner::new(args.config.as_deref())?;
@@ -460,16 +473,27 @@ fn main() -> Result<()> {
             // Use combined sandbox workflow: create sandbox 0 once for both
             // scan and build phases
             let sandbox = Sandbox::new(&runner.config);
-            let _scope = SandboxScope::new(sandbox.clone());
-            sandbox.create_for_scan()?;
+            let interrupted = 'build: {
+                let _scope = SandboxScope::new(sandbox.clone());
+                sandbox.create_for_scan()?;
 
-            let scan_result = runner.run_scan(&mut scan)?;
-            runner.run_build(
-                scan_result,
-                build::BuildOptions::default(),
-                &sandbox,
-            )?;
-            runner.generate_pkg_summary();
+                let Some(scan_result) = runner.run_scan(&mut scan)? else {
+                    break 'build true;
+                };
+                let Some(_) = runner.run_build(
+                    scan_result,
+                    build::BuildOptions::default(),
+                    &sandbox,
+                )?
+                else {
+                    break 'build true;
+                };
+                runner.generate_pkg_summary();
+                false
+            };
+            if interrupted {
+                std::process::exit(EXIT_INTERRUPTED);
+            }
         }
         Cmd::Rebuild { all, force, packages } => {
             if !all && packages.is_empty() {
@@ -555,12 +579,24 @@ fn main() -> Result<()> {
 
             // Use combined sandbox workflow
             let sandbox = Sandbox::new(&runner.config);
-            let _scope = SandboxScope::new(sandbox.clone());
-            sandbox.create_for_scan()?;
+            let interrupted = 'rebuild: {
+                let _scope = SandboxScope::new(sandbox.clone());
+                sandbox.create_for_scan()?;
 
-            let scan_result = runner.run_scan(&mut scan)?;
-            let options = build::BuildOptions { force_rebuild: force };
-            runner.run_build(scan_result, options, &sandbox)?;
+                let Some(scan_result) = runner.run_scan(&mut scan)? else {
+                    break 'rebuild true;
+                };
+                let options = build::BuildOptions { force_rebuild: force };
+                let Some(_) =
+                    runner.run_build(scan_result, options, &sandbox)?
+                else {
+                    break 'rebuild true;
+                };
+                false
+            };
+            if interrupted {
+                std::process::exit(EXIT_INTERRUPTED);
+            }
         }
         Cmd::Report => {
             let config = Config::load(args.config.as_deref())?;
