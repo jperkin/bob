@@ -31,9 +31,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::error;
 
-/// Exit code when interrupted.  We do not know what exact signal this was.
-const EXIT_INTERRUPTED: i32 = 128 + libc::SIGINT;
-
 /// Common context for build operations.
 struct BuildRunner {
     config: Config,
@@ -437,17 +434,10 @@ fn main() -> Result<()> {
             }
 
             let sandbox = Sandbox::new(&runner.config);
-            let interrupted = 'scan: {
-                let _scope = SandboxScope::new(sandbox.clone());
-                sandbox.create_for_scan()?;
-                let Some(result) = runner.run_scan(&mut scan)? else {
-                    break 'scan true;
-                };
+            let _scope = SandboxScope::new(sandbox.clone());
+            sandbox.create_for_scan()?;
+            if let Some(result) = runner.run_scan(&mut scan)? {
                 println!("{result}");
-                false
-            };
-            if interrupted {
-                std::process::exit(EXIT_INTERRUPTED);
             }
         }
         Cmd::Build { pkgpaths: cmdline_pkgs } => {
@@ -473,26 +463,20 @@ fn main() -> Result<()> {
             // Use combined sandbox workflow: create sandbox 0 once for both
             // scan and build phases
             let sandbox = Sandbox::new(&runner.config);
-            let interrupted = 'build: {
-                let _scope = SandboxScope::new(sandbox.clone());
-                sandbox.create_for_scan()?;
+            let _scope = SandboxScope::new(sandbox.clone());
+            sandbox.create_for_scan()?;
 
-                let Some(scan_result) = runner.run_scan(&mut scan)? else {
-                    break 'build true;
-                };
-                let Some(_) = runner.run_build(
-                    scan_result,
-                    build::BuildOptions::default(),
-                    &sandbox,
-                )?
-                else {
-                    break 'build true;
-                };
-                runner.generate_pkg_summary();
-                false
-            };
-            if interrupted {
-                std::process::exit(EXIT_INTERRUPTED);
+            if let Some(scan_result) = runner.run_scan(&mut scan)? {
+                if runner
+                    .run_build(
+                        scan_result,
+                        build::BuildOptions::default(),
+                        &sandbox,
+                    )?
+                    .is_some()
+                {
+                    runner.generate_pkg_summary();
+                }
             }
         }
         Cmd::Rebuild { all, force, packages } => {
@@ -579,23 +563,12 @@ fn main() -> Result<()> {
 
             // Use combined sandbox workflow
             let sandbox = Sandbox::new(&runner.config);
-            let interrupted = 'rebuild: {
-                let _scope = SandboxScope::new(sandbox.clone());
-                sandbox.create_for_scan()?;
+            let _scope = SandboxScope::new(sandbox.clone());
+            sandbox.create_for_scan()?;
 
-                let Some(scan_result) = runner.run_scan(&mut scan)? else {
-                    break 'rebuild true;
-                };
+            if let Some(scan_result) = runner.run_scan(&mut scan)? {
                 let options = build::BuildOptions { force_rebuild: force };
-                let Some(_) =
-                    runner.run_build(scan_result, options, &sandbox)?
-                else {
-                    break 'rebuild true;
-                };
-                false
-            };
-            if interrupted {
-                std::process::exit(EXIT_INTERRUPTED);
+                runner.run_build(scan_result, options, &sandbox)?;
             }
         }
         Cmd::Report => {
