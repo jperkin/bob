@@ -29,8 +29,35 @@ use tracing_subscriber::{
 
 static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 
-/// Initialize the logging system.
-/// Creates a logs directory and writes JSON-formatted logs there.
+/**
+ * Initialize stderr logging if RUST_LOG is set.
+ *
+ * For utility commands that don't need file logging but should support
+ * debug output when explicitly requested.
+ */
+pub fn init_stderr_if_enabled() {
+    if std::env::var("RUST_LOG").is_err() {
+        return;
+    }
+
+    let filter = EnvFilter::from_default_env();
+
+    let stderr_layer = fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_target(false)
+        .without_time();
+
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(stderr_layer)
+        .try_init();
+}
+
+/**
+ * Initialize the logging system.
+ *
+ * Creates a logs directory and writes JSON-formatted logs there.
+ */
 pub fn init(logs_dir: &PathBuf, log_level: &str) -> Result<()> {
     // Create logs directory
     fs::create_dir_all(logs_dir).with_context(|| {
