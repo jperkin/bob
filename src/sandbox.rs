@@ -845,8 +845,8 @@ impl Sandbox {
      * When `chroot` is true, the command runs inside the sandbox via chroot
      * with `/` as the working directory.
      *
-     * Stdin is redirected from /dev/null to prevent commands like `su` from
-     * trying to read from the terminal and stopping the process.
+     * Stdio is captured to prevent commands like `su` from trying to interact
+     * with the terminal. Output is logged on failure.
      */
     fn run_action_cmd(
         &self,
@@ -855,29 +855,42 @@ impl Sandbox {
         chroot: bool,
     ) -> Result<Option<std::process::ExitStatus>> {
         let sandbox_path = self.path(id);
-        if chroot {
-            let status = Command::new("/usr/sbin/chroot")
+        let output = if chroot {
+            Command::new("/usr/sbin/chroot")
                 .arg(&sandbox_path)
                 .arg("/bin/sh")
                 .arg("-c")
                 .arg(cmd)
                 .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
                 .process_group(0)
-                .status()?;
-
-            Ok(Some(status))
+                .output()?
         } else {
-            let status = Command::new("/bin/sh")
+            Command::new("/bin/sh")
                 .arg("-c")
                 .arg(cmd)
                 .env("bob_sandbox_path", &sandbox_path)
                 .current_dir(&sandbox_path)
                 .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
                 .process_group(0)
-                .status()?;
+                .output()?
+        };
 
-            Ok(Some(status))
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stdout.is_empty() {
+                warn!(cmd, stdout = %stdout.trim(), "Action command output");
+            }
+            if !stderr.is_empty() {
+                warn!(cmd, stderr = %stderr.trim(), "Action command error");
+            }
         }
+
+        Ok(Some(output.status))
     }
 
     fn reverse_actions(&self, id: usize) -> anyhow::Result<()> {
