@@ -55,7 +55,7 @@ pkgsrc = {
         -- override that to use a disk-backed location for any package written
         -- in Go, as they often have much larger space requirements.
         -- if pkg.scan_depends:match("/lang/go/") then
-        --     env.WRKOBJDIR = "/home/builder/build-disk"
+        --     env.WRKOBJDIR = "/Users/builder/build-disk"
         -- end
         return env
     end,
@@ -78,6 +78,8 @@ scripts = {
 -- sandboxes it is processed in reverse order.
 sandboxes = {
     basedir = "/Volumes/data/chroot",
+    -- If bindfs is not in PATH you can set it here.
+    -- bindfs = "/usr/local/bin/bindfs"
 
     actions = {
         { action = "mount", fs = "dev", dir = "/dev" },
@@ -102,7 +104,15 @@ sandboxes = {
 
         -- At this point everything should be set up so that chrooted commands
         -- will execute successfully.  Perform additional chroot setup.
-        { action = "cmd", chroot = true, create = "chmod 1777 /tmp /var/tmp" },
+        { action = "cmd", chroot = true, create = [[
+                chmod 1777 /tmp /var/tmp
+                mkdir -p $(getconf DARWIN_USER_TEMP_DIR)
+                # If you enable a builder user then uncomment these
+                #homedir=$(su builder -c 'echo $HOME')
+                #tempdir=$(su builder -c 'getconf DARWIN_USER_TEMP_DIR')
+                #mkdir -p ${homedir}/build $userdir
+                #chown -R builder $homedir $userdir
+		]] },
 
         -- It is recommended to mount pkgsrc read-only, but you will first need
         -- to configure DISTDIR, PACKAGES, and WRKOBJDIR to other directories.
