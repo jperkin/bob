@@ -546,6 +546,8 @@ pub struct Sandboxes {
     ///
     /// See [`Action`] for details.
     pub actions: Vec<Action>,
+    /// Path to bindfs binary (defaults to "bindfs").
+    pub bindfs: String,
 }
 
 impl Config {
@@ -669,6 +671,14 @@ impl Config {
 
     pub fn sandboxes(&self) -> &Option<Sandboxes> {
         &self.file.sandboxes
+    }
+
+    pub fn bindfs(&self) -> &str {
+        self.file
+            .sandboxes
+            .as_ref()
+            .map(|s| s.bindfs.as_str())
+            .unwrap_or("bindfs")
     }
 
     pub fn log_level(&self) -> &str {
@@ -1038,10 +1048,13 @@ fn parse_sandboxes(globals: &Table) -> LuaResult<Option<Sandboxes>> {
         .as_table()
         .ok_or_else(|| mlua::Error::runtime("'sandboxes' must be a table"))?;
 
-    const KNOWN_KEYS: &[&str] = &["actions", "basedir"];
+    const KNOWN_KEYS: &[&str] = &["actions", "basedir", "bindfs"];
     warn_unknown_keys(table, "sandboxes", KNOWN_KEYS);
 
     let basedir: String = table.get("basedir")?;
+    let bindfs: String = table
+        .get::<Option<String>>("bindfs")?
+        .unwrap_or_else(|| String::from("bindfs"));
 
     let actions_value: Value = table.get("actions")?;
     let actions = if actions_value.is_nil() {
@@ -1053,7 +1066,7 @@ fn parse_sandboxes(globals: &Table) -> LuaResult<Option<Sandboxes>> {
         parse_actions(actions_table)?
     };
 
-    Ok(Some(Sandboxes { basedir: PathBuf::from(basedir), actions }))
+    Ok(Some(Sandboxes { basedir: PathBuf::from(basedir), actions, bindfs }))
 }
 
 fn parse_actions(table: &Table) -> LuaResult<Vec<Action>> {
