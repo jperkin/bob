@@ -123,12 +123,10 @@ pub struct SkippedCounts {
 /// A successfully resolved package that is ready to build.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedPackage {
-    /// The scan index data (always present for resolved packages).
+    /// The scan index data including resolved dependencies.
     pub index: ScanIndex,
     /// Package path.
     pub pkgpath: PkgPath,
-    /// Resolved dependencies.
-    pub resolved_depends: Vec<PkgName>,
 }
 
 impl ResolvedPackage {
@@ -139,7 +137,7 @@ impl ResolvedPackage {
 
     /// Returns resolved dependencies.
     pub fn depends(&self) -> &[PkgName] {
-        &self.resolved_depends
+        self.index.resolved_depends.as_deref().unwrap_or(&[])
     }
 
     /// Returns bootstrap_pkg if set.
@@ -165,18 +163,7 @@ impl ResolvedPackage {
 
 impl std::fmt::Display for ResolvedPackage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.index)?;
-        if !self.resolved_depends.is_empty() {
-            write!(f, "DEPENDS=")?;
-            for (i, d) in self.resolved_depends.iter().enumerate() {
-                if i > 0 {
-                    write!(f, " ")?;
-                }
-                write!(f, "{d}")?;
-            }
-            writeln!(f)?;
-        }
-        Ok(())
+        write!(f, "{}", self.index)
     }
 }
 
@@ -242,7 +229,7 @@ impl ScanResult {
     /// Returns resolved dependencies.
     pub fn depends(&self) -> &[PkgName] {
         match self {
-            ScanResult::Buildable(pkg) => &pkg.resolved_depends,
+            ScanResult::Buildable(pkg) => pkg.depends(),
             ScanResult::Skipped { resolved_depends, .. } => resolved_depends,
             ScanResult::ScanFail { .. } => &[],
         }
@@ -1343,7 +1330,7 @@ impl Scan {
         let mut packages: Vec<ScanResult> = Vec::new();
         let mut count_buildable = 0;
 
-        for (pkgname, index) in std::mem::take(&mut self.packages) {
+        for (pkgname, mut index) in std::mem::take(&mut self.packages) {
             let Some(pkgpath) = index.pkg_location.clone() else {
                 error!(pkgname = %pkgname, "Package missing PKG_LOCATION, skipping");
                 continue;
@@ -1358,11 +1345,8 @@ impl Scan {
                 },
                 None => {
                     count_buildable += 1;
-                    ScanResult::Buildable(ResolvedPackage {
-                        index,
-                        pkgpath,
-                        resolved_depends,
-                    })
+                    index.resolved_depends = Some(resolved_depends);
+                    ScanResult::Buildable(ResolvedPackage { index, pkgpath })
                 }
             };
             packages.push(result);
@@ -1381,7 +1365,7 @@ impl Scan {
         let mut graph = DiGraphMap::new();
         for pkg in &packages {
             if let ScanResult::Buildable(resolved) = pkg {
-                for dep in &resolved.resolved_depends {
+                for dep in resolved.depends() {
                     graph.add_edge(
                         dep.pkgname(),
                         resolved.pkgname().pkgname(),
@@ -1434,7 +1418,7 @@ impl Scan {
         for pkg in &packages {
             if let ScanResult::Buildable(resolved) = pkg {
                 if let Some(&pkg_id) = pkgname_to_id.get(resolved.pkgname()) {
-                    for dep in &resolved.resolved_depends {
+                    for dep in resolved.depends() {
                         if let Some(&dep_id) = pkgname_to_id.get(dep) {
                             resolved_deps.push((pkg_id, dep_id));
                         }

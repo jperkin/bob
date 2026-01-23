@@ -415,9 +415,13 @@ enum UtilCmd {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    /// Import a pbulk pscan file into the database for resolver comparison
-    ImportPscan {
-        /// Path to the pscan file
+    /// Import scan data (pscan or presolve format) into the database
+    ///
+    /// Accepts both raw pscan output from 'bmake pbulk-index' and presolve
+    /// files that include resolved DEPENDS lines. This allows comparison
+    /// of bob's dependency resolution against external resolvers.
+    ImportScan {
+        /// Path to the scan file (pscan or presolve format)
         file: PathBuf,
     },
     /// Output raw scan data from the database (without resolution)
@@ -717,7 +721,7 @@ fn run() -> Result<()> {
                 print!("{}", out);
             }
         }
-        Cmd::Util { cmd: UtilCmd::ImportPscan { file } } => {
+        Cmd::Util { cmd: UtilCmd::ImportScan { file } } => {
             use indexmap::IndexMap;
             use pkgsrc::ScanIndex;
             use std::fs::File;
@@ -728,7 +732,7 @@ fn run() -> Result<()> {
             let db_path = logs_dir.join("bob.db");
             let db = Database::open(&db_path)?;
 
-            println!("Importing pscan file: {}", file.display());
+            println!("Importing scan data from {}", file.display());
 
             let f = File::open(&file)?;
             let reader = BufReader::new(f);
@@ -782,7 +786,7 @@ fn run() -> Result<()> {
             let packages = db.get_all_packages()?;
             if packages.is_empty() {
                 bail!(
-                    "No cached scan data found. Run 'bob scan' or 'bob util import-pscan' first."
+                    "No cached scan data found. Run 'bob scan' or 'bob util import-scan' first."
                 );
             }
 
