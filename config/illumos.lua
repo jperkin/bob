@@ -17,6 +17,7 @@ pkgsrc = {
     bootstrap = initdir .. "/bootstrap.tar.gz",
     logdir = initdir .. "/logs",
     make = "/opt/pkg/bin/bmake",
+    -- or pkgpaths = read_pkgpaths("/path/to/file"),
     pkgpaths = {
         "mail/mutt",
         "sysutils/coreutils",

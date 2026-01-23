@@ -16,6 +16,7 @@ pkgsrc = {
     basedir = "/usr/pkgsrc",
     logdir = initdir .. "/logs",
     make = "/usr/bin/make",
+    -- or pkgpaths = read_pkgpaths("/path/to/file"),
     pkgpaths = {
         "mail/mutt",
         "sysutils/coreutils",
