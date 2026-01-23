@@ -1226,6 +1226,81 @@ impl Scan {
         Ok(missing_pkgpaths)
     }
 
+    /**
+     * Propagate failures through the dependency graph.
+     *
+     * If package A depends on B, and B is failed/skipped, then A becomes
+     * indirect-failed/skipped. Iterates until no new failures are added.
+     */
+    fn propagate_failures(
+        depends: &HashMap<PkgName, Vec<PkgName>>,
+        skip_reasons: &mut HashMap<PkgName, SkipReason>,
+    ) {
+        loop {
+            let mut new_skip_reasons: Vec<(PkgName, SkipReason)> = Vec::new();
+            for (pkgname, pkg_depends) in depends {
+                if skip_reasons.contains_key(pkgname) {
+                    continue;
+                }
+                for dep in pkg_depends {
+                    if let Some(dep_reason) = skip_reasons.get(dep) {
+                        let reason = match dep_reason {
+                            SkipReason::PkgSkip(_)
+                            | SkipReason::IndirectSkip(_) => {
+                                SkipReason::IndirectSkip(format!(
+                                    "dependency {} skipped",
+                                    dep.pkgname()
+                                ))
+                            }
+                            _ => SkipReason::IndirectFail(format!(
+                                "dependency {} failed",
+                                dep.pkgname()
+                            )),
+                        };
+                        new_skip_reasons.push((pkgname.clone(), reason));
+                        break;
+                    }
+                }
+            }
+            if new_skip_reasons.is_empty() {
+                break;
+            }
+            for (pkgname, reason) in new_skip_reasons {
+                skip_reasons.insert(pkgname, reason);
+            }
+        }
+    }
+
+    /**
+     * Check for circular dependencies in buildable packages.
+     *
+     * Returns an error if a cycle is detected, with details about the cycle.
+     */
+    fn check_circular_deps(packages: &[ScanResult]) -> Result<()> {
+        let mut graph = DiGraphMap::new();
+        for pkg in packages {
+            if let ScanResult::Buildable(resolved) = pkg {
+                for dep in resolved.depends() {
+                    graph.add_edge(
+                        dep.pkgname(),
+                        resolved.pkgname().pkgname(),
+                        (),
+                    );
+                }
+            }
+        }
+        if let Some(cycle) = find_cycle(&graph) {
+            let mut err = "Circular dependencies detected:\n".to_string();
+            for n in cycle.iter().rev() {
+                err.push_str(&format!("\t{}\n", n));
+            }
+            err.push_str(&format!("\t{}", cycle.last().unwrap()));
+            error!(cycle = ?cycle, "Circular dependency detected");
+            bail!(err);
+        }
+        Ok(())
+    }
+
     /// Resolve the list of scanned packages, matching dependency patterns to
     /// specific packages and verifying no circular dependencies exist.
     ///
@@ -1457,41 +1532,7 @@ impl Scan {
             }
         }
 
-        // Propagate failures: if A depends on B and B is failed/skipped, A is indirect-failed/skipped
-        loop {
-            let mut new_skip_reasons: Vec<(PkgName, SkipReason)> = Vec::new();
-            for (pkgname, pkg_depends) in &depends {
-                if skip_reasons.contains_key(pkgname) {
-                    continue;
-                }
-                for dep in pkg_depends {
-                    if let Some(dep_reason) = skip_reasons.get(dep) {
-                        // Use indirect variants, preserving skip vs fail distinction
-                        let reason = match dep_reason {
-                            SkipReason::PkgSkip(_)
-                            | SkipReason::IndirectSkip(_) => {
-                                SkipReason::IndirectSkip(format!(
-                                    "dependency {} skipped",
-                                    dep.pkgname()
-                                ))
-                            }
-                            _ => SkipReason::IndirectFail(format!(
-                                "dependency {} failed",
-                                dep.pkgname()
-                            )),
-                        };
-                        new_skip_reasons.push((pkgname.clone(), reason));
-                        break;
-                    }
-                }
-            }
-            if new_skip_reasons.is_empty() {
-                break;
-            }
-            for (pkgname, reason) in new_skip_reasons {
-                skip_reasons.insert(pkgname, reason);
-            }
-        }
+        Self::propagate_failures(&depends, &mut skip_reasons);
 
         // Build final packages list
         let mut packages: Vec<ScanResult> = Vec::new();
@@ -1540,29 +1581,8 @@ impl Scan {
             });
         }
 
-        // Verify no circular dependencies (only for buildable packages)
         debug!(count_buildable, "Checking for circular dependencies");
-        let mut graph = DiGraphMap::new();
-        for pkg in &packages {
-            if let ScanResult::Buildable(resolved) = pkg {
-                for dep in resolved.depends() {
-                    graph.add_edge(
-                        dep.pkgname(),
-                        resolved.pkgname().pkgname(),
-                        (),
-                    );
-                }
-            }
-        }
-        if let Some(cycle) = find_cycle(&graph) {
-            let mut err = "Circular dependencies detected:\n".to_string();
-            for n in cycle.iter().rev() {
-                err.push_str(&format!("\t{}\n", n));
-            }
-            err.push_str(&format!("\t{}", cycle.last().unwrap()));
-            error!(cycle = ?cycle, "Circular dependency detected");
-            bail!(err);
-        }
+        Self::check_circular_deps(&packages)?;
 
         info!(
             count_buildable,
