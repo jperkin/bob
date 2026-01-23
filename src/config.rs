@@ -858,6 +858,11 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
             .map_err(|e| format!("Failed to set package.path: {}", e))?;
     }
 
+    // Load built-in helper functions
+    lua.load(include_str!("funcs.lua"))
+        .exec()
+        .map_err(|e| format!("Failed to load helper functions: {}", e))?;
+
     lua.load(filename)
         .exec()
         .map_err(|e| format!("Lua execution error: {}", e))?;
