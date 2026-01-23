@@ -1431,7 +1431,42 @@ impl Scan {
             debug!(count = resolved_deps.len(), "Stored resolved dependencies");
         }
 
-        Ok(ScanSummary { pkgpaths: self.done.len(), packages })
+        // Count unique pkgpaths from packages (handles both scanned and imported data)
+        let pkgpaths =
+            packages.iter().map(|p| p.pkgpath()).collect::<HashSet<_>>().len();
+
+        Ok(ScanSummary { pkgpaths, packages })
+    }
+
+    /**
+     * Resolve dependencies and report results.
+     *
+     * Prints progress, calls [`resolve`], reports any unresolved dependency
+     * errors, and optionally bails if `strict` is true.
+     */
+    pub fn resolve_with_report(
+        &mut self,
+        db: &crate::db::Database,
+        strict: bool,
+    ) -> Result<ScanSummary> {
+        print!("Resolving dependencies...");
+        std::io::Write::flush(&mut std::io::stdout())?;
+
+        let start = std::time::Instant::now();
+        let result = self.resolve(db)?;
+        println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
+
+        let errors: Vec<_> = result.errors().collect();
+        if !errors.is_empty() {
+            eprintln!("Unresolved dependencies:\n  {}", errors.join("\n  "));
+            if strict {
+                bail!(
+                    "Aborting due to unresolved dependencies (strict_scan enabled)"
+                );
+            }
+        }
+
+        Ok(result)
     }
 }
 

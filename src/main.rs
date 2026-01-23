@@ -130,21 +130,7 @@ impl BuildRunner {
         }
         drop(scan_errors);
 
-        println!("Resolving dependencies...");
-        let result = scan.resolve(&self.db)?;
-
-        // Check for unresolved dependency errors
-        let errors: Vec<_> = result.errors().collect();
-        if !errors.is_empty() {
-            eprintln!("Unresolved dependencies:\n  {}", errors.join("\n  "));
-            if self.config.strict_scan() {
-                bail!(
-                    "Aborting due to unresolved dependencies (strict_scan enabled)"
-                );
-            }
-        }
-
-        Ok(result)
+        scan.resolve_with_report(&self.db, self.config.strict_scan())
     }
 
     /**
@@ -403,18 +389,6 @@ enum UtilCmd {
         #[command(subcommand)]
         cmd: SandboxCmd,
     },
-    /// Output the resolved dependency graph from cached scan data
-    PrintDepGraph {
-        /// Output file (defaults to stdout)
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-    },
-    /// Output pbulk-compatible presolve data from cached scan data
-    PrintPresolve {
-        /// Output file (defaults to stdout)
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-    },
     /// Import scan data (pscan or presolve format) into the database
     ///
     /// Accepts both raw pscan output from 'bmake pbulk-index' and presolve
@@ -426,6 +400,18 @@ enum UtilCmd {
     },
     /// Output raw scan data from the database (without resolution)
     PrintPscan {
+        /// Output file (defaults to stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Output pbulk-compatible presolve data from cached scan data
+    PrintPresolve {
+        /// Output file (defaults to stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Output the resolved dependency graph from cached scan data
+    PrintDepGraph {
         /// Output file (defaults to stdout)
         #[arg(short, long)]
         output: Option<PathBuf>,
@@ -740,9 +726,7 @@ fn run() -> Result<()> {
             // Parse all ScanIndex entries and group by pkgpath (preserving order)
             let mut by_pkgpath: IndexMap<String, Vec<ScanIndex>> =
                 IndexMap::new();
-            let mut count = 0;
-            let mut errors = 0;
-
+            let mut errors: Vec<String> = Vec::new();
             for result in ScanIndex::from_reader(reader) {
                 match result {
                     Ok(index) => {
@@ -752,17 +736,26 @@ fn run() -> Result<()> {
                             .map(|p| p.to_string())
                             .unwrap_or_else(|| "unknown".to_string());
                         by_pkgpath.entry(pkgpath).or_default().push(index);
-                        count += 1;
                     }
                     Err(e) => {
-                        eprintln!("Parse error: {}", e);
-                        errors += 1;
+                        errors.push(e.to_string());
                     }
                 }
             }
 
-            if errors > 0 {
-                eprintln!("Warning: {} parse errors", errors);
+            if !errors.is_empty() {
+                eprintln!();
+                for err in &errors {
+                    eprintln!("{}", err);
+                }
+                if config.strict_scan() {
+                    bail!("{} record(s) failed to parse", errors.len());
+                }
+                eprintln!(
+                    "Warning: {} record(s) failed to parse, continuing anyway",
+                    errors.len()
+                );
+                eprintln!();
             }
 
             // Clear existing data and import
@@ -771,11 +764,10 @@ fn run() -> Result<()> {
                 db.store_scan_pkgpath(pkgpath, indexes)?;
             }
 
-            println!(
-                "Imported {} packages from {} package paths",
-                count,
-                by_pkgpath.len()
-            );
+            // Resolve dependencies (consistent with manual scan)
+            let mut scan = Scan::new(&config);
+            let result = scan.resolve_with_report(&db, config.strict_scan())?;
+            println!("{result}");
         }
         Cmd::Util { cmd: UtilCmd::PrintPscan { output } } => {
             let config = Config::load(args.config.as_deref())?;
