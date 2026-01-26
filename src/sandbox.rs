@@ -857,6 +857,10 @@ impl Sandbox {
                         dest = %dest.display(),
                         "Copying"
                     );
+                    if let Some(parent) = dest.parent() {
+                        fs::create_dir_all(parent)
+                            .with_context(|| format!("Failed to create {}", parent.display()))?;
+                    }
                     copy_dir::copy_dir(src, &dest).with_context(|| {
                         format!("Failed to copy {} to {}", src.display(), dest.display())
                     })?;
