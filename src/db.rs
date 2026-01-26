@@ -467,7 +467,7 @@ impl Database {
     /**
      * Load all ScanIndex data in one query.
      */
-    pub fn get_all_scan_indexes(&self) -> Result<Vec<(i64, ScanIndex)>> {
+    pub fn get_all_scan_data(&self) -> Result<Vec<ScanIndex>> {
         let mut stmt = self
             .conn
             .prepare("SELECT id, scan_data FROM packages ORDER BY id")?;
@@ -481,7 +481,7 @@ impl Database {
             let (id, json) = row?;
             let index: ScanIndex = serde_json::from_str(&json)
                 .with_context(|| format!("Failed to deserialize scan data for package {}", id))?;
-            results.push((id, index));
+            results.push(index);
         }
         Ok(results)
     }
@@ -500,9 +500,35 @@ impl Database {
     // ========================================================================
 
     /**
+     * Store resolved dependencies from a ScanSummary.
+     */
+    pub fn store_resolved_deps(&self, summary: &crate::scan::ScanSummary) -> Result<()> {
+        use crate::scan::ScanResult;
+
+        let mut resolved_deps: Vec<(i64, i64)> = Vec::new();
+        for pkg in &summary.packages {
+            if let ScanResult::Buildable(resolved) = pkg {
+                if let Some(pkg_id) = self.get_package_id(resolved.pkgname().pkgname())? {
+                    for dep in resolved.depends() {
+                        if let Some(dep_id) = self.get_package_id(dep.pkgname())? {
+                            resolved_deps.push((pkg_id, dep_id));
+                        }
+                    }
+                }
+            }
+        }
+
+        if !resolved_deps.is_empty() {
+            self.store_resolved_dependencies_batch(&resolved_deps)?;
+            debug!(count = resolved_deps.len(), "Stored resolved dependencies");
+        }
+        Ok(())
+    }
+
+    /**
      * Store resolved dependencies in batch.
      */
-    pub fn store_resolved_dependencies_batch(&self, deps: &[(i64, i64)]) -> Result<()> {
+    fn store_resolved_dependencies_batch(&self, deps: &[(i64, i64)]) -> Result<()> {
         self.conn.execute("BEGIN TRANSACTION", [])?;
         let mut stmt = self.conn.prepare(
             "INSERT OR IGNORE INTO resolved_depends (package_id, depends_on_id) VALUES (?1, ?2)",
