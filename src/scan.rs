@@ -1067,7 +1067,7 @@ impl Scan {
      * Only packages from initial_pkgpaths (and their transitive dependencies
      * that have already been scanned) are considered.
      */
-    pub fn find_missing_pkgpaths(&self, db: &crate::db::Database) -> Result<HashSet<PkgPath>> {
+    fn find_missing_pkgpaths(&self, db: &crate::db::Database) -> Result<HashSet<PkgPath>> {
         /*
          * Build set of available pkgnames (first occurrence only, like
          * resolve), then iteratively expand an "active" set starting from
@@ -1593,7 +1593,7 @@ impl Scan {
     }
 }
 
-pub fn find_cycle<'a>(graph: &'a DiGraphMap<&'a str, ()>) -> Option<Vec<&'a str>> {
+fn find_cycle<'a>(graph: &'a DiGraphMap<&'a str, ()>) -> Option<Vec<&'a str>> {
     let mut visited = HashSet::new();
     let mut in_stack = HashSet::new();
     let mut stack = Vec::new();
