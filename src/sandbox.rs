@@ -611,16 +611,18 @@ impl Sandbox {
             .map(|i| (i, self.create(i)))
             .collect();
         let mut first_error: Option<anyhow::Error> = None;
-        for (i, result) in &results {
+        let mut sandbox_ids: Vec<usize> = Vec::new();
+        for (i, result) in results {
+            sandbox_ids.push(i);
             if let Err(e) = result {
                 if first_error.is_none() {
-                    first_error = Some(anyhow::anyhow!("sandbox {}: {}", i, e));
+                    first_error = Some(e.context(format!("sandbox {}", i)));
                 }
             }
         }
         if let Some(e) = first_error {
             println!();
-            for (i, _) in &results {
+            for i in &sandbox_ids {
                 if let Err(destroy_err) = self.destroy(*i) {
                     eprintln!("Warning: failed to destroy sandbox {}: {}", i, destroy_err);
                 }
@@ -672,7 +674,7 @@ impl Sandbox {
                 if failed == 0 {
                     println!();
                 }
-                eprintln!("sandbox {}: {}", i, e);
+                eprintln!("sandbox {}: {:#}", i, e);
                 failed += 1;
             }
         }
@@ -1220,16 +1222,18 @@ impl SandboxScope {
         }
 
         let mut first_error: Option<anyhow::Error> = None;
-        for (i, result) in &results {
+        let mut sandbox_ids: Vec<usize> = Vec::new();
+        for (i, result) in results {
+            sandbox_ids.push(i);
             if let Err(e) = result {
                 if first_error.is_none() {
-                    first_error = Some(anyhow::anyhow!("sandbox {}: {}", i, e));
+                    first_error = Some(e.context(format!("sandbox {}", i)));
                 }
             }
         }
         if let Some(e) = first_error {
             println!();
-            for (i, _) in &results {
+            for i in &sandbox_ids {
                 if let Err(destroy_err) = self.sandbox.destroy(*i) {
                     eprintln!("Warning: failed to destroy sandbox {}: {}", i, destroy_err);
                 }
