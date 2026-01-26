@@ -372,18 +372,6 @@ impl Database {
     }
 
     /**
-     * Check if pkgpath is scanned.
-     */
-    pub fn is_pkgpath_scanned(&self, pkgpath: &str) -> Result<bool> {
-        let count: i32 = self.conn.query_row(
-            "SELECT COUNT(*) FROM packages WHERE pkgpath = ?1",
-            [pkgpath],
-            |row| row.get(0),
-        )?;
-        Ok(count > 0)
-    }
-
-    /**
      * Get all scanned pkgpaths.
      */
     pub fn get_scanned_pkgpaths(&self) -> Result<HashSet<String>> {
@@ -414,17 +402,6 @@ impl Database {
         self.conn
             .query_row("SELECT COUNT(*) FROM packages", [], |row| row.get(0))
             .context("Failed to count packages")
-    }
-
-    /**
-     * Count of scanned pkgpaths.
-     */
-    pub fn count_scan(&self) -> Result<i64> {
-        self.conn
-            .query_row("SELECT COUNT(DISTINCT pkgpath) FROM packages", [], |row| {
-                row.get(0)
-            })
-            .context("Failed to count scan")
     }
 
     /**
@@ -507,27 +484,6 @@ impl Database {
             results.push((id, index));
         }
         Ok(results)
-    }
-
-    /**
-     * Load full ScanIndex by pkgname.
-     */
-    pub fn get_scan_index_by_name(&self, pkgname: &str) -> Result<Option<ScanIndex>> {
-        let result = self.conn.query_row(
-            "SELECT scan_data FROM packages WHERE pkgname = ?1",
-            [pkgname],
-            |row| row.get::<_, String>(0),
-        );
-
-        match result {
-            Ok(json) => {
-                let index: ScanIndex =
-                    serde_json::from_str(&json).context("Failed to deserialize scan data")?;
-                Ok(Some(index))
-            }
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
     }
 
     /**
@@ -659,15 +615,6 @@ impl Database {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
-    }
-
-    /**
-     * Count of build results.
-     */
-    pub fn count_build(&self) -> Result<i64> {
-        self.conn
-            .query_row("SELECT COUNT(*) FROM builds", [], |row| row.get(0))
-            .context("Failed to count builds")
     }
 
     /**
