@@ -724,16 +724,7 @@ impl Scan {
         // allowing main thread to mutate self.done, self.incoming, etc.
         let config = &self.config;
         let sandbox = &self.sandbox;
-        let scan_env: Vec<(String, String)> = self
-            .pkgsrc_env
-            .as_ref()
-            .map(|e| {
-                e.cachevars
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let scan_env = self.scan_env();
 
         /*
          * For limited scans, prime incoming with any missing dependencies.
@@ -741,13 +732,11 @@ impl Scan {
          * already scanned but their dependencies are not.
          */
         if !self.full_tree && self.incoming.is_empty() {
-            if let Ok(missing) = self.find_missing_pkgpaths(db) {
-                for pkgpath in missing {
-                    if !self.done.contains(&pkgpath) {
-                        self.incoming.insert(pkgpath);
-                        if let Ok(mut p) = progress.lock() {
-                            p.state_mut().total += 1;
-                        }
+            if let Ok(deps) = self.unscanned_deps(db) {
+                for pkgpath in deps {
+                    self.incoming.insert(pkgpath);
+                    if let Ok(mut p) = progress.lock() {
+                        p.state_mut().total += 1;
                     }
                 }
             }
@@ -874,26 +863,24 @@ impl Scan {
              * approach where dependencies are only scanned if needed.
              */
             if !self.full_tree && new_incoming.is_empty() {
-                match self.find_missing_pkgpaths(db) {
-                    Ok(missing) => {
-                        for pkgpath in missing {
-                            if !self.done.contains(&pkgpath) {
-                                new_incoming.insert(pkgpath.clone());
-                                if let Ok(mut p) = progress.lock() {
-                                    p.state_mut().total += 1;
-                                }
+                match self.unscanned_deps(db) {
+                    Ok(deps) if !deps.is_empty() => {
+                        let count = deps.len();
+                        for pkgpath in deps {
+                            new_incoming.insert(pkgpath);
+                            if let Ok(mut p) = progress.lock() {
+                                p.state_mut().total += 1;
                             }
                         }
-                        if !new_incoming.is_empty() {
-                            debug!(
-                                missing_count = new_incoming.len(),
-                                "Discovered missing dependency pkgpaths"
-                            );
-                        }
+                        debug!(
+                            missing_count = count,
+                            "Discovered missing dependency pkgpaths"
+                        );
                     }
                     Err(e) => {
                         warn!(error = %e, "Failed to find missing pkgpaths");
                     }
+                    _ => {}
                 }
             }
 
@@ -970,14 +957,8 @@ impl Scan {
         self.scan_failures.iter().map(|(_, e)| e.as_str())
     }
 
-    /**
-     * Scan a single PKGPATH, returning a [`Vec`] of [`ScanIndex`] results,
-     * as multi-version packages may return multiple results.
-     */
-    pub fn scan_pkgpath(&self, pkgpath: &PkgPath) -> anyhow::Result<Vec<ScanIndex>> {
-        static NO_SHUTDOWN: AtomicBool = AtomicBool::new(false);
-        let scan_env: Vec<(String, String)> = self
-            .pkgsrc_env
+    fn scan_env(&self) -> Vec<(String, String)> {
+        self.pkgsrc_env
             .as_ref()
             .map(|e| {
                 e.cachevars
@@ -985,7 +966,24 @@ impl Scan {
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect()
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
+
+    fn unscanned_deps(&self, db: &crate::db::Database) -> Result<HashSet<PkgPath>> {
+        let missing = self.find_missing_pkgpaths(db)?;
+        Ok(missing
+            .into_iter()
+            .filter(|p| !self.done.contains(p))
+            .collect())
+    }
+
+    /**
+     * Scan a single PKGPATH, returning a [`Vec`] of [`ScanIndex`] results,
+     * as multi-version packages may return multiple results.
+     */
+    pub fn scan_pkgpath(&self, pkgpath: &PkgPath) -> anyhow::Result<Vec<ScanIndex>> {
+        static NO_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+        let scan_env = self.scan_env();
         Self::scan_pkgpath_with(
             &self.config,
             &self.sandbox,
