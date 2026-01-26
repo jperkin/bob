@@ -1345,45 +1345,71 @@ impl Scan {
         Ok(())
     }
 
-    /// Resolve the list of scanned packages, matching dependency patterns to
-    /// specific packages and verifying no circular dependencies exist.
-    ///
-    /// Returns a [`ScanSummary`] containing all packages with their outcomes.
-    /// Also stores resolved dependencies in the database for fast reverse lookups.
+    /**
+     * Resolve dependency patterns to available package names.
+     *
+     * Takes scanned package data (from `make pbulk-index`) and resolves
+     * dependency patterns like "perl>=5.0" to specific packages like
+     * "perl-5.38.0". Returns a [`ScanSummary`] classifying each package as
+     * Buildable, Skipped, or ScanFail.
+     *
+     * # Algorithm
+     *
+     * **Phase 1 - Load and classify**: Load all scan indexes from the
+     * database. For each package, record any PKG_SKIP_REASON or
+     * PKG_FAIL_REASON as a skip reason. For limited scans (non-full-tree),
+     * seed the "active" set with packages from initial_pkgpaths.
+     *
+     * **Phase 2 - Setup lookups**: Build a pkgbase map for O(1) candidate
+     * lookup by package base name (e.g., "perl" -> [perl-5.38.0, perl-5.36.0]).
+     * Initialize a match cache to memoize resolved patterns.
+     *
+     * **Phase 3 - Resolution loop**: For each package (active packages only
+     * for limited scans), resolve each dependency pattern:
+     *   - Check the cache for a previous match
+     *   - Find candidates via pkgbase map (fast) or full scan (for wildcards)
+     *   - Select the best match using pbulk's version comparison rules
+     *   - Record unresolved dependencies as skip reasons
+     *   - For limited scans, activate matched dependencies and iterate until
+     *     no new packages become active
+     *
+     * **Phase 4 - Propagate failures**: Walk the dependency graph to mark
+     * packages with failed/skipped dependencies as IndirectFail/IndirectSkip.
+     *
+     * **Phase 5 - Build results**: Transform the packages map into a
+     * Vec<ScanResult>, filtering inactive packages for limited scans.
+     *
+     * **Phase 6 - Finalize**: Check for circular dependencies, store resolved
+     * dependency edges in the database for reverse lookups, return summary.
+     *
+     * # Limited vs Full Tree Scans
+     *
+     * Full tree scans resolve all packages in pkgsrc. Limited scans (when
+     * packages are explicitly added via `add()`) only resolve packages from
+     * initial_pkgpaths and their transitive dependencies, matching pbulk's
+     * presolve behavior. This avoids scanning/resolving thousands of unneeded
+     * packages when building a small subset.
+     */
     pub fn resolve(&mut self, db: &crate::db::Database) -> Result<ScanSummary> {
         info!(
             done_pkgpaths = self.done.len(),
             "Starting dependency resolution"
         );
 
-        // Load all scan data in one query
         let all_scan_data = db.get_all_scan_indexes()?;
-
-        // Track package_id for storing resolved dependencies
         let mut pkgname_to_id: HashMap<PkgName, i64> = HashMap::new();
-
-        // Track skip reasons (packages not in this map are buildable)
         let mut skip_reasons: HashMap<PkgName, SkipReason> = HashMap::new();
         let mut depends: HashMap<PkgName, Vec<PkgName>> = HashMap::new();
-
-        /*
-         * For limited scans, track which packages are "active" (needed for
-         * resolution). Only active packages are included in output, matching
-         * pbulk's presolve behavior.
-         */
         let mut active: HashSet<PkgName> = HashSet::new();
         let use_active_filter =
             !self.full_tree && !self.initial_pkgpaths.is_empty();
 
-        // Process all scan data
         for (pkg_id, pkg) in all_scan_data {
-            // Skip duplicate PKGNAMEs - keep only the first (preferred) variant
             if self.packages.contains_key(&pkg.pkgname) {
                 debug!(pkgname = %pkg.pkgname.pkgname(), "Skipping duplicate PKGNAME");
                 continue;
             }
 
-            // Track skip/fail reasons
             if let Some(reason) = &pkg.pkg_skip_reason {
                 if !reason.is_empty() {
                     info!(pkgname = %pkg.pkgname.pkgname(), %reason, "PKG_SKIP_REASON");
@@ -1421,24 +1447,13 @@ impl Scan {
 
         info!(packages = self.packages.len(), "Loaded packages");
 
-        // Collect pkgnames for lookups (owned to avoid borrow issues)
         let pkgnames: Vec<PkgName> = self.packages.keys().cloned().collect();
-
         let pkgbase_map = Self::build_pkgbase_map(&pkgnames);
-
-        // Cache of best Depend => PkgName matches
         let mut match_cache: HashMap<Depend, PkgName> = HashMap::new();
-
-        // Helper to check if a dependency pattern is already satisfied
         let is_satisfied = |deps: &[PkgName], pattern: &pkgsrc::Pattern| {
             deps.iter().any(|existing| pattern.matches(existing.pkgname()))
         };
 
-        /*
-         * Resolve dependencies. For limited scans, only process active
-         * packages (from initial_pkgpaths or matched as dependencies).
-         * Iterate until no new packages become active.
-         */
         let mut resolved: HashSet<PkgName> = HashSet::new();
         loop {
             let mut new_active = false;
@@ -1532,7 +1547,6 @@ impl Scan {
 
         Self::propagate_failures(&depends, &mut skip_reasons);
 
-        // Build final packages list
         let mut packages: Vec<ScanResult> = Vec::new();
         let mut count_buildable = 0;
         let mut count_filtered = 0;
@@ -1571,7 +1585,6 @@ impl Scan {
             );
         }
 
-        // Add scan failures (these don't have a ScanIndex, just pkgpath)
         for (pkgpath, error) in &self.scan_failures {
             packages.push(ScanResult::ScanFail {
                 pkgpath: pkgpath.clone(),
@@ -1595,7 +1608,6 @@ impl Scan {
             "Resolution complete"
         );
 
-        // Store resolved dependencies in database
         let mut resolved_deps: Vec<(i64, i64)> = Vec::new();
         for pkg in &summary.packages {
             if let ScanResult::Buildable(resolved) = pkg {
