@@ -420,10 +420,17 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) if e.downcast_ref::<Interrupted>().is_some() => ExitCode::from(EXIT_INTERRUPTED),
         Err(e) => {
-            eprintln!("Error: {e:?}");
+            eprintln!("Error: {}", format_error(&e));
             ExitCode::FAILURE
         }
     }
+}
+
+fn format_error(e: &anyhow::Error) -> String {
+    e.chain()
+        .map(|cause| cause.to_string())
+        .collect::<Vec<_>>()
+        .join(": ")
 }
 
 fn run() -> Result<()> {
