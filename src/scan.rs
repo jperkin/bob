@@ -977,22 +977,6 @@ impl Scan {
             .collect())
     }
 
-    /**
-     * Scan a single PKGPATH, returning a [`Vec`] of [`ScanIndex`] results,
-     * as multi-version packages may return multiple results.
-     */
-    pub fn scan_pkgpath(&self, pkgpath: &PkgPath) -> anyhow::Result<Vec<ScanIndex>> {
-        static NO_SHUTDOWN: AtomicBool = AtomicBool::new(false);
-        let scan_env = self.scan_env();
-        Self::scan_pkgpath_with(
-            &self.config,
-            &self.sandbox,
-            pkgpath,
-            &scan_env,
-            &NO_SHUTDOWN,
-        )
-    }
-
     /*
      * Scan a single PKGPATH using provided config and sandbox references.
      * This allows scanning without borrowing all of `self`.
@@ -1083,7 +1067,7 @@ impl Scan {
      * Only packages from initial_pkgpaths (and their transitive dependencies
      * that have already been scanned) are considered.
      */
-    pub fn find_missing_pkgpaths(&self, db: &crate::db::Database) -> Result<HashSet<PkgPath>> {
+    fn find_missing_pkgpaths(&self, db: &crate::db::Database) -> Result<HashSet<PkgPath>> {
         /*
          * Build set of available pkgnames (first occurrence only, like
          * resolve), then iteratively expand an "active" set starting from
@@ -1609,7 +1593,7 @@ impl Scan {
     }
 }
 
-pub fn find_cycle<'a>(graph: &'a DiGraphMap<&'a str, ()>) -> Option<Vec<&'a str>> {
+fn find_cycle<'a>(graph: &'a DiGraphMap<&'a str, ()>) -> Option<Vec<&'a str>> {
     let mut visited = HashSet::new();
     let mut in_stack = HashSet::new();
     let mut stack = Vec::new();
