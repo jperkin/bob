@@ -43,9 +43,7 @@
 //! - `clean` - Clean up build artifacts
 
 use crate::config::PkgsrcEnv;
-use crate::sandbox::{
-    SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown,
-};
+use crate::sandbox::{SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
 use crate::scan::{ResolvedPackage, SkipReason, SkippedCounts};
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, RunContext, Sandbox};
@@ -153,8 +151,10 @@ impl<'a> PkgBuilder<'a> {
         envs: Vec<(String, String)>,
         output_tx: Option<Sender<ChannelCommand>>,
     ) -> Self {
-        let logdir =
-            session.config.logdir().join(pkginfo.index.pkgname.pkgname());
+        let logdir = session
+            .config
+            .logdir()
+            .join(pkginfo.index.pkgname.pkgname());
         let build_user = session.config.build_user().map(|s| s.to_string());
         Self {
             session,
@@ -214,8 +214,7 @@ impl<'a> PkgBuilder<'a> {
         let pkg_admin = self.session.pkgsrc_env.pkgtools.join("pkg_admin");
 
         // Get BUILD_INFO and verify source files
-        let Some(build_info) = self.run_cmd(&pkg_info, &["-qb", &pkgfile_str])
-        else {
+        let Some(build_info) = self.run_cmd(&pkg_info, &["-qb", &pkgfile_str]) else {
             debug!("pkg_info -qb failed or returned empty");
             return Ok(false);
         };
@@ -256,9 +255,7 @@ impl<'a> PkgBuilder<'a> {
             } else {
                 // Hash comparison
                 let src_file_str = src_file.to_string_lossy();
-                let Some(hash) =
-                    self.run_cmd(&pkg_admin, &["digest", &src_file_str])
-                else {
+                let Some(hash) = self.run_cmd(&pkg_admin, &["digest", &src_file_str]) else {
                     debug!(file, "pkg_admin digest failed");
                     return Ok(false);
                 };
@@ -277,8 +274,7 @@ impl<'a> PkgBuilder<'a> {
         }
 
         // Get package dependencies and verify
-        let Some(pkg_deps) = self.run_cmd(&pkg_info, &["-qN", &pkgfile_str])
-        else {
+        let Some(pkg_deps) = self.run_cmd(&pkg_info, &["-qN", &pkgfile_str]) else {
             return Ok(false);
         };
 
@@ -301,8 +297,7 @@ impl<'a> PkgBuilder<'a> {
             return Ok(false);
         }
 
-        let pkgfile_mtime = match pkgfile.metadata().and_then(|m| m.modified())
-        {
+        let pkgfile_mtime = match pkgfile.metadata().and_then(|m| m.modified()) {
             Ok(t) => t,
             Err(_) => return Ok(false),
         };
@@ -320,8 +315,7 @@ impl<'a> PkgBuilder<'a> {
                 return Ok(false);
             }
 
-            let dep_mtime = match dep_pkg.metadata().and_then(|m| m.modified())
-            {
+            let dep_mtime = match dep_pkg.metadata().and_then(|m| m.modified()) {
                 Ok(t) => t,
                 Err(_) => return Ok(false),
             };
@@ -337,10 +331,7 @@ impl<'a> PkgBuilder<'a> {
     }
 
     /// Run the full build process.
-    fn build<C: BuildCallback>(
-        &self,
-        callback: &mut C,
-    ) -> anyhow::Result<PkgBuildResult> {
+    fn build<C: BuildCallback>(&self, callback: &mut C) -> anyhow::Result<PkgBuildResult> {
         let pkgname_str = self.pkginfo.pkgname().pkgname();
         let pkgpath = &self.pkginfo.pkgpath;
 
@@ -376,13 +367,7 @@ impl<'a> PkgBuilder<'a> {
 
         // Pre-clean
         callback.stage(Stage::PreClean.as_str());
-        self.run_make_stage(
-            Stage::PreClean,
-            &pkgdir,
-            &["clean"],
-            RunAs::Root,
-            false,
-        )?;
+        self.run_make_stage(Stage::PreClean, &pkgdir, &["clean"], RunAs::Root, false)?;
 
         // Install dependencies
         if !self.pkginfo.depends().is_empty() {
@@ -395,24 +380,14 @@ impl<'a> PkgBuilder<'a> {
 
         // Checksum
         callback.stage(Stage::Checksum.as_str());
-        if !self.run_make_stage(
-            Stage::Checksum,
-            &pkgdir,
-            &["checksum"],
-            RunAs::Root,
-            true,
-        )? {
+        if !self.run_make_stage(Stage::Checksum, &pkgdir, &["checksum"], RunAs::Root, true)? {
             return Ok(PkgBuildResult::Failed);
         }
 
         // Configure
         callback.stage(Stage::Configure.as_str());
         let configure_log = self.logdir.join("configure.log");
-        if !self.run_usergroup_if_needed(
-            Stage::Configure,
-            &pkgdir,
-            &configure_log,
-        )? {
+        if !self.run_usergroup_if_needed(Stage::Configure, &pkgdir, &configure_log)? {
             return Ok(PkgBuildResult::Failed);
         }
         if !self.run_make_stage(
@@ -431,24 +406,14 @@ impl<'a> PkgBuilder<'a> {
         if !self.run_usergroup_if_needed(Stage::Build, &pkgdir, &build_log)? {
             return Ok(PkgBuildResult::Failed);
         }
-        if !self.run_make_stage(
-            Stage::Build,
-            &pkgdir,
-            &["all"],
-            self.build_run_as(),
-            true,
-        )? {
+        if !self.run_make_stage(Stage::Build, &pkgdir, &["all"], self.build_run_as(), true)? {
             return Ok(PkgBuildResult::Failed);
         }
 
         // Install
         callback.stage(Stage::Install.as_str());
         let install_log = self.logdir.join("install.log");
-        if !self.run_usergroup_if_needed(
-            Stage::Install,
-            &pkgdir,
-            &install_log,
-        )? {
+        if !self.run_usergroup_if_needed(Stage::Install, &pkgdir, &install_log)? {
             return Ok(PkgBuildResult::Failed);
         }
         if !self.run_make_stage(
@@ -512,13 +477,7 @@ impl<'a> PkgBuilder<'a> {
 
         // Clean
         callback.stage(Stage::Clean.as_str());
-        let _ = self.run_make_stage(
-            Stage::Clean,
-            &pkgdir,
-            &["clean"],
-            RunAs::Root,
-            false,
-        );
+        let _ = self.run_make_stage(Stage::Clean, &pkgdir, &["clean"], RunAs::Root, false);
 
         // Remove log directory on success
         let _ = fs::remove_dir_all(&self.logdir);
@@ -528,7 +487,11 @@ impl<'a> PkgBuilder<'a> {
 
     /// Determine how to run build commands.
     fn build_run_as(&self) -> RunAs {
-        if self.build_user.is_some() { RunAs::User } else { RunAs::Root }
+        if self.build_user.is_some() {
+            RunAs::User
+        } else {
+            RunAs::Root
+        }
     }
 
     /// Write the current stage to a .stage file.
@@ -553,20 +516,15 @@ impl<'a> PkgBuilder<'a> {
         let logfile = self.logdir.join(format!("{}.log", stage.as_str()));
         let work_log = self.logdir.join("work.log");
 
-        let owned_args =
-            self.make_args(pkgdir, targets, include_make_flags, &work_log);
+        let owned_args = self.make_args(pkgdir, targets, include_make_flags, &work_log);
 
         // Convert to slice of &str for the command
         let args: Vec<&str> = owned_args.iter().map(|s| s.as_str()).collect();
 
         info!(stage = stage.as_str(), "Running make stage");
 
-        let status = self.run_command_logged(
-            self.session.config.make(),
-            &args,
-            run_as,
-            &logfile,
-        )?;
+        let status =
+            self.run_command_logged(self.session.config.make(), &args, run_as, &logfile)?;
 
         Ok(status.success())
     }
@@ -592,8 +550,7 @@ impl<'a> PkgBuilder<'a> {
     ) -> anyhow::Result<ExitStatus> {
         use std::io::{BufRead, BufReader, Write};
 
-        let mut log =
-            OpenOptions::new().create(true).append(true).open(logfile)?;
+        let mut log = OpenOptions::new().create(true).append(true).open(logfile)?;
 
         // Write command being executed to the log file
         let _ = writeln!(log, "=> {:?} {:?}", cmd, args);
@@ -604,8 +561,7 @@ impl<'a> PkgBuilder<'a> {
         if let Some(ref output_tx) = self.output_tx {
             // Wrap command in shell to merge stdout/stderr with 2>&1, like the
             // shell script's run_log function does.
-            let shell_cmd =
-                self.build_shell_command(cmd, args, run_as, extra_envs);
+            let shell_cmd = self.build_shell_command(cmd, args, run_as, extra_envs);
             let mut child = self
                 .session
                 .sandbox
@@ -645,8 +601,7 @@ impl<'a> PkgBuilder<'a> {
                     batch.push(line);
 
                     // Send batch if interval elapsed or batch is large
-                    if last_send.elapsed() >= send_interval || batch.len() >= 50
-                    {
+                    if last_send.elapsed() >= send_interval || batch.len() >= 50 {
                         let _ = output_tx.send(ChannelCommand::OutputLines(
                             sandbox_id,
                             std::mem::take(&mut batch),
@@ -657,13 +612,11 @@ impl<'a> PkgBuilder<'a> {
 
                 // Send remaining lines
                 if !batch.is_empty() {
-                    let _ = output_tx
-                        .send(ChannelCommand::OutputLines(sandbox_id, batch));
+                    let _ = output_tx.send(ChannelCommand::OutputLines(sandbox_id, batch));
                 }
             });
 
-            let status =
-                wait_with_shutdown(&mut child, &self.session.shutdown)?;
+            let status = wait_with_shutdown(&mut child, &self.session.shutdown)?;
 
             // Reader thread will exit when pipe closes (process exits)
             let _ = tee_handle.join();
@@ -671,8 +624,7 @@ impl<'a> PkgBuilder<'a> {
             trace!(?cmd, ?status, "Command completed");
             Ok(status)
         } else {
-            let status =
-                self.spawn_command_to_file(cmd, args, run_as, extra_envs, log)?;
+            let status = self.spawn_command_to_file(cmd, args, run_as, extra_envs, log)?;
             trace!(?cmd, ?status, "Command completed");
             Ok(status)
         }
@@ -692,17 +644,14 @@ impl<'a> PkgBuilder<'a> {
 
         match run_as {
             RunAs::Root => {
-                let mut command =
-                    self.session.sandbox.command(self.sandbox_id, cmd);
+                let mut command = self.session.sandbox.command(self.sandbox_id, cmd);
                 command.args(args);
                 self.apply_envs(&mut command, extra_envs);
                 let mut child = command
                     .stdout(Stdio::from(log))
                     .stderr(Stdio::from(log_err))
                     .spawn()
-                    .with_context(|| {
-                        format!("Failed to spawn {}", cmd.display())
-                    })?;
+                    .with_context(|| format!("Failed to spawn {}", cmd.display()))?;
                 wait_with_shutdown(&mut child, &self.session.shutdown)
             }
             RunAs::User => {
@@ -732,11 +681,7 @@ impl<'a> PkgBuilder<'a> {
     }
 
     /// Get a make variable value.
-    fn get_make_var(
-        &self,
-        pkgdir: &Path,
-        varname: &str,
-    ) -> anyhow::Result<String> {
+    fn get_make_var(&self, pkgdir: &Path, varname: &str) -> anyhow::Result<String> {
         let mut cmd = self
             .session
             .sandbox
@@ -755,8 +700,7 @@ impl<'a> PkgBuilder<'a> {
             .create(true)
             .append(true)
             .open(self.logdir.join("bob.log"))?;
-        let output =
-            cmd.args(&make_args).stderr(Stdio::from(bob_log)).output()?;
+        let output = cmd.args(&make_args).stderr(Stdio::from(bob_log)).output()?;
 
         if !output.status.success() {
             bail!("Failed to get make variable {}", varname);
@@ -767,8 +711,12 @@ impl<'a> PkgBuilder<'a> {
 
     /// Install package dependencies.
     fn install_dependencies(&self) -> anyhow::Result<bool> {
-        let deps: Vec<String> =
-            self.pkginfo.depends().iter().map(|d| d.to_string()).collect();
+        let deps: Vec<String> = self
+            .pkginfo
+            .depends()
+            .iter()
+            .map(|d| d.to_string())
+            .collect();
 
         let pkg_path = self.session.pkgsrc_env.packages.join("All");
         let logfile = self.logdir.join("depends.log");
@@ -797,13 +745,7 @@ impl<'a> PkgBuilder<'a> {
         let mut args = vec!["-K", &*pkg_dbdir];
         args.extend(packages.iter().copied());
 
-        self.run_command_logged_with_env(
-            &pkg_add,
-            &args,
-            RunAs::Root,
-            logfile,
-            &extra_envs,
-        )
+        self.run_command_logged_with_env(&pkg_add, &args, RunAs::Root, logfile, &extra_envs)
     }
 
     /// Install a package file.
@@ -863,12 +805,8 @@ impl<'a> PkgBuilder<'a> {
             args.push("clean");
         }
 
-        let status = self.run_command_logged(
-            self.session.config.make(),
-            &args,
-            RunAs::Root,
-            logfile,
-        )?;
+        let status =
+            self.run_command_logged(self.session.config.make(), &args, RunAs::Root, logfile)?;
         Ok(status.success())
     }
 
@@ -942,8 +880,7 @@ impl<'a> PkgBuilder<'a> {
 
         // Build the actual command
         let cmd_str = Self::shell_escape(&cmd.to_string_lossy());
-        let args_str: Vec<String> =
-            args.iter().map(|a| Self::shell_escape(a)).collect();
+        let args_str: Vec<String> = args.iter().map(|a| Self::shell_escape(a)).collect();
 
         match run_as {
             RunAs::Root => {
@@ -977,7 +914,10 @@ struct ChannelCallback<'a> {
 
 impl<'a> ChannelCallback<'a> {
     fn new(sandbox_id: usize, status_tx: &'a Sender<ChannelCommand>) -> Self {
-        Self { sandbox_id, status_tx }
+        Self {
+            sandbox_id,
+            status_tx,
+        }
     }
 }
 
@@ -1060,28 +1000,20 @@ pub struct BuildSummary {
 impl BuildSummary {
     /// Compute all outcome counts in a single pass.
     pub fn counts(&self) -> BuildCounts {
-        let mut c =
-            BuildCounts { scanfail: self.scanfail.len(), ..Default::default() };
+        let mut c = BuildCounts {
+            scanfail: self.scanfail.len(),
+            ..Default::default()
+        };
         for r in &self.results {
             match &r.outcome {
                 BuildOutcome::Success => c.success += 1,
                 BuildOutcome::Failed(_) => c.failed += 1,
                 BuildOutcome::UpToDate => c.up_to_date += 1,
-                BuildOutcome::Skipped(SkipReason::PkgSkip(_)) => {
-                    c.skipped.pkg_skip += 1
-                }
-                BuildOutcome::Skipped(SkipReason::PkgFail(_)) => {
-                    c.skipped.pkg_fail += 1
-                }
-                BuildOutcome::Skipped(SkipReason::UnresolvedDep(_)) => {
-                    c.skipped.unresolved += 1
-                }
-                BuildOutcome::Skipped(SkipReason::IndirectFail(_)) => {
-                    c.skipped.indirect_fail += 1
-                }
-                BuildOutcome::Skipped(SkipReason::IndirectSkip(_)) => {
-                    c.skipped.indirect_skip += 1
-                }
+                BuildOutcome::Skipped(SkipReason::PkgSkip(_)) => c.skipped.pkg_skip += 1,
+                BuildOutcome::Skipped(SkipReason::PkgFail(_)) => c.skipped.pkg_fail += 1,
+                BuildOutcome::Skipped(SkipReason::UnresolvedDep(_)) => c.skipped.unresolved += 1,
+                BuildOutcome::Skipped(SkipReason::IndirectFail(_)) => c.skipped.indirect_fail += 1,
+                BuildOutcome::Skipped(SkipReason::IndirectSkip(_)) => c.skipped.indirect_skip += 1,
             }
         }
         c
@@ -1158,7 +1090,12 @@ impl<'a> MakeQuery<'a> {
         pkgpath: &'a PkgPath,
         env: &'a HashMap<String, String>,
     ) -> Self {
-        Self { session, sandbox_id, pkgpath, env }
+        Self {
+            session,
+            sandbox_id,
+            pkgpath,
+            env,
+        }
     }
 
     /// Query a bmake variable value.
@@ -1238,10 +1175,7 @@ impl std::fmt::Display for PackageBuildResult {
 }
 
 impl PackageBuild {
-    fn build(
-        &self,
-        status_tx: &Sender<ChannelCommand>,
-    ) -> anyhow::Result<PackageBuildResult> {
+    fn build(&self, status_tx: &Sender<ChannelCommand>) -> anyhow::Result<PackageBuildResult> {
         let pkgname = self.pkginfo.index.pkgname.pkgname();
         info!("Starting package build");
 
@@ -1258,8 +1192,10 @@ impl PackageBuild {
             }
         };
 
-        let mut envs =
-            self.session.config.script_env(Some(&self.session.pkgsrc_env));
+        let mut envs = self
+            .session
+            .config
+            .script_env(Some(&self.session.pkgsrc_env));
         for (key, value) in &pkg_env {
             envs.push((key.clone(), value.clone()));
         }
@@ -1288,8 +1224,7 @@ impl PackageBuild {
         let result = builder.build(&mut callback);
 
         // Clear stage display
-        let _ =
-            status_tx.send(ChannelCommand::StageUpdate(self.sandbox_id, None));
+        let _ = status_tx.send(ChannelCommand::StageUpdate(self.sandbox_id, None));
 
         let result = match &result {
             Ok(PkgBuildResult::Success) => {
@@ -1319,9 +1254,7 @@ impl PackageBuild {
                 // Save wrkdir files matching configured patterns, then clean up
                 if !patterns.is_empty() {
                     let save_start = Instant::now();
-                    self.save_wrkdir_files(
-                        pkgname, pkgpath, logdir, patterns, &pkg_env,
-                    );
+                    self.save_wrkdir_files(pkgname, pkgpath, logdir, patterns, &pkg_env);
                     trace!(
                         elapsed_ms = save_start.elapsed().as_millis(),
                         "save_wrkdir_files completed"
@@ -1361,9 +1294,7 @@ impl PackageBuild {
                 // Save wrkdir files matching configured patterns, then clean up
                 if !patterns.is_empty() {
                     let save_start = Instant::now();
-                    self.save_wrkdir_files(
-                        pkgname, pkgpath, logdir, patterns, &pkg_env,
-                    );
+                    self.save_wrkdir_files(pkgname, pkgpath, logdir, patterns, &pkg_env);
                     trace!(
                         elapsed_ms = save_start.elapsed().as_millis(),
                         "save_wrkdir_files completed"
@@ -1387,11 +1318,11 @@ impl PackageBuild {
         };
 
         // Run post-build script if defined (always runs regardless of result)
-        match self.session.sandbox.run_post_build(
-            self.sandbox_id,
-            &self.session.config,
-            envs,
-        ) {
+        match self
+            .session
+            .sandbox
+            .run_post_build(self.sandbox_id, &self.session.config, envs)
+        {
             Ok(true) => {}
             Ok(false) => warn!("post-build script failed"),
             Err(e) => {
@@ -1411,8 +1342,7 @@ impl PackageBuild {
         patterns: &[String],
         pkg_env: &HashMap<String, String>,
     ) {
-        let make =
-            MakeQuery::new(&self.session, self.sandbox_id, pkgpath, pkg_env);
+        let make = MakeQuery::new(&self.session, self.sandbox_id, pkgpath, pkg_env);
 
         // Get WRKDIR
         let wrkdir = match make.wrkdir() {
@@ -1657,12 +1587,7 @@ impl BuildJobs {
     /**
      * Mark a package as done and remove it from pending dependencies.
      */
-    fn mark_done(
-        &mut self,
-        pkgname: &PkgName,
-        outcome: BuildOutcome,
-        duration: Duration,
-    ) {
+    fn mark_done(&mut self, pkgname: &PkgName, outcome: BuildOutcome, duration: Duration) {
         /*
          * Remove the package from the list of dependencies in all
          * packages it is listed in.  Once a package has no outstanding
@@ -1778,9 +1703,7 @@ impl BuildJobs {
             .incoming
             .iter()
             .filter(|(_, v)| v.is_empty())
-            .map(|(k, _)| {
-                (k.clone(), *self.effective_weights.get(k).unwrap_or(&100))
-            })
+            .map(|(k, _)| (k.clone(), *self.effective_weights.get(k).unwrap_or(&100)))
             .collect();
 
         /*
@@ -1837,10 +1760,7 @@ impl Build {
     ///
     /// Returns the number of packages loaded from cache. Only loads results
     /// for packages that are in our build queue.
-    pub fn load_cached_from_db(
-        &mut self,
-        db: &crate::db::Database,
-    ) -> anyhow::Result<usize> {
+    pub fn load_cached_from_db(&mut self, db: &crate::db::Database) -> anyhow::Result<usize> {
         let mut count = 0;
         for pkgname in self.scanpkgs.keys() {
             if let Some(pkg) = db.get_package_by_name(pkgname.pkgname())? {
@@ -1875,8 +1795,7 @@ impl Build {
          */
         debug!("Populating BuildJobs from scanpkgs");
         let mut incoming: HashMap<PkgName, HashSet<PkgName>> = HashMap::new();
-        let mut reverse_deps: HashMap<PkgName, HashSet<PkgName>> =
-            HashMap::new();
+        let mut reverse_deps: HashMap<PkgName, HashSet<PkgName>> = HashMap::new();
         for (pkgname, index) in &self.scanpkgs {
             let mut deps: HashSet<PkgName> = HashSet::new();
             for dep in index.depends() {
@@ -1995,8 +1914,11 @@ impl Build {
             .keys()
             .map(|p| (p, reverse_deps.get(p).map_or(0, |s| s.len())))
             .collect();
-        let mut queue: VecDeque<&PkgName> =
-            pending.iter().filter(|(_, c)| **c == 0).map(|(&p, _)| p).collect();
+        let mut queue: VecDeque<&PkgName> = pending
+            .iter()
+            .filter(|(_, c)| **c == 0)
+            .map(|(&p, _)| p)
+            .collect();
         while let Some(pkg) = queue.pop_front() {
             let mut total = get_weight(pkg);
             if let Some(dependents) = reverse_deps.get(pkg) {
@@ -2057,8 +1979,7 @@ impl Build {
         let stop_flag = Arc::clone(&stop_refresh);
         let shutdown_for_refresh = Arc::clone(&shutdown_flag);
         let refresh_thread = std::thread::spawn(move || {
-            while !stop_flag.load(Ordering::Relaxed)
-                && !shutdown_for_refresh.load(Ordering::SeqCst)
+            while !stop_flag.load(Ordering::Relaxed) && !shutdown_for_refresh.load(Ordering::SeqCst)
             {
                 // Poll outside lock to avoid blocking main thread
                 let has_event = event::poll(REFRESH_INTERVAL).unwrap_or(false);
@@ -2084,8 +2005,7 @@ impl Build {
          * receiving instructions on its private channel.
          */
         let mut threads = vec![];
-        let mut clients: HashMap<usize, Sender<ChannelCommand>> =
-            HashMap::new();
+        let mut clients: HashMap<usize, Sender<ChannelCommand>> = HashMap::new();
         for i in 0..self.config.build_threads() {
             let (client_tx, client_rx) = mpsc::channel::<ChannelCommand>();
             clients.insert(i, client_tx);
@@ -2098,8 +2018,7 @@ impl Build {
                     }
 
                     // Use send() which can fail if receiver is dropped (manager shutdown)
-                    if manager_tx.send(ChannelCommand::ClientReady(i)).is_err()
-                    {
+                    if manager_tx.send(ChannelCommand::ClientReady(i)).is_err() {
                         break;
                     }
 
@@ -2134,34 +2053,21 @@ impl Build {
 
                             match result {
                                 Ok(PackageBuildResult::Success) => {
-                                    let _ = manager_tx.send(
-                                        ChannelCommand::JobSuccess(
-                                            pkgname, duration,
-                                        ),
-                                    );
+                                    let _ = manager_tx
+                                        .send(ChannelCommand::JobSuccess(pkgname, duration));
                                 }
                                 Ok(PackageBuildResult::Skipped) => {
-                                    let _ = manager_tx.send(
-                                        ChannelCommand::JobSkipped(pkgname),
-                                    );
+                                    let _ = manager_tx.send(ChannelCommand::JobSkipped(pkgname));
                                 }
                                 Ok(PackageBuildResult::Failed) => {
-                                    let _ = manager_tx.send(
-                                        ChannelCommand::JobFailed(
-                                            pkgname, duration,
-                                        ),
-                                    );
+                                    let _ = manager_tx
+                                        .send(ChannelCommand::JobFailed(pkgname, duration));
                                 }
                                 Err(e) => {
                                     // Don't report errors caused by shutdown
-                                    if !shutdown_for_worker
-                                        .load(Ordering::SeqCst)
-                                    {
-                                        let _ = manager_tx.send(
-                                            ChannelCommand::JobError((
-                                                pkgname, duration, e,
-                                            )),
-                                        );
+                                    if !shutdown_for_worker.load(Ordering::SeqCst) {
+                                        let _ = manager_tx
+                                            .send(ChannelCommand::JobError((pkgname, duration, e)));
                                     }
                                 }
                             }
@@ -2221,12 +2127,11 @@ impl Build {
                     break;
                 }
 
-                let command =
-                    match manager_rx.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
-                        Ok(cmd) => cmd,
-                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                    };
+                let command = match manager_rx.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
+                    Ok(cmd) => cmd,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
 
                 match command {
                     ChannelCommand::ClientReady(c) => {
@@ -2241,18 +2146,16 @@ impl Build {
                                 thread_packages.insert(c, pkg.clone());
                                 if let Ok(mut p) = progress_clone.lock() {
                                     p.clear_output_buffer(c);
-                                    p.state_mut()
-                                        .set_worker_active(c, pkg.pkgname());
+                                    p.state_mut().set_worker_active(c, pkg.pkgname());
                                     let _ = p.render();
                                 }
 
-                                let _ = client.send(ChannelCommand::JobData(
-                                    Box::new(PackageBuild {
+                                let _ =
+                                    client.send(ChannelCommand::JobData(Box::new(PackageBuild {
                                         session: Arc::clone(&session),
                                         sandbox_id: c,
                                         pkginfo: pkginfo.clone(),
-                                    }),
-                                ));
+                                    })));
                             }
                             BuildStatus::NoneAvailable => {
                                 if let Ok(mut p) = progress_clone.lock() {
@@ -2260,8 +2163,7 @@ impl Build {
                                     p.state_mut().set_worker_idle(c);
                                     let _ = p.render();
                                 }
-                                let _ =
-                                    client.send(ChannelCommand::ComeBackLater);
+                                let _ = client.send(ChannelCommand::ComeBackLater);
                             }
                             BuildStatus::Done => {
                                 if let Ok(mut p) = progress_clone.lock() {
@@ -2389,8 +2291,7 @@ impl Build {
                     }
                     ChannelCommand::StageUpdate(tid, stage) => {
                         if let Ok(mut p) = progress_clone.lock() {
-                            p.state_mut()
-                                .set_worker_stage(tid, stage.as_deref());
+                            p.state_mut().set_worker_stage(tid, stage.as_deref());
                             let _ = p.render();
                         }
                     }
@@ -2467,7 +2368,10 @@ impl Build {
         // Collect results from manager
         debug!("Collecting results from manager");
         let results = results_rx.recv().unwrap_or_default();
-        debug!(result_count = results.len(), "Collected results from manager");
+        debug!(
+            result_count = results.len(),
+            "Collected results from manager"
+        );
         let summary = BuildSummary {
             duration: started.elapsed(),
             results,

@@ -157,7 +157,11 @@ impl Sandbox {
         Ok(Some(
             Command::new(cmd)
                 .args(&args)
-                .arg(if !mount_opts.is_empty() { &opts_str } else { "" })
+                .arg(if !mount_opts.is_empty() {
+                    &opts_str
+                } else {
+                    ""
+                })
                 .arg("tmpfs")
                 .arg(dest)
                 .process_group(0)
@@ -166,10 +170,7 @@ impl Sandbox {
         ))
     }
 
-    fn unmount_common(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    fn unmount_common(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         let cmd = "/bin/umount";
         // Use process_group(0) to put umount in its own process group.
         // This prevents it from receiving SIGINT when the user presses Ctrl+C,
@@ -185,45 +186,27 @@ impl Sandbox {
         ))
     }
 
-    pub fn unmount_bindfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_bindfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_devfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_devfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_fdfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_fdfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_nfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_nfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_procfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_procfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_tmpfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_tmpfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
@@ -291,8 +274,7 @@ impl Sandbox {
                 return;
             }
 
-            let pids: Vec<String> =
-                killed.iter().map(|p| p.to_string()).collect();
+            let pids: Vec<String> = killed.iter().map(|p| p.to_string()).collect();
             info!(pids = %pids.join(" "), "Killed processes using sandbox");
 
             // Give processes a moment to die (exponential backoff)
@@ -322,15 +304,16 @@ impl Sandbox {
                 }
             }
         }
-        if info.is_empty() { String::from("(none)") } else { info.join(", ") }
+        if info.is_empty() {
+            String::from("(none)")
+        } else {
+            info.join(", ")
+        }
     }
 
     /// Check if a process has any references to paths under the given directory.
     /// Returns Some(reason) describing why the process matches, or None.
-    fn process_uses_path(
-        proc: &procfs::process::Process,
-        dir: &Path,
-    ) -> Option<String> {
+    fn process_uses_path(proc: &procfs::process::Process, dir: &Path) -> Option<String> {
         // Check cwd
         if let Ok(cwd) = proc.cwd() {
             if cwd.starts_with(dir) {

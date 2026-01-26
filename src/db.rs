@@ -77,8 +77,7 @@ impl Database {
      */
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .context("Failed to create database directory")?;
+            std::fs::create_dir_all(parent).context("Failed to create database directory")?;
         }
         let conn = Connection::open(path).context("Failed to open database")?;
         let db = Self { conn };
@@ -134,11 +133,11 @@ impl Database {
             self.create_schema()?;
         } else {
             // Check version matches
-            let version: i32 = self.conn.query_row(
-                "SELECT version FROM schema_version LIMIT 1",
-                [],
-                |row| row.get(0),
-            )?;
+            let version: i32 =
+                self.conn
+                    .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+                        row.get(0)
+                    })?;
 
             if version != SCHEMA_VERSION {
                 anyhow::bail!(
@@ -227,17 +226,11 @@ impl Database {
     /**
      * Store a package from scan results.
      */
-    pub fn store_package(
-        &self,
-        pkgpath: &str,
-        index: &ScanIndex,
-    ) -> Result<i64> {
+    pub fn store_package(&self, pkgpath: &str, index: &ScanIndex) -> Result<i64> {
         let pkgname = index.pkgname.pkgname();
 
-        let skip_reason =
-            index.pkg_skip_reason.as_ref().filter(|s| !s.is_empty());
-        let fail_reason =
-            index.pkg_fail_reason.as_ref().filter(|s| !s.is_empty());
+        let skip_reason = index.pkg_skip_reason.as_ref().filter(|s| !s.is_empty());
+        let fail_reason = index.pkg_fail_reason.as_ref().filter(|s| !s.is_empty());
         let is_bootstrap = index.bootstrap_pkg.as_deref() == Some("yes");
         let pbulk_weight: i32 = index
             .pbulk_weight
@@ -289,11 +282,7 @@ impl Database {
     /**
      * Store scan results for a pkgpath.
      */
-    pub fn store_scan_pkgpath(
-        &self,
-        pkgpath: &str,
-        indexes: &[ScanIndex],
-    ) -> Result<()> {
+    pub fn store_scan_pkgpath(&self, pkgpath: &str, indexes: &[ScanIndex]) -> Result<()> {
         for index in indexes {
             self.store_package(pkgpath, index)?;
         }
@@ -303,23 +292,22 @@ impl Database {
     /**
      * Get package by name.
      */
-    pub fn get_package_by_name(
-        &self,
-        pkgname: &str,
-    ) -> Result<Option<PackageRow>> {
+    pub fn get_package_by_name(&self, pkgname: &str) -> Result<Option<PackageRow>> {
         let result = self.conn.query_row(
             "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight
              FROM packages WHERE pkgname = ?1",
             [pkgname],
-            |row| Ok(PackageRow {
-                id: row.get(0)?,
-                pkgname: row.get(1)?,
-                pkgpath: row.get(2)?,
-                skip_reason: row.get(3)?,
-                fail_reason: row.get(4)?,
-                is_bootstrap: row.get::<_, i32>(5)? != 0,
-                pbulk_weight: row.get(6)?,
-            }),
+            |row| {
+                Ok(PackageRow {
+                    id: row.get(0)?,
+                    pkgname: row.get(1)?,
+                    pkgpath: row.get(2)?,
+                    skip_reason: row.get(3)?,
+                    fail_reason: row.get(4)?,
+                    is_bootstrap: row.get::<_, i32>(5)? != 0,
+                    pbulk_weight: row.get(6)?,
+                })
+            },
         );
 
         match result {
@@ -362,13 +350,10 @@ impl Database {
     /**
      * Get packages by pkgpath.
      */
-    pub fn get_packages_by_path(
-        &self,
-        pkgpath: &str,
-    ) -> Result<Vec<PackageRow>> {
+    pub fn get_packages_by_path(&self, pkgpath: &str) -> Result<Vec<PackageRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight
-             FROM packages WHERE pkgpath = ?1"
+             FROM packages WHERE pkgpath = ?1",
         )?;
 
         let rows = stmt.query_map([pkgpath], |row| {
@@ -402,8 +387,7 @@ impl Database {
      * Get all scanned pkgpaths.
      */
     pub fn get_scanned_pkgpaths(&self) -> Result<HashSet<String>> {
-        let mut stmt =
-            self.conn.prepare("SELECT DISTINCT pkgpath FROM packages")?;
+        let mut stmt = self.conn.prepare("SELECT DISTINCT pkgpath FROM packages")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect::<Result<HashSet<_>, _>>().map_err(Into::into)
     }
@@ -437,11 +421,9 @@ impl Database {
      */
     pub fn count_scan(&self) -> Result<i64> {
         self.conn
-            .query_row(
-                "SELECT COUNT(DISTINCT pkgpath) FROM packages",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(DISTINCT pkgpath) FROM packages", [], |row| {
+                row.get(0)
+            })
             .context("Failed to count scan")
     }
 
@@ -451,7 +433,7 @@ impl Database {
     pub fn get_all_packages(&self) -> Result<Vec<PackageRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight
-             FROM packages ORDER BY id"
+             FROM packages ORDER BY id",
         )?;
 
         let rows = stmt.query_map([], |row| {
@@ -475,7 +457,7 @@ impl Database {
     pub fn get_buildable_packages(&self) -> Result<Vec<PackageRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight
-             FROM packages WHERE skip_reason IS NULL AND fail_reason IS NULL"
+             FROM packages WHERE skip_reason IS NULL AND fail_reason IS NULL",
         )?;
 
         let rows = stmt.query_map([], |row| {
@@ -520,13 +502,8 @@ impl Database {
         let mut results = Vec::new();
         for row in rows {
             let (id, json) = row?;
-            let index: ScanIndex =
-                serde_json::from_str(&json).with_context(|| {
-                    format!(
-                        "Failed to deserialize scan data for package {}",
-                        id
-                    )
-                })?;
+            let index: ScanIndex = serde_json::from_str(&json)
+                .with_context(|| format!("Failed to deserialize scan data for package {}", id))?;
             results.push((id, index));
         }
         Ok(results)
@@ -535,10 +512,7 @@ impl Database {
     /**
      * Load full ScanIndex by pkgname.
      */
-    pub fn get_scan_index_by_name(
-        &self,
-        pkgname: &str,
-    ) -> Result<Option<ScanIndex>> {
+    pub fn get_scan_index_by_name(&self, pkgname: &str) -> Result<Option<ScanIndex>> {
         let result = self.conn.query_row(
             "SELECT scan_data FROM packages WHERE pkgname = ?1",
             [pkgname],
@@ -547,8 +521,8 @@ impl Database {
 
         match result {
             Ok(json) => {
-                let index: ScanIndex = serde_json::from_str(&json)
-                    .context("Failed to deserialize scan data")?;
+                let index: ScanIndex =
+                    serde_json::from_str(&json).context("Failed to deserialize scan data")?;
                 Ok(Some(index))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -572,10 +546,7 @@ impl Database {
     /**
      * Store resolved dependencies in batch.
      */
-    pub fn store_resolved_dependencies_batch(
-        &self,
-        deps: &[(i64, i64)],
-    ) -> Result<()> {
+    pub fn store_resolved_dependencies_batch(&self, deps: &[(i64, i64)]) -> Result<()> {
         self.conn.execute("BEGIN TRANSACTION", [])?;
         let mut stmt = self.conn.prepare(
             "INSERT OR IGNORE INTO resolved_depends (package_id, depends_on_id) VALUES (?1, ?2)",
@@ -591,10 +562,7 @@ impl Database {
     /**
      * Get all transitive reverse dependencies using recursive CTE.
      */
-    pub fn get_transitive_reverse_deps(
-        &self,
-        package_id: i64,
-    ) -> Result<Vec<i64>> {
+    pub fn get_transitive_reverse_deps(&self, package_id: i64) -> Result<Vec<i64>> {
         let mut stmt = self.conn.prepare(
             "WITH RECURSIVE affected(id) AS (
                 SELECT ?1
@@ -624,11 +592,7 @@ impl Database {
     /**
      * Store a build result by package ID.
      */
-    pub fn store_build_result(
-        &self,
-        package_id: i64,
-        result: &BuildResult,
-    ) -> Result<()> {
+    pub fn store_build_result(&self, package_id: i64, result: &BuildResult) -> Result<()> {
         let (outcome, detail) = build_outcome_to_db(&result.outcome);
         let duration_ms = result.duration.as_millis() as i64;
         let log_dir = result.log_dir.as_ref().map(|p| p.display().to_string());
@@ -663,10 +627,7 @@ impl Database {
     /**
      * Get build result for a package.
      */
-    pub fn get_build_result(
-        &self,
-        package_id: i64,
-    ) -> Result<Option<BuildResult>> {
+    pub fn get_build_result(&self, package_id: i64) -> Result<Option<BuildResult>> {
         let result = self.conn.query_row(
             "SELECT p.pkgname, p.pkgpath, b.outcome, b.outcome_detail, b.duration_ms, b.log_dir
              FROM builds b
@@ -747,7 +708,7 @@ impl Database {
             "SELECT p.pkgname, p.pkgpath, b.outcome, b.outcome_detail, b.duration_ms, b.log_dir
              FROM builds b
              JOIN packages p ON b.package_id = p.id
-             ORDER BY p.pkgname"
+             ORDER BY p.pkgname",
         )?;
 
         let rows = stmt.query_map([], |row| {
@@ -762,8 +723,7 @@ impl Database {
 
         let mut results = Vec::new();
         for row in rows {
-            let (pkgname, pkgpath, outcome, detail, duration_ms, log_dir) =
-                row?;
+            let (pkgname, pkgpath, outcome, detail, duration_ms, log_dir) = row?;
             let build_outcome = db_outcome_to_build(&outcome, detail);
             results.push(BuildResult {
                 pkgname: PkgName::new(&pkgname),
@@ -781,9 +741,7 @@ impl Database {
      * Count how many packages are broken by each failed package.
      * Returns a map from pkgname to the count of packages that depend on it.
      */
-    pub fn count_breaks_for_failed(
-        &self,
-    ) -> Result<std::collections::HashMap<String, usize>> {
+    pub fn count_breaks_for_failed(&self) -> Result<std::collections::HashMap<String, usize>> {
         use std::collections::HashMap;
 
         let mut counts: HashMap<String, usize> = HashMap::new();
@@ -832,9 +790,7 @@ impl Database {
      * Get pre-failed packages (those with skip_reason or fail_reason but no
      * build result). Returns (pkgname, pkgpath, reason).
      */
-    pub fn get_prefailed_packages(
-        &self,
-    ) -> Result<Vec<(String, Option<String>, String)>> {
+    pub fn get_prefailed_packages(&self) -> Result<Vec<(String, Option<String>, String)>> {
         let mut stmt = self.conn.prepare(
             "SELECT p.pkgname, p.pkgpath,
                     COALESCE(p.fail_reason, p.skip_reason) as reason
@@ -844,8 +800,7 @@ impl Database {
              ORDER BY p.pkgname",
         )?;
 
-        let rows = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -857,9 +812,7 @@ impl Database {
      * (they're pre-failed). Only lists root failures (direct failures), not
      * indirect failures.
      */
-    pub fn get_indirect_failures(
-        &self,
-    ) -> Result<Vec<(String, Option<String>, String)>> {
+    pub fn get_indirect_failures(&self) -> Result<Vec<(String, Option<String>, String)>> {
         // Find packages that:
         // 1. Have no build result
         // 2. Have no skip_reason or fail_reason (not pre-failed)
@@ -894,8 +847,7 @@ impl Database {
              ORDER BY p.pkgname",
         )?;
 
-        let rows = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -938,7 +890,11 @@ impl Database {
             let (outcome, detail, dur) = if *depth == 0 {
                 ("failed", reason.to_string(), duration.as_millis() as i64)
             } else {
-                ("indirect_failed", format!("depends on failed {}", pkgname), 0)
+                (
+                    "indirect_failed",
+                    format!("depends on failed {}", pkgname),
+                    0,
+                )
             };
 
             self.conn.execute(
@@ -992,10 +948,8 @@ impl Database {
      * Clear the full tree scan complete marker.
      */
     pub fn clear_full_scan_complete(&self) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM metadata WHERE key = 'full_scan_complete'",
-            [],
-        )?;
+        self.conn
+            .execute("DELETE FROM metadata WHERE key = 'full_scan_complete'", [])?;
         Ok(())
     }
 
@@ -1032,8 +986,8 @@ impl Database {
             )
             .context("pkgsrc environment not found in database")?;
 
-        let json: serde_json::Value = serde_json::from_str(&json_str)
-            .context("Invalid pkgsrc_env JSON")?;
+        let json: serde_json::Value =
+            serde_json::from_str(&json_str).context("Invalid pkgsrc_env JSON")?;
 
         let get_path = |key: &str| -> Result<PathBuf> {
             json.get(key)
@@ -1097,15 +1051,9 @@ impl Database {
                     .map(|i| {
                         row.get_ref(i)
                             .map(|v| match v {
-                                rusqlite::types::ValueRef::Null => {
-                                    String::new()
-                                }
-                                rusqlite::types::ValueRef::Integer(i) => {
-                                    i.to_string()
-                                }
-                                rusqlite::types::ValueRef::Real(f) => {
-                                    f.to_string()
-                                }
+                                rusqlite::types::ValueRef::Null => String::new(),
+                                rusqlite::types::ValueRef::Integer(i) => i.to_string(),
+                                rusqlite::types::ValueRef::Real(f) => f.to_string(),
                                 rusqlite::types::ValueRef::Text(s) => {
                                     String::from_utf8_lossy(s).to_string()
                                 }
@@ -1131,9 +1079,7 @@ impl Database {
 /**
  * Convert BuildOutcome to database format.
  */
-fn build_outcome_to_db(
-    outcome: &BuildOutcome,
-) -> (&'static str, Option<String>) {
+fn build_outcome_to_db(outcome: &BuildOutcome) -> (&'static str, Option<String>) {
     match outcome {
         BuildOutcome::Success => ("success", None),
         BuildOutcome::UpToDate => ("up_to_date", None),
@@ -1156,21 +1102,17 @@ fn db_outcome_to_build(outcome: &str, detail: Option<String>) -> BuildOutcome {
         "success" => BuildOutcome::Success,
         "up_to_date" => BuildOutcome::UpToDate,
         "failed" => BuildOutcome::Failed(detail.unwrap_or_default()),
-        "pkg_skip" => BuildOutcome::Skipped(SkipReason::PkgSkip(
-            detail.unwrap_or_default(),
-        )),
-        "pkg_fail" => BuildOutcome::Skipped(SkipReason::PkgFail(
-            detail.unwrap_or_default(),
-        )),
-        "indirect_skip" => BuildOutcome::Skipped(SkipReason::IndirectSkip(
-            detail.unwrap_or_default(),
-        )),
-        "indirect_fail" | "indirect_failed" => BuildOutcome::Skipped(
-            SkipReason::IndirectFail(detail.unwrap_or_default()),
-        ),
-        "unresolved_dep" => BuildOutcome::Skipped(SkipReason::UnresolvedDep(
-            detail.unwrap_or_default(),
-        )),
+        "pkg_skip" => BuildOutcome::Skipped(SkipReason::PkgSkip(detail.unwrap_or_default())),
+        "pkg_fail" => BuildOutcome::Skipped(SkipReason::PkgFail(detail.unwrap_or_default())),
+        "indirect_skip" => {
+            BuildOutcome::Skipped(SkipReason::IndirectSkip(detail.unwrap_or_default()))
+        }
+        "indirect_fail" | "indirect_failed" => {
+            BuildOutcome::Skipped(SkipReason::IndirectFail(detail.unwrap_or_default()))
+        }
+        "unresolved_dep" => {
+            BuildOutcome::Skipped(SkipReason::UnresolvedDep(detail.unwrap_or_default()))
+        }
         _ => BuildOutcome::Failed(format!("Unknown outcome: {}", outcome)),
     }
 }

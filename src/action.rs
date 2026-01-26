@@ -375,9 +375,7 @@ impl Action {
         match action_type {
             ActionType::Cmd => {
                 if self.create.is_none() && self.destroy.is_none() {
-                    bail!(
-                        "'cmd' action requires 'create' or 'destroy' command"
-                    );
+                    bail!("'cmd' action requires 'create' or 'destroy' command");
                 }
             }
             ActionType::Mount => {

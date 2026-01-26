@@ -11,8 +11,7 @@ use std::io::BufReader;
 use std::sync::OnceLock;
 use tempfile::TempDir;
 
-const PSCAN_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/pscan.zstd");
+const PSCAN_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/pscan.zstd");
 
 /// Cached scan result and import count, initialized once.
 static SCAN_DATA: OnceLock<(ScanSummary, usize)> = OnceLock::new();
@@ -24,8 +23,7 @@ fn get_scan_result() -> &'static (ScanSummary, usize) {
         let db_path = tmp.path().join("test.db");
         let db = Database::open(&db_path).expect("failed to open db");
 
-        let count =
-            import_pscan(&db, PSCAN_PATH).expect("failed to import pscan");
+        let count = import_pscan(&db, PSCAN_PATH).expect("failed to import pscan");
 
         let mut scan = Scan::default();
         scan.init_from_db(&db).expect("failed to init scan");
@@ -91,8 +89,7 @@ fn resolve_presolve_output() -> Result<()> {
     let (result, _) = get_scan_result();
 
     // Stream expected baseline
-    let expected_path =
-        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/presolve.zstd");
+    let expected_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/presolve.zstd");
     let file = File::open(expected_path)?;
     let decoder = zstd::stream::Decoder::new(file)?;
     let mut expected_lines = BufReader::new(decoder).lines();
@@ -139,7 +136,10 @@ fn resolve_errors_accurate() -> Result<()> {
 
     let unresolved = [
         ("py311-buildbot-[0-9]*", "py311-buildbot-badges-2.6.0nb1"),
-        ("py311-buildbot-[0-9]*", "py311-buildbot-waterfall-view-2.6.0nb1"),
+        (
+            "py311-buildbot-[0-9]*",
+            "py311-buildbot-waterfall-view-2.6.0nb1",
+        ),
         ("py311-stevedore>=1.20.0", "py311-e3-core-22.10.0nb3"),
         ("py312-daemon>=2.3.0", "py312-libagent-0.15.0"),
         ("py313-daemon>=2.3.0", "py313-libagent-0.15.0"),
@@ -148,9 +148,7 @@ fn resolve_errors_accurate() -> Result<()> {
 
     let expected: HashSet<String> = unresolved
         .iter()
-        .map(|(dep, pkg)| {
-            format!("No match found for dependency {dep} of package {pkg}")
-        })
+        .map(|(dep, pkg)| format!("No match found for dependency {dep} of package {pkg}"))
         .collect();
 
     let actual: HashSet<String> = result.errors().map(String::from).collect();

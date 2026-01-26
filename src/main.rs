@@ -99,10 +99,7 @@ impl BuildRunner {
         if cached_count > 0 {
             println!("Found {} cached package paths", cached_count);
             if pending_count > 0 {
-                println!(
-                    "Resuming scan with {} pending dependencies",
-                    pending_count
-                );
+                println!("Resuming scan with {} pending dependencies", pending_count);
             }
         }
 
@@ -168,8 +165,7 @@ impl BuildRunner {
             .load_pkgsrc_env()
             .context("PkgsrcEnv not cached - try 'bob clean' first")?;
 
-        let mut build =
-            Build::new(&self.config, pkgsrc_env, scope, buildable, options);
+        let mut build = Build::new(&self.config, pkgsrc_env, scope, buildable, options);
 
         // Load cached build results from database
         build.load_cached_from_db(&self.db)?;
@@ -196,9 +192,13 @@ impl BuildRunner {
         // Add pre-skipped/failed/unresolved packages from scan to summary
         for pkg in scan_result.packages.iter() {
             match pkg {
-                ScanResult::Skipped { pkgpath, reason, index, .. } => {
-                    let Some(pkgname) = index.as_ref().map(|i| &i.pkgname)
-                    else {
+                ScanResult::Skipped {
+                    pkgpath,
+                    reason,
+                    index,
+                    ..
+                } => {
+                    let Some(pkgname) = index.as_ref().map(|i| &i.pkgname) else {
                         error!(%pkgpath, "Skipped package missing PKGNAME");
                         continue;
                     };
@@ -243,10 +243,7 @@ impl BuildRunner {
     }
 
     /// Look up pkgpath for a pkgname from database.
-    fn find_pkgpath_for_pkgname(
-        &self,
-        pkgname: &str,
-    ) -> Result<Option<pkgsrc::PkgPath>> {
+    fn find_pkgpath_for_pkgname(&self, pkgname: &str) -> Result<Option<pkgsrc::PkgPath>> {
         if let Some(pkg) = self.db.get_package_by_name(pkgname)? {
             return Ok(Some(pkgsrc::PkgPath::new(&pkg.pkgpath)?));
         }
@@ -421,9 +418,7 @@ enum UtilCmd {
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) if e.downcast_ref::<Interrupted>().is_some() => {
-            ExitCode::from(EXIT_INTERRUPTED)
-        }
+        Err(e) if e.downcast_ref::<Interrupted>().is_some() => ExitCode::from(EXIT_INTERRUPTED),
         Err(e) => {
             eprintln!("Error: {e:?}");
             ExitCode::FAILURE
@@ -451,7 +446,9 @@ fn run() -> Result<()> {
             let result = runner.run_scan(&mut scan)?;
             println!("{result}");
         }
-        Cmd::Build { pkgpaths: cmdline_pkgs } => {
+        Cmd::Build {
+            pkgpaths: cmdline_pkgs,
+        } => {
             let mut runner = BuildRunner::new(args.config.as_deref())?;
             tracing::info!("Build command started");
 
@@ -473,20 +470,17 @@ fn run() -> Result<()> {
 
             let sandbox = Sandbox::new(&runner.config);
             let mut scope = SandboxScope::new(sandbox, runner.ctx.clone());
-            let scan_result =
-                runner.run_scan_with_scope(&mut scan, &mut scope)?;
-            runner.run_build_with(
-                scan_result,
-                build::BuildOptions::default(),
-                scope,
-            )?;
+            let scan_result = runner.run_scan_with_scope(&mut scan, &mut scope)?;
+            runner.run_build_with(scan_result, build::BuildOptions::default(), scope)?;
             runner.generate_pkg_summary();
         }
-        Cmd::Rebuild { all, force, packages } => {
+        Cmd::Rebuild {
+            all,
+            force,
+            packages,
+        } => {
             if !all && packages.is_empty() {
-                bail!(
-                    "Either specify packages to rebuild or use -a to rebuild all"
-                );
+                bail!("Either specify packages to rebuild or use -a to rebuild all");
             }
 
             let mut runner = BuildRunner::new(args.config.as_deref())?;
@@ -546,8 +540,7 @@ fn run() -> Result<()> {
                 // rebuilding)
                 let pkgpath_refs: Vec<&str> =
                     pkgpaths_to_rebuild.iter().map(|s| s.as_str()).collect();
-                let (dependents, pkgname_to_pkgpath) =
-                    runner.find_dependents(&pkgpath_refs)?;
+                let (dependents, pkgname_to_pkgpath) = runner.find_dependents(&pkgpath_refs)?;
                 for dep in &dependents {
                     if runner.db.delete_build_by_name(dep)? {
                         cleared += 1;
@@ -566,9 +559,10 @@ fn run() -> Result<()> {
 
             let sandbox = Sandbox::new(&runner.config);
             let mut scope = SandboxScope::new(sandbox, runner.ctx.clone());
-            let scan_result =
-                runner.run_scan_with_scope(&mut scan, &mut scope)?;
-            let options = build::BuildOptions { force_rebuild: force };
+            let scan_result = runner.run_scan_with_scope(&mut scan, &mut scope)?;
+            let options = build::BuildOptions {
+                force_rebuild: force,
+            };
             runner.run_build_with(scan_result, options, scope)?;
         }
         Cmd::Report => {
@@ -602,14 +596,12 @@ fn run() -> Result<()> {
                     let entry = entry?;
                     let path = entry.path();
                     if path.is_dir() && entry.file_name() != "bob" {
-                        std::fs::remove_dir_all(&path).with_context(|| {
-                            format!("Failed to remove {}", path.display())
-                        })?;
+                        std::fs::remove_dir_all(&path)
+                            .with_context(|| format!("Failed to remove {}", path.display()))?;
                     }
                 }
             } else {
-                std::fs::remove_dir_all(logdir)
-                    .context("Failed to remove logs directory")?;
+                std::fs::remove_dir_all(logdir).context("Failed to remove logs directory")?;
             }
         }
         Cmd::Db { sql } => {
@@ -623,7 +615,9 @@ fn run() -> Result<()> {
 
             db.execute_raw(&sql)?;
         }
-        Cmd::Util { cmd: UtilCmd::PrintDepGraph { output } } => {
+        Cmd::Util {
+            cmd: UtilCmd::PrintDepGraph { output },
+        } => {
             let config = Config::load(args.config.as_deref())?;
             let logs_dir = config.logdir().join("bob");
             let db_path = logs_dir.join("bob.db");
@@ -640,17 +634,19 @@ fn run() -> Result<()> {
             let result = scan.resolve(&db)?;
 
             // Build DAG output
-            let mut edges: std::collections::BTreeSet<String> =
-                std::collections::BTreeSet::new();
+            let mut edges: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
             for pkg in result.buildable() {
                 let pkgname = pkg.pkgname();
                 for dep in pkg.depends() {
                     edges.insert(format!("{} -> {}", dep, pkgname));
                 }
             }
-            let out: String =
-                edges.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n")
-                    + "\n";
+            let out: String = edges
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
 
             // Write to file or stdout
             if let Some(path) = output {
@@ -660,7 +656,9 @@ fn run() -> Result<()> {
                 print!("{}", out);
             }
         }
-        Cmd::Util { cmd: UtilCmd::PrintPresolve { output } } => {
+        Cmd::Util {
+            cmd: UtilCmd::PrintPresolve { output },
+        } => {
             let config = Config::load(args.config.as_deref())?;
             let logs_dir = config.logdir().join("bob");
             let db_path = logs_dir.join("bob.db");
@@ -679,10 +677,7 @@ fn run() -> Result<()> {
             // Print unresolved dependency errors
             let errors: Vec<_> = result.errors().collect();
             if !errors.is_empty() {
-                eprintln!(
-                    "Unresolved dependencies:\n  {}",
-                    errors.join("\n  ")
-                );
+                eprintln!("Unresolved dependencies:\n  {}", errors.join("\n  "));
             }
 
             // Build presolve output in original order
@@ -707,7 +702,9 @@ fn run() -> Result<()> {
                 print!("{}", out);
             }
         }
-        Cmd::Util { cmd: UtilCmd::ImportScan { file } } => {
+        Cmd::Util {
+            cmd: UtilCmd::ImportScan { file },
+        } => {
             use indexmap::IndexMap;
             use pkgsrc::ScanIndex;
             use std::fs::File;
@@ -724,8 +721,7 @@ fn run() -> Result<()> {
             let reader = BufReader::new(f);
 
             // Parse all ScanIndex entries and group by pkgpath (preserving order)
-            let mut by_pkgpath: IndexMap<String, Vec<ScanIndex>> =
-                IndexMap::new();
+            let mut by_pkgpath: IndexMap<String, Vec<ScanIndex>> = IndexMap::new();
             let mut errors: Vec<String> = Vec::new();
             for result in ScanIndex::from_reader(reader) {
                 match result {
@@ -769,7 +765,9 @@ fn run() -> Result<()> {
             let result = scan.resolve_with_report(&db, config.strict_scan())?;
             println!("{result}");
         }
-        Cmd::Util { cmd: UtilCmd::PrintPscan { output } } => {
+        Cmd::Util {
+            cmd: UtilCmd::PrintPscan { output },
+        } => {
             let config = Config::load(args.config.as_deref())?;
             let logs_dir = config.logdir().join("bob");
             let db_path = logs_dir.join("bob.db");
@@ -777,9 +775,7 @@ fn run() -> Result<()> {
 
             let packages = db.get_all_packages()?;
             if packages.is_empty() {
-                bail!(
-                    "No cached scan data found. Run 'bob scan' or 'bob util import-scan' first."
-                );
+                bail!("No cached scan data found. Run 'bob scan' or 'bob util import-scan' first.");
             }
 
             // Collect all ScanIndex entries
@@ -800,7 +796,11 @@ fn run() -> Result<()> {
                 print!("{}", out);
             }
         }
-        Cmd::Util { cmd: UtilCmd::Sandbox { cmd: SandboxCmd::Create } } => {
+        Cmd::Util {
+            cmd: UtilCmd::Sandbox {
+                cmd: SandboxCmd::Create,
+            },
+        } => {
             logging::init_stderr_if_enabled();
             let config = Config::load(args.config.as_deref())?;
             let sandbox = Sandbox::new(&config);
@@ -809,7 +809,11 @@ fn run() -> Result<()> {
             }
             sandbox.create_all(config.build_threads())?;
         }
-        Cmd::Util { cmd: UtilCmd::Sandbox { cmd: SandboxCmd::Destroy } } => {
+        Cmd::Util {
+            cmd: UtilCmd::Sandbox {
+                cmd: SandboxCmd::Destroy,
+            },
+        } => {
             logging::init_stderr_if_enabled();
             let config = Config::load(args.config.as_deref())?;
             let sandbox = Sandbox::new(&config);
@@ -818,7 +822,11 @@ fn run() -> Result<()> {
             }
             sandbox.destroy_all()?;
         }
-        Cmd::Util { cmd: UtilCmd::Sandbox { cmd: SandboxCmd::List } } => {
+        Cmd::Util {
+            cmd: UtilCmd::Sandbox {
+                cmd: SandboxCmd::List,
+            },
+        } => {
             let config = Config::load(args.config.as_deref())?;
             let sandbox = Sandbox::new(&config);
             if !sandbox.enabled() {

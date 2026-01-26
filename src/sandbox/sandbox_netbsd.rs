@@ -51,9 +51,7 @@ impl Sandbox {
         _dest: &Path,
         _opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        bail!(
-            "NetBSD does not support 'dev' mounts. Use a 'cmd' action with MAKEDEV instead."
-        )
+        bail!("NetBSD does not support 'dev' mounts. Use a 'cmd' action with MAKEDEV instead.")
     }
 
     pub fn mount_fdfs(
@@ -140,10 +138,7 @@ impl Sandbox {
      * This prevents it from receiving SIGINT when the user presses Ctrl+C,
      * ensuring cleanup can complete even during repeated interrupts.
      */
-    fn unmount_common(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    fn unmount_common(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         let cmd = "/sbin/umount";
         Ok(Some(
             Command::new(cmd)
@@ -154,48 +149,28 @@ impl Sandbox {
         ))
     }
 
-    pub fn unmount_bindfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_bindfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_devfs(
-        &self,
-        _dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_devfs(&self, _dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         // Should never be called since mount_devfs bails
-        bail!(
-            "NetBSD does not support 'dev' mounts. Use a 'cmd' action with MAKEDEV instead."
-        )
+        bail!("NetBSD does not support 'dev' mounts. Use a 'cmd' action with MAKEDEV instead.")
     }
 
-    pub fn unmount_fdfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_fdfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_nfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_nfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_procfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_procfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_tmpfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_tmpfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
@@ -239,8 +214,7 @@ impl Sandbox {
         for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
             // Use fstat to find processes using files under the sandbox
             // Use process_group(0) to isolate from terminal signals
-            let output =
-                Command::new("fstat").arg(sandbox).process_group(0).output();
+            let output = Command::new("fstat").arg(sandbox).process_group(0).output();
             let Ok(out) = output else {
                 return;
             };
@@ -285,8 +259,7 @@ impl Sandbox {
     /// Get info about processes using files in a directory.
     fn get_process_info(&self, sandbox: &Path) -> String {
         // Get PIDs using fstat
-        let output =
-            Command::new("fstat").arg(sandbox).process_group(0).output();
+        let output = Command::new("fstat").arg(sandbox).process_group(0).output();
         let Ok(out) = output else {
             return String::from("(failed to query)");
         };

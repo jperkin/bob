@@ -24,8 +24,14 @@ use tracing::{debug, info, warn};
 
 /// Processes that should not be killed during sandbox cleanup.
 /// These are system daemons that hold file handles but cannot be killed.
-const PROCESS_SKIP_LIST: &[&str] =
-    &["kextd", "mds", "mds_stores", "mdworker", "mdworker_shared", "notifyd"];
+const PROCESS_SKIP_LIST: &[&str] = &[
+    "kextd",
+    "mds",
+    "mds_stores",
+    "mdworker",
+    "mdworker_shared",
+    "notifyd",
+];
 
 impl Sandbox {
     pub fn mount_bindfs(
@@ -129,10 +135,7 @@ impl Sandbox {
      * Use process_group(0) to put diskutil in its own process group,
      * preventing it from receiving SIGINT when the user presses Ctrl+C.
      */
-    fn unmount_common(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    fn unmount_common(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         let cmd = "/usr/sbin/diskutil";
         let max_retries = 180;
         let mut last_status = None;
@@ -168,17 +171,11 @@ impl Sandbox {
         Ok(last_status)
     }
 
-    pub fn unmount_bindfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_bindfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_devfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_devfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         let cmd = "/sbin/umount";
         Ok(Some(
             Command::new(cmd)
@@ -190,32 +187,20 @@ impl Sandbox {
     }
 
     /* Not actually supported but try to unmount it anyway. */
-    pub fn unmount_fdfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_fdfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_nfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_nfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
     /* Not actually supported but try to unmount it anyway. */
-    pub fn unmount_procfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_procfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_tmpfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_tmpfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
