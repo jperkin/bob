@@ -1131,13 +1131,7 @@ impl Scan {
             }
         }
 
-        let pkgbase_map: HashMap<&str, Vec<&PkgName>> = {
-            let mut map: HashMap<&str, Vec<&PkgName>> = HashMap::new();
-            for pkgname in &available_pkgnames {
-                map.entry(pkgname.pkgbase()).or_default().push(pkgname);
-            }
-            map
-        };
+        let pkgbase_map = Self::build_pkgbase_map(&available_pkgnames);
 
         let mut active_pkgnames: HashSet<PkgName> = HashSet::new();
         for pkg in packages.values() {
@@ -1195,6 +1189,19 @@ impl Scan {
         );
 
         Ok(missing_pkgpaths)
+    }
+
+    /**
+     * Build a map from pkgbase to matching PkgNames for efficient lookups.
+     */
+    fn build_pkgbase_map<'a>(
+        pkgnames: impl IntoIterator<Item = &'a PkgName>,
+    ) -> HashMap<&'a str, Vec<&'a PkgName>> {
+        let mut map: HashMap<&str, Vec<&PkgName>> = HashMap::new();
+        for pkgname in pkgnames {
+            map.entry(pkgname.pkgbase()).or_default().push(pkgname);
+        }
+        map
     }
 
     /**
@@ -1417,14 +1424,7 @@ impl Scan {
         // Collect pkgnames for lookups (owned to avoid borrow issues)
         let pkgnames: Vec<PkgName> = self.packages.keys().cloned().collect();
 
-        // Build pkgbase -> Vec<&PkgName> for efficient lookups
-        let pkgbase_map: HashMap<&str, Vec<&PkgName>> = {
-            let mut map: HashMap<&str, Vec<&PkgName>> = HashMap::new();
-            for pkgname in &pkgnames {
-                map.entry(pkgname.pkgbase()).or_default().push(pkgname);
-            }
-            map
-        };
+        let pkgbase_map = Self::build_pkgbase_map(&pkgnames);
 
         // Cache of best Depend => PkgName matches
         let mut match_cache: HashMap<Depend, PkgName> = HashMap::new();
