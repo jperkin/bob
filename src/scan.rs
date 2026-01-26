@@ -452,10 +452,7 @@ impl Scan {
         let mut pending_count = 0;
 
         if cached_count > 0 {
-            info!(
-                cached_count = cached_count,
-                "Found cached scan results in database"
-            );
+            info!(cached_count, "Found cached scan results in database");
 
             // For full tree scans with full_scan_complete, we'll skip scanning
             // For limited scans, remove already-scanned from incoming
@@ -572,13 +569,11 @@ impl Scan {
                         }
                         Ok(o) => {
                             let stderr = String::from_utf8_lossy(&o.stderr);
-                            debug!(category = *category, stderr = %stderr,
-                                "Failed to get packages for category");
+                            debug!(category = *category, %stderr, "Failed to get packages for category");
                             vec![]
                         }
                         Err(e) => {
-                            debug!(category = *category, error = %e,
-                                "Failed to run make in category");
+                            debug!(category = *category, error = %e, "Failed to run make in category");
                             vec![]
                         }
                     }
@@ -1041,11 +1036,7 @@ impl Scan {
         let pkgsrcdir = config.pkgsrc().display().to_string();
         let workdir = format!("{}/{}", pkgsrcdir, pkgpath_str);
 
-        trace!(
-            workdir = %workdir,
-            scan_env = ?scan_env,
-            "Executing pkg-scan"
-        );
+        trace!(%workdir, ?scan_env, "Executing pkg-scan");
         let child = sandbox.execute_command(
             0,
             config.make(),
@@ -1056,11 +1047,7 @@ impl Scan {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            error!(
-                exit_code = ?output.status.code(),
-                stderr = %stderr,
-                "pkg-scan script failed"
-            );
+            error!(exit_code = ?output.status.code(), %stderr, "pkg-scan script failed");
             let stderr = stderr.trim();
             let msg = if stderr.is_empty() {
                 format!("Scan failed for {}", pkgpath_str)
@@ -1070,12 +1057,8 @@ impl Scan {
             bail!(msg);
         }
 
-        let stdout_str = String::from_utf8_lossy(&output.stdout);
-        trace!(
-            stdout_len = stdout_str.len(),
-            stdout = %stdout_str,
-            "pkg-scan script output"
-        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        trace!(stdout_len = stdout.len(), %stdout, "pkg-scan script output");
 
         let reader = BufReader::new(&output.stdout[..]);
         let all_results: Vec<ScanIndex> =
@@ -1295,7 +1278,7 @@ impl Scan {
                 err.push_str(&format!("\t{}\n", n));
             }
             err.push_str(&format!("\t{}", cycle.last().unwrap()));
-            error!(cycle = ?cycle, "Circular dependency detected");
+            error!(?cycle, "Circular dependency detected");
             bail!(err);
         }
         Ok(())
@@ -1342,7 +1325,7 @@ impl Scan {
             // Track skip/fail reasons
             if let Some(reason) = &pkg.pkg_skip_reason {
                 if !reason.is_empty() {
-                    info!(pkgname = %pkg.pkgname.pkgname(), reason = %reason, "PKG_SKIP_REASON");
+                    info!(pkgname = %pkg.pkgname.pkgname(), %reason, "PKG_SKIP_REASON");
                     skip_reasons.insert(
                         pkg.pkgname.clone(),
                         SkipReason::PkgSkip(reason.clone()),
@@ -1362,7 +1345,7 @@ impl Scan {
                 if !reason.is_empty()
                     && !skip_reasons.contains_key(&pkg.pkgname)
                 {
-                    info!(pkgname = %pkg.pkgname.pkgname(), reason = %reason, "PKG_FAIL_REASON");
+                    info!(pkgname = %pkg.pkgname.pkgname(), %reason, "PKG_FAIL_REASON");
                     skip_reasons.insert(
                         pkg.pkgname.clone(),
                         SkipReason::PkgFail(reason.clone()),
@@ -1546,7 +1529,7 @@ impl Scan {
             }
 
             let Some(pkgpath) = index.pkg_location.clone() else {
-                error!(pkgname = %pkgname, "Package missing PKG_LOCATION, skipping");
+                error!(%pkgname, "Package missing PKG_LOCATION, skipping");
                 continue;
             };
             let resolved_depends = depends.remove(&pkgname).unwrap_or_default();
@@ -1584,38 +1567,22 @@ impl Scan {
         debug!(count_buildable, "Checking for circular dependencies");
         Self::check_circular_deps(&packages)?;
 
+        let pkgpaths =
+            packages.iter().map(|p| p.pkgpath()).collect::<HashSet<_>>().len();
+        let summary = ScanSummary { pkgpaths, packages };
+
+        let c = summary.counts();
         info!(
-            count_buildable,
-            count_preskip = packages
-                .iter()
-                .filter(|p| matches!(
-                    p,
-                    ScanResult::Skipped { reason: SkipReason::PkgSkip(_), .. }
-                ))
-                .count(),
-            count_prefail = packages
-                .iter()
-                .filter(|p| matches!(
-                    p,
-                    ScanResult::Skipped { reason: SkipReason::PkgFail(_), .. }
-                ))
-                .count(),
-            count_unresolved = packages
-                .iter()
-                .filter(|p| matches!(
-                    p,
-                    ScanResult::Skipped {
-                        reason: SkipReason::UnresolvedDep(_),
-                        ..
-                    }
-                ))
-                .count(),
+            buildable = c.buildable,
+            preskip = c.skipped.pkg_skip,
+            prefail = c.skipped.pkg_fail,
+            unresolved = c.skipped.unresolved,
             "Resolution complete"
         );
 
         // Store resolved dependencies in database
         let mut resolved_deps: Vec<(i64, i64)> = Vec::new();
-        for pkg in &packages {
+        for pkg in &summary.packages {
             if let ScanResult::Buildable(resolved) = pkg {
                 if let Some(&pkg_id) = pkgname_to_id.get(resolved.pkgname()) {
                     for dep in resolved.depends() {
@@ -1631,11 +1598,7 @@ impl Scan {
             debug!(count = resolved_deps.len(), "Stored resolved dependencies");
         }
 
-        // Count unique pkgpaths from packages (handles both scanned and imported data)
-        let pkgpaths =
-            packages.iter().map(|p| p.pkgpath()).collect::<HashSet<_>>().len();
-
-        Ok(ScanSummary { pkgpaths, packages })
+        Ok(summary)
     }
 
     /**

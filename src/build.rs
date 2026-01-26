@@ -668,12 +668,12 @@ impl<'a> PkgBuilder<'a> {
             // Reader thread will exit when pipe closes (process exits)
             let _ = tee_handle.join();
 
-            trace!(cmd = ?cmd, status = ?status, "Command completed");
+            trace!(?cmd, ?status, "Command completed");
             Ok(status)
         } else {
             let status =
                 self.spawn_command_to_file(cmd, args, run_as, extra_envs, log)?;
-            trace!(cmd = ?cmd, status = ?status, "Command completed");
+            trace!(?cmd, ?status, "Command completed");
             Ok(status)
         }
     }
@@ -1418,7 +1418,7 @@ impl PackageBuild {
         let wrkdir = match make.wrkdir() {
             Some(w) => w,
             None => {
-                debug!(pkgname = %pkgname, "Could not determine WRKDIR, skipping file save");
+                debug!(%pkgname, "Could not determine WRKDIR, skipping file save");
                 return;
             }
         };
@@ -1427,19 +1427,13 @@ impl PackageBuild {
         let wrkdir_path = make.resolve_path(&wrkdir);
 
         if !wrkdir_path.exists() {
-            debug!(pkgname = %pkgname,
-                wrkdir = %wrkdir_path.display(),
-                "WRKDIR does not exist, skipping file save"
-            );
+            debug!(%pkgname, wrkdir = %wrkdir_path.display(), "WRKDIR does not exist, skipping file save");
             return;
         }
 
         let save_dir = logdir.join(pkgname).join("wrkdir-files");
         if let Err(e) = fs::create_dir_all(&save_dir) {
-            warn!(pkgname = %pkgname,
-                error = %e,
-                "Failed to create wrkdir-files directory"
-            );
+            warn!(%pkgname, error = %e, "Failed to create wrkdir-files directory");
             return;
         }
 
@@ -1467,18 +1461,11 @@ impl PackageBuild {
             &compiled_patterns,
             &mut saved_count,
         ) {
-            warn!(pkgname = %pkgname,
-                error = %e,
-                "Error while saving wrkdir files"
-            );
+            warn!(%pkgname, error = %e, "Error while saving wrkdir files");
         }
 
         if saved_count > 0 {
-            info!(pkgname = %pkgname,
-                count = saved_count,
-                dest = %save_dir.display(),
-                "Saved wrkdir files"
-            );
+            info!(%pkgname, count = saved_count, dest = %save_dir.display(), "Saved wrkdir files");
         }
     }
 
