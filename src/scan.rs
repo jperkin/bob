@@ -977,22 +977,6 @@ impl Scan {
             .collect())
     }
 
-    /**
-     * Scan a single PKGPATH, returning a [`Vec`] of [`ScanIndex`] results,
-     * as multi-version packages may return multiple results.
-     */
-    pub fn scan_pkgpath(&self, pkgpath: &PkgPath) -> anyhow::Result<Vec<ScanIndex>> {
-        static NO_SHUTDOWN: AtomicBool = AtomicBool::new(false);
-        let scan_env = self.scan_env();
-        Self::scan_pkgpath_with(
-            &self.config,
-            &self.sandbox,
-            pkgpath,
-            &scan_env,
-            &NO_SHUTDOWN,
-        )
-    }
-
     /*
      * Scan a single PKGPATH using provided config and sandbox references.
      * This allows scanning without borrowing all of `self`.
