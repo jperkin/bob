@@ -84,9 +84,7 @@ impl SkipReason {
     pub fn is_direct(&self) -> bool {
         matches!(
             self,
-            SkipReason::PkgSkip(_)
-                | SkipReason::PkgFail(_)
-                | SkipReason::UnresolvedDep(_)
+            SkipReason::PkgSkip(_) | SkipReason::PkgFail(_) | SkipReason::UnresolvedDep(_)
         )
     }
 }
@@ -206,9 +204,7 @@ impl ScanResult {
     pub fn pkgname(&self) -> Option<&PkgName> {
         match self {
             ScanResult::Buildable(pkg) => Some(pkg.pkgname()),
-            ScanResult::Skipped { index, .. } => {
-                index.as_ref().map(|i| &i.pkgname)
-            }
+            ScanResult::Skipped { index, .. } => index.as_ref().map(|i| &i.pkgname),
             ScanResult::ScanFail { .. } => None,
         }
     }
@@ -230,7 +226,9 @@ impl ScanResult {
     pub fn depends(&self) -> &[PkgName] {
         match self {
             ScanResult::Buildable(pkg) => pkg.depends(),
-            ScanResult::Skipped { resolved_depends, .. } => resolved_depends,
+            ScanResult::Skipped {
+                resolved_depends, ..
+            } => resolved_depends,
             ScanResult::ScanFail { .. } => &[],
         }
     }
@@ -303,10 +301,12 @@ impl ScanSummary {
             match p {
                 ScanResult::Buildable(_) => c.buildable += 1,
                 ScanResult::Skipped {
-                    reason: SkipReason::PkgSkip(_), ..
+                    reason: SkipReason::PkgSkip(_),
+                    ..
                 } => c.skipped.pkg_skip += 1,
                 ScanResult::Skipped {
-                    reason: SkipReason::PkgFail(_), ..
+                    reason: SkipReason::PkgFail(_),
+                    ..
                 } => c.skipped.pkg_fail += 1,
                 ScanResult::Skipped {
                     reason: SkipReason::IndirectSkip(_),
@@ -443,10 +443,7 @@ impl Scan {
     /// Initialize scan from database, checking what's already scanned.
     /// Returns (cached_count, pending_deps_count) where pending_deps_count is the
     /// number of dependencies discovered but not yet scanned (from interrupted scans).
-    pub fn init_from_db(
-        &mut self,
-        db: &crate::db::Database,
-    ) -> Result<(usize, usize)> {
+    pub fn init_from_db(&mut self, db: &crate::db::Database) -> Result<(usize, usize)> {
         let scanned = db.get_scanned_pkgpaths()?;
         let cached_count = scanned.len();
         let mut pending_count = 0;
@@ -512,8 +509,8 @@ impl Scan {
             ["-C", &pkgsrc, "show-subdir-var", "VARNAME=SUBDIR"],
             vec![],
         )?;
-        let output = wait_output_with_shutdown(child, shutdown)
-            .context("Failed to run show-subdir-var")?;
+        let output =
+            wait_output_with_shutdown(child, shutdown).context("Failed to run show-subdir-var")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -583,7 +580,10 @@ impl Scan {
 
         self.incoming.extend(discovered);
 
-        info!(discovered = self.incoming.len(), "Package discovery complete");
+        info!(
+            discovered = self.incoming.len(),
+            "Package discovery complete"
+        );
         println!("Discovered {} package paths", self.incoming.len());
 
         Ok(())
@@ -620,10 +620,7 @@ impl Scan {
             self.incoming.retain(|p| !self.done.contains(p));
             if self.incoming.is_empty() {
                 if !self.done.is_empty() {
-                    println!(
-                        "All {} package paths already scanned",
-                        self.done.len()
-                    );
+                    println!("All {} package paths already scanned", self.done.len());
                 }
                 return Ok(());
             }
@@ -639,11 +636,10 @@ impl Scan {
 
         if scope.enabled() {
             // Run pre-build script if defined
-            if !self.sandbox.run_pre_build(
-                0,
-                &self.config,
-                self.config.script_env(None),
-            )? {
+            if !self
+                .sandbox
+                .run_pre_build(0, &self.config, self.config.script_env(None))?
+            {
                 warn!("pre-build script failed");
             }
         }
@@ -667,10 +663,7 @@ impl Scan {
         // Nothing to scan - all packages are cached
         if self.incoming.is_empty() {
             if !self.done.is_empty() {
-                println!(
-                    "All {} package paths already scanned",
-                    self.done.len()
-                );
+                println!("All {} package paths already scanned", self.done.len());
             }
 
             if scope.enabled() {
@@ -691,13 +684,8 @@ impl Scan {
         // Note: finished_title is unused since we print our own summary
         let total_count = self.initial_cached + self.incoming.len();
         let progress = Arc::new(Mutex::new(
-            MultiProgress::new(
-                "Scanning",
-                "",
-                total_count,
-                self.config.scan_threads(),
-            )
-            .expect("Failed to initialize progress display"),
+            MultiProgress::new("Scanning", "", total_count, self.config.scan_threads())
+                .expect("Failed to initialize progress display"),
         ));
 
         // Mark cached packages in progress display
@@ -715,8 +703,7 @@ impl Scan {
         let stop_flag = Arc::clone(&stop_refresh);
         let shutdown_for_refresh = Arc::clone(&shutdown_flag);
         let refresh_thread = std::thread::spawn(move || {
-            while !stop_flag.load(Ordering::Relaxed)
-                && !shutdown_for_refresh.load(Ordering::SeqCst)
+            while !stop_flag.load(Ordering::Relaxed) && !shutdown_for_refresh.load(Ordering::SeqCst)
             {
                 // Poll outside lock to avoid blocking main thread
                 let has_event = event::poll(REFRESH_INTERVAL).unwrap_or(false);
@@ -793,10 +780,9 @@ impl Scan {
 
             // Create bounded channel for streaming results
             const CHANNEL_BUFFER_SIZE: usize = 128;
-            let (tx, rx) = std::sync::mpsc::sync_channel::<(
-                PkgPath,
-                Result<Vec<ScanIndex>>,
-            )>(CHANNEL_BUFFER_SIZE);
+            let (tx, rx) = std::sync::mpsc::sync_channel::<(PkgPath, Result<Vec<ScanIndex>>)>(
+                CHANNEL_BUFFER_SIZE,
+            );
 
             let mut new_incoming: HashSet<PkgPath> = HashSet::new();
 
@@ -815,15 +801,12 @@ impl Scan {
                                 return;
                             }
 
-                            let pathname =
-                                pkgpath.as_path().to_string_lossy().to_string();
-                            let thread_id =
-                                rayon::current_thread_index().unwrap_or(0);
+                            let pathname = pkgpath.as_path().to_string_lossy().to_string();
+                            let thread_id = rayon::current_thread_index().unwrap_or(0);
 
                             // Update progress - show current package
                             if let Ok(mut p) = progress_clone.lock() {
-                                p.state_mut()
-                                    .set_worker_active(thread_id, &pathname);
+                                p.state_mut().set_worker_active(thread_id, &pathname);
                             }
 
                             let result = Self::scan_pkgpath_with(
@@ -858,8 +841,7 @@ impl Scan {
                     let scanpkgs = match result {
                         Ok(pkgs) => pkgs,
                         Err(e) => {
-                            self.scan_failures
-                                .push((pkgpath.clone(), e.to_string()));
+                            self.scan_failures.push((pkgpath.clone(), e.to_string()));
                             self.done.insert(pkgpath);
                             continue;
                         }
@@ -868,9 +850,7 @@ impl Scan {
 
                     // Save to database
                     if !scanpkgs.is_empty() {
-                        if let Err(e) = db
-                            .store_scan_pkgpath(&pkgpath.to_string(), &scanpkgs)
-                        {
+                        if let Err(e) = db.store_scan_pkgpath(&pkgpath.to_string(), &scanpkgs) {
                             error!(error = %e, "Failed to store scan results");
                         }
                     }
@@ -945,8 +925,9 @@ impl Scan {
             let failed = self.scan_failures.len();
             let succeeded = total.saturating_sub(cached).saturating_sub(failed);
 
-            let elapsed_str =
-                elapsed.map(format_duration).unwrap_or_else(|| "?".to_string());
+            let elapsed_str = elapsed
+                .map(format_duration)
+                .unwrap_or_else(|| "?".to_string());
 
             if cached > 0 {
                 println!(
@@ -993,10 +974,7 @@ impl Scan {
      * Scan a single PKGPATH, returning a [`Vec`] of [`ScanIndex`] results,
      * as multi-version packages may return multiple results.
      */
-    pub fn scan_pkgpath(
-        &self,
-        pkgpath: &PkgPath,
-    ) -> anyhow::Result<Vec<ScanIndex>> {
+    pub fn scan_pkgpath(&self, pkgpath: &PkgPath) -> anyhow::Result<Vec<ScanIndex>> {
         static NO_SHUTDOWN: AtomicBool = AtomicBool::new(false);
         let scan_env: Vec<(String, String)> = self
             .pkgsrc_env
@@ -1107,10 +1085,7 @@ impl Scan {
      * Only packages from initial_pkgpaths (and their transitive dependencies
      * that have already been scanned) are considered.
      */
-    pub fn find_missing_pkgpaths(
-        &self,
-        db: &crate::db::Database,
-    ) -> Result<HashSet<PkgPath>> {
+    pub fn find_missing_pkgpaths(&self, db: &crate::db::Database) -> Result<HashSet<PkgPath>> {
         /*
          * Build set of available pkgnames (first occurrence only, like
          * resolve), then iteratively expand an "active" set starting from
@@ -1147,8 +1122,7 @@ impl Scan {
 
         while changed {
             changed = false;
-            let current_active: Vec<PkgName> =
-                active_pkgnames.iter().cloned().collect();
+            let current_active: Vec<PkgName> = active_pkgnames.iter().cloned().collect();
 
             for active_pkgname in current_active {
                 let Some(pkg) = packages.get(&active_pkgname) else {
@@ -1159,11 +1133,8 @@ impl Scan {
                 };
 
                 for depend in all_deps {
-                    let candidates = Self::find_candidates(
-                        depend,
-                        &pkgbase_map,
-                        available_pkgnames.iter(),
-                    );
+                    let candidates =
+                        Self::find_candidates(depend, &pkgbase_map, available_pkgnames.iter());
 
                     if candidates.is_empty() {
                         let dep_path = depend.pkgpath();
@@ -1245,21 +1216,18 @@ impl Scan {
         pkgbase_map: &HashMap<&str, Vec<&'a PkgName>>,
         pkgnames: &'a [PkgName],
     ) -> Result<Option<&'a PkgName>, pkgsrc::PatternError> {
-        let candidates =
-            Self::find_candidates(depend, pkgbase_map, pkgnames.iter());
+        let candidates = Self::find_candidates(depend, pkgbase_map, pkgnames.iter());
 
         let mut best: Option<&PkgName> = None;
         for candidate in candidates {
             best = match best {
                 None => Some(candidate),
                 Some(current) => {
-                    match depend.pattern().best_match_pbulk(
-                        current.pkgname(),
-                        candidate.pkgname(),
-                    ) {
-                        Ok(Some(m)) if m == candidate.pkgname() => {
-                            Some(candidate)
-                        }
+                    match depend
+                        .pattern()
+                        .best_match_pbulk(current.pkgname(), candidate.pkgname())
+                    {
+                        Ok(Some(m)) if m == candidate.pkgname() => Some(candidate),
                         Ok(_) => Some(current),
                         Err(e) => return Err(e),
                     }
@@ -1289,8 +1257,7 @@ impl Scan {
                 for dep in pkg_depends {
                     if let Some(dep_reason) = skip_reasons.get(dep) {
                         let reason = match dep_reason {
-                            SkipReason::PkgSkip(_)
-                            | SkipReason::IndirectSkip(_) => {
+                            SkipReason::PkgSkip(_) | SkipReason::IndirectSkip(_) => {
                                 SkipReason::IndirectSkip(format!(
                                     "dependency {} skipped",
                                     dep.pkgname()
@@ -1325,11 +1292,7 @@ impl Scan {
         for pkg in packages {
             if let ScanResult::Buildable(resolved) = pkg {
                 for dep in resolved.depends() {
-                    graph.add_edge(
-                        dep.pkgname(),
-                        resolved.pkgname().pkgname(),
-                        (),
-                    );
+                    graph.add_edge(dep.pkgname(), resolved.pkgname().pkgname(), ());
                 }
             }
         }
@@ -1401,8 +1364,7 @@ impl Scan {
         let mut skip_reasons: HashMap<PkgName, SkipReason> = HashMap::new();
         let mut depends: HashMap<PkgName, Vec<PkgName>> = HashMap::new();
         let mut active: HashSet<PkgName> = HashSet::new();
-        let use_active_filter =
-            !self.full_tree && !self.initial_pkgpaths.is_empty();
+        let use_active_filter = !self.full_tree && !self.initial_pkgpaths.is_empty();
 
         for (pkg_id, pkg) in all_scan_data {
             if self.packages.contains_key(&pkg.pkgname) {
@@ -1413,10 +1375,7 @@ impl Scan {
             if let Some(reason) = &pkg.pkg_skip_reason {
                 if !reason.is_empty() {
                     info!(pkgname = %pkg.pkgname.pkgname(), %reason, "PKG_SKIP_REASON");
-                    skip_reasons.insert(
-                        pkg.pkgname.clone(),
-                        SkipReason::PkgSkip(reason.clone()),
-                    );
+                    skip_reasons.insert(pkg.pkgname.clone(), SkipReason::PkgSkip(reason.clone()));
                 }
             }
 
@@ -1429,14 +1388,9 @@ impl Scan {
             }
 
             if let Some(reason) = &pkg.pkg_fail_reason {
-                if !reason.is_empty()
-                    && !skip_reasons.contains_key(&pkg.pkgname)
-                {
+                if !reason.is_empty() && !skip_reasons.contains_key(&pkg.pkgname) {
                     info!(pkgname = %pkg.pkgname.pkgname(), %reason, "PKG_FAIL_REASON");
-                    skip_reasons.insert(
-                        pkg.pkgname.clone(),
-                        SkipReason::PkgFail(reason.clone()),
-                    );
+                    skip_reasons.insert(pkg.pkgname.clone(), SkipReason::PkgFail(reason.clone()));
                 }
             }
 
@@ -1451,7 +1405,8 @@ impl Scan {
         let pkgbase_map = Self::build_pkgbase_map(&pkgnames);
         let mut match_cache: HashMap<Depend, PkgName> = HashMap::new();
         let is_satisfied = |deps: &[PkgName], pattern: &pkgsrc::Pattern| {
-            deps.iter().any(|existing| pattern.matches(existing.pkgname()))
+            deps.iter()
+                .any(|existing| pattern.matches(existing.pkgname()))
         };
 
         let mut resolved: HashSet<PkgName> = HashSet::new();
@@ -1482,8 +1437,7 @@ impl Scan {
                         continue;
                     }
 
-                    match Self::find_best_match(depend, &pkgbase_map, &pkgnames)
-                    {
+                    match Self::find_best_match(depend, &pkgbase_map, &pkgnames) {
                         Err(e) => {
                             let reason = format!(
                                 "{}: pattern error for {}: {}",
@@ -1492,10 +1446,8 @@ impl Scan {
                                 e
                             );
                             if !skip_reasons.contains_key(&pkg.pkgname) {
-                                skip_reasons.insert(
-                                    pkg.pkgname.clone(),
-                                    SkipReason::PkgFail(reason),
-                                );
+                                skip_reasons
+                                    .insert(pkg.pkgname.clone(), SkipReason::PkgFail(reason));
                             }
                         }
                         Ok(Some(pkgname)) => {
@@ -1512,10 +1464,8 @@ impl Scan {
                         }
                         Ok(None) => {
                             let pattern = depend.pattern().pattern();
-                            let fail_reason = format!(
-                                "\"could not resolve dependency \"{}\"\"",
-                                pattern
-                            );
+                            let fail_reason =
+                                format!("\"could not resolve dependency \"{}\"\"", pattern);
                             pkg.pkg_fail_reason = Some(fail_reason);
                             let msg = format!(
                                 "No match found for dependency {} of package {}",
@@ -1595,8 +1545,11 @@ impl Scan {
         debug!(count_buildable, "Checking for circular dependencies");
         Self::check_circular_deps(&packages)?;
 
-        let pkgpaths =
-            packages.iter().map(|p| p.pkgpath()).collect::<HashSet<_>>().len();
+        let pkgpaths = packages
+            .iter()
+            .map(|p| p.pkgpath())
+            .collect::<HashSet<_>>()
+            .len();
         let summary = ScanSummary { pkgpaths, packages };
 
         let c = summary.counts();
@@ -1650,9 +1603,7 @@ impl Scan {
         if !errors.is_empty() {
             eprintln!("Unresolved dependencies:\n  {}", errors.join("\n  "));
             if strict {
-                bail!(
-                    "Aborting due to unresolved dependencies (strict_scan enabled)"
-                );
+                bail!("Aborting due to unresolved dependencies (strict_scan enabled)");
             }
         }
 
@@ -1660,9 +1611,7 @@ impl Scan {
     }
 }
 
-pub fn find_cycle<'a>(
-    graph: &'a DiGraphMap<&'a str, ()>,
-) -> Option<Vec<&'a str>> {
+pub fn find_cycle<'a>(graph: &'a DiGraphMap<&'a str, ()>) -> Option<Vec<&'a str>> {
     let mut visited = HashSet::new();
     let mut in_stack = HashSet::new();
     let mut stack = Vec::new();
@@ -1671,9 +1620,7 @@ pub fn find_cycle<'a>(
         if visited.contains(&node) {
             continue;
         }
-        if let Some(cycle) =
-            dfs(graph, node, &mut visited, &mut stack, &mut in_stack)
-        {
+        if let Some(cycle) = dfs(graph, node, &mut visited, &mut stack, &mut in_stack) {
             return Some(cycle);
         }
     }

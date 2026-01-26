@@ -60,16 +60,12 @@ impl RunContext {
 
 // Re-export main types for convenience
 pub use action::{Action, ActionType, FSType};
-pub use build::{
-    Build, BuildCounts, BuildOptions, BuildOutcome, BuildResult, BuildSummary,
-};
+pub use build::{Build, BuildCounts, BuildOptions, BuildOutcome, BuildResult, BuildSummary};
 pub use config::{Config, Options, Pkgsrc, PkgsrcEnv, Sandboxes};
 pub use db::Database;
 pub use report::write_html_report;
 pub use sandbox::Sandbox;
-pub use scan::{
-    ResolvedPackage, Scan, ScanResult, ScanSummary, SkipReason, SkippedCounts,
-};
+pub use scan::{ResolvedPackage, Scan, ScanResult, ScanSummary, SkipReason, SkippedCounts};
 pub use summary::generate_pkg_summary;
 
 // Re-export init for CLI use

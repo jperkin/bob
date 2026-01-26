@@ -102,10 +102,7 @@ pub(crate) const KILL_PROCESSES_INITIAL_DELAY_MS: u64 = 64;
  * Poll for child process exit while checking a shutdown flag.  If shutdown
  * is requested, kill the child and return an error.
  */
-pub fn wait_with_shutdown(
-    child: &mut Child,
-    shutdown: &AtomicBool,
-) -> Result<ExitStatus> {
+pub fn wait_with_shutdown(child: &mut Child, shutdown: &AtomicBool) -> Result<ExitStatus> {
     loop {
         if shutdown.load(Ordering::SeqCst) {
             let _ = child.kill();
@@ -129,10 +126,7 @@ pub fn wait_with_shutdown(
  * channel for results while checking the shutdown flag.  This avoids the
  * polling latency of try_wait() while still allowing shutdown interruption.
  */
-pub fn wait_output_with_shutdown(
-    child: Child,
-    shutdown: &AtomicBool,
-) -> Result<Output> {
+pub fn wait_output_with_shutdown(child: Child, shutdown: &AtomicBool) -> Result<Output> {
     let pid = child.id();
     let (tx, rx) = std::sync::mpsc::channel();
 
@@ -174,7 +168,9 @@ impl Sandbox {
      * [`execute`]: Sandbox::execute
      */
     pub fn new(config: &Config) -> Sandbox {
-        Sandbox { config: config.clone() }
+        Sandbox {
+            config: config.clone(),
+        }
     }
 
     /// Return whether sandboxes have been enabled.
@@ -256,8 +252,7 @@ impl Sandbox {
         // Canonicalize both paths to resolve any ".." or symlinks
         // Note: canonicalize requires the path to exist, so we check
         // the parent directory for paths that don't exist yet
-        let canonical_sandbox =
-            sandbox_root.canonicalize().unwrap_or(sandbox_root.clone());
+        let canonical_sandbox = sandbox_root.canonicalize().unwrap_or(sandbox_root.clone());
 
         // For the target path, try to canonicalize what exists
         let canonical_path = if path.exists() {
@@ -602,8 +597,10 @@ impl Sandbox {
         }
         let _ = std::io::stdout().flush();
         let start = Instant::now();
-        let results: Vec<(usize, Result<()>)> =
-            (0..count).into_par_iter().map(|i| (i, self.create(i))).collect();
+        let results: Vec<(usize, Result<()>)> = (0..count)
+            .into_par_iter()
+            .map(|i| (i, self.create(i)))
+            .collect();
         let mut first_error: Option<anyhow::Error> = None;
         for (i, result) in &results {
             if let Err(e) = result {
@@ -616,10 +613,7 @@ impl Sandbox {
             println!();
             for (i, _) in &results {
                 if let Err(destroy_err) = self.destroy(*i) {
-                    eprintln!(
-                        "Warning: failed to destroy sandbox {}: {}",
-                        i, destroy_err
-                    );
+                    eprintln!("Warning: failed to destroy sandbox {}: {}", i, destroy_err);
                 }
             }
             return Err(e);
@@ -659,8 +653,10 @@ impl Sandbox {
         }
         let _ = std::io::stdout().flush();
         let start = Instant::now();
-        let results: Vec<(usize, Result<()>)> =
-            sandboxes.into_par_iter().map(|i| (i, self.destroy(i))).collect();
+        let results: Vec<(usize, Result<()>)> = sandboxes
+            .into_par_iter()
+            .map(|i| (i, self.destroy(i)))
+            .collect();
         let mut failed = 0;
         for (i, result) in results {
             if let Err(e) = result {
@@ -746,11 +742,7 @@ impl Sandbox {
         if meta.is_symlink() {
             // Symlinks can be removed
             fs::remove_file(path).map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to remove symlink {}: {}",
-                    path.display(),
-                    e
-                )
+                anyhow::anyhow!("Failed to remove symlink {}: {}", path.display(), e)
             })?;
             return Ok(());
         }
@@ -785,9 +777,7 @@ impl Sandbox {
     ///
     fn perform_actions(&self, id: usize) -> Result<()> {
         let Some(sandbox) = &self.config.sandboxes() else {
-            bail!(
-                "Internal error: trying to perform actions when sandboxes disabled."
-            );
+            bail!("Internal error: trying to perform actions when sandboxes disabled.");
         };
         for action in sandbox.actions.iter() {
             action.validate()?;
@@ -795,8 +785,10 @@ impl Sandbox {
 
             // For mount/copy actions, dest defaults to src (src is more readable)
             let src = action.src().or(action.dest());
-            let dest =
-                action.dest().or(action.src()).map(|d| self.mountpath(id, d));
+            let dest = action
+                .dest()
+                .or(action.src())
+                .map(|d| self.mountpath(id, d));
             if let Some(ref dest_path) = dest {
                 self.verify_path_in_sandbox(id, dest_path)?;
             }
@@ -811,12 +803,9 @@ impl Sandbox {
             let status = match action_type {
                 ActionType::Mount => {
                     let fs_type = action.fs_type()?;
-                    let src = src.ok_or_else(|| {
-                        anyhow::anyhow!("mount action requires src or dest")
-                    })?;
-                    let dest = dest.ok_or_else(|| {
-                        anyhow::anyhow!("mount action requires dest")
-                    })?;
+                    let src =
+                        src.ok_or_else(|| anyhow::anyhow!("mount action requires src or dest"))?;
+                    let dest = dest.ok_or_else(|| anyhow::anyhow!("mount action requires dest"))?;
                     if action.ifexists() && !src.exists() {
                         debug!(
                             sandbox = id,
@@ -845,12 +834,9 @@ impl Sandbox {
                     }
                 }
                 ActionType::Copy => {
-                    let src = src.ok_or_else(|| {
-                        anyhow::anyhow!("copy action requires src or dest")
-                    })?;
-                    let dest = dest.ok_or_else(|| {
-                        anyhow::anyhow!("copy action requires dest")
-                    })?;
+                    let src =
+                        src.ok_or_else(|| anyhow::anyhow!("copy action requires src or dest"))?;
+                    let dest = dest.ok_or_else(|| anyhow::anyhow!("copy action requires dest"))?;
                     debug!(
                         sandbox = id,
                         action = "copy",
@@ -876,12 +862,12 @@ impl Sandbox {
                     }
                 }
                 ActionType::Symlink => {
-                    let src = action.src().ok_or_else(|| {
-                        anyhow::anyhow!("symlink action requires src")
-                    })?;
-                    let dest = action.dest().ok_or_else(|| {
-                        anyhow::anyhow!("symlink action requires dest")
-                    })?;
+                    let src = action
+                        .src()
+                        .ok_or_else(|| anyhow::anyhow!("symlink action requires src"))?;
+                    let dest = action
+                        .dest()
+                        .ok_or_else(|| anyhow::anyhow!("symlink action requires dest"))?;
                     let dest_path = self.mountpath(id, dest);
                     debug!(
                         sandbox = id,
@@ -967,15 +953,15 @@ impl Sandbox {
 
     fn reverse_actions(&self, id: usize) -> anyhow::Result<()> {
         let Some(sandbox) = &self.config.sandboxes() else {
-            bail!(
-                "Internal error: trying to reverse actions when sandboxes disabled."
-            );
+            bail!("Internal error: trying to reverse actions when sandboxes disabled.");
         };
         for action in sandbox.actions.iter().rev() {
             let action_type = action.action_type()?;
             // dest defaults to src if not specified
-            let dest =
-                action.dest().or(action.src()).map(|d| self.mountpath(id, d));
+            let dest = action
+                .dest()
+                .or(action.src())
+                .map(|d| self.mountpath(id, d));
 
             match action_type {
                 ActionType::Cmd => {
@@ -987,17 +973,10 @@ impl Sandbox {
                             chroot = action.chroot(),
                             "Running destroy command"
                         );
-                        let status = self.run_action_cmd(
-                            id,
-                            destroy_cmd,
-                            action.chroot(),
-                        )?;
+                        let status = self.run_action_cmd(id, destroy_cmd, action.chroot())?;
                         if let Some(s) = status {
                             if !s.success() {
-                                bail!(
-                                    "Failed to run destroy command: exit code {:?}",
-                                    s.code()
-                                );
+                                bail!("Failed to run destroy command: exit code {:?}", s.code());
                             }
                         }
                     }
@@ -1169,7 +1148,11 @@ impl SandboxScope {
      * Use `ensure()` to create sandboxes when needed.
      */
     pub fn new(sandbox: Sandbox, ctx: RunContext) -> Self {
-        Self { sandbox, count: 0, ctx }
+        Self {
+            sandbox,
+            count: 0,
+            ctx,
+        }
     }
 
     /**
@@ -1220,10 +1203,7 @@ impl SandboxScope {
             println!();
             for (i, _) in &results {
                 if let Err(destroy_err) = self.sandbox.destroy(*i) {
-                    eprintln!(
-                        "Warning: failed to destroy sandbox {}: {}",
-                        i, destroy_err
-                    );
+                    eprintln!("Warning: failed to destroy sandbox {}: {}", i, destroy_err);
                 }
             }
             return Err(e);

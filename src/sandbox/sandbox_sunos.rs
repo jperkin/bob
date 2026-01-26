@@ -145,10 +145,7 @@ impl Sandbox {
      * This prevents it from receiving SIGINT when the user presses Ctrl+C,
      * ensuring cleanup can complete even during repeated interrupts.
      */
-    fn unmount_common(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    fn unmount_common(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         let cmd = "/sbin/umount";
         Ok(Some(
             Command::new(cmd)
@@ -159,45 +156,27 @@ impl Sandbox {
         ))
     }
 
-    pub fn unmount_bindfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_bindfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_devfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_devfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_fdfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_fdfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_nfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_nfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_procfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_procfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_tmpfs(
-        &self,
-        dest: &Path,
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_tmpfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
         self.unmount_common(dest)
     }
 
@@ -322,8 +301,7 @@ impl Sandbox {
         // Use pargs to get full command line (ps truncates on illumos)
         let mut info = Vec::new();
         for pid in &pids {
-            let pargs_output =
-                Command::new("pargs").arg(pid).process_group(0).output();
+            let pargs_output = Command::new("pargs").arg(pid).process_group(0).output();
             match pargs_output {
                 Ok(out) => {
                     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -337,6 +315,10 @@ impl Sandbox {
                 Err(_) => info.push(format!("pid={}", pid)),
             }
         }
-        if info.is_empty() { String::from("(none)") } else { info.join(", ") }
+        if info.is_empty() {
+            String::from("(none)")
+        } else {
+            info.join(", ")
+        }
     }
 }

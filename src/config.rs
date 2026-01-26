@@ -253,23 +253,25 @@ impl std::fmt::Debug for LuaEnv {
 
 impl Default for LuaEnv {
     fn default() -> Self {
-        Self { lua: Arc::new(Mutex::new(Lua::new())), env_key: None }
+        Self {
+            lua: Arc::new(Mutex::new(Lua::new())),
+            env_key: None,
+        }
     }
 }
 
 impl LuaEnv {
     /// Get environment variables for a package by calling the env function.
     /// Returns a HashMap of VAR_NAME -> value.
-    pub fn get_env(
-        &self,
-        pkg: &ResolvedPackage,
-    ) -> Result<HashMap<String, String>, String> {
+    pub fn get_env(&self, pkg: &ResolvedPackage) -> Result<HashMap<String, String>, String> {
         let Some(env_key) = &self.env_key else {
             return Ok(HashMap::new());
         };
 
-        let lua =
-            self.lua.lock().map_err(|e| format!("Lua lock error: {}", e))?;
+        let lua = self
+            .lua
+            .lock()
+            .map_err(|e| format!("Lua lock error: {}", e))?;
 
         // Get the env value from registry
         let env_value: Value = lua
@@ -299,12 +301,7 @@ impl LuaEnv {
                             .as_ref()
                             .map(|deps| {
                                 deps.iter()
-                                    .map(|d| {
-                                        d.pkgpath()
-                                            .as_path()
-                                            .display()
-                                            .to_string()
-                                    })
+                                    .map(|d| d.pkgpath().as_path().display().to_string())
                                     .collect::<Vec<_>>()
                                     .join(" ")
                             })
@@ -316,65 +313,43 @@ impl LuaEnv {
                         "pkg_skip_reason",
                         idx.pkg_skip_reason.clone().unwrap_or_default(),
                     )
-                    .map_err(|e| {
-                        format!("Failed to set pkg_skip_reason: {}", e)
-                    })?;
+                    .map_err(|e| format!("Failed to set pkg_skip_reason: {}", e))?;
                 pkg_table
                     .set(
                         "pkg_fail_reason",
                         idx.pkg_fail_reason.clone().unwrap_or_default(),
                     )
-                    .map_err(|e| {
-                        format!("Failed to set pkg_fail_reason: {}", e)
-                    })?;
+                    .map_err(|e| format!("Failed to set pkg_fail_reason: {}", e))?;
                 pkg_table
                     .set(
                         "no_bin_on_ftp",
                         idx.no_bin_on_ftp.clone().unwrap_or_default(),
                     )
-                    .map_err(|e| {
-                        format!("Failed to set no_bin_on_ftp: {}", e)
-                    })?;
+                    .map_err(|e| format!("Failed to set no_bin_on_ftp: {}", e))?;
                 pkg_table
-                    .set(
-                        "restricted",
-                        idx.restricted.clone().unwrap_or_default(),
-                    )
+                    .set("restricted", idx.restricted.clone().unwrap_or_default())
                     .map_err(|e| format!("Failed to set restricted: {}", e))?;
                 pkg_table
-                    .set(
-                        "categories",
-                        idx.categories.clone().unwrap_or_default(),
-                    )
+                    .set("categories", idx.categories.clone().unwrap_or_default())
                     .map_err(|e| format!("Failed to set categories: {}", e))?;
                 pkg_table
-                    .set(
-                        "maintainer",
-                        idx.maintainer.clone().unwrap_or_default(),
-                    )
+                    .set("maintainer", idx.maintainer.clone().unwrap_or_default())
                     .map_err(|e| format!("Failed to set maintainer: {}", e))?;
                 pkg_table
-                    .set(
-                        "use_destdir",
-                        idx.use_destdir.clone().unwrap_or_default(),
-                    )
+                    .set("use_destdir", idx.use_destdir.clone().unwrap_or_default())
                     .map_err(|e| format!("Failed to set use_destdir: {}", e))?;
                 pkg_table
                     .set(
                         "bootstrap_pkg",
                         idx.bootstrap_pkg.clone().unwrap_or_default(),
                     )
-                    .map_err(|e| {
-                        format!("Failed to set bootstrap_pkg: {}", e)
-                    })?;
+                    .map_err(|e| format!("Failed to set bootstrap_pkg: {}", e))?;
                 pkg_table
                     .set(
                         "usergroup_phase",
                         idx.usergroup_phase.clone().unwrap_or_default(),
                     )
-                    .map_err(|e| {
-                        format!("Failed to set usergroup_phase: {}", e)
-                    })?;
+                    .map_err(|e| format!("Failed to set usergroup_phase: {}", e))?;
                 pkg_table
                     .set(
                         "scan_depends",
@@ -388,17 +363,10 @@ impl LuaEnv {
                             })
                             .unwrap_or_default(),
                     )
-                    .map_err(|e| {
-                        format!("Failed to set scan_depends: {}", e)
-                    })?;
+                    .map_err(|e| format!("Failed to set scan_depends: {}", e))?;
                 pkg_table
-                    .set(
-                        "pbulk_weight",
-                        idx.pbulk_weight.clone().unwrap_or_default(),
-                    )
-                    .map_err(|e| {
-                        format!("Failed to set pbulk_weight: {}", e)
-                    })?;
+                    .set("pbulk_weight", idx.pbulk_weight.clone().unwrap_or_default())
+                    .map_err(|e| format!("Failed to set pbulk_weight: {}", e))?;
                 pkg_table
                     .set(
                         "multi_version",
@@ -407,9 +375,7 @@ impl LuaEnv {
                             .map(|v| v.join(" "))
                             .unwrap_or_default(),
                     )
-                    .map_err(|e| {
-                        format!("Failed to set multi_version: {}", e)
-                    })?;
+                    .map_err(|e| format!("Failed to set multi_version: {}", e))?;
                 pkg_table
                     .set(
                         "depends",
@@ -421,9 +387,8 @@ impl LuaEnv {
                     )
                     .map_err(|e| format!("Failed to set depends: {}", e))?;
 
-                func.call(pkg_table).map_err(|e| {
-                    format!("Failed to call env function: {}", e)
-                })?
+                func.call(pkg_table)
+                    .map_err(|e| format!("Failed to call env function: {}", e))?
             }
             // If it's a table, use it directly
             Value::Table(t) => t,
@@ -434,8 +399,7 @@ impl LuaEnv {
         // Convert Lua table to HashMap
         let mut env = HashMap::new();
         for pair in result_table.pairs::<String, String>() {
-            let (k, v) = pair
-                .map_err(|e| format!("Failed to iterate env table: {}", e))?;
+            let (k, v) = pair.map_err(|e| format!("Failed to iterate env table: {}", e))?;
             env.insert(k, v);
         }
 
@@ -575,22 +539,21 @@ impl Config {
 
         /* A configuration file is mandatory. */
         if !filename.exists() {
-            anyhow::bail!(
-                "Configuration file {} does not exist",
-                filename.display()
-            );
+            anyhow::bail!("Configuration file {} does not exist", filename.display());
         }
 
         /*
          * Parse configuration file as Lua.
          */
         let (mut file, lua_env) =
-            load_lua(&filename).map_err(|e| anyhow!(e)).with_context(|| {
-                format!(
-                    "Unable to parse Lua configuration file {}",
-                    filename.display()
-                )
-            })?;
+            load_lua(&filename)
+                .map_err(|e| anyhow!(e))
+                .with_context(|| {
+                    format!(
+                        "Unable to parse Lua configuration file {}",
+                        filename.display()
+                    )
+                })?;
 
         /*
          * Parse scripts section.  Paths are resolved relative to config dir
@@ -599,8 +562,11 @@ impl Config {
         let base_dir = filename.parent().unwrap_or_else(|| Path::new("."));
         let mut newscripts: HashMap<String, PathBuf> = HashMap::new();
         for (k, v) in &file.scripts {
-            let fullpath =
-                if v.is_relative() { base_dir.join(v) } else { v.clone() };
+            let fullpath = if v.is_relative() {
+                base_dir.join(v)
+            } else {
+                v.clone()
+            };
             newscripts.insert(k.clone(), fullpath);
         }
         file.scripts = newscripts;
@@ -626,7 +592,11 @@ impl Config {
             "info".to_string()
         };
 
-        Ok(Config { file, log_level, lua_env })
+        Ok(Config {
+            file,
+            log_level,
+            lua_env,
+        })
     }
 
     pub fn build_threads(&self) -> usize {
@@ -727,14 +697,17 @@ impl Config {
     /// If `pkgsrc_env` is provided, includes the pkgsrc-derived variables
     /// (packages, pkgtools, prefix, pkg_dbdir, pkg_refcount_dbdir) as well
     /// as the cached variables from the `cachevars` config option.
-    pub fn script_env(
-        &self,
-        pkgsrc_env: Option<&PkgsrcEnv>,
-    ) -> Vec<(String, String)> {
+    pub fn script_env(&self, pkgsrc_env: Option<&PkgsrcEnv>) -> Vec<(String, String)> {
         let mut envs = vec![
-            ("bob_logdir".to_string(), format!("{}", self.logdir().display())),
+            (
+                "bob_logdir".to_string(),
+                format!("{}", self.logdir().display()),
+            ),
             ("bob_make".to_string(), format!("{}", self.make().display())),
-            ("bob_pkgsrc".to_string(), format!("{}", self.pkgsrc().display())),
+            (
+                "bob_pkgsrc".to_string(),
+                format!("{}", self.pkgsrc().display()),
+            ),
         ];
         if let Some(env) = pkgsrc_env {
             envs.push((
@@ -745,10 +718,7 @@ impl Config {
                 "bob_pkgtools".to_string(),
                 env.pkgtools.display().to_string(),
             ));
-            envs.push((
-                "bob_prefix".to_string(),
-                env.prefix.display().to_string(),
-            ));
+            envs.push(("bob_prefix".to_string(), env.prefix.display().to_string()));
             envs.push((
                 "bob_pkg_dbdir".to_string(),
                 env.pkg_dbdir.display().to_string(),
@@ -839,7 +809,11 @@ impl Config {
             }
         }
 
-        if errors.is_empty() { Ok(()) } else { Err(errors) }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 }
 
@@ -871,24 +845,24 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
     let globals = lua.globals();
 
     // Parse each section
-    let options = parse_options(&globals)
-        .map_err(|e| format!("Error parsing options config: {}", e))?;
+    let options =
+        parse_options(&globals).map_err(|e| format!("Error parsing options config: {}", e))?;
     let pkgsrc_table: Table = globals
         .get("pkgsrc")
         .map_err(|e| format!("Error getting pkgsrc config: {}", e))?;
-    let pkgsrc = parse_pkgsrc(&globals)
-        .map_err(|e| format!("Error parsing pkgsrc config: {}", e))?;
-    let scripts = parse_scripts(&globals)
-        .map_err(|e| format!("Error parsing scripts config: {}", e))?;
-    let sandboxes = parse_sandboxes(&globals)
-        .map_err(|e| format!("Error parsing sandboxes config: {}", e))?;
+    let pkgsrc =
+        parse_pkgsrc(&globals).map_err(|e| format!("Error parsing pkgsrc config: {}", e))?;
+    let scripts =
+        parse_scripts(&globals).map_err(|e| format!("Error parsing scripts config: {}", e))?;
+    let sandboxes =
+        parse_sandboxes(&globals).map_err(|e| format!("Error parsing sandboxes config: {}", e))?;
 
     // Store env function/table in registry if it exists
     let env_key = if let Ok(env_value) = pkgsrc_table.get::<Value>("env") {
         if !env_value.is_nil() {
-            let key = lua.create_registry_value(env_value).map_err(|e| {
-                format!("Failed to store env in registry: {}", e)
-            })?;
+            let key = lua
+                .create_registry_value(env_value)
+                .map_err(|e| format!("Failed to store env in registry: {}", e))?;
             Some(Arc::new(key))
         } else {
             None
@@ -897,9 +871,17 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
         None
     };
 
-    let lua_env = LuaEnv { lua: Arc::new(Mutex::new(lua)), env_key };
+    let lua_env = LuaEnv {
+        lua: Arc::new(Mutex::new(lua)),
+        env_key,
+    };
 
-    let config = ConfigFile { options, pkgsrc, scripts, sandboxes };
+    let config = ConfigFile {
+        options,
+        pkgsrc,
+        scripts,
+        sandboxes,
+    };
 
     Ok((config, lua_env))
 }
@@ -914,8 +896,7 @@ fn parse_options(globals: &Table) -> LuaResult<Option<Options>> {
         .as_table()
         .ok_or_else(|| mlua::Error::runtime("'options' must be a table"))?;
 
-    const KNOWN_KEYS: &[&str] =
-        &["build_threads", "scan_threads", "strict_scan", "log_level"];
+    const KNOWN_KEYS: &[&str] = &["build_threads", "scan_threads", "strict_scan", "log_level"];
     warn_unknown_keys(table, "options", KNOWN_KEYS);
 
     Ok(Some(Options {
@@ -971,43 +952,42 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
     warn_unknown_keys(&pkgsrc, "pkgsrc", KNOWN_KEYS);
 
     let basedir = get_required_string(&pkgsrc, "basedir")?;
-    let bootstrap: Option<PathBuf> =
-        pkgsrc.get::<Option<String>>("bootstrap")?.map(PathBuf::from);
-    let build_user: Option<String> =
-        pkgsrc.get::<Option<String>>("build_user")?;
+    let bootstrap: Option<PathBuf> = pkgsrc
+        .get::<Option<String>>("bootstrap")?
+        .map(PathBuf::from);
+    let build_user: Option<String> = pkgsrc.get::<Option<String>>("build_user")?;
     let logdir = get_required_string(&pkgsrc, "logdir")?;
     let make = get_required_string(&pkgsrc, "make")?;
-    let tar: Option<PathBuf> =
-        pkgsrc.get::<Option<String>>("tar")?.map(PathBuf::from);
+    let tar: Option<PathBuf> = pkgsrc.get::<Option<String>>("tar")?.map(PathBuf::from);
 
-    let pkgpaths: Option<Vec<PkgPath>> =
-        match pkgsrc.get::<Value>("pkgpaths")? {
-            Value::Nil => None,
-            Value::Table(t) => {
-                let paths: Vec<PkgPath> = t
-                    .sequence_values::<String>()
-                    .filter_map(|r| r.ok())
-                    .filter_map(|s| PkgPath::new(&s).ok())
-                    .collect();
-                if paths.is_empty() { None } else { Some(paths) }
-            }
-            _ => None,
-        };
+    let pkgpaths: Option<Vec<PkgPath>> = match pkgsrc.get::<Value>("pkgpaths")? {
+        Value::Nil => None,
+        Value::Table(t) => {
+            let paths: Vec<PkgPath> = t
+                .sequence_values::<String>()
+                .filter_map(|r| r.ok())
+                .filter_map(|s| PkgPath::new(&s).ok())
+                .collect();
+            if paths.is_empty() { None } else { Some(paths) }
+        }
+        _ => None,
+    };
 
-    let save_wrkdir_patterns: Vec<String> =
-        match pkgsrc.get::<Value>("save_wrkdir_patterns")? {
-            Value::Nil => Vec::new(),
-            Value::Table(t) => {
-                t.sequence_values::<String>().filter_map(|r| r.ok()).collect()
-            }
-            _ => Vec::new(),
-        };
+    let save_wrkdir_patterns: Vec<String> = match pkgsrc.get::<Value>("save_wrkdir_patterns")? {
+        Value::Nil => Vec::new(),
+        Value::Table(t) => t
+            .sequence_values::<String>()
+            .filter_map(|r| r.ok())
+            .collect(),
+        _ => Vec::new(),
+    };
 
     let cachevars: Vec<String> = match pkgsrc.get::<Value>("cachevars")? {
         Value::Nil => Vec::new(),
-        Value::Table(t) => {
-            t.sequence_values::<String>().filter_map(|r| r.ok()).collect()
-        }
+        Value::Table(t) => t
+            .sequence_values::<String>()
+            .filter_map(|r| r.ok())
+            .collect(),
         _ => Vec::new(),
     };
 
@@ -1065,15 +1045,22 @@ fn parse_sandboxes(globals: &Table) -> LuaResult<Option<Sandboxes>> {
     let actions = if actions_value.is_nil() {
         Vec::new()
     } else {
-        let actions_table = actions_value.as_table().ok_or_else(|| {
-            mlua::Error::runtime("'sandboxes.actions' must be a table")
-        })?;
+        let actions_table = actions_value
+            .as_table()
+            .ok_or_else(|| mlua::Error::runtime("'sandboxes.actions' must be a table"))?;
         parse_actions(actions_table)?
     };
 
-    Ok(Some(Sandboxes { basedir: PathBuf::from(basedir), actions, bindfs }))
+    Ok(Some(Sandboxes {
+        basedir: PathBuf::from(basedir),
+        actions,
+        bindfs,
+    }))
 }
 
 fn parse_actions(table: &Table) -> LuaResult<Vec<Action>> {
-    table.sequence_values::<Table>().map(|v| Action::from_lua(&v?)).collect()
+    table
+        .sequence_values::<Table>()
+        .map(|v| Action::from_lua(&v?))
+        .collect()
 }

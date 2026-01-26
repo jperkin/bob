@@ -83,7 +83,9 @@ fn generate_summary_entry(pkgfile: &Path) -> Option<String> {
         return None;
     }
 
-    let opts = SummaryOptions { compute_file_cksum: true };
+    let opts = SummaryOptions {
+        compute_file_cksum: true,
+    };
 
     match BinaryPackage::open(pkgfile) {
         Ok(pkg) => match pkg.to_summary_with_opts(&opts) {
@@ -110,9 +112,8 @@ fn generate_summary_entry(pkgfile: &Path) -> Option<String> {
 
 fn write_pkg_summary(pkgsrc_env: &PkgsrcEnv, entries: &[String]) -> Result<()> {
     let summary_path = pkgsrc_env.packages.join("All/pkg_summary.gz");
-    let file = File::create(&summary_path).with_context(|| {
-        format!("Failed to create {}", summary_path.display())
-    })?;
+    let file = File::create(&summary_path)
+        .with_context(|| format!("Failed to create {}", summary_path.display()))?;
     let mut encoder = GzEncoder::new(file, Compression::default());
 
     for entry in entries {

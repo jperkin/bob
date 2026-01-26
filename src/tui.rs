@@ -20,8 +20,7 @@ use crossterm::ExecutableCommand;
 use crossterm::cursor::Show;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
-    enable_raw_mode,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
@@ -63,7 +62,10 @@ pub struct OutputBuffer {
 
 impl OutputBuffer {
     pub fn new(capacity: usize) -> Self {
-        Self { lines: VecDeque::with_capacity(capacity), capacity }
+        Self {
+            lines: VecDeque::with_capacity(capacity),
+            capacity,
+        }
     }
 
     pub fn push(&mut self, line: String) {
@@ -106,7 +108,11 @@ pub struct WorkerState {
 
 impl WorkerState {
     pub fn new() -> Self {
-        Self { package: None, stage: None, started: None }
+        Self {
+            package: None,
+            stage: None,
+            started: None,
+        }
     }
 
     pub fn set_active(&mut self, package: &str) {
@@ -149,12 +155,7 @@ pub struct ProgressState {
 }
 
 impl ProgressState {
-    pub fn new(
-        title: &str,
-        finished_title: &str,
-        total: usize,
-        num_workers: usize,
-    ) -> Self {
+    pub fn new(title: &str, finished_title: &str, total: usize, num_workers: usize) -> Self {
         let workers = (0..num_workers).map(|_| WorkerState::new()).collect();
         Self {
             title: title.to_string(),
@@ -245,8 +246,7 @@ impl ProgressState {
         if self.total == 0 {
             0.0
         } else {
-            (self.completed + self.cached + self.failed + self.skipped) as f64
-                / self.total as f64
+            (self.completed + self.cached + self.failed + self.skipped) as f64 / self.total as f64
         }
     }
 }
@@ -266,7 +266,11 @@ pub fn format_duration(d: Duration) -> String {
 /// Format a duration with decimal seconds for short durations.
 fn format_duration_short(d: Duration) -> String {
     let secs = d.as_secs_f64();
-    if secs < 60.0 { format!("{:.1}s", secs) } else { format_duration(d) }
+    if secs < 60.0 {
+        format!("{:.1}s", secs)
+    } else {
+        format_duration(d)
+    }
 }
 
 /**
@@ -288,8 +292,7 @@ impl PanelGroup {
         match self {
             PanelGroup::Active(i) => format!("[{}] ", i),
             PanelGroup::Idle(ids) => {
-                let id_strs: Vec<String> =
-                    ids.iter().map(|i| i.to_string()).collect();
+                let id_strs: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
                 format!("[{}] idle ", id_strs.join(","))
             }
         }
@@ -325,10 +328,7 @@ fn group_workers_linear(is_active: &[bool]) -> Vec<PanelGroup> {
  * within each column. Returns (groups, grid_info) where grid_info contains the
  * column assignments for rendering.
  */
-fn group_workers_grid(
-    is_active: &[bool],
-    cols: usize,
-) -> (Vec<Vec<PanelGroup>>, usize) {
+fn group_workers_grid(is_active: &[bool], cols: usize) -> (Vec<Vec<PanelGroup>>, usize) {
     let num_workers = is_active.len();
     let rows = num_workers.div_ceil(cols);
 
@@ -351,8 +351,7 @@ fn group_workers_grid(
             } else {
                 let mut idle_ids = vec![w];
                 i += 1;
-                while i < workers_in_col.len() && !is_active[workers_in_col[i]]
-                {
+                while i < workers_in_col.len() && !is_active[workers_in_col[i]] {
                     idle_ids.push(workers_in_col[i]);
                     i += 1;
                 }
@@ -369,11 +368,7 @@ fn group_workers_grid(
  * Idle groups get minimal height, active panels share remaining space.
  * Elapsed times are used to prioritize extra lines to longer-running panels.
  */
-fn calculate_linear_layout(
-    area: Rect,
-    groups: &[PanelGroup],
-    elapsed_secs: &[u64],
-) -> Vec<Rect> {
+fn calculate_linear_layout(area: Rect, groups: &[PanelGroup], elapsed_secs: &[u64]) -> Vec<Rect> {
     let num_groups = groups.len();
     if num_groups == 0 {
         return vec![];
@@ -386,8 +381,11 @@ fn calculate_linear_layout(
     let active_space = area.height.saturating_sub(total_idle_height);
 
     // Base height for each active panel, plus remainder to distribute
-    let base_height =
-        if active_count > 0 { active_space / active_count as u16 } else { 0 };
+    let base_height = if active_count > 0 {
+        active_space / active_count as u16
+    } else {
+        0
+    };
     let remainder = if active_count > 0 {
         (active_space % active_count as u16) as usize
     } else {
@@ -431,7 +429,12 @@ fn calculate_linear_layout(
         } else {
             idle_height
         };
-        rects.push(Rect { x: area.x, y, width: area.width, height: h });
+        rects.push(Rect {
+            x: area.x,
+            y,
+            width: area.width,
+            height: h,
+        });
         y += h;
     }
 
@@ -453,8 +456,9 @@ fn calculate_grid_layout(
     }
 
     // Split area into columns
-    let col_constraints: Vec<Constraint> =
-        (0..cols).map(|_| Constraint::Ratio(1, cols as u32)).collect();
+    let col_constraints: Vec<Constraint> = (0..cols)
+        .map(|_| Constraint::Ratio(1, cols as u32))
+        .collect();
     let col_areas = Layout::default()
         .direction(Direction::Horizontal)
         .constraints(col_constraints)
@@ -464,9 +468,7 @@ fn calculate_grid_layout(
     column_groups
         .iter()
         .enumerate()
-        .map(|(col_idx, groups)| {
-            calculate_linear_layout(col_areas[col_idx], groups, elapsed_secs)
-        })
+        .map(|(col_idx, groups)| calculate_linear_layout(col_areas[col_idx], groups, elapsed_secs))
         .collect()
 }
 
@@ -495,21 +497,17 @@ impl MultiProgress {
         enable_raw_mode()?;
 
         let backend = CrosstermBackend::new(stdout());
-        let options = TerminalOptions { viewport: Viewport::Inline(height) };
+        let options = TerminalOptions {
+            viewport: Viewport::Inline(height),
+        };
         let terminal = Terminal::with_options(backend, options)?;
 
         // Create output buffer for each worker (100 lines each)
-        let output_buffers =
-            (0..num_workers).map(|_| OutputBuffer::new(100)).collect();
+        let output_buffers = (0..num_workers).map(|_| OutputBuffer::new(100)).collect();
 
         Ok(Self {
             terminal,
-            state: ProgressState::new(
-                title,
-                finished_title,
-                total,
-                num_workers,
-            ),
+            state: ProgressState::new(title, finished_title, total, num_workers),
             view_mode: ViewMode::Inline,
             output_buffers,
             num_workers,
@@ -521,10 +519,7 @@ impl MultiProgress {
         &mut self.state
     }
 
-    pub fn output_buffer_mut(
-        &mut self,
-        id: usize,
-    ) -> Option<&mut OutputBuffer> {
+    pub fn output_buffer_mut(&mut self, id: usize) -> Option<&mut OutputBuffer> {
         self.output_buffers.get_mut(id)
     }
 
@@ -573,8 +568,11 @@ impl MultiProgress {
             let area = frame.area();
 
             // Create constraints for each line
-            let mut constraints: Vec<Constraint> =
-                state.workers.iter().map(|_| Constraint::Length(1)).collect();
+            let mut constraints: Vec<Constraint> = state
+                .workers
+                .iter()
+                .map(|_| Constraint::Length(1))
+                .collect();
             constraints.push(Constraint::Length(1)); // Progress bar
 
             let chunks = Layout::vertical(constraints).split(area);
@@ -582,9 +580,7 @@ impl MultiProgress {
             // Render worker lines
             let tw = state.timer_width;
             for (i, worker) in state.workers.iter().enumerate() {
-                let text = if let (Some(pkg), Some(elapsed)) =
-                    (&worker.package, worker.elapsed())
-                {
+                let text = if let (Some(pkg), Some(elapsed)) = (&worker.package, worker.elapsed()) {
                     if let Some(stage) = &worker.stage {
                         format!(
                             "  [{:>2}:{:>tw$} ] {} ({})",
@@ -646,10 +642,7 @@ impl MultiProgress {
             };
 
             let line = if hint.is_empty() {
-                format!(
-                    "{:>12} [{}] {} {}",
-                    state.title, bar, counts, elapsed_str
-                )
+                format!("{:>12} [{}] {} {}", state.title, bar, counts, elapsed_str)
             } else {
                 format!(
                     "{:>12} [{}] {} {}{:pad$} {}",
@@ -684,9 +677,7 @@ impl MultiProgress {
             // Handle Ctrl+C - immediately show interrupted message, then
             // raise SIGINT to trigger shutdown. This ensures the user sees
             // feedback right away, even if cleanup takes time.
-            if key.code == KeyCode::Char('c')
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-            {
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 let _ = self.finish_interrupted();
                 unsafe {
                     libc::raise(libc::SIGINT);
@@ -729,7 +720,9 @@ impl MultiProgress {
         // Recreate terminal with inline viewport
         let height = (self.num_workers + 1) as u16;
         let backend = CrosstermBackend::new(stdout());
-        let options = TerminalOptions { viewport: Viewport::Inline(height) };
+        let options = TerminalOptions {
+            viewport: Viewport::Inline(height),
+        };
         self.terminal = Terminal::with_options(backend, options)?;
         self.view_mode = ViewMode::Inline;
 
@@ -758,7 +751,10 @@ impl MultiProgress {
         // Extract active flags and elapsed times for layout calculation
         let is_active: Vec<bool> = (0..num_workers)
             .map(|i| {
-                self.state.workers.get(i).is_some_and(|w| w.package.is_some())
+                self.state
+                    .workers
+                    .get(i)
+                    .is_some_and(|w| w.package.is_some())
             })
             .collect();
         let elapsed_secs: Vec<u64> = (0..num_workers)
@@ -793,8 +789,10 @@ impl MultiProgress {
         let panels = calculate_linear_layout(area, &groups, elapsed_secs);
 
         // Pre-compute titles
-        let titles: Vec<String> =
-            groups.iter().map(|group| self.format_group_title(group)).collect();
+        let titles: Vec<String> = groups
+            .iter()
+            .map(|group| self.format_group_title(group))
+            .collect();
 
         // Collect output lines for each panel
         let panel_lines: Vec<Vec<String>> = panels
@@ -825,11 +823,7 @@ impl MultiProgress {
                 let inner_width = panel_area.width.saturating_sub(2) as usize;
                 let inner_height = panel_area.height.saturating_sub(2) as usize;
 
-                let visible = build_visible_lines(
-                    &panel_lines[i],
-                    inner_width,
-                    inner_height,
-                );
+                let visible = build_visible_lines(&panel_lines[i], inner_width, inner_height);
 
                 let paragraph = Paragraph::new(visible).block(block);
                 frame.render_widget(paragraph, *panel_area);
@@ -853,15 +847,12 @@ impl MultiProgress {
         let cols = max_cols_by_count.min(max_cols_by_width).max(1);
 
         let (column_groups, _rows) = group_workers_grid(is_active, cols);
-        let column_rects =
-            calculate_grid_layout(area, &column_groups, elapsed_secs);
+        let column_rects = calculate_grid_layout(area, &column_groups, elapsed_secs);
 
         // Pre-compute titles for each group in each column
         let column_titles: Vec<Vec<String>> = column_groups
             .iter()
-            .map(|groups| {
-                groups.iter().map(|g| self.format_group_title(g)).collect()
-            })
+            .map(|groups| groups.iter().map(|g| self.format_group_title(g)).collect())
             .collect();
 
         // Collect output lines for each panel in each column
@@ -873,16 +864,13 @@ impl MultiProgress {
                     .iter()
                     .zip(rects.iter())
                     .map(|(group, rect)| {
-                        let inner_height =
-                            rect.height.saturating_sub(2) as usize;
+                        let inner_height = rect.height.saturating_sub(2) as usize;
                         let lines_needed = (inner_height * 2).max(10);
                         match group {
                             PanelGroup::Active(i) => self
                                 .output_buffers
                                 .get(*i)
-                                .map(|buf| {
-                                    buf.last_n(lines_needed).cloned().collect()
-                                })
+                                .map(|buf| buf.last_n(lines_needed).cloned().collect())
                                 .unwrap_or_default(),
                             PanelGroup::Idle(..) => Vec::new(),
                         }
@@ -897,18 +885,13 @@ impl MultiProgress {
                     frame.render_widget(Clear, *panel_area);
 
                     let title = &column_titles[col_idx][row_idx];
-                    let block = Block::default()
-                        .title(title.as_str())
-                        .borders(Borders::ALL);
+                    let block = Block::default().title(title.as_str()).borders(Borders::ALL);
 
-                    let inner_width =
-                        panel_area.width.saturating_sub(2) as usize;
-                    let inner_height =
-                        panel_area.height.saturating_sub(2) as usize;
+                    let inner_width = panel_area.width.saturating_sub(2) as usize;
+                    let inner_height = panel_area.height.saturating_sub(2) as usize;
 
                     let lines = &column_lines[col_idx][row_idx];
-                    let visible =
-                        build_visible_lines(lines, inner_width, inner_height);
+                    let visible = build_visible_lines(lines, inner_width, inner_height);
 
                     let paragraph = Paragraph::new(visible).block(block);
                     frame.render_widget(paragraph, *panel_area);
@@ -925,10 +908,7 @@ impl MultiProgress {
                 if let Some(w) = self.state.workers.get(*i) {
                     if let Some(pkg) = &w.package {
                         let stage = w.stage.as_deref().unwrap_or("");
-                        let elapsed = w
-                            .elapsed()
-                            .map(format_duration_short)
-                            .unwrap_or_default();
+                        let elapsed = w.elapsed().map(format_duration_short).unwrap_or_default();
                         if stage.is_empty() {
                             format!("[{}] {} {} ", i, pkg, elapsed)
                         } else {
@@ -949,10 +929,8 @@ impl MultiProgress {
     pub fn finish(&mut self) -> io::Result<()> {
         let elapsed = self.finish_silent()?;
         let elapsed_str = format_duration(elapsed);
-        let total = self.state.completed
-            + self.state.cached
-            + self.state.failed
-            + self.state.skipped;
+        let total =
+            self.state.completed + self.state.cached + self.state.failed + self.state.skipped;
         println!(
             "{} {} in {} ({} succeeded, {} cached, {} failed, {} skipped)",
             self.state.finished_title,
@@ -1012,11 +990,7 @@ impl MultiProgress {
     }
 }
 
-fn build_visible_lines(
-    lines: &[String],
-    width: usize,
-    height: usize,
-) -> Vec<Line<'static>> {
+fn build_visible_lines(lines: &[String], width: usize, height: usize) -> Vec<Line<'static>> {
     if width == 0 || height == 0 {
         return Vec::new();
     }

@@ -81,18 +81,16 @@ struct FailedPackageInfo<'a> {
 /// Read the failed phase from the .stage file in the log directory.
 fn read_failed_phase(log_dir: &Path) -> Option<String> {
     let stage_file = log_dir.join(".stage");
-    fs::read_to_string(stage_file).ok().map(|s| s.trim().to_string())
+    fs::read_to_string(stage_file)
+        .ok()
+        .map(|s| s.trim().to_string())
 }
 
 /// Generate an HTML build report from database.
 ///
 /// Reads build results from the database, ensuring accurate duration and
 /// breaks counts even for interrupted or resumed builds.
-pub fn write_html_report(
-    db: &Database,
-    logdir: &Path,
-    path: &Path,
-) -> Result<()> {
+pub fn write_html_report(db: &Database, logdir: &Path, path: &Path) -> Result<()> {
     let mut results = db.get_all_build_results()?;
     let breaks_counts = db.count_breaks_for_failed()?;
     let duration = db.get_total_build_duration()?;
@@ -113,15 +111,17 @@ pub fn write_html_report(
         results.push(BuildResult {
             pkgname: pkgsrc::PkgName::new(&pkgname),
             pkgpath: pkgpath.and_then(|p| pkgsrc::PkgPath::new(&p).ok()),
-            outcome: BuildOutcome::Skipped(SkipReason::IndirectFail(
-                failed_dep,
-            )),
+            outcome: BuildOutcome::Skipped(SkipReason::IndirectFail(failed_dep)),
             duration: std::time::Duration::ZERO,
             log_dir: None,
         });
     }
 
-    let summary = BuildSummary { duration, results, scanfail: Vec::new() };
+    let summary = BuildSummary {
+        duration,
+        results,
+        scanfail: Vec::new(),
+    };
 
     write_report_impl(&summary, &breaks_counts, logdir, path)
 }
@@ -144,12 +144,7 @@ fn write_report_impl(
     let mut skipped: Vec<&BuildResult> = summary
         .results
         .iter()
-        .filter(|r| {
-            matches!(
-                r.outcome,
-                BuildOutcome::UpToDate | BuildOutcome::Skipped(_)
-            )
-        })
+        .filter(|r| matches!(r.outcome, BuildOutcome::UpToDate | BuildOutcome::Skipped(_)))
         .collect();
 
     // Collect failed packages with additional info
@@ -169,15 +164,20 @@ fn write_report_impl(
                     .find(|(name, _)| *name == phase)
                     .map(|(_, log)| (*log).to_string())
             });
-            FailedPackageInfo { result, breaks_count, failed_phase, failed_log }
+            FailedPackageInfo {
+                result,
+                breaks_count,
+                failed_phase,
+                failed_log,
+            }
         })
         .collect();
 
     // Sort failed by breaks_count descending, then by name
     failed_info.sort_by(|a, b| {
-        b.breaks_count.cmp(&a.breaks_count).then_with(|| {
-            a.result.pkgname.pkgname().cmp(b.result.pkgname.pkgname())
-        })
+        b.breaks_count
+            .cmp(&a.breaks_count)
+            .then_with(|| a.result.pkgname.pkgname().cmp(b.result.pkgname.pkgname()))
     });
 
     succeeded.sort_by(|a, b| a.pkgname.pkgname().cmp(b.pkgname.pkgname()));
@@ -249,7 +249,10 @@ fn write_styles(file: &mut fs::File) -> Result<()> {
         file,
         "    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background: #fff; }}"
     )?;
-    writeln!(file, "    .container {{ max-width: 1400px; margin: 0 auto; }}")?;
+    writeln!(
+        file,
+        "    .container {{ max-width: 1400px; margin: 0 auto; }}"
+    )?;
     writeln!(
         file,
         "    .header {{ display: flex; align-items: center; gap: 20px; margin-bottom: 20px; padding-bottom: 20px; border-bottom: 3px solid #f37021; }}"
@@ -365,8 +368,14 @@ fn write_sort_script(file: &mut fs::File) -> Result<()> {
         file,
         "      const rows = Array.from(tbody.querySelectorAll('tr'));"
     )?;
-    writeln!(file, "      const th = table.querySelectorAll('th')[colIdx];")?;
-    writeln!(file, "      const isAsc = th.classList.contains('sort-asc');")?;
+    writeln!(
+        file,
+        "      const th = table.querySelectorAll('th')[colIdx];"
+    )?;
+    writeln!(
+        file,
+        "      const isAsc = th.classList.contains('sort-asc');"
+    )?;
     writeln!(file, "      ")?;
     writeln!(file, "      // Remove sort classes from all headers")?;
     writeln!(
@@ -408,10 +417,7 @@ fn write_sort_script(file: &mut fs::File) -> Result<()> {
     Ok(())
 }
 
-fn write_summary_stats(
-    file: &mut fs::File,
-    summary: &BuildSummary,
-) -> Result<()> {
+fn write_summary_stats(file: &mut fs::File, summary: &BuildSummary) -> Result<()> {
     let duration_secs = summary.duration.as_secs();
     let hours = duration_secs / 3600;
     let minutes = (duration_secs % 3600) / 60;
@@ -426,12 +432,8 @@ fn write_summary_stats(
 
     let c = summary.counts();
     let s = &c.skipped;
-    let skipped_count = c.up_to_date
-        + s.pkg_skip
-        + s.pkg_fail
-        + s.unresolved
-        + s.indirect_skip
-        + s.indirect_fail;
+    let skipped_count =
+        c.up_to_date + s.pkg_skip + s.pkg_fail + s.unresolved + s.indirect_skip + s.indirect_fail;
     writeln!(file, "<div class=\"summary\">")?;
     writeln!(
         file,
@@ -464,11 +466,7 @@ fn write_summary_stats(
     Ok(())
 }
 
-fn generate_phase_links(
-    pkg_name: &str,
-    log_dir: &Path,
-    failed_phase: Option<&str>,
-) -> String {
+fn generate_phase_links(pkg_name: &str, log_dir: &Path, failed_phase: Option<&str>) -> String {
     if !log_dir.exists() {
         return "-".to_string();
     }
@@ -478,8 +476,11 @@ fn generate_phase_links(
         let log_path = log_dir.join(log_file);
         if log_path.exists() {
             let is_failed = failed_phase == Some(*phase_name);
-            let class =
-                if is_failed { "phase-link failed" } else { "phase-link" };
+            let class = if is_failed {
+                "phase-link failed"
+            } else {
+                "phase-link"
+            };
             links.push(format!(
                 "<a href=\"{}/{}\" class=\"{}\">{}</a>",
                 pkg_name, log_file, class, phase_name
@@ -557,11 +558,8 @@ fn write_failed_section(
             };
 
             let log_dir = logdir.join(pkg_name);
-            let phase_links = generate_phase_links(
-                pkg_name,
-                &log_dir,
-                info.failed_phase.as_deref(),
-            );
+            let phase_links =
+                generate_phase_links(pkg_name, &log_dir, info.failed_phase.as_deref());
 
             writeln!(
                 file,
@@ -584,10 +582,7 @@ fn write_failed_section(
     Ok(())
 }
 
-fn write_skipped_section(
-    file: &mut fs::File,
-    skipped: &[&BuildResult],
-) -> Result<()> {
+fn write_skipped_section(file: &mut fs::File, skipped: &[&BuildResult]) -> Result<()> {
     writeln!(file, "<div class=\"section skipped\">")?;
     writeln!(file, "  <h2>Skipped Packages ({})</h2>", skipped.len())?;
 
@@ -703,10 +698,7 @@ fn write_success_section(
     Ok(())
 }
 
-fn write_scanfail_section(
-    file: &mut fs::File,
-    scanfail: &[(PkgPath, String)],
-) -> Result<()> {
+fn write_scanfail_section(file: &mut fs::File, scanfail: &[(PkgPath, String)]) -> Result<()> {
     writeln!(file, "<div class=\"section scan-failed\">")?;
     writeln!(file, "  <h2>Scan Failed Packages ({})</h2>", scanfail.len())?;
 
