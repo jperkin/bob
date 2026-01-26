@@ -75,7 +75,7 @@ mod sandbox_sunos;
 use crate::action::{ActionType, FSType};
 use crate::config::Config;
 use crate::{Interrupted, RunContext};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
 use std::fs;
 use std::io::Write;
@@ -301,21 +301,27 @@ impl Sandbox {
     }
 
     fn create_marker(&self, id: usize) -> Result<()> {
-        Ok(fs::create_dir(self.bobmarker(id))?)
+        let path = self.bobmarker(id);
+        fs::create_dir(&path).with_context(|| format!("Failed to create {}", path.display()))?;
+        Ok(())
     }
 
     fn create_lock(&self, id: usize) -> Result<()> {
-        Ok(fs::create_dir(self.lockpath(id))?)
+        let path = self.lockpath(id);
+        fs::create_dir(&path).with_context(|| format!("Failed to create {}", path.display()))?;
+        Ok(())
     }
 
     fn delete_lock(&self, id: usize) -> Result<()> {
         let lockdir = self.lockpath(id);
         if lockdir.exists() {
-            fs::remove_dir(&lockdir)?;
+            fs::remove_dir(&lockdir)
+                .with_context(|| format!("Failed to remove {}", lockdir.display()))?;
         }
         let bobmarker = self.bobmarker(id);
         if bobmarker.exists() {
-            fs::remove_dir(&bobmarker)?;
+            fs::remove_dir(&bobmarker)
+                .with_context(|| format!("Failed to remove {}", bobmarker.display()))?;
         }
         Ok(())
     }
@@ -340,7 +346,9 @@ impl Sandbox {
             return Ok(vec![]);
         }
         let mut ids = Vec::new();
-        for entry in fs::read_dir(basedir)? {
+        let entries = fs::read_dir(basedir)
+            .with_context(|| format!("Failed to read {}", basedir.display()))?;
+        for entry in entries {
             let entry = entry?;
             let path = entry.path();
             if !path.is_dir() {
@@ -376,7 +384,8 @@ impl Sandbox {
                 sandbox.display()
             );
         }
-        fs::create_dir_all(&sandbox)?;
+        fs::create_dir_all(&sandbox)
+            .with_context(|| format!("Failed to create {}", sandbox.display()))?;
         self.create_marker(id)?;
         self.perform_actions(id)?;
         self.create_lock(id)?;
@@ -756,7 +765,9 @@ impl Sandbox {
         }
 
         // It's a directory - process contents first (depth-first)
-        for entry in fs::read_dir(path)? {
+        let entries =
+            fs::read_dir(path).with_context(|| format!("Failed to read {}", path.display()))?;
+        for entry in entries {
             let entry = entry?;
             self.remove_empty_hierarchy(&entry.path())?;
         }
@@ -844,7 +855,9 @@ impl Sandbox {
                         dest = %dest.display(),
                         "Copying"
                     );
-                    copy_dir::copy_dir(src, &dest)?;
+                    copy_dir::copy_dir(src, &dest).with_context(|| {
+                        format!("Failed to copy {} to {}", src.display(), dest.display())
+                    })?;
                     None
                 }
                 ActionType::Cmd => {
@@ -878,10 +891,18 @@ impl Sandbox {
                     );
                     if let Some(parent) = dest_path.parent() {
                         if !parent.exists() {
-                            fs::create_dir_all(parent)?;
+                            fs::create_dir_all(parent).with_context(|| {
+                                format!("Failed to create {}", parent.display())
+                            })?;
                         }
                     }
-                    std::os::unix::fs::symlink(src, &dest_path)?;
+                    std::os::unix::fs::symlink(src, &dest_path).with_context(|| {
+                        format!(
+                            "Failed to create symlink {} -> {}",
+                            dest_path.display(),
+                            src.display()
+                        )
+                    })?;
                     None
                 }
             };
@@ -1098,31 +1119,38 @@ impl Sandbox {
     #[allow(clippy::only_used_in_recursion)]
     fn remove_dir_recursive(&self, path: &Path) -> Result<()> {
         // Use symlink_metadata to check type WITHOUT following symlinks
-        let meta = fs::symlink_metadata(path)?;
+        let meta = fs::symlink_metadata(path)
+            .with_context(|| format!("Failed to stat {}", path.display()))?;
         if meta.is_symlink() {
             // Remove the symlink itself, don't follow it
-            fs::remove_file(path)?;
+            fs::remove_file(path)
+                .with_context(|| format!("Failed to remove {}", path.display()))?;
             return Ok(());
         }
         if !meta.is_dir() {
-            fs::remove_file(path)?;
+            fs::remove_file(path)
+                .with_context(|| format!("Failed to remove {}", path.display()))?;
             return Ok(());
         }
-        for entry in fs::read_dir(path)? {
+        let entries =
+            fs::read_dir(path).with_context(|| format!("Failed to read {}", path.display()))?;
+        for entry in entries {
             let entry = entry?;
             let entry_path = entry.path();
             // Use file_type() from DirEntry which doesn't follow symlinks
             let file_type = entry.file_type()?;
             if file_type.is_symlink() {
                 // Remove symlink itself, don't follow
-                fs::remove_file(&entry_path)?;
+                fs::remove_file(&entry_path)
+                    .with_context(|| format!("Failed to remove {}", entry_path.display()))?;
             } else if file_type.is_dir() {
                 self.remove_dir_recursive(&entry_path)?;
             } else {
-                fs::remove_file(&entry_path)?;
+                fs::remove_file(&entry_path)
+                    .with_context(|| format!("Failed to remove {}", entry_path.display()))?;
             }
         }
-        fs::remove_dir(path)?;
+        fs::remove_dir(path).with_context(|| format!("Failed to remove {}", path.display()))?;
         Ok(())
     }
 }

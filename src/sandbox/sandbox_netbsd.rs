@@ -29,7 +29,7 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest)?;
+        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
         let cmd = "/sbin/mount_null";
         Ok(Some(
             Command::new(cmd)
@@ -60,7 +60,7 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest)?;
+        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
         let cmd = "/sbin/mount_fdesc";
         Ok(Some(
             Command::new(cmd)
@@ -79,7 +79,7 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest)?;
+        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
         let cmd = "/sbin/mount_nfs";
         Ok(Some(
             Command::new(cmd)
@@ -98,7 +98,7 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest)?;
+        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
         let cmd = "/sbin/mount_procfs";
         Ok(Some(
             Command::new(cmd)
@@ -117,7 +117,7 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest)?;
+        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
         let cmd = "/sbin/mount_tmpfs";
         Ok(Some(
             Command::new(cmd)
