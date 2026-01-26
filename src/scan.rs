@@ -1076,12 +1076,12 @@ impl Scan {
          * to the missing set. If a match exists, add it to the active set.
          * Continue until no new packages are activated.
          */
-        let all_scan_data = db.get_all_scan_indexes()?;
+        let all_scan_data = db.get_all_scan_data()?;
 
         let mut available_pkgnames: HashSet<PkgName> = HashSet::new();
         let mut packages: IndexMap<PkgName, ScanIndex> = IndexMap::new();
 
-        for (_pkg_id, pkg) in all_scan_data {
+        for pkg in all_scan_data {
             if !packages.contains_key(&pkg.pkgname) {
                 available_pkgnames.insert(pkg.pkgname.clone());
                 packages.insert(pkg.pkgname.clone(), pkg);
@@ -1335,20 +1335,18 @@ impl Scan {
      * presolve behavior. This avoids scanning/resolving thousands of unneeded
      * packages when building a small subset.
      */
-    pub fn resolve(&mut self, db: &crate::db::Database) -> Result<ScanSummary> {
+    pub fn resolve(&mut self, scan_data: Vec<ScanIndex>) -> Result<ScanSummary> {
         info!(
             done_pkgpaths = self.done.len(),
             "Starting dependency resolution"
         );
 
-        let all_scan_data = db.get_all_scan_indexes()?;
-        let mut pkgname_to_id: HashMap<PkgName, i64> = HashMap::new();
         let mut skip_reasons: HashMap<PkgName, SkipReason> = HashMap::new();
         let mut depends: HashMap<PkgName, Vec<PkgName>> = HashMap::new();
         let mut active: HashSet<PkgName> = HashSet::new();
         let use_active_filter = !self.full_tree && !self.initial_pkgpaths.is_empty();
 
-        for (pkg_id, pkg) in all_scan_data {
+        for pkg in scan_data {
             if self.packages.contains_key(&pkg.pkgname) {
                 debug!(pkgname = %pkg.pkgname.pkgname(), "Skipping duplicate PKGNAME");
                 continue;
@@ -1376,7 +1374,6 @@ impl Scan {
                 }
             }
 
-            pkgname_to_id.insert(pkg.pkgname.clone(), pkg_id);
             depends.insert(pkg.pkgname.clone(), Vec::new());
             self.packages.insert(pkg.pkgname.clone(), pkg);
         }
@@ -1543,31 +1540,15 @@ impl Scan {
             "Resolution complete"
         );
 
-        let mut resolved_deps: Vec<(i64, i64)> = Vec::new();
-        for pkg in &summary.packages {
-            if let ScanResult::Buildable(resolved) = pkg {
-                if let Some(&pkg_id) = pkgname_to_id.get(resolved.pkgname()) {
-                    for dep in resolved.depends() {
-                        if let Some(&dep_id) = pkgname_to_id.get(dep) {
-                            resolved_deps.push((pkg_id, dep_id));
-                        }
-                    }
-                }
-            }
-        }
-        if !resolved_deps.is_empty() {
-            db.store_resolved_dependencies_batch(&resolved_deps)?;
-            debug!(count = resolved_deps.len(), "Stored resolved dependencies");
-        }
-
         Ok(summary)
     }
 
     /**
      * Resolve dependencies and report results.
      *
-     * Prints progress, calls [`resolve`], reports any unresolved dependency
-     * errors, and optionally bails if `strict` is true.
+     * Loads scan data from database, resolves dependencies, stores resolved
+     * dependencies back to database, and reports any unresolved dependency
+     * errors. Optionally bails if `strict` is true.
      */
     pub fn resolve_with_report(
         &mut self,
@@ -1578,7 +1559,9 @@ impl Scan {
         std::io::Write::flush(&mut std::io::stdout())?;
 
         let start = std::time::Instant::now();
-        let result = self.resolve(db)?;
+        let scan_data = db.get_all_scan_data()?;
+        let result = self.resolve(scan_data)?;
+        db.store_resolved_deps(&result)?;
         println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
 
         let errors: Vec<_> = result.errors().collect();

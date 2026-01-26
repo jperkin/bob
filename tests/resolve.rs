@@ -2,65 +2,38 @@
 
 use anyhow::Result;
 use bob::Scan;
-use bob::db::Database;
 use bob::scan::ScanSummary;
-use indexmap::IndexMap;
 use pkgsrc::ScanIndex;
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::OnceLock;
-use tempfile::TempDir;
 
 const PSCAN_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/pscan.zstd");
 
 /// Cached scan result and import count, initialized once.
 static SCAN_DATA: OnceLock<(ScanSummary, usize)> = OnceLock::new();
 
-/// Get or initialize the scan result (imports pscan and resolves once).
+/// Get or initialize the scan result (parses pscan and resolves once).
 fn get_scan_result() -> &'static (ScanSummary, usize) {
     SCAN_DATA.get_or_init(|| {
-        let tmp = TempDir::new().expect("failed to create tempdir");
-        let db_path = tmp.path().join("test.db");
-        let db = Database::open(&db_path).expect("failed to open db");
-
-        let count = import_pscan(&db, PSCAN_PATH).expect("failed to import pscan");
+        let scan_data = load_pscan(PSCAN_PATH).expect("failed to load pscan");
+        let count = scan_data.len();
 
         let mut scan = Scan::default();
-        scan.init_from_db(&db).expect("failed to init scan");
-        let result = scan.resolve(&db).expect("failed to resolve");
+        let result = scan.resolve(scan_data).expect("failed to resolve");
 
         (result, count)
     })
 }
 
-/// Import a zstd-compressed pscan file into a database.
-fn import_pscan(db: &Database, path: &str) -> Result<usize> {
+/// Load a zstd-compressed pscan file into a Vec<ScanIndex>.
+fn load_pscan(path: &str) -> Result<Vec<ScanIndex>> {
     let file = File::open(path)?;
     let decoder = zstd::stream::Decoder::new(file)?;
     let reader = BufReader::new(decoder);
 
-    let mut by_pkgpath: IndexMap<String, Vec<ScanIndex>> = IndexMap::new();
-    let mut count = 0;
-
-    for result in ScanIndex::from_reader(reader) {
-        let index = result?;
-        let pkgpath = index
-            .pkg_location
-            .as_ref()
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        by_pkgpath.entry(pkgpath).or_default().push(index);
-        count += 1;
-    }
-
-    db.clear_scan()?;
-    db.begin_transaction()?;
-    for (pkgpath, indexes) in &by_pkgpath {
-        db.store_scan_pkgpath(pkgpath, indexes)?;
-    }
-    db.commit()?;
-
-    Ok(count)
+    let results: Result<Vec<_>, _> = ScanIndex::from_reader(reader).collect();
+    Ok(results?)
 }
 
 #[test]
@@ -161,28 +134,11 @@ fn resolve_errors_accurate() -> Result<()> {
 }
 
 /// Parse synthetic scan data from text format.
-fn parse_scan_data(data: &str) -> Vec<(String, ScanIndex)> {
+fn parse_scan_data(data: &str) -> Vec<ScanIndex> {
     let reader = std::io::BufReader::new(data.as_bytes());
     ScanIndex::from_reader(reader)
-        .map(|r| {
-            let index = r.expect("failed to parse scan index");
-            let pkgpath = index
-                .pkg_location
-                .as_ref()
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            (pkgpath, index)
-        })
+        .map(|r| r.expect("failed to parse scan index"))
         .collect()
-}
-
-/// Import synthetic scan data into a database.
-fn import_synthetic(db: &Database, data: &str) -> Result<()> {
-    db.clear_scan()?;
-    for (pkgpath, index) in parse_scan_data(data) {
-        db.store_scan_pkgpath(&pkgpath, &[index])?;
-    }
-    Ok(())
 }
 
 #[test]
@@ -205,15 +161,9 @@ PKG_SKIP_REASON=
 PKG_FAIL_REASON=
 "#;
 
-    let tmp = TempDir::new()?;
-    let db_path = tmp.path().join("test.db");
-    let db = Database::open(&db_path)?;
-
-    import_synthetic(&db, data)?;
-
+    let scan_data = parse_scan_data(data);
     let mut scan = Scan::default();
-    scan.init_from_db(&db)?;
-    let result = scan.resolve(&db);
+    let result = scan.resolve(scan_data);
 
     // Should fail with circular dependency error
     assert!(result.is_err(), "circular dependencies should be detected");

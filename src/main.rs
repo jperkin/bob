@@ -631,7 +631,8 @@ fn run() -> Result<()> {
             let mut scan = Scan::new(&config);
             scan.init_from_db(&db)?;
 
-            let result = scan.resolve(&db)?;
+            let scan_data = db.get_all_scan_data()?;
+            let result = scan.resolve(scan_data)?;
 
             // Build DAG output
             let mut edges: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -672,7 +673,8 @@ fn run() -> Result<()> {
             let mut scan = Scan::new(&config);
             scan.init_from_db(&db)?;
 
-            let result = scan.resolve(&db)?;
+            let scan_data = db.get_all_scan_data()?;
+            let result = scan.resolve(scan_data)?;
 
             // Print unresolved dependency errors
             let errors: Vec<_> = result.errors().collect();
