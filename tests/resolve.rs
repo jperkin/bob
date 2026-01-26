@@ -54,9 +54,11 @@ fn import_pscan(db: &Database, path: &str) -> Result<usize> {
     }
 
     db.clear_scan()?;
+    db.begin_transaction()?;
     for (pkgpath, indexes) in &by_pkgpath {
         db.store_scan_pkgpath(pkgpath, indexes)?;
     }
+    db.commit()?;
 
     Ok(count)
 }
