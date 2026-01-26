@@ -199,7 +199,7 @@ impl BuildRunner {
                 ScanResult::Skipped { pkgpath, reason, index, .. } => {
                     let Some(pkgname) = index.as_ref().map(|i| &i.pkgname)
                     else {
-                        error!(pkgpath = %pkgpath, "Skipped package missing PKGNAME");
+                        error!(%pkgpath, "Skipped package missing PKGNAME");
                         continue;
                     };
                     summary.results.push(build::BuildResult {
