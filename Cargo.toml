@@ -24,7 +24,7 @@ anyhow = "1.0.89"
 clap = { version = "4.5", features = ["derive"] }
 copy_dir = "0.1"
 libc = "0.2"
-crossterm = "0.28"
+crossterm = { version = "0.28", features = ["use-dev-tty"] }
 strip-ansi-escapes = "0.2"
 unicode-width = "0.2"
 ctrlc = { version = "3.4", features = ["termination"] }
