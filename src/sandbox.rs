@@ -315,15 +315,15 @@ impl Sandbox {
      * Marker directory functions for sandbox lifecycle management.
      *
      * Each sandbox has a .bob directory that marks it as bob-managed.
-     * Inside .bob, a "created" directory indicates successful creation.
-     * This two-stage marker allows detecting incomplete sandboxes.
+     * Inside .bob, a "completed" directory indicates the sandbox was set up
+     * successfully.  This two-stage marker allows detecting incomplete sandboxes.
      */
     fn bobmarker(&self, id: usize) -> PathBuf {
         self.path(id).join(".bob")
     }
 
-    fn lockpath(&self, id: usize) -> PathBuf {
-        self.bobmarker(id).join("created")
+    fn completedpath(&self, id: usize) -> PathBuf {
+        self.bobmarker(id).join("completed")
     }
 
     fn create_marker(&self, id: usize) -> Result<()> {
@@ -332,23 +332,9 @@ impl Sandbox {
         Ok(())
     }
 
-    fn create_lock(&self, id: usize) -> Result<()> {
-        let path = self.lockpath(id);
+    fn mark_complete(&self, id: usize) -> Result<()> {
+        let path = self.completedpath(id);
         fs::create_dir(&path).with_context(|| format!("Failed to create {}", path.display()))?;
-        Ok(())
-    }
-
-    fn delete_lock(&self, id: usize) -> Result<()> {
-        let lockdir = self.lockpath(id);
-        if lockdir.exists() {
-            fs::remove_dir(&lockdir)
-                .with_context(|| format!("Failed to remove {}", lockdir.display()))?;
-        }
-        let bobmarker = self.bobmarker(id);
-        if bobmarker.exists() {
-            fs::remove_dir(&bobmarker)
-                .with_context(|| format!("Failed to remove {}", bobmarker.display()))?;
-        }
         Ok(())
     }
 
@@ -357,7 +343,7 @@ impl Sandbox {
     }
 
     fn is_sandbox_complete(&self, id: usize) -> bool {
-        self.lockpath(id).exists()
+        self.completedpath(id).exists()
     }
 
     /**
@@ -414,7 +400,7 @@ impl Sandbox {
             .with_context(|| format!("Failed to create {}", sandbox.display()))?;
         self.create_marker(id)?;
         self.perform_actions(id)?;
-        self.create_lock(id)?;
+        self.mark_complete(id)?;
         Ok(())
     }
 
@@ -600,22 +586,47 @@ impl Sandbox {
         if !sandbox.exists() {
             return Ok(());
         }
-        self.delete_lock(id)?;
+        /*
+         * First, remove the "completed" marker to indicate this sandbox is no
+         * longer available for builds.  If cleanup fails after this point,
+         * the sandbox remains discoverable (has .bob) but is marked incomplete.
+         */
+        let completeddir = self.completedpath(id);
+        if completeddir.exists() {
+            self.remove_empty_hierarchy(&completeddir)?;
+        }
         self.reverse_actions(id)?;
         /*
-         * Final cleanup: kill any remaining processes before removing the
-         * sandbox directory.  Per-mount killing already happened in
-         * reverse_actions(), but this catches anything that slipped through.
+         * Kill any remaining processes before removing the sandbox directory.
+         * Per-mount killing already happened in reverse_actions(), but this
+         * catches anything that slipped through.
          */
         self.kill_processes(&sandbox);
         /*
-         * After unmounting, try to remove the sandbox directory.  Use
-         * remove_empty_hierarchy which only removes empty directories.
-         * If any files remain, it will fail - this is intentional as it
-         * likely means a mount is still active or cleanup actions are
-         * missing from the config.
+         * Remove all sandbox contents EXCEPT .bob.  If removal fails due to
+         * unexpected files, the .bob marker remains and the sandbox can still
+         * be discovered for retry.
          */
         if sandbox.exists() {
+            let bobmarker = self.bobmarker(id);
+            let entries = fs::read_dir(&sandbox)
+                .with_context(|| format!("Failed to read {}", sandbox.display()))?;
+            for entry in entries {
+                let entry = entry?;
+                let path = entry.path();
+                if path == bobmarker {
+                    continue;
+                }
+                self.remove_empty_hierarchy(&path)?;
+            }
+            /*
+             * All other contents removed successfully.  Remove .bob as the
+             * absolute last step - this is what makes the sandbox no longer
+             * discoverable.
+             */
+            if bobmarker.exists() {
+                self.remove_empty_hierarchy(&bobmarker)?;
+            }
             self.remove_empty_hierarchy(&sandbox)?;
         }
         Ok(())
