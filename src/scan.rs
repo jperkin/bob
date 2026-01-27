@@ -360,12 +360,13 @@ impl std::fmt::Display for ScanSummary {
         let s = &c.skipped;
         write!(
             f,
-            "Resolved {} total packages from {} package paths\n{} buildable, {} pre-skipped, {} pre-failed, {} unresolved",
+            "Resolved {} total packages from {} package paths\n\
+             {} buildable, {} prefailed, {} indirect-prefailed, {} unresolved",
             self.packages.len(),
             self.pkgpaths,
             c.buildable,
-            s.pkg_skip + s.indirect_skip,
-            s.pkg_fail + s.indirect_fail,
+            s.pkg_skip + s.pkg_fail,
+            s.indirect_skip + s.indirect_fail,
             s.unresolved
         )
     }
