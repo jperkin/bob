@@ -202,10 +202,13 @@ impl Sandbox {
     pub fn command(&self, id: usize, cmd: &Path) -> Command {
         if self.enabled() {
             let mut c = Command::new("/usr/sbin/chroot");
+            c.env_clear();
             c.arg(self.path(id)).arg(cmd);
             c
         } else {
-            Command::new(cmd)
+            let mut c = Command::new(cmd);
+            c.env_clear();
+            c
         }
     }
 
@@ -941,27 +944,29 @@ impl Sandbox {
     ) -> Result<Option<std::process::ExitStatus>> {
         let sandbox_path = self.path(id);
         let output = if chroot {
-            Command::new("/usr/sbin/chroot")
-                .arg(&sandbox_path)
+            let mut c = Command::new("/usr/sbin/chroot");
+            c.env_clear();
+            c.arg(&sandbox_path)
                 .arg("/bin/sh")
                 .arg("-c")
                 .arg(cmd)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
-                .process_group(0)
-                .output()?
+                .process_group(0);
+            c.output()?
         } else {
-            Command::new("/bin/sh")
-                .arg("-c")
+            let mut c = Command::new("/bin/sh");
+            c.env_clear();
+            c.arg("-c")
                 .arg(cmd)
                 .env("bob_sandbox_path", &sandbox_path)
                 .current_dir(&sandbox_path)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
-                .process_group(0)
-                .output()?
+                .process_group(0);
+            c.output()?
         };
 
         if !output.status.success() {
