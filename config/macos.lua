@@ -97,7 +97,7 @@ sandboxes = {
         { action = "mount", fs = "dev", dir = "/dev" },
         { action = "mount", fs = "tmp", dir = "/tmp", opts = "-e -s 384m" },
         { action = "mount", fs = "tmp", dir = "/var", opts = "-e -s 512m" },
-        { action = "cmd", create = "mkdir var/tmp" },
+        { action = "cmd", create = "mkdir -m 1777 var/tmp; chmod 1777 tmp" },
 
         -- Read-only system mounts.
         { action = "mount", fs = "bind", dir = "/Library", opts = "-r" },
@@ -117,7 +117,7 @@ sandboxes = {
         -- At this point everything should be set up so that chrooted commands
         -- will execute successfully.  Perform additional chroot setup.
         { action = "cmd", chroot = true, create = [[
-                chmod 1777 /tmp /var/tmp
+                mkdir -p /var/{folders,select}
                 mkdir -p $(getconf DARWIN_USER_TEMP_DIR)
                 # If you enable a builder user then uncomment these
                 #homedir=$(su builder -c 'echo $HOME')
