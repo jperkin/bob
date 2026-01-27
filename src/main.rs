@@ -145,7 +145,7 @@ impl BuildRunner {
         &mut self,
         scan_result: bob::scan::ScanSummary,
         options: build::BuildOptions,
-        mut scope: SandboxScope,
+        scope: SandboxScope,
     ) -> Result<build::BuildSummary> {
         // Validate config before sandbox expansion
         if scan_result.count_buildable() == 0 {
@@ -156,9 +156,6 @@ impl BuildRunner {
             .buildable()
             .map(|p| (p.pkgname().clone(), p.clone()))
             .collect();
-
-        // Expand to build_threads sandboxes (creates any that don't exist)
-        scope.ensure(self.config.build_threads())?;
 
         let pkgsrc_env = self
             .db
@@ -478,8 +475,11 @@ fn run() -> Result<()> {
             let sandbox = Sandbox::new(&runner.config);
             let mut scope = SandboxScope::new(sandbox, runner.ctx.clone());
             let scan_result = runner.run_scan_with_scope(&mut scan, &mut scope)?;
-            runner.run_build_with(scan_result, build::BuildOptions::default(), scope)?;
-            runner.generate_pkg_summary();
+            let summary =
+                runner.run_build_with(scan_result, build::BuildOptions::default(), scope)?;
+            if summary.counts().success > 0 {
+                runner.generate_pkg_summary();
+            }
         }
         Cmd::Rebuild {
             all,

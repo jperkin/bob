@@ -1887,13 +1887,15 @@ impl Build {
         );
 
         if incoming.is_empty() {
-            // Guard is dropped when Build goes out of scope, destroying sandboxes
             return Ok(BuildSummary {
                 duration: started.elapsed(),
                 results,
                 scanfail: Vec::new(),
             });
         }
+
+        // Only create sandboxes when there's actual work to do
+        self.scope.ensure(self.config.build_threads())?;
 
         /*
          * Compute effective weights for build ordering.  The effective weight
