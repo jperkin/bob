@@ -11,6 +11,17 @@ options = {
     log_level = "info",
 }
 
+-- Environment variables for sandbox processes.  It is recommended to be as
+-- strict as possible, as pollution from the user environment can negatively
+-- impact builds.
+environment = {
+    clear = true,
+    inherit = { "TERM", "HOME" },
+    set = {
+        PATH = "/sbin:/bin:/usr/sbin:/usr/bin",
+    },
+}
+
 -- Variables that configure pkgsrc, where it is, what packages to build, etc.
 pkgsrc = {
     basedir = "/Volumes/data/pkgsrc",

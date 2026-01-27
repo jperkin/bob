@@ -21,9 +21,10 @@
 //!
 //! # Configuration File Structure
 //!
-//! A configuration file has four main sections:
+//! A configuration file has five main sections:
 //!
 //! - [`options`](#options-section) - General build options (optional)
+//! - [`environment`](#environment-section) - Environment variable configuration (optional)
 //! - [`pkgsrc`](#pkgsrc-section) - pkgsrc paths and package list (required)
 //! - [`scripts`](#scripts-section) - Build script paths (required)
 //! - [`sandboxes`](#sandboxes-section) - Sandbox configuration (optional)
@@ -38,6 +39,42 @@
 //! | `scan_threads` | integer | 1 | Number of parallel scan processes for dependency discovery. |
 //! | `strict_scan` | boolean | false | If true, abort on scan errors. If false, continue and report failures separately. |
 //! | `log_level` | string | "info" | Log level: "trace", "debug", "info", "warn", or "error". Can be overridden by `RUST_LOG` env var. |
+//!
+//! # Environment Section
+//!
+//! The `environment` section is optional. It controls the environment variables
+//! available to processes executed inside sandboxes.
+//!
+//! If this section is omitted, the parent environment is inherited unchanged.
+//! If present, `clear` defaults to true and the environment is cleared before
+//! applying the configured variables.
+//!
+//! | Field | Type | Default | Description |
+//! |-------|------|---------|-------------|
+//! | `clear` | boolean | true | If true, clear the environment. If false, inherit the full parent environment. |
+//! | `inherit` | table | `{}` | Variable names to copy from the parent environment (only used when `clear = true`). |
+//! | `set` | table | `{}` | Variables to set explicitly as key-value pairs. |
+//!
+//! To configure a minimal, controlled environment:
+//!
+//! ```lua
+//! environment = {
+//!     inherit = { "TERM", "HOME" },
+//!     set = {
+//!         PATH = "/sbin:/bin:/usr/sbin:/usr/bin",
+//!     },
+//! }
+//! ```
+//!
+//! ## Precedence
+//!
+//! Variables are applied in this order (later values override earlier):
+//!
+//! 1. `inherit` - copied from parent process (only if `clear = true`)
+//! 2. `set` - explicitly configured values
+//! 3. `pkgsrc.cachevars` - values fetched from pkgsrc
+//! 4. `pkgsrc.env` - per-package overrides
+//! 5. `bob_*` - internal variables (always set, cannot be overridden)
 //!
 //! # Pkgsrc Section
 //!
@@ -426,6 +463,8 @@ pub struct ConfigFile {
     pub scripts: HashMap<String, PathBuf>,
     /// The `sandboxes` section.
     pub sandboxes: Option<Sandboxes>,
+    /// The `environment` section.
+    pub environment: Option<Environment>,
 }
 
 /// General build options from the `options` section.
@@ -481,6 +520,45 @@ pub struct Pkgsrc {
     pub cachevars: Vec<String>,
     /// Path to tar binary (defaults to `tar` in PATH).
     pub tar: Option<PathBuf>,
+}
+
+/// Environment configuration from the `environment` section.
+///
+/// Controls the environment variables available to sandbox processes.
+///
+/// If this section is omitted from the config, the parent environment is
+/// inherited unchanged.  If present, `clear` defaults to true and the
+/// environment is cleared before applying the configured variables.
+///
+/// # Example
+///
+/// ```lua
+/// environment = {
+///     inherit = { "TERM", "HOME" },
+///     set = {
+///         PATH = "/sbin:/bin:/usr/sbin:/usr/bin",
+///     },
+/// }
+/// ```
+#[derive(Clone, Debug)]
+pub struct Environment {
+    /// If true (default), clear the environment before setting variables.
+    /// If false, inherit the full parent environment.
+    pub clear: bool,
+    /// Variable names to copy from the parent environment (when `clear = true`).
+    pub inherit: Vec<String>,
+    /// Variables to set explicitly.
+    pub set: HashMap<String, String>,
+}
+
+impl Default for Environment {
+    fn default() -> Self {
+        Self {
+            clear: true,
+            inherit: Vec::new(),
+            set: HashMap::new(),
+        }
+    }
 }
 
 /// Sandbox configuration from the `sandboxes` section.
@@ -641,6 +719,10 @@ impl Config {
 
     pub fn sandboxes(&self) -> &Option<Sandboxes> {
         &self.file.sandboxes
+    }
+
+    pub fn environment(&self) -> Option<&Environment> {
+        self.file.environment.as_ref()
     }
 
     pub fn bindfs(&self) -> &str {
@@ -856,6 +938,8 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
         parse_scripts(&globals).map_err(|e| format!("Error parsing scripts config: {}", e))?;
     let sandboxes =
         parse_sandboxes(&globals).map_err(|e| format!("Error parsing sandboxes config: {}", e))?;
+    let environment = parse_environment(&globals)
+        .map_err(|e| format!("Error parsing environment config: {}", e))?;
 
     // Store env function/table in registry if it exists
     let env_key = if let Ok(env_value) = pkgsrc_table.get::<Value>("env") {
@@ -881,6 +965,7 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
         pkgsrc,
         scripts,
         sandboxes,
+        environment,
     };
 
     Ok((config, lua_env))
@@ -1063,4 +1148,52 @@ fn parse_actions(table: &Table) -> LuaResult<Vec<Action>> {
         .sequence_values::<Table>()
         .map(|v| Action::from_lua(&v?))
         .collect()
+}
+
+fn parse_environment(globals: &Table) -> LuaResult<Option<Environment>> {
+    let environment: Value = globals.get("environment")?;
+    if environment.is_nil() {
+        return Ok(None);
+    }
+
+    let table = environment
+        .as_table()
+        .ok_or_else(|| mlua::Error::runtime("'environment' must be a table"))?;
+
+    const KNOWN_KEYS: &[&str] = &["clear", "inherit", "set"];
+    warn_unknown_keys(table, "environment", KNOWN_KEYS);
+
+    let clear: bool = table.get::<Option<bool>>("clear")?.unwrap_or(true);
+
+    let inherit: Vec<String> = match table.get::<Value>("inherit")? {
+        Value::Nil => Vec::new(),
+        Value::Table(t) => t
+            .sequence_values::<String>()
+            .filter_map(|r| r.ok())
+            .collect(),
+        _ => {
+            return Err(mlua::Error::runtime(
+                "'environment.inherit' must be a table",
+            ));
+        }
+    };
+
+    let set: HashMap<String, String> = match table.get::<Value>("set")? {
+        Value::Nil => HashMap::new(),
+        Value::Table(t) => {
+            let mut map = HashMap::new();
+            for pair in t.pairs::<String, String>() {
+                let (k, v) = pair?;
+                map.insert(k, v);
+            }
+            map
+        }
+        _ => return Err(mlua::Error::runtime("'environment.set' must be a table")),
+    };
+
+    Ok(Some(Environment {
+        clear,
+        inherit,
+        set,
+    }))
 }

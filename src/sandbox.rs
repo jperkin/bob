@@ -200,12 +200,38 @@ impl Sandbox {
      * or directly if sandboxes are disabled.
      */
     pub fn command(&self, id: usize, cmd: &Path) -> Command {
-        if self.enabled() {
+        let mut c = if self.enabled() {
             let mut c = Command::new("/usr/sbin/chroot");
             c.arg(self.path(id)).arg(cmd);
             c
         } else {
             Command::new(cmd)
+        };
+        self.apply_environment(&mut c);
+        c
+    }
+
+    /**
+     * Apply the configured environment settings to a Command.
+     *
+     * If no environment section is configured, the parent environment is
+     * inherited unchanged.  If a section is present, `clear` defaults to
+     * true and only explicitly configured variables are available.
+     */
+    fn apply_environment(&self, cmd: &mut Command) {
+        let Some(env) = self.config.environment() else {
+            return;
+        };
+        if env.clear {
+            cmd.env_clear();
+            for name in &env.inherit {
+                if let Ok(value) = std::env::var(name) {
+                    cmd.env(name, value);
+                }
+            }
+        }
+        for (name, value) in &env.set {
+            cmd.env(name, value);
         }
     }
 
@@ -941,27 +967,29 @@ impl Sandbox {
     ) -> Result<Option<std::process::ExitStatus>> {
         let sandbox_path = self.path(id);
         let output = if chroot {
-            Command::new("/usr/sbin/chroot")
-                .arg(&sandbox_path)
+            let mut c = Command::new("/usr/sbin/chroot");
+            self.apply_environment(&mut c);
+            c.arg(&sandbox_path)
                 .arg("/bin/sh")
                 .arg("-c")
                 .arg(cmd)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
-                .process_group(0)
-                .output()?
+                .process_group(0);
+            c.output()?
         } else {
-            Command::new("/bin/sh")
-                .arg("-c")
+            let mut c = Command::new("/bin/sh");
+            self.apply_environment(&mut c);
+            c.arg("-c")
                 .arg(cmd)
                 .env("bob_sandbox_path", &sandbox_path)
                 .current_dir(&sandbox_path)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
-                .process_group(0)
-                .output()?
+                .process_group(0);
+            c.output()?
         };
 
         if !output.status.success() {
