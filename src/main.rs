@@ -33,6 +33,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::error;
 
+mod cmd;
+
 /// Exit code when interrupted.  We do not know what exact signal this was.
 const EXIT_INTERRUPTED: u8 = 128 + libc::SIGINT as u8;
 
@@ -353,16 +355,24 @@ enum Cmd {
         #[arg(short = 'l', long = "logs-only")]
         logs_only: bool,
     },
-    /// Run SQL commands against the database
-    Db {
-        /// SQL command to execute (omit for interactive mode)
-        #[arg(value_name = "SQL")]
-        sql: Option<String>,
+    /// Query package build status
+    List {
+        #[command(subcommand)]
+        cmd: cmd::list::ListCmd,
+        /// Output pkgpath instead of pkgname
+        #[arg(short, long, global = true)]
+        path: bool,
     },
     /// Utility commands for debugging and data import/export
     Util {
         #[command(subcommand)]
         cmd: UtilCmd,
+    },
+    /// Run SQL commands against the database
+    Db {
+        /// SQL command to execute (omit for interactive mode)
+        #[arg(value_name = "SQL")]
+        sql: Option<String>,
     },
 }
 
@@ -621,6 +631,12 @@ fn run() -> Result<()> {
             };
 
             db.execute_raw(&sql)?;
+        }
+        Cmd::List { cmd, path } => {
+            let config = Config::load(args.config.as_deref())?;
+            let db_path = config.logdir().join("bob").join("bob.db");
+            let db = Database::open(&db_path)?;
+            cmd::list::run(&db, cmd, path)?;
         }
         Cmd::Util {
             cmd: UtilCmd::PrintDepGraph { output },

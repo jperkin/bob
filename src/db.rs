@@ -507,14 +507,31 @@ impl Database {
 
         let mut resolved_deps: Vec<(i64, i64)> = Vec::new();
         for pkg in &summary.packages {
-            if let ScanResult::Buildable(resolved) = pkg {
-                if let Some(pkg_id) = self.get_package_id(resolved.pkgname().pkgname())? {
-                    for dep in resolved.depends() {
-                        if let Some(dep_id) = self.get_package_id(dep.pkgname())? {
-                            resolved_deps.push((pkg_id, dep_id));
+            match pkg {
+                ScanResult::Buildable(resolved) => {
+                    if let Some(pkg_id) = self.get_package_id(resolved.pkgname().pkgname())? {
+                        for dep in resolved.depends() {
+                            if let Some(dep_id) = self.get_package_id(dep.pkgname())? {
+                                resolved_deps.push((pkg_id, dep_id));
+                            }
                         }
                     }
                 }
+                ScanResult::Skipped {
+                    index,
+                    resolved_depends,
+                    ..
+                } => {
+                    let Some(idx) = index else { continue };
+                    if let Some(pkg_id) = self.get_package_id(idx.pkgname.pkgname())? {
+                        for dep in resolved_depends {
+                            if let Some(dep_id) = self.get_package_id(dep.pkgname())? {
+                                resolved_deps.push((pkg_id, dep_id));
+                            }
+                        }
+                    }
+                }
+                ScanResult::ScanFail { .. } => {}
             }
         }
 
@@ -522,6 +539,54 @@ impl Database {
             self.store_resolved_dependencies_batch(&resolved_deps)?;
             debug!(count = resolved_deps.len(), "Stored resolved dependencies");
         }
+        Ok(())
+    }
+
+    /**
+     * Store skipped packages from scan resolution.
+     *
+     * This persists all skip reasons to the builds table so that queries
+     * like `get_blockers` can find them consistently.
+     *
+     * At scan time, both IndirectSkip and IndirectFail come from prefailed
+     * packages (PKG_SKIP_REASON and PKG_FAIL_REASON respectively), so both
+     * are stored as indirect_skip to map to "indirect-prefailed" in the CLI.
+     */
+    pub fn store_scan_skipped(&self, summary: &crate::scan::ScanSummary) -> Result<()> {
+        use crate::scan::{ScanResult, SkipReason};
+
+        self.conn.execute("BEGIN TRANSACTION", [])?;
+
+        for pkg in &summary.packages {
+            if let ScanResult::Skipped { reason, index, .. } = pkg {
+                let Some(idx) = index else { continue };
+                let pkgname = idx.pkgname.pkgname();
+
+                let Some(pkg_row) = self.get_package_by_name(pkgname)? else {
+                    continue;
+                };
+
+                // At scan time, both IndirectSkip and IndirectFail are from
+                // prefailed deps, so store both as indirect_skip
+                let (outcome, detail) = match reason {
+                    SkipReason::PkgSkip(s) => ("pkg_skip", Some(s.clone())),
+                    SkipReason::PkgFail(s) => ("pkg_fail", Some(s.clone())),
+                    SkipReason::IndirectSkip(s) | SkipReason::IndirectFail(s) => {
+                        ("indirect_skip", Some(s.clone()))
+                    }
+                    SkipReason::UnresolvedDep(s) => ("unresolved_dep", Some(s.clone())),
+                };
+
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO builds
+                     (package_id, outcome, outcome_detail, duration_ms)
+                     VALUES (?1, ?2, ?3, 0)",
+                    params![pkg_row.id, outcome, detail],
+                )?;
+            }
+        }
+
+        self.conn.execute("COMMIT", [])?;
         Ok(())
     }
 
@@ -757,6 +822,114 @@ impl Database {
             |row| row.get(0),
         )?;
         Ok(Duration::from_millis(total_ms as u64))
+    }
+
+    /**
+     * Get blockers for a package - what's preventing it from building.
+     * Accepts either pkgname or pkgpath (auto-detected by presence of '/').
+     * Returns (pkgname, pkgpath, reason) for each blocking dependency.
+     */
+    pub fn get_blockers(&self, package: &str) -> Result<Vec<(String, String, String)>> {
+        let pkg = if package.contains('/') {
+            let pkgs = self.get_packages_by_path(package)?;
+            pkgs.into_iter().next()
+        } else {
+            self.get_package_by_name(package)?
+        };
+
+        let Some(pkg) = pkg else {
+            anyhow::bail!("Package '{}' not found in database", package);
+        };
+
+        let mut stmt = self.conn.prepare(
+            "WITH RECURSIVE
+             blocking(id, reason) AS (
+                 -- Direct dependencies that have failed/skipped builds
+                 SELECT rd.depends_on_id,
+                        CASE b.outcome
+                            WHEN 'failed' THEN 'failed'
+                            WHEN 'pkg_skip' THEN 'prefailed'
+                            WHEN 'pkg_fail' THEN 'prefailed'
+                            WHEN 'indirect_skip' THEN 'indirect-prefailed'
+                            WHEN 'indirect_fail' THEN 'indirect-failed'
+                            WHEN 'indirect_failed' THEN 'indirect-failed'
+                            WHEN 'unresolved_dep' THEN 'unresolved'
+                            ELSE b.outcome
+                        END
+                 FROM resolved_depends rd
+                 JOIN builds b ON b.package_id = rd.depends_on_id
+                 WHERE rd.package_id = ?1
+                   AND b.outcome NOT IN ('success', 'up_to_date')
+                 UNION
+                 -- Transitive: deps of deps that are blocked
+                 SELECT rd.depends_on_id,
+                        CASE b.outcome
+                            WHEN 'failed' THEN 'failed'
+                            WHEN 'pkg_skip' THEN 'prefailed'
+                            WHEN 'pkg_fail' THEN 'prefailed'
+                            WHEN 'indirect_skip' THEN 'indirect-prefailed'
+                            WHEN 'indirect_fail' THEN 'indirect-failed'
+                            WHEN 'indirect_failed' THEN 'indirect-failed'
+                            WHEN 'unresolved_dep' THEN 'unresolved'
+                            ELSE b.outcome
+                        END
+                 FROM resolved_depends rd
+                 JOIN blocking bl ON rd.package_id = bl.id
+                 JOIN builds b ON b.package_id = rd.depends_on_id
+                 WHERE b.outcome NOT IN ('success', 'up_to_date')
+             )
+             SELECT DISTINCT p.pkgname, p.pkgpath, bl.reason
+             FROM blocking bl
+             JOIN packages p ON bl.id = p.id
+             -- Only show root causes (failed or prefailed), not indirect
+             WHERE bl.reason IN ('failed', 'prefailed', 'unresolved')
+             ORDER BY p.pkgname",
+        )?;
+
+        let rows = stmt.query_map([pkg.id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /**
+     * Get packages blocked by a failed package.
+     * Accepts either pkgname or pkgpath (auto-detected by presence of '/').
+     * Returns (pkgname, pkgpath) for each blocked package.
+     */
+    pub fn get_blocked_by(&self, package: &str) -> Result<Vec<(String, String)>> {
+        let pkg = if package.contains('/') {
+            let pkgs = self.get_packages_by_path(package)?;
+            pkgs.into_iter().next()
+        } else {
+            self.get_package_by_name(package)?
+        };
+
+        let Some(pkg) = pkg else {
+            anyhow::bail!("Package '{}' not found in database", package);
+        };
+
+        let mut stmt = self.conn.prepare(
+            "WITH RECURSIVE
+             affected(id) AS (
+                 -- Direct reverse dependencies
+                 SELECT rd.package_id
+                 FROM resolved_depends rd
+                 WHERE rd.depends_on_id = ?1
+                 UNION
+                 -- Transitive reverse dependencies
+                 SELECT rd.package_id
+                 FROM resolved_depends rd
+                 JOIN affected a ON rd.depends_on_id = a.id
+             )
+             SELECT p.pkgname, p.pkgpath
+             FROM affected a
+             JOIN packages p ON a.id = p.id
+             ORDER BY p.pkgname",
+        )?;
+
+        let rows = stmt.query_map([pkg.id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /**
