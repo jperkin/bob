@@ -466,11 +466,13 @@ impl Scan {
             }
 
             /*
-             * For full tree scans, check for dependencies that were discovered
-             * but not yet scanned. This handles resume after interrupt.
+             * For full tree scans, check for dependencies that were
+             * discovered but not yet scanned.  This handles resume
+             * after interrupt.
              *
-             * For limited scans, find_missing_pkgpaths() handles this instead,
-             * ensuring we only scan dependencies of active packages.
+             * For limited scans, the early-return check in start()
+             * calls find_missing_pkgpaths() instead, ensuring we only
+             * scan dependencies of active packages.
              */
             if self.full_tree {
                 let unscanned = db.get_unscanned_dependencies()?;
@@ -615,15 +617,25 @@ impl Scan {
             return Ok(());
         }
 
-        // For non-full-tree scans, prune already-cached packages from incoming
-        // before sandbox creation to avoid unnecessary setup/teardown.
+        /*
+         * For non-full-tree scans, prune already-cached packages from
+         * incoming before sandbox creation to avoid unnecessary
+         * setup/teardown.  If all initial packages are cached, check
+         * for unscanned dependencies (resume after interrupt) before
+         * deciding there's nothing to do.
+         */
         if !self.full_tree {
             self.incoming.retain(|p| !self.done.contains(p));
             if self.incoming.is_empty() {
-                if !self.done.is_empty() {
-                    println!("All {} package paths already scanned", self.done.len());
+                if let Ok(deps) = self.unscanned_deps(db) {
+                    self.incoming = deps;
                 }
-                return Ok(());
+                if self.incoming.is_empty() {
+                    if !self.done.is_empty() {
+                        println!("All {} package paths already scanned", self.done.len());
+                    }
+                    return Ok(());
+                }
             }
         }
 
