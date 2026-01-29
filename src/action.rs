@@ -71,6 +71,12 @@
 //!
 //!         -- Only mount if source exists on host
 //!         { action = "mount", fs = "bind", dir = "/opt/local", ifexists = true },
+//!
+//!         -- Only run if pkgsrc.build_user is set; {pkgsrc.build_user} is
+//!         -- replaced with its value
+//!         { action = "cmd", chroot = true,
+//!           ifset = "pkgsrc.build_user",
+//!           create = "mkdir -p /home/{pkgsrc.build_user}" },
 //!     },
 //! }
 //! ```
@@ -83,6 +89,7 @@
 //! | `src` | string | Source path on the host system |
 //! | `dest` | string | Destination path inside the sandbox |
 //! | `ifexists` | boolean | Only perform action if source exists (default: false) |
+//! | `ifset` | string | Only perform action if the named config variable is set (e.g. `"pkgsrc.build_user"`). Occurrences of `{var}` in `create`/`destroy` are replaced with the variable's value. |
 
 use anyhow::{Error, bail};
 use mlua::{Result as LuaResult, Table};
@@ -149,6 +156,7 @@ pub struct Action {
     destroy: Option<String>,
     chroot: bool,
     ifexists: bool,
+    ifset: Option<String>,
 }
 
 /// The type of sandbox action to perform.
@@ -325,6 +333,7 @@ impl Action {
             destroy: t.get("destroy").ok(),
             chroot: t.get("chroot").unwrap_or(false),
             ifexists: t.get("ifexists").unwrap_or(false),
+            ifset: t.get("ifset").ok(),
         })
     }
 
@@ -365,6 +374,24 @@ impl Action {
 
     pub fn ifexists(&self) -> bool {
         self.ifexists
+    }
+
+    pub fn ifset(&self) -> Option<&str> {
+        self.ifset.as_deref()
+    }
+
+    /**
+     * Substitute all occurrences of `{varpath}` in the `create` and
+     * `destroy` command strings with the given value.
+     */
+    pub fn substitute_var(&mut self, varpath: &str, value: &str) {
+        let pattern = format!("{{{}}}", varpath);
+        if let Some(cmd) = &mut self.create {
+            *cmd = cmd.replace(&pattern, value);
+        }
+        if let Some(cmd) = &mut self.destroy {
+            *cmd = cmd.replace(&pattern, value);
+        }
     }
 
     /// Validate the action configuration.

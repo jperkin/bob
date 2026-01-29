@@ -1133,7 +1133,7 @@ fn parse_sandboxes(globals: &Table) -> LuaResult<Option<Sandboxes>> {
         let actions_table = actions_value
             .as_table()
             .ok_or_else(|| mlua::Error::runtime("'sandboxes.actions' must be a table"))?;
-        parse_actions(actions_table)?
+        parse_actions(actions_table, globals)?
     };
 
     Ok(Some(Sandboxes {
@@ -1143,11 +1143,43 @@ fn parse_sandboxes(globals: &Table) -> LuaResult<Option<Sandboxes>> {
     }))
 }
 
-fn parse_actions(table: &Table) -> LuaResult<Vec<Action>> {
-    table
-        .sequence_values::<Table>()
-        .map(|v| Action::from_lua(&v?))
-        .collect()
+fn parse_actions(table: &Table, globals: &Table) -> LuaResult<Vec<Action>> {
+    let mut actions = Vec::new();
+    for v in table.sequence_values::<Table>() {
+        let mut action = Action::from_lua(&v?)?;
+        if let Some(varpath) = action.ifset().map(String::from) {
+            match resolve_lua_var(globals, &varpath) {
+                Some(val) => action.substitute_var(&varpath, &val),
+                None => continue,
+            }
+        }
+        actions.push(action);
+    }
+    Ok(actions)
+}
+
+/**
+ * Resolve a dotted variable path (e.g. "pkgsrc.build_user") by
+ * walking the Lua globals table.
+ */
+fn resolve_lua_var(globals: &Table, path: &str) -> Option<String> {
+    let mut parts = path.split('.');
+    let first = parts.next()?;
+    let mut current: Value = globals.get(first).ok()?;
+    for key in parts {
+        match current {
+            Value::Table(t) => {
+                current = t.get(key).ok()?;
+            }
+            _ => return None,
+        }
+    }
+    match current {
+        Value::String(s) => Some(s.to_str().ok()?.to_string()),
+        Value::Integer(n) => Some(n.to_string()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
 }
 
 fn parse_environment(globals: &Table) -> LuaResult<Option<Environment>> {
