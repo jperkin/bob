@@ -36,8 +36,8 @@ pkgsrc = {
     tar = "/usr/bin/tar",
 
     -- It is strongly recommended to set up an unprivileged user to perform
-    -- builds.  If you do, ensure that their home directory is created inside
-    -- the sandbox and that work directories are writeable.
+    -- builds.  If this is enabled, there is an action below to automatically
+    -- create the user home directory.
     -- build_user = "builder",
 
     -- List of pkgsrc variables to fetch once and cache.  These are then set in
@@ -119,12 +119,16 @@ sandboxes = {
         { action = "cmd", chroot = true, create = [[
                 mkdir -p /var/{folders,select}
                 mkdir -p $(getconf DARWIN_USER_TEMP_DIR)
-                # If you enable a builder user then uncomment these
-                #homedir=$(su builder -c 'echo $HOME')
-                #tempdir=$(su builder -c 'getconf DARWIN_USER_TEMP_DIR')
-                #mkdir -p ${homedir}/build $tempdir
-                #chown -R builder $homedir $tempdir
-		]] },
+         ]] },
+
+        -- Configure build user directories if enabled.
+        { action = "cmd", chroot = true, ifset = "pkgsrc.build_user", create = [[
+                user="{pkgsrc.build_user}"
+                homedir=$(su ${user} -c 'echo ${HOME}')
+                tempdir=$(su ${user} -c 'getconf DARWIN_USER_TEMP_DIR')
+                mkdir -p ${homedir} ${tempdir}
+                chown -R ${user} ${homedir} ${tempdir}
+        ]] },
 
         -- It is recommended to mount pkgsrc read-only, but you will first need
         -- to configure DISTDIR, PACKAGES, and WRKOBJDIR to other directories.

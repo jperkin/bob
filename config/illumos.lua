@@ -36,8 +36,8 @@ pkgsrc = {
     tar = "/usr/bin/tar",
 
     -- It is strongly recommended to set up an unprivileged user to perform
-    -- builds.  If you do, ensure that their home directory is created inside
-    -- the sandbox and that work directories are writeable.
+    -- builds.  If this is enabled, there is an action below to automatically
+    -- create the user home directory.
     -- build_user = "builder",
 
     -- List of pkgsrc variables to fetch once and cache.  These are then set in
@@ -111,6 +111,14 @@ sandboxes = {
         -- At this point everything should be set up so that chrooted commands
         -- will execute successfully.  Perform additional chroot setup.
         { action = "cmd", chroot = true, create = "chmod 1777 /tmp /var/tmp" },
+
+        -- Configure build user home directory if enabled.
+        { action = "cmd", chroot = true, ifset = "pkgsrc.build_user", create = [[
+                user="{pkgsrc.build_user}"
+                homedir=$(su ${user} -c 'echo ${HOME}')
+                mkdir -p ${homedir}
+                chown ${user} ${homedir}
+        ]] },
 
         -- It is recommended to mount pkgsrc read-only, but you will first need
         -- to configure DISTDIR, PACKAGES, and WRKOBJDIR to other directories.
