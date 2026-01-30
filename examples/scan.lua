@@ -6,6 +6,7 @@
 
 options = {
     scan_threads = 8,
+    strict_scan = true,
 }
 
 pkgsrc = {
