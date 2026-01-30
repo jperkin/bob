@@ -1,5 +1,44 @@
 # Changelog
 
+## Version 0.7.0 (2026-01-30)
+
+* Add `bob list` command for querying package status.
+
+* Add `environment` config section for controlling the sandbox process
+  environment.  Set up default strict environments to avoid host pollution.
+
+* Add `ifset` conditional field on sandbox actions, with `{var}` variable
+  substitution.  Used by example configs to automatically create `build_user`
+  home directories.
+
+* Add `read_pkgpaths(file)` Lua function for loading package lists from files.
+
+* Unify sandbox lifecycle.  The scan sandbox is now reused for subsequent
+  builds, avoiding an unnecessary destroy/create cycle between scan and build.
+
+* Defer dependency discovery for limited scans, only scanning dependency
+  pkgpaths when resolution determines they are needed.  This matches pbulk
+  behaviour, and can slightly reduce the number of packages that are built.
+
+* Overhaul sandbox discovery and cleanup.  More reliable detection of old or
+  incomplete sandboxes.
+
+* Improve macOS sandbox support: switch to `diskutil unmount` with retry logic,
+  per-mount process killing with system daemon filtering, and `mdns-listener`
+  script for DNS resolution inside chroots.
+
+* Add `bindfs` sandbox config option for specifying the bindfs binary path.
+
+* Improve error messages throughout, with full error chain context for sandbox
+  operations and clean single-line error display.
+
+* Add `bob_sandbox_path` environment variable for non-chroot `cmd` actions.
+
+* Rename `bob util import-pscan` to `bob util import-scan`, which now supports
+  both `pscan` and `presolve` files from pbulk.
+
+* Enable crossterm `use-dev-tty`, fixing TUI issues with piped input.
+
 ## Version 0.6.0 (2026-01-20)
 
 * Overhaul pkgsrc variable configuration.  Variables are fetched directly via
