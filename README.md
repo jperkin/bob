@@ -28,7 +28,7 @@ sandboxes.
 
 Bob works out-of-the-box on NetBSD, Linux, macOS[^1], and illumos.
 
-[^1] Requires MacFUSE and bindfs due to macOS limitations.
+[^1]: Requires MacFUSE and bindfs due to macOS limitations.
 
 ## Getting Started
 
