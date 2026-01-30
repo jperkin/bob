@@ -4,8 +4,8 @@
 [![Documentation](https://docs.rs/pkgbob/badge.svg)](https://docs.rs/pkgbob)
 [![License](https://img.shields.io/crates/l/pkgbob.svg)](https://github.com/jperkin/bob)
 
-Bob's goal is to become a simple but powerful, complete, and user-friendly
-utility for building pkgsrc packages.
+Bob is a powerful and user-friendly utility for building pkgsrc packages inside
+sandboxes.
 
 ## Screencasts
 
@@ -23,14 +23,12 @@ utility for building pkgsrc packages.
 - [x] Native sandbox implementation for common operating systems.
 - [x] Threaded scan and build processes inside concurrent sandboxes.
 - [x] [Ratatui](https://ratatui.rs)-based user interface.
-- [x] Simple, flexible, powerful Lua-based configuration.
+- [x] Simple, flexible, and powerful Lua-based configuration.
 - [x] Easily support multiple build configurations.
 
-Bob should work pretty much out-of-the-box on NetBSD, Linux, and illumos.
+Bob works out-of-the-box on NetBSD, Linux, macOS[^1], and illumos.
 
-Bob works on macOS, but due to Apple, there is a lot of additional sandbox work
-to do before things work correctly (e.g. name resolution inside chroot).  This
-will be implemented in due course.
+[^1] Requires MacFUSE and bindfs due to macOS limitations.
 
 ## Getting Started
 
@@ -40,25 +38,29 @@ Install bob, or upgrade an existing install to the latest release.
 $ cargo install pkgbob
 ```
 
-Generate directory containing the configuration file and build scripts.  This
-is also where by default all data will be generated.  `/bob` here is used as
-an example, but this can be any location.  You may wish to put this directory
-under version control to track changes.
+Create configuration directory.  This is also where by default all log data
+will be generated.  `/data/bob` here is used as an example, but this can be any
+location.
 
 You may wish to build multiple package sets (e.g. `netbsd-x86_64` and
 `netbsd-i386`) in which case you can simply create a configuration directory
 for each set.
 
 ```
-$ bob init /bob
+$ bob init /data/bob
+Initialising new configuration directory /data/bob:
+        /data/bob/config.lua
+        /data/bob/scripts/post-build
+        /data/bob/scripts/pre-build
 ```
 
-Customise the config.  The defaults are designed to work mostly out of the
-box, but you are likely to want to change some things, for example which
-packages to build, or any additional mount points required.
+Customise the config.  The defaults are designed to work out of the box, but
+you are likely to want to change some things, for example which packages to
+build, enable an unprivileged build user, or add any additional mount points
+required.
 
 ```
-$ cd /bob
+$ cd /data/bob
 $ vi config.lua
 ```
 
@@ -71,7 +73,14 @@ When you are happy with the configuration:
 $ bob build
 ```
 
-will proceed to build all of the packages you have requested.
+will proceed to build all of the packages you have requested.  At the end of a
+successful build run bob will automatically create a `pkg_summary.gz` file, so
+if you have configured [pkgin](https://github.com/NetBSDfr/pkgin) to look
+there, a full upgrade to the latest pkgsrc packages is as simple as:
+
+```
+$ bob build && pkgin upgrade
+```
 
 During the build phase you can press 'v' to toggle between the default inline
 progress bars and a full-screen paned layout that shows live build logs to
@@ -124,7 +133,7 @@ their own drawbacks:
    patches and the user to configure manually, and it can be very easy to
    accidentally trash your system.
 
-Bob aims to combine these methods into a best-of-both approach:
+Bob combines these methods into a best-of-both approach:
 
  * Automatically set up build sandboxes, hiding away all of the complexity
    involved trying to support multiple operating systems.
