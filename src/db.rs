@@ -632,6 +632,29 @@ impl Database {
         Ok(())
     }
 
+    /**
+     * Get all resolved dependencies as a map from pkgname to list of dependency pkgnames.
+     */
+    pub fn get_all_resolved_deps(&self) -> Result<HashMap<String, Vec<String>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p1.pkgname, p2.pkgname
+             FROM resolved_depends rd
+             JOIN packages p1 ON rd.package_id = p1.id
+             JOIN packages p2 ON rd.depends_on_id = p2.id
+             ORDER BY p1.pkgname, p2.pkgname",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        let mut deps: HashMap<String, Vec<String>> = HashMap::new();
+        for row in rows {
+            let (pkg, dep) = row?;
+            deps.entry(pkg).or_default().push(dep);
+        }
+        Ok(deps)
+    }
+
     // ========================================================================
     // BUILD QUERIES
     // ========================================================================
