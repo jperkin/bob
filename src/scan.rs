@@ -353,20 +353,24 @@ impl ScanSummary {
         })
     }
 
-    /**
-     * Print scan summary.
-     *
-     * If `up_to_date` is provided, shows "to build" and "up-to-date" counts.
-     * Otherwise shows "buildable" count.
-     */
-    pub fn print(&self, up_to_date: Option<usize>) {
-        let c = self.counts();
-        let s = &c.skipped;
+    /// Print the "Resolved N total packages..." line.
+    pub fn print_resolved(&self) {
         println!(
             "Resolved {} total packages from {} package paths",
             self.packages.len(),
             self.pkgpaths
         );
+    }
+
+    /**
+     * Print package counts.
+     *
+     * If `up_to_date` is provided, shows "to build" and "up-to-date" counts.
+     * Otherwise shows "buildable" count.
+     */
+    pub fn print_counts(&self, up_to_date: Option<usize>) {
+        let c = self.counts();
+        let s = &c.skipped;
         match up_to_date {
             Some(n) => println!(
                 "{} to build, {} up-to-date, {} prefailed, \

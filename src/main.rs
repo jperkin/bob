@@ -85,11 +85,7 @@ impl BuildRunner {
      * The scope is managed by the caller, allowing it to persist for a
      * subsequent build phase. Returns `Err(Interrupted)` if interrupted.
      */
-    fn run_scan_with_scope(
-        &self,
-        scan: &mut Scan,
-        scope: &mut SandboxScope,
-    ) -> Result<bob::scan::ScanSummary> {
+    fn run_scan_phase(&self, scan: &mut Scan, scope: &mut SandboxScope) -> Result<()> {
         // For full tree scans with full_scan_complete, we might be able to
         // skip scanning entirely
         if scan.is_full_tree() && self.db.full_scan_complete() {
@@ -127,20 +123,8 @@ impl BuildRunner {
             // Mark full tree scan as complete if no errors
             self.db.set_full_scan_complete()?;
         }
-        drop(scan_errors);
 
-        scan.resolve_with_report(&self.db, self.config.strict_scan())
-    }
-
-    /**
-     * Run scan phase standalone (creates its own scope).
-     *
-     * The scope is destroyed when this function returns (or on error).
-     */
-    fn run_scan(&self, scan: &mut Scan) -> Result<bob::scan::ScanSummary> {
-        let sandbox = Sandbox::new(&self.config);
-        let mut scope = SandboxScope::new(sandbox, self.ctx.clone());
-        self.run_scan_with_scope(scan, &mut scope)
+        Ok(())
     }
 
     /**
@@ -516,13 +500,19 @@ fn run() -> Result<()> {
                 }
             }
 
-            let result = runner.run_scan(&mut scan)?;
+            let sandbox = Sandbox::new(&runner.config);
+            let mut scope = SandboxScope::new(sandbox, runner.ctx.clone());
+            runner.run_scan_phase(&mut scan, &mut scope)?;
+            drop(scope);
+
+            let result = scan.resolve_with_report(&runner.db, runner.config.strict_scan())?;
+            result.print_resolved();
             let up_to_date = if scan_only {
                 None
             } else {
                 Some(runner.check_up_to_date(&result)?)
             };
-            result.print(up_to_date);
+            result.print_counts(up_to_date);
         }
         Cmd::Build {
             pkgpaths: cmdline_pkgs,
@@ -548,7 +538,8 @@ fn run() -> Result<()> {
 
             let sandbox = Sandbox::new(&runner.config);
             let mut scope = SandboxScope::new(sandbox, runner.ctx.clone());
-            let scan_result = runner.run_scan_with_scope(&mut scan, &mut scope)?;
+            runner.run_scan_phase(&mut scan, &mut scope)?;
+            let scan_result = scan.resolve_with_report(&runner.db, runner.config.strict_scan())?;
             runner.check_up_to_date(&scan_result)?;
             let summary = runner.run_build_with(scan_result, scope)?;
             if summary.counts().success > 0 {
@@ -640,7 +631,8 @@ fn run() -> Result<()> {
 
             let sandbox = Sandbox::new(&runner.config);
             let mut scope = SandboxScope::new(sandbox, runner.ctx.clone());
-            let scan_result = runner.run_scan_with_scope(&mut scan, &mut scope)?;
+            runner.run_scan_phase(&mut scan, &mut scope)?;
+            let scan_result = scan.resolve_with_report(&runner.db, runner.config.strict_scan())?;
             if !force {
                 runner.check_up_to_date(&scan_result)?;
             }
@@ -852,7 +844,8 @@ fn run() -> Result<()> {
             // Resolve dependencies (consistent with manual scan)
             let mut scan = Scan::new(&config);
             let result = scan.resolve_with_report(&db, config.strict_scan())?;
-            result.print(None);
+            result.print_resolved();
+            result.print_counts(None);
         }
         Cmd::Util {
             cmd: UtilCmd::PrintPscan { output },
