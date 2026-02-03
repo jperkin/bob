@@ -20,6 +20,7 @@ use std::io::{self, Write};
 use anyhow::{Result, bail};
 use clap::Subcommand;
 use crossterm::terminal;
+use regex::Regex;
 
 use bob::build::BuildOutcome;
 use bob::db::Database;
@@ -509,6 +510,12 @@ fn print_build_status(
         }
     };
 
+    // Compile filter as regex
+    let filter_re = filter
+        .map(Regex::new)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", filter.unwrap_or(""), e))?;
+
     // Get all buildable packages and build pkgname -> pkgpath map
     let buildable_pkgs = db.get_buildable_packages()?;
     let pkgname_to_pkgpath: HashMap<String, String> = buildable_pkgs
@@ -575,9 +582,9 @@ fn print_build_status(
                 None => continue,
             };
 
-            // Apply filter if provided
-            if let Some(f) = filter {
-                if !pkgname.contains(f) && !pkgpath.contains(f) {
+            // Apply regex filter if provided
+            if let Some(ref re) = filter_re {
+                if !re.is_match(pkgname) {
                     continue;
                 }
             }
