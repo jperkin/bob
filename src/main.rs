@@ -26,6 +26,7 @@ use bob::report;
 use bob::sandbox::{Sandbox, SandboxScope};
 use bob::scan::{Scan, ScanResult};
 use clap::{Parser, Subcommand};
+use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str;
@@ -152,28 +153,43 @@ impl BuildRunner {
         std::io::Write::flush(&mut std::io::stdout())?;
         let start = std::time::Instant::now();
 
-        for pkg in buildable {
-            let pkgname = pkg.pkgname().pkgname();
-            let depends: Vec<&str> = pkg.depends().iter().map(|d| d.pkgname()).collect();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(self.config.scan_threads())
+            .build()
+            .context("Failed to build thread pool for up-to-date check")?;
 
-            match bob::pkg_up_to_date(pkgname, &depends, &packages_dir, pkgsrc_dir) {
+        let results: Vec<_> = pool.install(|| {
+            buildable
+                .par_iter()
+                .map(|pkg| {
+                    let pkgname = pkg.pkgname().pkgname();
+                    let depends: Vec<&str> = pkg.depends().iter().map(|d| d.pkgname()).collect();
+                    let result = bob::pkg_up_to_date(pkgname, &depends, &packages_dir, pkgsrc_dir);
+                    (pkg, result)
+                })
+                .collect()
+        });
+
+        for (pkg, result) in results {
+            match result {
                 Ok(true) => {
-                    let result = bob::BuildResult {
+                    let build_result = bob::BuildResult {
                         pkgname: pkg.pkgname().clone(),
                         pkgpath: Some(pkg.pkgpath.clone()),
                         outcome: bob::BuildOutcome::UpToDate,
                         duration: std::time::Duration::ZERO,
                         log_dir: None,
                     };
-                    self.db.store_build_by_name(&result)?;
+                    self.db.store_build_by_name(&build_result)?;
                     up_to_date_count += 1;
                 }
-                Ok(false) => {
-                    // Needs building - no action needed
-                }
+                Ok(false) => {}
                 Err(e) => {
-                    tracing::debug!(pkgname, error = %e, "Error checking up-to-date status");
-                    // Treat errors as "needs build" - don't store anything
+                    tracing::debug!(
+                        pkgname = pkg.pkgname().pkgname(),
+                        error = %e,
+                        "Error checking up-to-date status"
+                    );
                 }
             }
         }
