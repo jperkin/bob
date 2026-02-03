@@ -75,6 +75,130 @@ const OUTPUT_BATCH_INTERVAL: Duration = Duration::from_millis(100);
 /// dependencies. 100ms balances responsiveness with CPU efficiency.
 const WORKER_BACKOFF_INTERVAL: Duration = Duration::from_millis(100);
 
+/**
+ * Check if a package binary is up-to-date with its sources.
+ *
+ * Returns `Ok(true)` if the package doesn't need rebuilding:
+ * - Package file exists
+ * - All tracked source files match (CVS ID or SHA256 hash)
+ * - Dependencies match expected list
+ * - No dependency package is newer than this package
+ *
+ * This function is called during the scan phase to pre-compute which
+ * packages need building, allowing `bob list build-tree` to show accurate
+ * results and `bob build` to skip up-to-date packages entirely.
+ */
+pub fn pkg_up_to_date(
+    pkgname: &str,
+    depends: &[&str],
+    packages_dir: &Path,
+    pkgsrc_dir: &Path,
+) -> anyhow::Result<bool> {
+    let pkgfile = packages_dir.join(format!("{}.tgz", pkgname));
+
+    let pkgfile_mtime = match pkgfile.metadata().and_then(|m| m.modified()) {
+        Ok(t) => t,
+        Err(_) => {
+            debug!(path = %pkgfile.display(), "Package file not found");
+            return Ok(false);
+        }
+    };
+
+    let pkg = BinaryPackage::open(&pkgfile)
+        .with_context(|| format!("Failed to open package {}", pkgfile.display()))?;
+
+    let build_version = pkg
+        .build_version()
+        .context("Failed to read BUILD_VERSION")?
+        .unwrap_or_default();
+    debug!(
+        lines = build_version.lines().count(),
+        "Checking BUILD_VERSION"
+    );
+
+    for line in build_version.lines() {
+        let Some((file, file_id)) = line.split_once(':') else {
+            continue;
+        };
+        let file_id = file_id.trim();
+        if file.is_empty() || file_id.is_empty() {
+            continue;
+        }
+
+        let src_file = pkgsrc_dir.join(file);
+        if !src_file.exists() {
+            debug!(file, "Source file missing");
+            return Ok(false);
+        }
+
+        if file_id.starts_with("$NetBSD") {
+            let Ok(content) = std::fs::read_to_string(&src_file) else {
+                return Ok(false);
+            };
+            let id = content.lines().find_map(|line| {
+                let start = line.find("$NetBSD")?;
+                let end = line[start + 1..].find('$')?;
+                Some(&line[start..start + end + 2])
+            });
+            if id != Some(file_id) {
+                debug!(file, "CVS ID mismatch");
+                return Ok(false);
+            }
+        } else {
+            let mut f = File::open(&src_file)
+                .with_context(|| format!("Failed to open {}", src_file.display()))?;
+            let hash = Digest::SHA256
+                .hash_file(&mut f)
+                .with_context(|| format!("Failed to digest {file}"))?;
+            if hash != file_id {
+                debug!(
+                    file,
+                    path = %src_file.display(),
+                    expected = file_id,
+                    actual = hash,
+                    "Hash mismatch"
+                );
+                return Ok(false);
+            }
+        }
+    }
+
+    let recorded_deps: HashSet<&str> = pkg
+        .plist()
+        .build_depends()
+        .into_iter()
+        .filter(|l| !l.is_empty())
+        .collect();
+    let expected_deps: HashSet<&str> = depends.iter().copied().collect();
+
+    if recorded_deps != expected_deps {
+        debug!(
+            recorded = recorded_deps.len(),
+            expected = expected_deps.len(),
+            "Dependency list changed"
+        );
+        return Ok(false);
+    }
+
+    for dep in &recorded_deps {
+        let dep_pkg = packages_dir.join(format!("{}.tgz", dep));
+        let dep_mtime = match dep_pkg.metadata().and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(_) => {
+                debug!(dep, "Dependency package missing");
+                return Ok(false);
+            }
+        };
+        if dep_mtime > pkgfile_mtime {
+            debug!(dep, "Dependency is newer");
+            return Ok(false);
+        }
+    }
+
+    debug!(pkgname, "Package is up-to-date");
+    Ok(true)
+}
+
 /// Build stages in order of execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -110,7 +234,6 @@ impl Stage {
 enum PkgBuildResult {
     Success,
     Failed,
-    Skipped,
 }
 
 /// How to run a command.
@@ -131,7 +254,6 @@ struct BuildSession {
     config: Config,
     pkgsrc_env: PkgsrcEnv,
     sandbox: Sandbox,
-    options: BuildOptions,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -170,128 +292,10 @@ impl<'a> PkgBuilder<'a> {
         }
     }
 
-    /// Check if the package is already up-to-date.
-    fn check_up_to_date(&self) -> anyhow::Result<bool> {
-        let pkgname = self.pkginfo.index.pkgname.pkgname();
-        let pkg_dir = self.session.pkgsrc_env.packages.join("All");
-        let pkgfile = pkg_dir.join(format!("{}.tgz", pkgname));
-
-        let pkgfile_mtime = match pkgfile.metadata().and_then(|m| m.modified()) {
-            Ok(t) => t,
-            Err(_) => {
-                debug!(
-                    path = %pkgfile.display(),
-                    "Package file not found"
-                );
-                return Ok(false);
-            }
-        };
-
-        let pkg = BinaryPackage::open(&pkgfile)
-            .with_context(|| format!("Failed to open package {}", pkgfile.display()))?;
-
-        let build_version = pkg
-            .build_version()
-            .context("Failed to read BUILD_VERSION")?
-            .unwrap_or_default();
-        debug!(
-            lines = build_version.lines().count(),
-            "Checking BUILD_VERSION"
-        );
-
-        for line in build_version.lines() {
-            let Some((file, file_id)) = line.split_once(':') else {
-                continue;
-            };
-            let file_id = file_id.trim();
-            if file.is_empty() || file_id.is_empty() {
-                continue;
-            }
-
-            let src_file = self.session.config.pkgsrc().join(file);
-            if !src_file.exists() {
-                debug!(file, "Source file missing");
-                return Ok(false);
-            }
-
-            if file_id.starts_with("$NetBSD") {
-                let Ok(content) = std::fs::read_to_string(&src_file) else {
-                    return Ok(false);
-                };
-                let id = content.lines().find_map(|line| {
-                    let start = line.find("$NetBSD")?;
-                    let end = line[start + 1..].find('$')?;
-                    Some(&line[start..start + end + 2])
-                });
-                if id != Some(file_id) {
-                    debug!(file, "CVS ID mismatch");
-                    return Ok(false);
-                }
-            } else {
-                let mut f = File::open(&src_file)
-                    .with_context(|| format!("Failed to open {}", src_file.display()))?;
-                let hash = Digest::SHA256
-                    .hash_file(&mut f)
-                    .with_context(|| format!("Failed to digest {file}"))?;
-                if hash != file_id {
-                    debug!(
-                        file,
-                        path = %src_file.display(),
-                        expected = file_id,
-                        actual = hash,
-                        "Hash mismatch"
-                    );
-                    return Ok(false);
-                }
-            }
-        }
-
-        let recorded_deps: HashSet<&str> = pkg
-            .plist()
-            .build_depends()
-            .into_iter()
-            .filter(|l| !l.is_empty())
-            .collect();
-        let expected_deps: HashSet<&str> =
-            self.pkginfo.depends().iter().map(|d| d.pkgname()).collect();
-
-        if recorded_deps != expected_deps {
-            debug!(
-                recorded = recorded_deps.len(),
-                expected = expected_deps.len(),
-                "Dependency list changed"
-            );
-            return Ok(false);
-        }
-
-        for dep in &recorded_deps {
-            let dep_pkg = pkg_dir.join(format!("{}.tgz", dep));
-            let dep_mtime = match dep_pkg.metadata().and_then(|m| m.modified()) {
-                Ok(t) => t,
-                Err(_) => {
-                    debug!(dep, "Dependency package missing");
-                    return Ok(false);
-                }
-            };
-            if dep_mtime > pkgfile_mtime {
-                debug!(dep, "Dependency is newer");
-                return Ok(false);
-            }
-        }
-
-        debug!("Package is up-to-date");
-        Ok(true)
-    }
-
     /// Run the full build process.
     fn build<C: BuildCallback>(&self, callback: &mut C) -> anyhow::Result<PkgBuildResult> {
         let pkgname_str = self.pkginfo.pkgname().pkgname();
         let pkgpath = &self.pkginfo.pkgpath;
-
-        // Check if package is already up-to-date (skip check if force rebuild)
-        if !self.session.options.force_rebuild && self.check_up_to_date()? {
-            return Ok(PkgBuildResult::Skipped);
-        }
 
         // Clean up and create log directory
         if self.logdir.exists() {
@@ -997,13 +1001,6 @@ impl BuildSummary {
     }
 }
 
-/// Options that control build behavior.
-#[derive(Clone, Debug, Default)]
-pub struct BuildOptions {
-    /// Force rebuild even if package is up-to-date.
-    pub force_rebuild: bool,
-}
-
 #[derive(Debug)]
 pub struct Build {
     /// Parsed [`Config`].
@@ -1016,8 +1013,6 @@ pub struct Build {
     scanpkgs: IndexMap<PkgName, ResolvedPackage>,
     /// Cached build results from previous run.
     cached: IndexMap<PkgName, BuildResult>,
-    /// Build options.
-    options: BuildOptions,
 }
 
 /// Per-package build task sent to worker threads.
@@ -1113,8 +1108,6 @@ enum PackageBuildResult {
     Success,
     /// Build failed
     Failed,
-    /// Package was up-to-date, skipped
-    Skipped,
 }
 
 impl std::fmt::Display for PackageBuildResult {
@@ -1122,7 +1115,6 @@ impl std::fmt::Display for PackageBuildResult {
         match self {
             Self::Success => write!(f, "success"),
             Self::Failed => write!(f, "failed"),
-            Self::Skipped => write!(f, "skipped"),
         }
     }
 }
@@ -1183,10 +1175,6 @@ impl PackageBuild {
             Ok(PkgBuildResult::Success) => {
                 info!("Package build completed successfully");
                 PackageBuildResult::Success
-            }
-            Ok(PkgBuildResult::Skipped) => {
-                info!("Package build skipped (up-to-date)");
-                PackageBuildResult::Skipped
             }
             Ok(PkgBuildResult::Failed) => {
                 error!("Package build failed");
@@ -1463,10 +1451,6 @@ enum ChannelCommand {
      */
     JobFailed(PkgName, Duration),
     /**
-     * Client returning a skipped package (up-to-date).
-     */
-    JobSkipped(PkgName),
-    /**
      * Client returning an error during the package build.
      */
     JobError((PkgName, Duration, anyhow::Error)),
@@ -1531,10 +1515,6 @@ impl BuildJobs {
      */
     fn mark_success(&mut self, pkgname: &PkgName, duration: Duration) {
         self.mark_done(pkgname, BuildOutcome::Success, duration);
-    }
-
-    fn mark_up_to_date(&mut self, pkgname: &PkgName) {
-        self.mark_done(pkgname, BuildOutcome::UpToDate, Duration::ZERO);
     }
 
     /**
@@ -1682,13 +1662,11 @@ impl Build {
         pkgsrc_env: PkgsrcEnv,
         scope: SandboxScope,
         scanpkgs: IndexMap<PkgName, ResolvedPackage>,
-        options: BuildOptions,
     ) -> Build {
         info!(
             package_count = scanpkgs.len(),
             sandbox_enabled = scope.enabled(),
             build_threads = config.build_threads(),
-            ?options,
             "Creating new Build instance"
         );
         for (pkgname, index) in &scanpkgs {
@@ -1705,7 +1683,6 @@ impl Build {
             scope,
             scanpkgs,
             cached: IndexMap::new(),
-            options,
         }
     }
 
@@ -2011,9 +1988,6 @@ impl Build {
                                     let _ = manager_tx
                                         .send(ChannelCommand::JobSuccess(pkgname, duration));
                                 }
-                                Ok(PackageBuildResult::Skipped) => {
-                                    let _ = manager_tx.send(ChannelCommand::JobSkipped(pkgname));
-                                }
                                 Ok(PackageBuildResult::Failed) => {
                                     let _ = manager_tx
                                         .send(ChannelCommand::JobFailed(pkgname, duration));
@@ -2050,7 +2024,6 @@ impl Build {
             config: self.config.clone(),
             pkgsrc_env: self.pkgsrc_env.clone(),
             sandbox: self.scope.sandbox().clone(),
-            options: self.options.clone(),
             shutdown: Arc::clone(&shutdown_flag),
         });
         let progress_clone = Arc::clone(&progress);
@@ -2151,32 +2124,6 @@ impl Build {
                                 format_duration(duration)
                             ));
                             p.state_mut().increment_completed();
-                            for (tid, pkg) in &thread_packages {
-                                if pkg == &pkgname {
-                                    p.clear_output_buffer(*tid);
-                                    p.state_mut().set_worker_idle(*tid);
-                                    break;
-                                }
-                            }
-                            let _ = p.render();
-                        }
-                    }
-                    ChannelCommand::JobSkipped(pkgname) => {
-                        jobs.mark_up_to_date(&pkgname);
-                        jobs.running.remove(&pkgname);
-
-                        // Send result for immediate saving
-                        if let Some(result) = jobs.results.last() {
-                            let _ = completed_tx.send(result.clone());
-                        }
-
-                        // Find which thread completed and mark idle
-                        if let Ok(mut p) = progress_clone.lock() {
-                            let _ = p.print_status(&format!(
-                                "     Skipped {} (up-to-date)",
-                                pkgname.pkgname()
-                            ));
-                            p.state_mut().increment_skipped();
                             for (tid, pkg) in &thread_packages {
                                 if pkg == &pkgname {
                                     p.clear_output_buffer(*tid);

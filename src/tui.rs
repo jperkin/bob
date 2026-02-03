@@ -234,10 +234,6 @@ impl ProgressState {
         self.failed += 1;
     }
 
-    pub fn increment_skipped(&mut self) {
-        self.skipped += 1;
-    }
-
     pub fn elapsed(&self) -> Duration {
         self.started.elapsed()
     }

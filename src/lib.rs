@@ -60,7 +60,7 @@ impl RunContext {
 
 // Re-export main types for convenience
 pub use action::{Action, ActionType, FSType};
-pub use build::{Build, BuildCounts, BuildOptions, BuildOutcome, BuildResult, BuildSummary};
+pub use build::{Build, BuildCounts, BuildOutcome, BuildResult, BuildSummary, pkg_up_to_date};
 pub use config::{Config, Options, Pkgsrc, PkgsrcEnv, Sandboxes};
 pub use db::Database;
 pub use report::write_html_report;

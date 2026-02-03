@@ -143,10 +143,65 @@ impl BuildRunner {
         self.run_scan_with_scope(scan, &mut scope)
     }
 
+    /**
+     * Check which buildable packages are up-to-date and store results.
+     *
+     * For each buildable package, checks if the binary package is current
+     * with its sources. Packages that are up-to-date are recorded with
+     * `BuildOutcome::UpToDate` so they will be skipped during build.
+     */
+    fn check_up_to_date(&self, scan_result: &bob::scan::ScanSummary) -> Result<usize> {
+        let pkgsrc_env = match self.db.load_pkgsrc_env() {
+            Ok(env) => env,
+            Err(_) => {
+                tracing::warn!("PkgsrcEnv not cached, skipping up-to-date check");
+                return Ok(0);
+            }
+        };
+        let packages_dir = pkgsrc_env.packages.join("All");
+        let pkgsrc_dir = self.config.pkgsrc();
+
+        let buildable: Vec<_> = scan_result.buildable().collect();
+        let mut up_to_date_count = 0usize;
+
+        print!("Calculating package build status...");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let start = std::time::Instant::now();
+
+        for pkg in buildable {
+            let pkgname = pkg.pkgname().pkgname();
+            let depends: Vec<&str> = pkg.depends().iter().map(|d| d.pkgname()).collect();
+
+            match bob::pkg_up_to_date(pkgname, &depends, &packages_dir, pkgsrc_dir) {
+                Ok(true) => {
+                    let result = bob::BuildResult {
+                        pkgname: pkg.pkgname().clone(),
+                        pkgpath: Some(pkg.pkgpath.clone()),
+                        outcome: bob::BuildOutcome::UpToDate,
+                        duration: std::time::Duration::ZERO,
+                        log_dir: None,
+                    };
+                    self.db.store_build_by_name(&result)?;
+                    up_to_date_count += 1;
+                }
+                Ok(false) => {
+                    // Needs building - no action needed
+                }
+                Err(e) => {
+                    tracing::debug!(pkgname, error = %e, "Error checking up-to-date status");
+                    // Treat errors as "needs build" - don't store anything
+                }
+            }
+        }
+
+        println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
+
+        Ok(up_to_date_count)
+    }
+
     fn run_build_with(
         &mut self,
         scan_result: bob::scan::ScanSummary,
-        options: build::BuildOptions,
         scope: SandboxScope,
     ) -> Result<build::BuildSummary> {
         // Validate config before sandbox expansion
@@ -164,7 +219,7 @@ impl BuildRunner {
             .load_pkgsrc_env()
             .context("PkgsrcEnv not cached - try 'bob clean' first")?;
 
-        let mut build = Build::new(&self.config, pkgsrc_env, scope, buildable, options);
+        let mut build = Build::new(&self.config, pkgsrc_env, scope, buildable);
 
         // Load cached build results from database
         build.load_cached_from_db(&self.db)?;
@@ -328,7 +383,11 @@ enum Cmd {
     /// Initialise a new build directory and configuration file
     Init { dir: PathBuf },
     /// Perform recursive scan of packages and resolve dependencies
-    Scan,
+    Scan {
+        /// Skip up-to-date checking (scan and resolve only)
+        #[arg(long)]
+        scan_only: bool,
+    },
     /// Build all scanned packages
     Build {
         /// Package paths to build (overrides config pkgpaths)
@@ -447,7 +506,7 @@ fn run() -> Result<()> {
         Cmd::Init { dir: ref arg } => {
             Init::create(arg)?;
         }
-        Cmd::Scan => {
+        Cmd::Scan { scan_only } => {
             let runner = BuildRunner::new(args.config.as_deref())?;
 
             let mut scan = Scan::new(&runner.config);
@@ -458,7 +517,12 @@ fn run() -> Result<()> {
             }
 
             let result = runner.run_scan(&mut scan)?;
-            println!("{result}");
+            let up_to_date = if scan_only {
+                None
+            } else {
+                Some(runner.check_up_to_date(&result)?)
+            };
+            result.print(up_to_date);
         }
         Cmd::Build {
             pkgpaths: cmdline_pkgs,
@@ -485,8 +549,8 @@ fn run() -> Result<()> {
             let sandbox = Sandbox::new(&runner.config);
             let mut scope = SandboxScope::new(sandbox, runner.ctx.clone());
             let scan_result = runner.run_scan_with_scope(&mut scan, &mut scope)?;
-            let summary =
-                runner.run_build_with(scan_result, build::BuildOptions::default(), scope)?;
+            runner.check_up_to_date(&scan_result)?;
+            let summary = runner.run_build_with(scan_result, scope)?;
             if summary.counts().success > 0 {
                 runner.generate_pkg_summary();
             }
@@ -577,10 +641,10 @@ fn run() -> Result<()> {
             let sandbox = Sandbox::new(&runner.config);
             let mut scope = SandboxScope::new(sandbox, runner.ctx.clone());
             let scan_result = runner.run_scan_with_scope(&mut scan, &mut scope)?;
-            let options = build::BuildOptions {
-                force_rebuild: force,
-            };
-            runner.run_build_with(scan_result, options, scope)?;
+            if !force {
+                runner.check_up_to_date(&scan_result)?;
+            }
+            runner.run_build_with(scan_result, scope)?;
         }
         Cmd::Report => {
             let config = Config::load(args.config.as_deref())?;
@@ -788,7 +852,7 @@ fn run() -> Result<()> {
             // Resolve dependencies (consistent with manual scan)
             let mut scan = Scan::new(&config);
             let result = scan.resolve_with_report(&db, config.strict_scan())?;
-            println!("{result}");
+            result.print(None);
         }
         Cmd::Util {
             cmd: UtilCmd::PrintPscan { output },

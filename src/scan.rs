@@ -352,23 +352,39 @@ impl ScanSummary {
             _ => None,
         })
     }
-}
 
-impl std::fmt::Display for ScanSummary {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    /**
+     * Print scan summary.
+     *
+     * If `up_to_date` is provided, shows "to build" and "up-to-date" counts.
+     * Otherwise shows "buildable" count.
+     */
+    pub fn print(&self, up_to_date: Option<usize>) {
         let c = self.counts();
         let s = &c.skipped;
-        write!(
-            f,
-            "Resolved {} total packages from {} package paths\n\
-             {} buildable, {} prefailed, {} indirect-prefailed, {} unresolved",
+        println!(
+            "Resolved {} total packages from {} package paths",
             self.packages.len(),
-            self.pkgpaths,
-            c.buildable,
-            s.pkg_skip + s.pkg_fail,
-            s.indirect_skip + s.indirect_fail,
-            s.unresolved
-        )
+            self.pkgpaths
+        );
+        match up_to_date {
+            Some(n) => println!(
+                "{} to build, {} up-to-date, {} prefailed, \
+                 {} indirect-prefailed, {} unresolved",
+                c.buildable.saturating_sub(n),
+                n,
+                s.pkg_skip + s.pkg_fail,
+                s.indirect_skip + s.indirect_fail,
+                s.unresolved
+            ),
+            None => println!(
+                "{} buildable, {} prefailed, {} indirect-prefailed, {} unresolved",
+                c.buildable,
+                s.pkg_skip + s.pkg_fail,
+                s.indirect_skip + s.indirect_fail,
+                s.unresolved
+            ),
+        }
     }
 }
 
