@@ -51,6 +51,9 @@ use anyhow::{Context, bail};
 use crossterm::event;
 use glob::Pattern;
 use indexmap::IndexMap;
+use pkgsrc::archive::BinaryPackage;
+use pkgsrc::digest::Digest;
+use pkgsrc::metadata::FileRead;
 use pkgsrc::{PkgName, PkgPath};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
@@ -167,60 +170,36 @@ impl<'a> PkgBuilder<'a> {
         }
     }
 
-    /// Run a command in the sandbox and capture its stdout.
-    fn run_cmd(&self, cmd: &Path, args: &[&str]) -> Option<String> {
-        let mut command = self.session.sandbox.command(self.sandbox_id, cmd);
-        command.args(args);
-        self.apply_envs(&mut command, &[]);
-        match command.output() {
-            Ok(output) if output.status.success() => {
-                Some(String::from_utf8_lossy(&output.stdout).into_owned())
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                debug!(
-                    cmd = %cmd.display(),
-                    exit_code = ?output.status.code(),
-                    stderr = %stderr.trim(),
-                    "command failed"
-                );
-                None
-            }
-            Err(e) => {
-                debug!(cmd = %cmd.display(), error = %e, "command execution error");
-                None
-            }
-        }
-    }
-
     /// Check if the package is already up-to-date.
     fn check_up_to_date(&self) -> anyhow::Result<bool> {
         let pkgname = self.pkginfo.index.pkgname.pkgname();
-        let pkgfile = self
-            .session
-            .pkgsrc_env
-            .packages
-            .join("All")
-            .join(format!("{}.tgz", pkgname));
+        let pkg_dir = self.session.pkgsrc_env.packages.join("All");
+        let pkgfile = pkg_dir.join(format!("{}.tgz", pkgname));
 
-        // Check if package file exists
-        if !pkgfile.exists() {
-            debug!(path = %pkgfile.display(), "Package file not found");
-            return Ok(false);
-        }
-
-        let pkgfile_str = pkgfile.to_string_lossy();
-        let pkg_info = self.session.pkgsrc_env.pkgtools.join("pkg_info");
-        let pkg_admin = self.session.pkgsrc_env.pkgtools.join("pkg_admin");
-
-        // Get BUILD_INFO and verify source files
-        let Some(build_info) = self.run_cmd(&pkg_info, &["-qb", &pkgfile_str]) else {
-            debug!("pkg_info -qb failed or returned empty");
-            return Ok(false);
+        let pkgfile_mtime = match pkgfile.metadata().and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(_) => {
+                debug!(
+                    path = %pkgfile.display(),
+                    "Package file not found"
+                );
+                return Ok(false);
+            }
         };
-        debug!(lines = build_info.lines().count(), "Checking BUILD_INFO");
 
-        for line in build_info.lines() {
+        let pkg = BinaryPackage::open(&pkgfile)
+            .with_context(|| format!("Failed to open package {}", pkgfile.display()))?;
+
+        let build_version = pkg
+            .build_version()
+            .context("Failed to read BUILD_VERSION")?
+            .unwrap_or_default();
+        debug!(
+            lines = build_version.lines().count(),
+            "Checking BUILD_VERSION"
+        );
+
+        for line in build_version.lines() {
             let Some((file, file_id)) = line.split_once(':') else {
                 continue;
             };
@@ -236,30 +215,24 @@ impl<'a> PkgBuilder<'a> {
             }
 
             if file_id.starts_with("$NetBSD") {
-                // CVS ID comparison - extract $NetBSD...$ from actual file
                 let Ok(content) = std::fs::read_to_string(&src_file) else {
                     return Ok(false);
                 };
                 let id = content.lines().find_map(|line| {
-                    if let Some(start) = line.find("$NetBSD") {
-                        if let Some(end) = line[start + 1..].find('$') {
-                            return Some(&line[start..start + 1 + end + 1]);
-                        }
-                    }
-                    None
+                    let start = line.find("$NetBSD")?;
+                    let end = line[start + 1..].find('$')?;
+                    Some(&line[start..start + end + 2])
                 });
                 if id != Some(file_id) {
                     debug!(file, "CVS ID mismatch");
                     return Ok(false);
                 }
             } else {
-                // Hash comparison
-                let src_file_str = src_file.to_string_lossy();
-                let Some(hash) = self.run_cmd(&pkg_admin, &["digest", &src_file_str]) else {
-                    debug!(file, "pkg_admin digest failed");
-                    return Ok(false);
-                };
-                let hash = hash.trim();
+                let mut f = File::open(&src_file)
+                    .with_context(|| format!("Failed to open {}", src_file.display()))?;
+                let hash = Digest::SHA256
+                    .hash_file(&mut f)
+                    .with_context(|| format!("Failed to digest {file}"))?;
                 if hash != file_id {
                     debug!(
                         file,
@@ -273,21 +246,15 @@ impl<'a> PkgBuilder<'a> {
             }
         }
 
-        // Get package dependencies and verify
-        let Some(pkg_deps) = self.run_cmd(&pkg_info, &["-qN", &pkgfile_str]) else {
-            return Ok(false);
-        };
-
-        // Build sets of recorded vs expected dependencies
-        let recorded_deps: HashSet<&str> = pkg_deps
-            .lines()
-            .map(|l| l.trim())
+        let recorded_deps: HashSet<&str> = pkg
+            .plist()
+            .build_depends()
+            .into_iter()
             .filter(|l| !l.is_empty())
             .collect();
         let expected_deps: HashSet<&str> =
             self.pkginfo.depends().iter().map(|d| d.pkgname()).collect();
 
-        // If dependency list has changed in any way, rebuild
         if recorded_deps != expected_deps {
             debug!(
                 recorded = recorded_deps.len(),
@@ -297,29 +264,15 @@ impl<'a> PkgBuilder<'a> {
             return Ok(false);
         }
 
-        let pkgfile_mtime = match pkgfile.metadata().and_then(|m| m.modified()) {
-            Ok(t) => t,
-            Err(_) => return Ok(false),
-        };
-
-        // Check each dependency package exists and is not newer
         for dep in &recorded_deps {
-            let dep_pkg = self
-                .session
-                .pkgsrc_env
-                .packages
-                .join("All")
-                .join(format!("{}.tgz", dep));
-            if !dep_pkg.exists() {
-                debug!(dep, "Dependency package missing");
-                return Ok(false);
-            }
-
+            let dep_pkg = pkg_dir.join(format!("{}.tgz", dep));
             let dep_mtime = match dep_pkg.metadata().and_then(|m| m.modified()) {
                 Ok(t) => t,
-                Err(_) => return Ok(false),
+                Err(_) => {
+                    debug!(dep, "Dependency package missing");
+                    return Ok(false);
+                }
             };
-
             if dep_mtime > pkgfile_mtime {
                 debug!(dep, "Dependency is newer");
                 return Ok(false);
@@ -1619,7 +1572,7 @@ impl BuildJobs {
     /**
      * Recursively mark a package and its dependents as failed.
      */
-    fn mark_failure(&mut self, pkgname: &PkgName, duration: Duration) {
+    fn mark_failure(&mut self, pkgname: &PkgName, duration: Duration, reason: &str) {
         trace!(pkgname = %pkgname.pkgname(), "mark_failure called");
         let start = std::time::Instant::now();
         let mut broken: HashSet<PkgName> = HashSet::new();
@@ -1663,7 +1616,7 @@ impl BuildJobs {
             let scanpkg = self.scanpkgs.get(&pkg);
             let log_dir = Some(self.logdir.join(pkg.pkgname()));
             let (outcome, dur) = if is_original(&pkg) {
-                (BuildOutcome::Failed("Build failed".to_string()), duration)
+                (BuildOutcome::Failed(reason.to_string()), duration)
             } else {
                 (
                     BuildOutcome::Skipped(SkipReason::IndirectFail(format!(
@@ -2236,7 +2189,7 @@ impl Build {
                     }
                     ChannelCommand::JobFailed(pkgname, duration) => {
                         let results_before = jobs.results.len();
-                        jobs.mark_failure(&pkgname, duration);
+                        jobs.mark_failure(&pkgname, duration, "Build failed");
                         jobs.running.remove(&pkgname);
 
                         // Send all new results for immediate saving
@@ -2264,7 +2217,7 @@ impl Build {
                     }
                     ChannelCommand::JobError((pkgname, duration, e)) => {
                         let results_before = jobs.results.len();
-                        jobs.mark_failure(&pkgname, duration);
+                        jobs.mark_failure(&pkgname, duration, &e.to_string());
                         jobs.running.remove(&pkgname);
 
                         // Send all new results for immediate saving
