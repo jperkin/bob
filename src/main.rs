@@ -134,6 +134,7 @@ impl BuildRunner {
      * For each buildable package, checks if the binary package is current
      * with its sources. Packages that are up-to-date are recorded with
      * `BuildOutcome::UpToDate` so they will be skipped during build.
+     * Packages that need building have their reason stored in the database.
      */
     fn check_up_to_date(&self, scan_result: &bob::scan::ScanSummary) -> Result<usize> {
         let pkgsrc_env = match self.db.load_pkgsrc_env() {
@@ -148,6 +149,8 @@ impl BuildRunner {
 
         let buildable: Vec<_> = scan_result.buildable().collect();
         let mut up_to_date_count = 0usize;
+
+        self.db.clear_build_reasons()?;
 
         print!("Calculating package build status...");
         std::io::Write::flush(&mut std::io::stdout())?;
@@ -172,7 +175,7 @@ impl BuildRunner {
 
         for (pkg, result) in results {
             match result {
-                Ok(true) => {
+                Ok(None) => {
                     let build_result = bob::BuildResult {
                         pkgname: pkg.pkgname().clone(),
                         pkgpath: Some(pkg.pkgpath.clone()),
@@ -183,13 +186,20 @@ impl BuildRunner {
                     self.db.store_build_by_name(&build_result)?;
                     up_to_date_count += 1;
                 }
-                Ok(false) => {}
+                Ok(Some(reason)) => {
+                    self.db
+                        .store_build_reason(pkg.pkgname().pkgname(), &reason.to_string())?;
+                }
                 Err(e) => {
                     tracing::debug!(
                         pkgname = pkg.pkgname().pkgname(),
                         error = %e,
                         "Error checking up-to-date status"
                     );
+                    self.db.store_build_reason(
+                        pkg.pkgname().pkgname(),
+                        &format!("check failed: {}", e),
+                    )?;
                 }
             }
         }

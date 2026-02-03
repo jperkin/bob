@@ -101,6 +101,17 @@ pub enum ListCmd {
         #[arg(short = 'f', long, value_enum, default_value_t = TreeOutput::Utf8)]
         format: TreeOutput,
     },
+    /// Show package status with columns
+    Status {
+        /// Hide column headers
+        #[arg(short = 'H', long = "no-header")]
+        no_header: bool,
+        /// Columns to display (comma-separated: pkgname,pkgpath,status,reason)
+        #[arg(short = 'o', long, value_delimiter = ',')]
+        columns: Option<Vec<String>>,
+        /// Filter to specific package (name or path)
+        package: Option<String>,
+    },
 }
 
 pub fn run(db: &Database, cmd: ListCmd, path: bool) -> Result<()> {
@@ -228,6 +239,13 @@ pub fn run(db: &Database, cmd: ListCmd, path: bool) -> Result<()> {
         ListCmd::Tree { all, format } => {
             print_build_tree(db, path, all, format)?;
         }
+        ListCmd::Status {
+            no_header,
+            columns,
+            package,
+        } => {
+            print_build_status(db, no_header, columns.as_deref(), package.as_deref())?;
+        }
     }
 
     Ok(())
@@ -273,7 +291,15 @@ fn print_build_tree(
         .map(|pkg| pkg.pkgname.clone())
         .collect();
 
-    // Get packages that are up-to-date (have UpToDate build result)
+    // Get packages that don't need building (up-to-date or skipped)
+    let excluded: HashSet<String> = db
+        .get_all_build_results()?
+        .into_iter()
+        .filter(|r| matches!(r.outcome, BuildOutcome::UpToDate | BuildOutcome::Skipped(_)))
+        .map(|r| r.pkgname.pkgname().to_string())
+        .collect();
+
+    // Get just up-to-date packages for display suffix
     let up_to_date: HashSet<String> = db
         .get_all_build_results()?
         .into_iter()
@@ -287,7 +313,7 @@ fn print_build_tree(
     } else {
         all_buildable
             .iter()
-            .filter(|p| !up_to_date.contains(*p))
+            .filter(|p| !excluded.contains(*p))
             .cloned()
             .collect()
     };
@@ -445,4 +471,184 @@ fn calculate_levels(
     }
 
     levels
+}
+
+/**
+ * Print package status with selectable columns in build order.
+ */
+fn print_build_status(
+    db: &Database,
+    no_header: bool,
+    columns: Option<&[String]>,
+    filter: Option<&str>,
+) -> Result<()> {
+    // Default columns if none specified
+    let all_cols = ["pkgname", "pkgpath", "status", "reason"];
+    let default_cols = ["pkgname", "status", "reason"];
+    let cols: Vec<&str> = columns
+        .map(|c| c.iter().map(|s| s.as_str()).collect())
+        .unwrap_or_else(|| default_cols.to_vec());
+
+    // Validate column names
+    for col in &cols {
+        if !all_cols.contains(col) {
+            bail!(
+                "Unknown column '{}'. Valid columns: {}",
+                col,
+                all_cols.join(", ")
+            );
+        }
+    }
+
+    // Column width limits (for padding only - full values still displayed)
+    let max_width = |col: &str| -> usize {
+        match col {
+            "pkgname" => 40,
+            "pkgpath" => 35,
+            _ => usize::MAX,
+        }
+    };
+
+    // Get all buildable packages and build pkgname -> pkgpath map
+    let buildable_pkgs = db.get_buildable_packages()?;
+    let pkgname_to_pkgpath: HashMap<String, String> = buildable_pkgs
+        .iter()
+        .map(|pkg| (pkg.pkgname.clone(), pkg.pkgpath.clone()))
+        .collect();
+
+    // Get resolved dependencies and build set of resolved packages
+    let pkgname_to_deps = db.get_all_resolved_deps()?;
+    let mut resolved_pkgs: HashSet<String> = HashSet::new();
+    for (pkg, deps) in &pkgname_to_deps {
+        resolved_pkgs.insert(pkg.clone());
+        for dep in deps {
+            resolved_pkgs.insert(dep.clone());
+        }
+    }
+
+    // Only include buildable packages that were resolved
+    let all_buildable: HashSet<String> = buildable_pkgs
+        .iter()
+        .filter(|pkg| resolved_pkgs.contains(&pkg.pkgname))
+        .map(|pkg| pkg.pkgname.clone())
+        .collect();
+
+    // Get build results and reasons
+    let build_results: HashMap<String, BuildOutcome> = db
+        .get_all_build_results()?
+        .into_iter()
+        .map(|r| (r.pkgname.pkgname().to_string(), r.outcome))
+        .collect();
+    let build_reasons = db.get_all_build_reasons()?;
+
+    // Filter dependencies to only those in the buildable set
+    let filtered_deps: HashMap<String, Vec<String>> = pkgname_to_deps
+        .iter()
+        .filter(|(pkg, _)| all_buildable.contains(*pkg))
+        .map(|(pkg, deps)| {
+            let filtered: Vec<String> = deps
+                .iter()
+                .filter(|d| all_buildable.contains(*d))
+                .cloned()
+                .collect();
+            (pkg.clone(), filtered)
+        })
+        .collect();
+
+    // Calculate topological levels for all buildable packages
+    let levels = calculate_levels(&all_buildable, &filtered_deps);
+    let max_level = levels.values().max().copied().unwrap_or(0);
+    let mut by_level: Vec<Vec<String>> = vec![Vec::new(); max_level + 1];
+    for (pkg, &level) in &levels {
+        by_level[level].push(pkg.clone());
+    }
+    for level_pkgs in &mut by_level {
+        level_pkgs.sort();
+    }
+
+    // Build rows in build order
+    let mut rows: Vec<[String; 4]> = Vec::new();
+    for pkgs in &by_level {
+        for pkgname in pkgs {
+            let pkgpath = match pkgname_to_pkgpath.get(pkgname) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // Apply filter if provided
+            if let Some(f) = filter {
+                if !pkgname.contains(f) && !pkgpath.contains(f) {
+                    continue;
+                }
+            }
+
+            let (status, reason) = if let Some(outcome) = build_results.get(pkgname) {
+                match outcome {
+                    BuildOutcome::Success => ("success", String::new()),
+                    BuildOutcome::UpToDate => ("up-to-date", String::new()),
+                    BuildOutcome::Failed(msg) => ("failed", msg.clone()),
+                    BuildOutcome::Skipped(skip) => ("skipped", skip.to_string()),
+                }
+            } else if let Some(reason) = build_reasons.get(pkgname) {
+                ("pending", reason.clone())
+            } else {
+                ("pending", String::new())
+            };
+
+            rows.push([pkgname.clone(), pkgpath.clone(), status.to_string(), reason]);
+        }
+    }
+
+    if rows.is_empty() {
+        println!("No packages to display");
+        return Ok(());
+    }
+
+    // Map column names to indices
+    let col_idx = |name: &str| -> usize {
+        match name {
+            "pkgname" => 0,
+            "pkgpath" => 1,
+            "status" => 2,
+            "reason" => 3,
+            _ => 0,
+        }
+    };
+
+    // Calculate column widths (capped by max_width)
+    let widths: Vec<usize> = cols
+        .iter()
+        .map(|&col| {
+            let idx = col_idx(col);
+            let header_len = col.len();
+            let max_data = rows.iter().map(|r| r[idx].len()).max().unwrap_or(0);
+            header_len.max(max_data).min(max_width(col))
+        })
+        .collect();
+
+    // Print header
+    if !no_header {
+        let header: Vec<String> = cols
+            .iter()
+            .zip(&widths)
+            .map(|(&col, &w)| format!("{:<width$}", col.to_uppercase(), width = w))
+            .collect();
+        if !out(header.join("  ").trim_end()) {
+            return Ok(());
+        }
+    }
+
+    // Print rows
+    for row in &rows {
+        let values: Vec<String> = cols
+            .iter()
+            .zip(&widths)
+            .map(|(&col, &w)| format!("{:<width$}", row[col_idx(col)], width = w))
+            .collect();
+        if !out(values.join("  ").trim_end()) {
+            break;
+        }
+    }
+
+    Ok(())
 }

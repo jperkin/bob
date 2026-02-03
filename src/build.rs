@@ -76,16 +76,70 @@ const OUTPUT_BATCH_INTERVAL: Duration = Duration::from_millis(100);
 const WORKER_BACKOFF_INTERVAL: Duration = Duration::from_millis(100);
 
 /**
+ * Reason why a package needs to be built.
+ *
+ * Returned by [`pkg_up_to_date`] when a package is not current with its
+ * sources. Used by `bob list tree -r` to show why packages need building.
+ */
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BuildReason {
+    /// Binary package file doesn't exist.
+    PackageNotFound,
+    /// A tracked source file no longer exists.
+    BuildFileRemoved(String),
+    /// A tracked source file has changed (hash or CVS ID mismatch).
+    BuildFileChanged(String),
+    /// The dependency list has changed (added, removed).
+    DependencyListChanged(Vec<String>, Vec<String>),
+    /// A dependency package file is missing.
+    DependencyMissing(String),
+    /// A dependency package is newer than this package.
+    DependencyNewer(String),
+}
+
+impl std::fmt::Display for BuildReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BuildReason::PackageNotFound => write!(f, "package not found"),
+            BuildReason::BuildFileRemoved(file) => {
+                write!(f, "build file removed: {}", file)
+            }
+            BuildReason::BuildFileChanged(file) => {
+                write!(f, "build file changed: {}", file)
+            }
+            BuildReason::DependencyListChanged(added, removed) => {
+                let mut parts = Vec::new();
+                if !added.is_empty() {
+                    parts.push(format!("+{}", added.join(", +")));
+                }
+                if !removed.is_empty() {
+                    parts.push(format!("-{}", removed.join(", -")));
+                }
+                write!(f, "deps changed: {}", parts.join(", "))
+            }
+            BuildReason::DependencyMissing(dep) => {
+                write!(f, "dependency missing: {}", dep)
+            }
+            BuildReason::DependencyNewer(dep) => {
+                write!(f, "dependency newer: {}", dep)
+            }
+        }
+    }
+}
+
+/**
  * Check if a package binary is up-to-date with its sources.
  *
- * Returns `Ok(true)` if the package doesn't need rebuilding:
+ * Returns `Ok(None)` if the package doesn't need rebuilding:
  * - Package file exists
  * - All tracked source files match (CVS ID or SHA256 hash)
  * - Dependencies match expected list
  * - No dependency package is newer than this package
  *
+ * Returns `Ok(Some(reason))` if the package needs building, with the reason.
+ *
  * This function is called during the scan phase to pre-compute which
- * packages need building, allowing `bob list build-tree` to show accurate
+ * packages need building, allowing `bob list tree` to show accurate
  * results and `bob build` to skip up-to-date packages entirely.
  */
 pub fn pkg_up_to_date(
@@ -93,14 +147,14 @@ pub fn pkg_up_to_date(
     depends: &[&str],
     packages_dir: &Path,
     pkgsrc_dir: &Path,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<BuildReason>> {
     let pkgfile = packages_dir.join(format!("{}.tgz", pkgname));
 
     let pkgfile_mtime = match pkgfile.metadata().and_then(|m| m.modified()) {
         Ok(t) => t,
         Err(_) => {
             debug!(path = %pkgfile.display(), "Package file not found");
-            return Ok(false);
+            return Ok(Some(BuildReason::PackageNotFound));
         }
     };
 
@@ -127,13 +181,13 @@ pub fn pkg_up_to_date(
 
         let src_file = pkgsrc_dir.join(file);
         if !src_file.exists() {
-            debug!(file, "Source file missing");
-            return Ok(false);
+            debug!(file, "File removed");
+            return Ok(Some(BuildReason::BuildFileRemoved(file.to_string())));
         }
 
         if file_id.starts_with("$NetBSD") {
             let Ok(content) = std::fs::read_to_string(&src_file) else {
-                return Ok(false);
+                return Ok(Some(BuildReason::BuildFileRemoved(file.to_string())));
             };
             let id = content.lines().find_map(|line| {
                 let start = line.find("$NetBSD")?;
@@ -142,7 +196,7 @@ pub fn pkg_up_to_date(
             });
             if id != Some(file_id) {
                 debug!(file, "CVS ID mismatch");
-                return Ok(false);
+                return Ok(Some(BuildReason::BuildFileChanged(file.to_string())));
             }
         } else {
             let mut f = File::open(&src_file)
@@ -158,7 +212,7 @@ pub fn pkg_up_to_date(
                     actual = hash,
                     "Hash mismatch"
                 );
-                return Ok(false);
+                return Ok(Some(BuildReason::BuildFileChanged(file.to_string())));
             }
         }
     }
@@ -172,12 +226,16 @@ pub fn pkg_up_to_date(
     let expected_deps: HashSet<&str> = depends.iter().copied().collect();
 
     if recorded_deps != expected_deps {
-        debug!(
-            recorded = recorded_deps.len(),
-            expected = expected_deps.len(),
-            "Dependency list changed"
-        );
-        return Ok(false);
+        let added: Vec<String> = expected_deps
+            .difference(&recorded_deps)
+            .map(|s| (*s).to_string())
+            .collect();
+        let removed: Vec<String> = recorded_deps
+            .difference(&expected_deps)
+            .map(|s| (*s).to_string())
+            .collect();
+        debug!(?added, ?removed, "Dependency list changed");
+        return Ok(Some(BuildReason::DependencyListChanged(added, removed)));
     }
 
     for dep in &recorded_deps {
@@ -186,17 +244,17 @@ pub fn pkg_up_to_date(
             Ok(t) => t,
             Err(_) => {
                 debug!(dep, "Dependency package missing");
-                return Ok(false);
+                return Ok(Some(BuildReason::DependencyMissing((*dep).to_string())));
             }
         };
         if dep_mtime > pkgfile_mtime {
             debug!(dep, "Dependency is newer");
-            return Ok(false);
+            return Ok(Some(BuildReason::DependencyNewer((*dep).to_string())));
         }
     }
 
     debug!(pkgname, "Package is up-to-date");
-    Ok(true)
+    Ok(None)
 }
 
 /// Build stages in order of execution.

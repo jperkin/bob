@@ -48,7 +48,7 @@ use crate::scan::SkipReason;
 /**
  * Schema version - update when schema changes.
  */
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 /**
  * Lightweight package row without full scan data.
@@ -166,6 +166,7 @@ impl Database {
                  pkgpath TEXT NOT NULL,
                  skip_reason TEXT,
                  fail_reason TEXT,
+                 build_reason TEXT,
                  is_bootstrap INTEGER DEFAULT 0,
                  pbulk_weight INTEGER DEFAULT 100,
                  scan_data TEXT
@@ -493,6 +494,66 @@ impl Database {
         self.conn.execute("DELETE FROM packages", [])?;
         self.clear_full_scan_complete()?;
         Ok(())
+    }
+
+    // ========================================================================
+    // BUILD REASON QUERIES
+    // ========================================================================
+
+    /**
+     * Store why a package needs to be built.
+     */
+    pub fn store_build_reason(&self, pkgname: &str, reason: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE packages SET build_reason = ?1 WHERE pkgname = ?2",
+            params![reason, pkgname],
+        )?;
+        Ok(())
+    }
+
+    /**
+     * Clear all build reasons (called before re-checking up-to-date status).
+     */
+    pub fn clear_build_reasons(&self) -> Result<()> {
+        self.conn
+            .execute("UPDATE packages SET build_reason = NULL", [])?;
+        Ok(())
+    }
+
+    /**
+     * Get build reason for a package by name.
+     */
+    pub fn get_build_reason(&self, pkgname: &str) -> Result<Option<String>> {
+        let result = self.conn.query_row(
+            "SELECT build_reason FROM packages WHERE pkgname = ?1",
+            [pkgname],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(reason) => Ok(reason),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /**
+     * Get all packages with their build reasons.
+     */
+    pub fn get_all_build_reasons(&self) -> Result<HashMap<String, String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT pkgname, build_reason FROM packages WHERE build_reason IS NOT NULL")?;
+        let rows = stmt.query_map([], |row| {
+            let pkgname: String = row.get(0)?;
+            let reason: String = row.get(1)?;
+            Ok((pkgname, reason))
+        })?;
+        let mut result = HashMap::new();
+        for row in rows {
+            let (pkgname, reason) = row?;
+            result.insert(pkgname, reason);
+        }
+        Ok(result)
     }
 
     // ========================================================================
