@@ -64,6 +64,26 @@ pub struct PackageRow {
     pub pbulk_weight: i32,
 }
 
+impl PackageRow {
+    /**
+     * Construct a PackageRow from a database row.
+     *
+     * Expects columns in order: id, pkgname, pkgpath, skip_reason,
+     * fail_reason, is_bootstrap, pbulk_weight.
+     */
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            pkgname: row.get(1)?,
+            pkgpath: row.get(2)?,
+            skip_reason: row.get(3)?,
+            fail_reason: row.get(4)?,
+            is_bootstrap: row.get::<_, i32>(5)? != 0,
+            pbulk_weight: row.get(6)?,
+        })
+    }
+}
+
 /**
  * SQLite database for scan and build caching.
  */
@@ -298,17 +318,7 @@ impl Database {
             "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight
              FROM packages WHERE pkgname = ?1",
             [pkgname],
-            |row| {
-                Ok(PackageRow {
-                    id: row.get(0)?,
-                    pkgname: row.get(1)?,
-                    pkgpath: row.get(2)?,
-                    skip_reason: row.get(3)?,
-                    fail_reason: row.get(4)?,
-                    is_bootstrap: row.get::<_, i32>(5)? != 0,
-                    pbulk_weight: row.get(6)?,
-                })
-            },
+            PackageRow::from_row,
         );
 
         match result {
@@ -357,17 +367,7 @@ impl Database {
              FROM packages WHERE pkgpath = ?1",
         )?;
 
-        let rows = stmt.query_map([pkgpath], |row| {
-            Ok(PackageRow {
-                id: row.get(0)?,
-                pkgname: row.get(1)?,
-                pkgpath: row.get(2)?,
-                skip_reason: row.get(3)?,
-                fail_reason: row.get(4)?,
-                is_bootstrap: row.get::<_, i32>(5)? != 0,
-                pbulk_weight: row.get(6)?,
-            })
-        })?;
+        let rows = stmt.query_map([pkgpath], PackageRow::from_row)?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -414,17 +414,7 @@ impl Database {
              FROM packages ORDER BY id",
         )?;
 
-        let rows = stmt.query_map([], |row| {
-            Ok(PackageRow {
-                id: row.get(0)?,
-                pkgname: row.get(1)?,
-                pkgpath: row.get(2)?,
-                skip_reason: row.get(3)?,
-                fail_reason: row.get(4)?,
-                is_bootstrap: row.get::<_, i32>(5)? != 0,
-                pbulk_weight: row.get(6)?,
-            })
-        })?;
+        let rows = stmt.query_map([], PackageRow::from_row)?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -438,17 +428,7 @@ impl Database {
              FROM packages WHERE skip_reason IS NULL AND fail_reason IS NULL",
         )?;
 
-        let rows = stmt.query_map([], |row| {
-            Ok(PackageRow {
-                id: row.get(0)?,
-                pkgname: row.get(1)?,
-                pkgpath: row.get(2)?,
-                skip_reason: row.get(3)?,
-                fail_reason: row.get(4)?,
-                is_bootstrap: row.get::<_, i32>(5)? != 0,
-                pbulk_weight: row.get(6)?,
-            })
-        })?;
+        let rows = stmt.query_map([], PackageRow::from_row)?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
