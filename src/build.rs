@@ -93,8 +93,8 @@ pub enum BuildReason {
     DependencyListChanged(Vec<String>, Vec<String>),
     /// A dependency package file is missing.
     DependencyMissing(String),
-    /// A dependency package is newer than this package.
-    DependencyNewer(String),
+    /// A dependency has been rebuilt.
+    DependencyRebuilt(String),
 }
 
 impl std::fmt::Display for BuildReason {
@@ -120,8 +120,8 @@ impl std::fmt::Display for BuildReason {
             BuildReason::DependencyMissing(dep) => {
                 write!(f, "dependency missing: {}", dep)
             }
-            BuildReason::DependencyNewer(dep) => {
-                write!(f, "dependency newer: {}", dep)
+            BuildReason::DependencyRebuilt(dep) => {
+                write!(f, "dependency rebuilt: {}", dep)
             }
         }
     }
@@ -249,7 +249,7 @@ pub fn pkg_up_to_date(
         };
         if dep_mtime > pkgfile_mtime {
             debug!(dep, "Dependency is newer");
-            return Ok(Some(BuildReason::DependencyNewer((*dep).to_string())));
+            return Ok(Some(BuildReason::DependencyRebuilt((*dep).to_string())));
         }
     }
 
