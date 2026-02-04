@@ -27,6 +27,7 @@ use bob::sandbox::{Sandbox, SandboxScope};
 use bob::scan::{Scan, ScanResult};
 use clap::{Parser, Subcommand};
 use rayon::prelude::*;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str;
@@ -129,12 +130,18 @@ impl BuildRunner {
     }
 
     /**
-     * Check which buildable packages are up-to-date and store results.
+     * Check in advance whether packages are up-to-date, or a reason why they
+     * need to be built, and store results.
      *
-     * For each buildable package, checks if the binary package is current
-     * with its sources. Packages that are up-to-date are recorded with
-     * `BuildOutcome::UpToDate` so they will be skipped during build.
-     * Packages that need building have their reason stored in the database.
+     * Determines whether each package's binary is current with its sources by
+     * checking file hashes, CVS IDs, and dependency states. Packages verified
+     * as up-to-date are recorded with `BuildOutcome::UpToDate` to skip during
+     * build; others have their rebuild reason stored in the database.
+     *
+     * Processing uses topological waves to avoid redundant checks. Packages
+     * are checked only after all their dependencies have been processed. When
+     * a checked package needs rebuilding, all its dependents are immediately
+     * marked for rebuild via propagation.
      */
     fn check_up_to_date(&self, scan_result: &bob::scan::ScanSummary) -> Result<usize> {
         let pkgsrc_env = match self.db.load_pkgsrc_env() {
@@ -161,19 +168,130 @@ impl BuildRunner {
             .build()
             .context("Failed to build thread pool for up-to-date check")?;
 
-        let results: Vec<_> = pool.install(|| {
-            buildable
-                .par_iter()
-                .map(|pkg| {
-                    let pkgname = pkg.pkgname().pkgname();
-                    let depends: Vec<&str> = pkg.depends().iter().map(|d| d.pkgname()).collect();
-                    let result = bob::pkg_up_to_date(pkgname, &depends, &packages_dir, pkgsrc_dir);
-                    (pkg, result)
-                })
-                .collect()
-        });
+        /*
+         * Build dependency graph restricted to buildable set. Forward deps
+         * determine wave ordering, reverse deps enable propagation.
+         */
+        let buildable_names: HashSet<&str> =
+            buildable.iter().map(|p| p.pkgname().pkgname()).collect();
+        let pkg_by_name: HashMap<&str, &bob::scan::ResolvedPackage> = buildable
+            .iter()
+            .map(|&p| (p.pkgname().pkgname(), p))
+            .collect();
 
-        for (pkg, result) in results {
+        let forward_deps: HashMap<&str, Vec<&str>> = buildable
+            .iter()
+            .map(|p| {
+                let deps: Vec<&str> = p
+                    .depends()
+                    .iter()
+                    .map(|d| d.pkgname())
+                    .filter(|d| buildable_names.contains(d))
+                    .collect();
+                (p.pkgname().pkgname(), deps)
+            })
+            .collect();
+
+        let mut reverse_deps: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (pkg, deps) in &forward_deps {
+            for dep in deps {
+                reverse_deps.entry(*dep).or_default().push(*pkg);
+            }
+        }
+
+        let mut remaining: HashSet<&str> = buildable_names.clone();
+        let mut needs_rebuild: HashSet<&str> = HashSet::new();
+        let mut propagated_from: HashMap<&str, &str> = HashMap::new();
+        let mut checked_results: Vec<(
+            &bob::scan::ResolvedPackage,
+            anyhow::Result<Option<bob::BuildReason>>,
+        )> = Vec::new();
+
+        /*
+         * Mark packages with missing binaries. Not propagated - dependents
+         * will get their own reason (DependencyMissing) when checked.
+         */
+        for &pkgname in &buildable_names {
+            let pkgfile = packages_dir.join(format!("{}.tgz", pkgname));
+            if !pkgfile.exists() {
+                needs_rebuild.insert(pkgname);
+                self.db
+                    .store_build_reason(pkgname, &bob::BuildReason::PackageNotFound.to_string())?;
+            }
+        }
+
+        /*
+         * Process in topological waves. Each wave contains packages whose
+         * dependencies have all been processed. Packages already marked are
+         * skipped; when a checked package needs rebuild, all transitive
+         * dependents are marked with DependencyNewer via propagation.
+         */
+        while !remaining.is_empty() {
+            let ready: Vec<&str> = remaining
+                .iter()
+                .filter(|pkg| {
+                    forward_deps[*pkg]
+                        .iter()
+                        .all(|dep| !remaining.contains(dep))
+                })
+                .copied()
+                .collect();
+
+            if ready.is_empty() {
+                break;
+            }
+
+            let to_check: Vec<&str> = ready
+                .iter()
+                .filter(|pkg| !needs_rebuild.contains(*pkg))
+                .copied()
+                .collect();
+
+            let wave_results: Vec<_> = pool.install(|| {
+                to_check
+                    .par_iter()
+                    .map(|&pkgname| {
+                        let pkg = pkg_by_name[pkgname];
+                        let depends: Vec<&str> =
+                            pkg.depends().iter().map(|d| d.pkgname()).collect();
+                        let result =
+                            bob::pkg_up_to_date(pkgname, &depends, &packages_dir, pkgsrc_dir);
+                        (pkg, result)
+                    })
+                    .collect()
+            });
+
+            for (pkg, result) in wave_results {
+                let pkgname = pkg.pkgname().pkgname();
+                if matches!(&result, Ok(Some(_)) | Err(_)) {
+                    needs_rebuild.insert(pkgname);
+                    let mut worklist = vec![pkgname];
+                    while let Some(dep) = worklist.pop() {
+                        if let Some(dependents) = reverse_deps.get(dep) {
+                            for &dependent in dependents {
+                                if needs_rebuild.insert(dependent) {
+                                    propagated_from.insert(dependent, dep);
+                                    worklist.push(dependent);
+                                }
+                            }
+                        }
+                    }
+                }
+                checked_results.push((pkg, result));
+            }
+
+            for pkg in ready {
+                remaining.remove(pkg);
+            }
+        }
+
+        /*
+         * Store results. Checked packages get their actual outcome (UpToDate
+         * or their specific rebuild reason). Propagated packages (not checked)
+         * get DependencyNewer.
+         */
+        for (pkg, result) in checked_results {
+            let pkgname = pkg.pkgname().pkgname();
             match result {
                 Ok(None) => {
                     let build_result = bob::BuildResult {
@@ -187,21 +305,23 @@ impl BuildRunner {
                     up_to_date_count += 1;
                 }
                 Ok(Some(reason)) => {
-                    self.db
-                        .store_build_reason(pkg.pkgname().pkgname(), &reason.to_string())?;
+                    self.db.store_build_reason(pkgname, &reason.to_string())?;
                 }
                 Err(e) => {
                     tracing::debug!(
-                        pkgname = pkg.pkgname().pkgname(),
+                        pkgname,
                         error = %e,
                         "Error checking up-to-date status"
                     );
-                    self.db.store_build_reason(
-                        pkg.pkgname().pkgname(),
-                        &format!("check failed: {}", e),
-                    )?;
+                    self.db
+                        .store_build_reason(pkgname, &format!("check failed: {}", e))?;
                 }
             }
+        }
+
+        for (pkgname, dep) in propagated_from {
+            let reason = bob::BuildReason::DependencyNewer(dep.to_string());
+            self.db.store_build_reason(pkgname, &reason.to_string())?;
         }
 
         println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
