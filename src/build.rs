@@ -1236,82 +1236,16 @@ impl PackageBuild {
             }
             Ok(PkgBuildResult::Failed) => {
                 error!("Package build failed");
-                // Show cleanup stage to user
-                let _ = status_tx.send(ChannelCommand::StageUpdate(
-                    self.sandbox_id,
-                    Some("cleanup".to_string()),
-                ));
-                // Kill any orphaned processes in the sandbox before cleanup.
-                // Failed builds may leave processes running that would block
-                // subsequent commands like bmake show-var or bmake clean.
-                let kill_start = Instant::now();
-                self.session.sandbox.kill_processes_by_id(self.sandbox_id);
-                trace!(
-                    elapsed_ms = kill_start.elapsed().as_millis(),
-                    "kill_processes_by_id completed"
+                self.cleanup_after_failure(
+                    status_tx, pkgname, pkgpath, logdir, patterns, &pkg_env, &envs,
                 );
-                // Save wrkdir files matching configured patterns, then clean up
-                if !patterns.is_empty() {
-                    let save_start = Instant::now();
-                    self.save_wrkdir_files(pkgname, pkgpath, logdir, patterns, &pkg_env);
-                    trace!(
-                        elapsed_ms = save_start.elapsed().as_millis(),
-                        "save_wrkdir_files completed"
-                    );
-                    let clean_start = Instant::now();
-                    self.run_clean(pkgpath, &envs);
-                    trace!(
-                        elapsed_ms = clean_start.elapsed().as_millis(),
-                        "run_clean completed"
-                    );
-                } else {
-                    let clean_start = Instant::now();
-                    self.run_clean(pkgpath, &envs);
-                    trace!(
-                        elapsed_ms = clean_start.elapsed().as_millis(),
-                        "run_clean completed"
-                    );
-                }
                 PackageBuildResult::Failed
             }
             Err(e) => {
                 error!(error = %e, "Package build error");
-                // Show cleanup stage to user
-                let _ = status_tx.send(ChannelCommand::StageUpdate(
-                    self.sandbox_id,
-                    Some("cleanup".to_string()),
-                ));
-                // Kill any orphaned processes in the sandbox before cleanup.
-                // Failed builds may leave processes running that would block
-                // subsequent commands like bmake show-var or bmake clean.
-                let kill_start = Instant::now();
-                self.session.sandbox.kill_processes_by_id(self.sandbox_id);
-                trace!(
-                    elapsed_ms = kill_start.elapsed().as_millis(),
-                    "kill_processes_by_id completed"
+                self.cleanup_after_failure(
+                    status_tx, pkgname, pkgpath, logdir, patterns, &pkg_env, &envs,
                 );
-                // Save wrkdir files matching configured patterns, then clean up
-                if !patterns.is_empty() {
-                    let save_start = Instant::now();
-                    self.save_wrkdir_files(pkgname, pkgpath, logdir, patterns, &pkg_env);
-                    trace!(
-                        elapsed_ms = save_start.elapsed().as_millis(),
-                        "save_wrkdir_files completed"
-                    );
-                    let clean_start = Instant::now();
-                    self.run_clean(pkgpath, &envs);
-                    trace!(
-                        elapsed_ms = clean_start.elapsed().as_millis(),
-                        "run_clean completed"
-                    );
-                } else {
-                    let clean_start = Instant::now();
-                    self.run_clean(pkgpath, &envs);
-                    trace!(
-                        elapsed_ms = clean_start.elapsed().as_millis(),
-                        "run_clean completed"
-                    );
-                }
                 PackageBuildResult::Failed
             }
         };
@@ -1330,6 +1264,61 @@ impl PackageBuild {
         }
 
         Ok(result)
+    }
+
+    /**
+     * Perform cleanup after a build failure or error.  A successful build
+     * will perform its own cleanup, while this one handles saving useful
+     * logs from the build, etc.
+     */
+    #[allow(clippy::too_many_arguments)]
+    fn cleanup_after_failure(
+        &self,
+        status_tx: &Sender<ChannelCommand>,
+        pkgname: &str,
+        pkgpath: &PkgPath,
+        logdir: &Path,
+        patterns: &[String],
+        pkg_env: &HashMap<String, String>,
+        envs: &[(String, String)],
+    ) {
+        let _ = status_tx.send(ChannelCommand::StageUpdate(
+            self.sandbox_id,
+            Some("cleanup".to_string()),
+        ));
+
+        /*
+         * Kill any orphaned processes in the sandbox before cleanup, as
+         * occasionally builds leave some behind.
+         */
+        let kill_start = Instant::now();
+        self.session.sandbox.kill_processes_by_id(self.sandbox_id);
+        trace!(
+            elapsed_ms = kill_start.elapsed().as_millis(),
+            "kill_processes_by_id completed"
+        );
+
+        /*
+         * Save any user-configured save_wrkdir_patterns.
+         */
+        if !patterns.is_empty() {
+            let save_start = Instant::now();
+            self.save_wrkdir_files(pkgname, pkgpath, logdir, patterns, pkg_env);
+            trace!(
+                elapsed_ms = save_start.elapsed().as_millis(),
+                "save_wrkdir_files completed"
+            );
+        }
+
+        /*
+         * Run the standard cleanup.
+         */
+        let clean_start = Instant::now();
+        self.run_clean(pkgpath, envs);
+        trace!(
+            elapsed_ms = clean_start.elapsed().as_millis(),
+            "run_clean completed"
+        );
     }
 
     /// Save files matching patterns from WRKDIR to logdir on build failure.
