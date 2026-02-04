@@ -360,36 +360,6 @@ impl Sandbox {
             .filter_map(|line| line.split_whitespace().nth(1))
             .collect();
 
-        if pids.is_empty() {
-            return String::from("(none)");
-        }
-
-        let ps_output = Command::new("ps")
-            .arg("-ww")
-            .arg("-o")
-            .arg("pid,args")
-            .arg("-p")
-            .arg(pids.join(","))
-            .process_group(0)
-            .output();
-
-        match ps_output {
-            Ok(out) => String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .skip(1)
-                .filter_map(|line| {
-                    let mut parts = line.split_whitespace();
-                    let pid = parts.next()?;
-                    let cmd: String = parts.collect::<Vec<_>>().join(" ");
-                    Some(format!("pid={} cmd='{}'", pid, cmd))
-                })
-                .collect::<Vec<_>>()
-                .join(", "),
-            Err(_) => pids
-                .iter()
-                .map(|p| format!("pid={}", p))
-                .collect::<Vec<_>>()
-                .join(", "),
-        }
+        super::format_process_info(&pids)
     }
 }

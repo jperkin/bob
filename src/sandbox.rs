@@ -98,6 +98,52 @@ pub(crate) const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub(crate) const KILL_PROCESSES_MAX_RETRIES: u32 = 5;
 pub(crate) const KILL_PROCESSES_INITIAL_DELAY_MS: u64 = 64;
 
+/**
+ * Format process info for a list of PIDs using ps.
+ *
+ * Used by platform implementations to generate human-readable process info
+ * for warnings when processes can't be killed.
+ *
+ * illumos ps doesn't support getting full argument list (uses pargs instead),
+ * and Linux handles this differently by iterating /proc instead.
+ */
+#[cfg(any(target_os = "macos", target_os = "netbsd"))]
+pub(crate) fn format_process_info(pids: &[&str]) -> String {
+    use std::process::Command;
+
+    if pids.is_empty() {
+        return String::from("(none)");
+    }
+
+    let ps_output = Command::new("ps")
+        .arg("-ww")
+        .arg("-o")
+        .arg("pid,args")
+        .arg("-p")
+        .arg(pids.join(","))
+        .process_group(0)
+        .output();
+
+    match ps_output {
+        Ok(out) => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                let pid = parts.next()?;
+                let cmd: String = parts.collect::<Vec<_>>().join(" ");
+                Some(format!("pid={} cmd='{}'", pid, cmd))
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        Err(_) => pids
+            .iter()
+            .map(|p| format!("pid={}", p))
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
 /*
  * Poll for child process exit while checking a shutdown flag.  If shutdown
  * is requested, kill the child and return an error.
