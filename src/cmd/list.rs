@@ -475,7 +475,12 @@ fn calculate_levels(
 }
 
 /**
- * Print package status with selectable columns in build order.
+ * Print package status with selectable columns in dependency order.
+ *
+ * Shows packages in topological order so dependencies appear before packages
+ * that depend on them. Only includes packages in the resolved dependency graph
+ * (the actual build set), so a prefailed package appears before packages it
+ * blocks.
  */
 fn print_build_status(
     db: &Database,
@@ -516,28 +521,31 @@ fn print_build_status(
         .transpose()
         .map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", filter.unwrap_or(""), e))?;
 
-    // Get all buildable packages and build pkgname -> pkgpath map
-    let buildable_pkgs = db.get_buildable_packages()?;
-    let pkgname_to_pkgpath: HashMap<String, String> = buildable_pkgs
-        .iter()
-        .map(|pkg| (pkg.pkgname.clone(), pkg.pkgpath.clone()))
-        .collect();
+    // Get all packages for metadata lookup
+    let all_pkgs = db.get_all_packages()?;
+    let pkgname_to_pkg: HashMap<String, &_> =
+        all_pkgs.iter().map(|p| (p.pkgname.clone(), p)).collect();
 
-    // Get resolved dependencies and build set of resolved packages
+    // Get resolved dependencies - this defines the actual build set
     let pkgname_to_deps = db.get_all_resolved_deps()?;
-    let mut resolved_pkgs: HashSet<String> = HashSet::new();
+
+    // Build set of packages in the resolved dependency graph
+    let mut in_build: HashSet<String> = HashSet::new();
     for (pkg, deps) in &pkgname_to_deps {
-        resolved_pkgs.insert(pkg.clone());
+        in_build.insert(pkg.clone());
         for dep in deps {
-            resolved_pkgs.insert(dep.clone());
+            in_build.insert(dep.clone());
         }
     }
 
-    // Only include buildable packages that were resolved
-    let all_buildable: HashSet<String> = buildable_pkgs
-        .iter()
-        .filter(|pkg| resolved_pkgs.contains(&pkg.pkgname))
-        .map(|pkg| pkg.pkgname.clone())
+    // Filter deps to only packages in the build set
+    let filtered_deps: HashMap<String, Vec<String>> = pkgname_to_deps
+        .into_iter()
+        .filter(|(pkg, _)| in_build.contains(pkg))
+        .map(|(pkg, deps)| {
+            let filtered: Vec<String> = deps.into_iter().filter(|d| in_build.contains(d)).collect();
+            (pkg, filtered)
+        })
         .collect();
 
     // Get build results and reasons
@@ -548,22 +556,8 @@ fn print_build_status(
         .collect();
     let build_reasons = db.get_all_build_reasons()?;
 
-    // Filter dependencies to only those in the buildable set
-    let filtered_deps: HashMap<String, Vec<String>> = pkgname_to_deps
-        .iter()
-        .filter(|(pkg, _)| all_buildable.contains(*pkg))
-        .map(|(pkg, deps)| {
-            let filtered: Vec<String> = deps
-                .iter()
-                .filter(|d| all_buildable.contains(*d))
-                .cloned()
-                .collect();
-            (pkg.clone(), filtered)
-        })
-        .collect();
-
-    // Calculate topological levels for all buildable packages
-    let levels = calculate_levels(&all_buildable, &filtered_deps);
+    // Calculate topological levels for packages in the build
+    let levels = calculate_levels(&in_build, &filtered_deps);
     let max_level = levels.values().max().copied().unwrap_or(0);
     let mut by_level: Vec<Vec<String>> = vec![Vec::new(); max_level + 1];
     for (pkg, &level) in &levels {
@@ -573,11 +567,11 @@ fn print_build_status(
         level_pkgs.sort();
     }
 
-    // Build rows in build order
+    // Build rows in dependency order
     let mut rows: Vec<[String; 4]> = Vec::new();
     for pkgs in &by_level {
         for pkgname in pkgs {
-            let pkgpath = match pkgname_to_pkgpath.get(pkgname) {
+            let pkg = match pkgname_to_pkg.get(pkgname) {
                 Some(p) => p,
                 None => continue,
             };
@@ -594,15 +588,26 @@ fn print_build_status(
                     BuildOutcome::Success => ("success", String::new()),
                     BuildOutcome::UpToDate => ("up-to-date", String::new()),
                     BuildOutcome::Failed(msg) => ("failed", msg.clone()),
-                    BuildOutcome::Skipped(skip) => ("skipped", skip.to_string()),
+                    BuildOutcome::Skipped(skip) => (skip.status(), skip.to_string()),
                 }
             } else if let Some(reason) = build_reasons.get(pkgname) {
                 ("pending", reason.clone())
+            } else if let Some(reason) = &pkg.fail_reason {
+                let skip = SkipReason::PkgFail(reason.clone());
+                (skip.status(), skip.to_string())
+            } else if let Some(reason) = &pkg.skip_reason {
+                let skip = SkipReason::PkgSkip(reason.clone());
+                (skip.status(), skip.to_string())
             } else {
                 ("pending", String::new())
             };
 
-            rows.push([pkgname.clone(), pkgpath.clone(), status.to_string(), reason]);
+            rows.push([
+                pkgname.clone(),
+                pkg.pkgpath.clone(),
+                status.to_string(),
+                reason,
+            ]);
         }
     }
 

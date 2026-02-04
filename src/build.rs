@@ -966,6 +966,47 @@ pub enum BuildOutcome {
     Skipped(SkipReason),
 }
 
+impl BuildOutcome {
+    /// Returns the database key for this outcome variant.
+    pub fn db_key(&self) -> &'static str {
+        match self {
+            BuildOutcome::Success => "success",
+            BuildOutcome::UpToDate => "up_to_date",
+            BuildOutcome::Failed(_) => "failed",
+            BuildOutcome::Skipped(skip) => skip.db_key(),
+        }
+    }
+
+    /// Returns the detail string for database storage.
+    pub fn db_detail(&self) -> Option<String> {
+        match self {
+            BuildOutcome::Success | BuildOutcome::UpToDate => None,
+            BuildOutcome::Failed(s) => Some(s.clone()),
+            BuildOutcome::Skipped(skip) => Some(skip.to_string()),
+        }
+    }
+
+    /// Creates a BuildOutcome from database key and detail.
+    pub fn from_db(key: &str, detail: Option<String>) -> Option<Self> {
+        match key {
+            "success" => Some(BuildOutcome::Success),
+            "up_to_date" => Some(BuildOutcome::UpToDate),
+            "failed" => Some(BuildOutcome::Failed(detail.unwrap_or_default())),
+            _ => SkipReason::from_db(key, detail.unwrap_or_default()).map(BuildOutcome::Skipped),
+        }
+    }
+
+    /// Returns the display status string.
+    pub fn status(&self) -> &'static str {
+        match self {
+            BuildOutcome::Success => "success",
+            BuildOutcome::UpToDate => "up-to-date",
+            BuildOutcome::Failed(_) => "failed",
+            BuildOutcome::Skipped(skip) => skip.status(),
+        }
+    }
+}
+
 /// Result of building a single package.
 ///
 /// Contains the outcome, timing, and log location for a package build.

@@ -43,12 +43,11 @@ use tracing::{debug, warn};
 
 use crate::build::{BuildOutcome, BuildResult};
 use crate::config::PkgsrcEnv;
-use crate::scan::SkipReason;
 
 /**
  * Schema version - update when schema changes.
  */
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 5;
 
 /**
  * Lightweight package row without full scan data.
@@ -585,13 +584,9 @@ impl Database {
      *
      * This persists all skip reasons to the builds table so that queries
      * like `get_blockers` can find them consistently.
-     *
-     * At scan time, both IndirectSkip and IndirectFail come from prefailed
-     * packages (PKG_SKIP_REASON and PKG_FAIL_REASON respectively), so both
-     * are stored as indirect_skip to map to "indirect-prefailed" in the CLI.
      */
     pub fn store_scan_skipped(&self, summary: &crate::scan::ScanSummary) -> Result<()> {
-        use crate::scan::{ScanResult, SkipReason};
+        use crate::scan::ScanResult;
 
         self.conn.execute("BEGIN TRANSACTION", [])?;
 
@@ -604,16 +599,8 @@ impl Database {
                     continue;
                 };
 
-                // At scan time, both IndirectSkip and IndirectFail are from
-                // prefailed deps, so store both as indirect_skip
-                let (outcome, detail) = match reason {
-                    SkipReason::PkgSkip(s) => ("pkg_skip", Some(s.clone())),
-                    SkipReason::PkgFail(s) => ("pkg_fail", Some(s.clone())),
-                    SkipReason::IndirectSkip(s) | SkipReason::IndirectFail(s) => {
-                        ("indirect_skip", Some(s.clone()))
-                    }
-                    SkipReason::UnresolvedDep(s) => ("unresolved_dep", Some(s.clone())),
-                };
+                let outcome = reason.db_key();
+                let detail = reason.to_string();
 
                 self.conn.execute(
                     "INSERT OR IGNORE INTO builds
@@ -701,7 +688,8 @@ impl Database {
      * Store a build result by package ID.
      */
     pub fn store_build_result(&self, package_id: i64, result: &BuildResult) -> Result<()> {
-        let (outcome, detail) = build_outcome_to_db(&result.outcome);
+        let outcome = result.outcome.db_key();
+        let detail = result.outcome.db_detail();
         let duration_ms = result.duration.as_millis() as i64;
         let log_dir = result.log_dir.as_ref().map(|p| p.display().to_string());
 
@@ -755,7 +743,9 @@ impl Database {
 
         match result {
             Ok((pkgname, pkgpath, outcome, detail, duration_ms, log_dir)) => {
-                let build_outcome = db_outcome_to_build(&outcome, detail);
+                let Some(build_outcome) = BuildOutcome::from_db(&outcome, detail) else {
+                    anyhow::bail!("Unknown build outcome: {}", outcome);
+                };
                 Ok(Some(BuildResult {
                     pkgname: PkgName::new(&pkgname),
                     pkgpath: pkgpath.and_then(|p| PkgPath::new(&p).ok()),
@@ -823,7 +813,9 @@ impl Database {
         let mut results = Vec::new();
         for row in rows {
             let (pkgname, pkgpath, outcome, detail, duration_ms, log_dir) = row?;
-            let build_outcome = db_outcome_to_build(&outcome, detail);
+            let Some(build_outcome) = BuildOutcome::from_db(&outcome, detail) else {
+                continue;
+            };
             results.push(BuildResult {
                 pkgname: PkgName::new(&pkgname),
                 pkgpath: pkgpath.and_then(|p| PkgPath::new(&p).ok()),
@@ -904,50 +896,38 @@ impl Database {
 
         let mut stmt = self.conn.prepare(
             "WITH RECURSIVE
-             blocking(id, reason) AS (
+             blocking(id, outcome) AS (
                  -- Direct dependencies that have failed/skipped builds
-                 SELECT rd.depends_on_id,
-                        CASE b.outcome
-                            WHEN 'failed' THEN 'failed'
-                            WHEN 'pkg_skip' THEN 'prefailed'
-                            WHEN 'pkg_fail' THEN 'prefailed'
-                            WHEN 'indirect_skip' THEN 'indirect-prefailed'
-                            WHEN 'indirect_fail' THEN 'indirect-failed'
-                            WHEN 'indirect_failed' THEN 'indirect-failed'
-                            WHEN 'unresolved_dep' THEN 'unresolved'
-                            ELSE b.outcome
-                        END
+                 SELECT rd.depends_on_id, b.outcome
                  FROM resolved_depends rd
                  JOIN builds b ON b.package_id = rd.depends_on_id
                  WHERE rd.package_id = ?1
                    AND b.outcome NOT IN ('success', 'up_to_date')
                  UNION
                  -- Transitive: deps of deps that are blocked
-                 SELECT rd.depends_on_id,
-                        CASE b.outcome
-                            WHEN 'failed' THEN 'failed'
-                            WHEN 'pkg_skip' THEN 'prefailed'
-                            WHEN 'pkg_fail' THEN 'prefailed'
-                            WHEN 'indirect_skip' THEN 'indirect-prefailed'
-                            WHEN 'indirect_fail' THEN 'indirect-failed'
-                            WHEN 'indirect_failed' THEN 'indirect-failed'
-                            WHEN 'unresolved_dep' THEN 'unresolved'
-                            ELSE b.outcome
-                        END
+                 SELECT rd.depends_on_id, b.outcome
                  FROM resolved_depends rd
                  JOIN blocking bl ON rd.package_id = bl.id
                  JOIN builds b ON b.package_id = rd.depends_on_id
                  WHERE b.outcome NOT IN ('success', 'up_to_date')
              )
-             SELECT DISTINCT p.pkgname, p.pkgpath, bl.reason
+             SELECT DISTINCT p.pkgname, p.pkgpath, bl.outcome
              FROM blocking bl
              JOIN packages p ON bl.id = p.id
-             -- Only show root causes (failed or prefailed), not indirect
-             WHERE bl.reason IN ('failed', 'prefailed', 'unresolved')
+             -- Only show root causes (failed or prefailed/preskipped), not indirect
+             WHERE bl.outcome IN ('failed', 'pkg_fail', 'pkg_skip', 'unresolved')
              ORDER BY p.pkgname",
         )?;
 
-        let rows = stmt.query_map([pkg.id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        let rows = stmt.query_map([pkg.id], |row| {
+            let pkgname: String = row.get(0)?;
+            let pkgpath: String = row.get(1)?;
+            let outcome: String = row.get(2)?;
+            let status = BuildOutcome::from_db(&outcome, None)
+                .map(|o| o.status())
+                .unwrap_or("unknown");
+            Ok((pkgname, pkgpath, status.to_string()))
+        })?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -1276,50 +1256,5 @@ impl Database {
         }
 
         Ok(())
-    }
-}
-
-// ============================================================================
-// HELPER FUNCTIONS
-// ============================================================================
-
-/**
- * Convert BuildOutcome to database format.
- */
-fn build_outcome_to_db(outcome: &BuildOutcome) -> (&'static str, Option<String>) {
-    match outcome {
-        BuildOutcome::Success => ("success", None),
-        BuildOutcome::UpToDate => ("up_to_date", None),
-        BuildOutcome::Failed(s) => ("failed", Some(s.clone())),
-        BuildOutcome::Skipped(reason) => match reason {
-            SkipReason::PkgSkip(s) => ("pkg_skip", Some(s.clone())),
-            SkipReason::PkgFail(s) => ("pkg_fail", Some(s.clone())),
-            SkipReason::IndirectSkip(s) => ("indirect_skip", Some(s.clone())),
-            SkipReason::IndirectFail(s) => ("indirect_fail", Some(s.clone())),
-            SkipReason::UnresolvedDep(s) => ("unresolved_dep", Some(s.clone())),
-        },
-    }
-}
-
-/**
- * Convert database format to BuildOutcome.
- */
-fn db_outcome_to_build(outcome: &str, detail: Option<String>) -> BuildOutcome {
-    match outcome {
-        "success" => BuildOutcome::Success,
-        "up_to_date" => BuildOutcome::UpToDate,
-        "failed" => BuildOutcome::Failed(detail.unwrap_or_default()),
-        "pkg_skip" => BuildOutcome::Skipped(SkipReason::PkgSkip(detail.unwrap_or_default())),
-        "pkg_fail" => BuildOutcome::Skipped(SkipReason::PkgFail(detail.unwrap_or_default())),
-        "indirect_skip" => {
-            BuildOutcome::Skipped(SkipReason::IndirectSkip(detail.unwrap_or_default()))
-        }
-        "indirect_fail" | "indirect_failed" => {
-            BuildOutcome::Skipped(SkipReason::IndirectFail(detail.unwrap_or_default()))
-        }
-        "unresolved_dep" => {
-            BuildOutcome::Skipped(SkipReason::UnresolvedDep(detail.unwrap_or_default()))
-        }
-        _ => BuildOutcome::Failed(format!("Unknown outcome: {}", outcome)),
     }
 }

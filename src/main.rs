@@ -224,7 +224,7 @@ impl BuildRunner {
          * Process in topological waves. Each wave contains packages whose
          * dependencies have all been processed. Packages already marked are
          * skipped; when a checked package needs rebuild, all transitive
-         * dependents are marked with DependencyRebuilt via propagation.
+         * dependents are marked with DependencyUpdated via propagation.
          */
         while !remaining.is_empty() {
             let ready: Vec<&str> = remaining
@@ -288,7 +288,7 @@ impl BuildRunner {
         /*
          * Store results. Checked packages get their actual outcome (UpToDate
          * or their specific rebuild reason). Propagated packages (not checked)
-         * get DependencyRebuilt.
+         * get DependencyUpdated.
          */
         for (pkg, result) in checked_results {
             let pkgname = pkg.pkgname().pkgname();
@@ -320,7 +320,7 @@ impl BuildRunner {
         }
 
         for (pkgname, dep) in propagated_from {
-            let reason = bob::BuildReason::DependencyRebuilt(dep.to_string());
+            let reason = bob::BuildReason::DependencyUpdated(dep.to_string());
             self.db.store_build_reason(pkgname, &reason.to_string())?;
         }
 

@@ -60,9 +60,9 @@ pub enum SkipReason {
     PkgSkip(String),
     /// Package has `PKG_FAIL_REASON` set.
     PkgFail(String),
-    /// Package skipped because a dependency was skipped.
+    /// Package blocked because a dependency has `PKG_SKIP_REASON`.
     IndirectSkip(String),
-    /// Package failed because a dependency failed.
+    /// Package blocked because a dependency has `PKG_FAIL_REASON`.
     IndirectFail(String),
     /// Dependency could not be resolved.
     UnresolvedDep(String),
@@ -72,11 +72,34 @@ impl SkipReason {
     /// Returns the status label for this skip reason.
     pub fn status(&self) -> &'static str {
         match self {
-            SkipReason::PkgSkip(_) => "pre-skipped",
-            SkipReason::PkgFail(_) => "pre-failed",
-            SkipReason::IndirectSkip(_) => "indirect-skipped",
-            SkipReason::IndirectFail(_) => "indirect-failed",
+            SkipReason::PkgSkip(_) => "preskipped",
+            SkipReason::PkgFail(_) => "prefailed",
+            SkipReason::IndirectSkip(_) => "indirect-preskipped",
+            SkipReason::IndirectFail(_) => "indirect-prefailed",
             SkipReason::UnresolvedDep(_) => "unresolved",
+        }
+    }
+
+    /// Returns the database key for this skip reason variant.
+    pub fn db_key(&self) -> &'static str {
+        match self {
+            SkipReason::PkgSkip(_) => "pkg_skip",
+            SkipReason::PkgFail(_) => "pkg_fail",
+            SkipReason::IndirectSkip(_) => "indirect_skip",
+            SkipReason::IndirectFail(_) => "indirect_fail",
+            SkipReason::UnresolvedDep(_) => "unresolved",
+        }
+    }
+
+    /// Creates a SkipReason from database key and detail string.
+    pub fn from_db(key: &str, detail: String) -> Option<Self> {
+        match key {
+            "pkg_skip" => Some(SkipReason::PkgSkip(detail)),
+            "pkg_fail" => Some(SkipReason::PkgFail(detail)),
+            "indirect_skip" => Some(SkipReason::IndirectSkip(detail)),
+            "indirect_fail" => Some(SkipReason::IndirectFail(detail)),
+            "unresolved" => Some(SkipReason::UnresolvedDep(detail)),
+            _ => None,
         }
     }
 
@@ -1256,8 +1279,10 @@ impl Scan {
     /**
      * Propagate failures through the dependency graph.
      *
-     * If package A depends on B, and B is failed/skipped, then A becomes
-     * indirect-failed/skipped. Iterates until no new failures are added.
+     * If package A depends on B, and B is prefailed/preskipped, then A becomes
+     * indirect-prefailed/preskipped to match the dependency's status. Checks
+     * all dependencies to find a prefailed one first; if none are prefailed,
+     * uses a preskipped one. Iterates until no new entries are added.
      */
     fn propagate_failures(
         depends: &HashMap<PkgName, Vec<PkgName>>,
@@ -1269,23 +1294,24 @@ impl Scan {
                 if skip_reasons.contains_key(pkgname) {
                     continue;
                 }
+                let mut blocking_reason: Option<SkipReason> = None;
                 for dep in pkg_depends {
                     if let Some(dep_reason) = skip_reasons.get(dep) {
-                        let reason = match dep_reason {
-                            SkipReason::PkgSkip(_) | SkipReason::IndirectSkip(_) => {
-                                SkipReason::IndirectSkip(format!(
-                                    "dependency {} skipped",
-                                    dep.pkgname()
-                                ))
-                            }
-                            _ => SkipReason::IndirectFail(format!(
-                                "dependency {} failed",
-                                dep.pkgname()
-                            )),
-                        };
-                        new_skip_reasons.push((pkgname.clone(), reason));
-                        break;
+                        let is_fail = !matches!(
+                            dep_reason,
+                            SkipReason::PkgSkip(_) | SkipReason::IndirectSkip(_)
+                        );
+                        let msg = format!("dependency {} {}", dep.pkgname(), dep_reason.status());
+                        if is_fail {
+                            blocking_reason = Some(SkipReason::IndirectFail(msg));
+                            break;
+                        } else if blocking_reason.is_none() {
+                            blocking_reason = Some(SkipReason::IndirectSkip(msg));
+                        }
                     }
+                }
+                if let Some(reason) = blocking_reason {
+                    new_skip_reasons.push((pkgname.clone(), reason));
                 }
             }
             if new_skip_reasons.is_empty() {
