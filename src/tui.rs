@@ -296,23 +296,26 @@ impl PanelGroup {
 }
 
 /**
- * Group consecutive idle workers together for collapsed display (linear layout).
+ * Group a sequence of worker IDs by their active state, collapsing consecutive
+ * idle workers into single groups.
  */
-fn group_workers_linear(is_active: &[bool]) -> Vec<PanelGroup> {
+fn group_worker_sequence(workers: &[usize], is_active: &[bool]) -> Vec<PanelGroup> {
     let mut groups = Vec::new();
     let mut i = 0;
 
-    while i < is_active.len() {
-        if is_active[i] {
-            groups.push(PanelGroup::Active(i));
+    while i < workers.len() {
+        let w = workers[i];
+        if is_active[w] {
+            groups.push(PanelGroup::Active(w));
             i += 1;
         } else {
-            let start = i;
-            while i < is_active.len() && !is_active[i] {
+            let mut idle_ids = vec![w];
+            i += 1;
+            while i < workers.len() && !is_active[workers[i]] {
+                idle_ids.push(workers[i]);
                 i += 1;
             }
-            let ids: Vec<usize> = (start..i).collect();
-            groups.push(PanelGroup::Idle(ids));
+            groups.push(PanelGroup::Idle(idle_ids));
         }
     }
 
@@ -320,41 +323,30 @@ fn group_workers_linear(is_active: &[bool]) -> Vec<PanelGroup> {
 }
 
 /**
+ * Group consecutive idle workers together for collapsed display (linear layout).
+ */
+fn group_workers_linear(is_active: &[bool]) -> Vec<PanelGroup> {
+    let workers: Vec<usize> = (0..is_active.len()).collect();
+    group_worker_sequence(&workers, is_active)
+}
+
+/**
  * Group workers by column for grid layout, collapsing consecutive idle workers
- * within each column. Returns (groups, grid_info) where grid_info contains the
- * column assignments for rendering.
+ * within each column. Returns (groups, rows) for rendering.
  */
 fn group_workers_grid(is_active: &[bool], cols: usize) -> (Vec<Vec<PanelGroup>>, usize) {
     let num_workers = is_active.len();
     let rows = num_workers.div_ceil(cols);
 
-    // Build groups for each column
-    let mut column_groups: Vec<Vec<PanelGroup>> = vec![Vec::new(); cols];
-
-    for (col, groups) in column_groups.iter_mut().enumerate() {
-        // Workers in this column: col, col+cols, col+2*cols, ...
-        let workers_in_col: Vec<usize> = (0..rows)
-            .map(|r| r * cols + col)
-            .filter(|&w| w < num_workers)
-            .collect();
-
-        let mut i = 0;
-        while i < workers_in_col.len() {
-            let w = workers_in_col[i];
-            if is_active[w] {
-                groups.push(PanelGroup::Active(w));
-                i += 1;
-            } else {
-                let mut idle_ids = vec![w];
-                i += 1;
-                while i < workers_in_col.len() && !is_active[workers_in_col[i]] {
-                    idle_ids.push(workers_in_col[i]);
-                    i += 1;
-                }
-                groups.push(PanelGroup::Idle(idle_ids));
-            }
-        }
-    }
+    let column_groups = (0..cols)
+        .map(|col| {
+            let workers_in_col: Vec<usize> = (0..rows)
+                .map(|r| r * cols + col)
+                .filter(|&w| w < num_workers)
+                .collect();
+            group_worker_sequence(&workers_in_col, is_active)
+        })
+        .collect();
 
     (column_groups, rows)
 }
