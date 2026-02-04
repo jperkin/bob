@@ -1,8 +1,8 @@
 # Bob - A Package Builder
 
-[![Crates.io](https://img.shields.io/crates/v/pkgbob.svg)](https://crates.io/crates/pkgbob)
-[![Documentation](https://docs.rs/pkgbob/badge.svg)](https://docs.rs/pkgbob)
-[![License](https://img.shields.io/crates/l/pkgbob.svg)](https://github.com/jperkin/bob)
+[![Crates.io](https://img.shields.io/crates/v/bob.svg)](https://crates.io/crates/bob)
+[![Documentation](https://docs.rs/bob/badge.svg)](https://docs.rs/bob)
+[![License](https://img.shields.io/crates/l/bob.svg)](https://github.com/jperkin/bob)
 
 Bob is a powerful and user-friendly utility for building pkgsrc packages inside
 sandboxes.
@@ -35,7 +35,7 @@ Bob works out-of-the-box on NetBSD, Linux, macOS[^1], and illumos.
 Install bob, or upgrade an existing install to the latest release.
 
 ```
-$ cargo install pkgbob
+$ cargo install bob
 ```
 
 Create configuration directory.  This is also where by default all log data

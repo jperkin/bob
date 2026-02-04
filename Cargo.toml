@@ -1,5 +1,5 @@
 [package]
-name = "pkgbob"
+name = "bob"
 description = "A pkgsrc package builder"
 version = "0.7.0"
 authors = ["Jonathan Perkin <jonathan@perkin.org.uk>"]
@@ -7,17 +7,9 @@ keywords = ["cli", "pkgsrc"]
 license = "ISC"
 repository = "https://github.com/jperkin/bob"
 homepage = "https://github.com/jperkin/bob"
-documentation = "https://docs.rs/pkgbob"
+documentation = "https://docs.rs/bob"
 rust-version = "1.85.1"
 edition = "2024"
-
-[lib]
-name = "bob"
-path = "src/lib.rs"
-
-[[bin]]
-name = "bob"
-path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.89"
