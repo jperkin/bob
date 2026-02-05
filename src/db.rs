@@ -1200,6 +1200,24 @@ impl Database {
     }
 
     /**
+     * Get all package names with failed build outcomes.
+     */
+    pub fn get_failed_packages(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.pkgname FROM builds b
+             JOIN packages p ON b.package_id = p.id
+             WHERE b.outcome = 'failed'
+             ORDER BY p.pkgname",
+        )?;
+
+        let pkgnames = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(pkgnames)
+    }
+
+    /**
      * Get all package names with successful build outcomes.
      */
     pub fn get_successful_packages(&self) -> Result<Vec<String>> {

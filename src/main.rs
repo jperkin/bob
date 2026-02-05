@@ -425,56 +425,6 @@ impl BuildRunner {
             }
         }
     }
-
-    /// Look up pkgpath for a pkgname from database.
-    fn find_pkgpath_for_pkgname(&self, pkgname: &str) -> Result<Option<pkgsrc::PkgPath>> {
-        if let Some(pkg) = self.db.get_package_by_name(pkgname)? {
-            return Ok(Some(pkgsrc::PkgPath::new(&pkg.pkgpath)?));
-        }
-        Ok(None)
-    }
-
-    /// Find all packages that depend on the given pkgpaths (reverse dependencies).
-    /// Returns pkgnames of packages that should be rebuilt.
-    fn find_dependents(
-        &self,
-        pkgpaths: &[&str],
-    ) -> Result<(Vec<String>, std::collections::HashMap<String, String>)> {
-        use std::collections::HashMap;
-
-        // Get all packages for pkgname -> pkgpath mapping
-        let all_packages = self.db.get_all_packages()?;
-        let mut pkgname_to_pkgpath: HashMap<String, String> = HashMap::new();
-        let mut pkgname_to_id: HashMap<String, i64> = HashMap::new();
-
-        for pkg in &all_packages {
-            pkgname_to_pkgpath.insert(pkg.pkgname.clone(), pkg.pkgpath.clone());
-            pkgname_to_id.insert(pkg.pkgname.clone(), pkg.id);
-        }
-
-        // Find package IDs for the given pkgpaths
-        let mut seed_ids: Vec<i64> = Vec::new();
-        for pkgpath in pkgpaths {
-            let packages = self.db.get_packages_by_path(pkgpath)?;
-            for pkg in packages {
-                seed_ids.push(pkg.id);
-            }
-        }
-
-        // Use database to get all transitive reverse dependencies
-        let mut to_clear: Vec<String> = Vec::new();
-        for seed_id in seed_ids {
-            let rev_deps = self.db.get_transitive_reverse_deps(seed_id)?;
-            for dep_id in rev_deps {
-                let pkgname = self.db.get_pkgname(dep_id)?;
-                if !to_clear.contains(&pkgname) {
-                    to_clear.push(pkgname);
-                }
-            }
-        }
-
-        Ok((to_clear, pkgname_to_pkgpath))
-    }
 }
 
 #[derive(Debug, Parser)]
@@ -526,12 +476,12 @@ enum Cmd {
     },
     /// Rebuild specific packages
     Rebuild {
-        /// Rebuild all packages from scan cache.
+        /// Rebuild all previously failed packages
         #[arg(short, long)]
         all: bool,
-        /// Force rebuild even if package is up-to-date
-        #[arg(short, long)]
-        force: bool,
+        /// Only rebuild specified packages (skip dependents)
+        #[arg(long)]
+        only: bool,
         /// Package paths or package names to rebuild
         #[arg(value_name = "PKGPATH|PKGNAME")]
         packages: Vec<String>,
@@ -691,95 +641,20 @@ fn run() -> Result<()> {
         }
         Cmd::Rebuild {
             all,
-            force,
+            only,
             packages,
         } => {
-            if !all && packages.is_empty() {
-                bail!("Either specify packages to rebuild or use -a to rebuild all");
-            }
-
-            let mut runner = BuildRunner::new(args.config.as_deref())?;
-
-            let mut scan = Scan::new(&runner.config);
-
-            if all {
-                let cleared = runner.db.clear_builds()?;
-                if cleared > 0 {
-                    println!("Cleared {} cached build result(s)", cleared);
-                }
-                if let Some(pkgs) = runner.config.pkgpaths() {
-                    for p in pkgs {
-                        scan.add(p);
-                    }
-                }
-            } else {
-                // Convert packages to pkgpaths and collect for dependent lookup
-                let mut pkgpaths_to_rebuild: Vec<String> = Vec::new();
-
-                for pkg in &packages {
-                    if pkg.contains('/') {
-                        match pkgsrc::PkgPath::new(pkg) {
-                            Ok(pkgpath) => {
-                                pkgpaths_to_rebuild.push(pkgpath.to_string());
-                                scan.add(&pkgpath);
-                            }
-                            Err(e) => bail!("Invalid PKGPATH '{}': {}", pkg, e),
-                        }
-                    } else {
-                        match runner.find_pkgpath_for_pkgname(pkg)? {
-                            Some(pkgpath) => {
-                                pkgpaths_to_rebuild.push(pkgpath.to_string());
-                                scan.add(&pkgpath);
-                            }
-                            None => bail!(
-                                "Package '{}' not found in scan cache. \
-                                 Run 'bob scan' first or specify the full \
-                                 PKGPATH.",
-                                pkg
-                            ),
-                        }
-                    }
-                }
-
-                // Clear cached build results for specified packages
-                let mut cleared = 0;
-                for pkg in &packages {
-                    if pkg.contains('/') {
-                        cleared += runner.db.delete_build_by_pkgpath(pkg)?;
-                    } else if runner.db.delete_build_by_name(pkg)? {
-                        cleared += 1;
-                    }
-                }
-
-                // Also clear dependents (packages that depend on what we're
-                // rebuilding)
-                let pkgpath_refs: Vec<&str> =
-                    pkgpaths_to_rebuild.iter().map(|s| s.as_str()).collect();
-                let (dependents, pkgname_to_pkgpath) = runner.find_dependents(&pkgpath_refs)?;
-                for dep in &dependents {
-                    if runner.db.delete_build_by_name(dep)? {
-                        cleared += 1;
-                    }
-                    if let Some(pkgpath) = pkgname_to_pkgpath.get(dep) {
-                        if let Ok(pkgpath) = pkgsrc::PkgPath::new(pkgpath) {
-                            scan.add(&pkgpath);
-                        }
-                    }
-                }
-
-                if cleared > 0 {
-                    println!("Cleared {} cached build result(s)", cleared);
-                }
-            }
-
-            let sandbox = Sandbox::new(&runner.config);
-            let mut scope = SandboxScope::new(sandbox, runner.ctx.clone());
-            runner.run_scan_phase(&mut scan, &mut scope)?;
-            let scan_result = scan.resolve_with_report(&runner.db, runner.config.strict_scan())?;
-            if !force {
-                runner.check_up_to_date(&scan_result)?;
-            }
-            runner.run_build_with(scan_result, scope)?;
+            let runner = BuildRunner::new(args.config.as_deref())?;
+            cmd::rebuild::run(
+                &runner.config,
+                &runner.db,
+                &runner.ctx,
+                cmd::rebuild::RebuildArgs {
+                    all,
+                    only,
+                    packages,
+                },
+            )?;
         }
         Cmd::Report => {
             let config = Config::load(args.config.as_deref())?;
