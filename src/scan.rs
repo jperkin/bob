@@ -60,12 +60,16 @@ pub enum SkipReason {
     PkgSkip(String),
     /// Package has `PKG_FAIL_REASON` set.
     PkgFail(String),
-    /// Package blocked because a dependency has `PKG_SKIP_REASON`.
-    IndirectSkip(String),
-    /// Package blocked because a dependency has `PKG_FAIL_REASON`.
-    IndirectFail(String),
+    /// Package blocked because a dependency is preskipped.
+    IndirectPreskip(String),
+    /// Package blocked because a dependency is prefailed.
+    IndirectPrefail(String),
     /// Dependency could not be resolved.
     UnresolvedDep(String),
+    /// Package blocked because a dependency has an unresolved dependency.
+    IndirectUnresolved(String),
+    /// Package blocked because a dependency failed to build.
+    IndirectFailed(String),
 }
 
 impl SkipReason {
@@ -74,9 +78,11 @@ impl SkipReason {
         match self {
             SkipReason::PkgSkip(_) => "preskipped",
             SkipReason::PkgFail(_) => "prefailed",
-            SkipReason::IndirectSkip(_) => "indirect-preskipped",
-            SkipReason::IndirectFail(_) => "indirect-prefailed",
+            SkipReason::IndirectPreskip(_) => "indirect-preskipped",
+            SkipReason::IndirectPrefail(_) => "indirect-prefailed",
             SkipReason::UnresolvedDep(_) => "unresolved",
+            SkipReason::IndirectUnresolved(_) => "indirect-unresolved",
+            SkipReason::IndirectFailed(_) => "indirect-failed",
         }
     }
 
@@ -85,9 +91,11 @@ impl SkipReason {
         match self {
             SkipReason::PkgSkip(_) => "pkg_skip",
             SkipReason::PkgFail(_) => "pkg_fail",
-            SkipReason::IndirectSkip(_) => "indirect_skip",
-            SkipReason::IndirectFail(_) => "indirect_fail",
+            SkipReason::IndirectPreskip(_) => "indirect_preskip",
+            SkipReason::IndirectPrefail(_) => "indirect_prefail",
             SkipReason::UnresolvedDep(_) => "unresolved",
+            SkipReason::IndirectUnresolved(_) => "indirect_unresolved",
+            SkipReason::IndirectFailed(_) => "indirect_failed",
         }
     }
 
@@ -96,9 +104,11 @@ impl SkipReason {
         match key {
             "pkg_skip" => Some(SkipReason::PkgSkip(detail)),
             "pkg_fail" => Some(SkipReason::PkgFail(detail)),
-            "indirect_skip" => Some(SkipReason::IndirectSkip(detail)),
-            "indirect_fail" => Some(SkipReason::IndirectFail(detail)),
+            "indirect_preskip" => Some(SkipReason::IndirectPreskip(detail)),
+            "indirect_prefail" => Some(SkipReason::IndirectPrefail(detail)),
             "unresolved" => Some(SkipReason::UnresolvedDep(detail)),
+            "indirect_unresolved" => Some(SkipReason::IndirectUnresolved(detail)),
+            "indirect_failed" => Some(SkipReason::IndirectFailed(detail)),
             _ => None,
         }
     }
@@ -117,8 +127,10 @@ impl std::fmt::Display for SkipReason {
         match self {
             SkipReason::PkgSkip(r)
             | SkipReason::PkgFail(r)
-            | SkipReason::IndirectSkip(r)
-            | SkipReason::IndirectFail(r) => write!(f, "{}", r),
+            | SkipReason::IndirectPreskip(r)
+            | SkipReason::IndirectPrefail(r)
+            | SkipReason::IndirectUnresolved(r)
+            | SkipReason::IndirectFailed(r) => write!(f, "{}", r),
             SkipReason::UnresolvedDep(p) => {
                 write!(f, "Could not resolve: {}", p)
             }
@@ -135,10 +147,14 @@ pub struct SkippedCounts {
     pub pkg_fail: usize,
     /// Packages with unresolved dependencies.
     pub unresolved: usize,
-    /// Packages skipped due to a dependency being skipped.
-    pub indirect_skip: usize,
-    /// Packages skipped due to a dependency failure.
-    pub indirect_fail: usize,
+    /// Packages blocked by a preskipped dependency.
+    pub indirect_preskip: usize,
+    /// Packages blocked by a prefailed dependency.
+    pub indirect_prefail: usize,
+    /// Packages blocked by a dependency with unresolved deps.
+    pub indirect_unresolved: usize,
+    /// Packages blocked by a dependency that failed to build.
+    pub indirect_failed: usize,
 }
 
 /// A successfully resolved package that is ready to build.
@@ -332,17 +348,25 @@ impl ScanSummary {
                     ..
                 } => c.skipped.pkg_fail += 1,
                 ScanResult::Skipped {
-                    reason: SkipReason::IndirectSkip(_),
+                    reason: SkipReason::IndirectPreskip(_),
                     ..
-                } => c.skipped.indirect_skip += 1,
+                } => c.skipped.indirect_preskip += 1,
                 ScanResult::Skipped {
-                    reason: SkipReason::IndirectFail(_),
+                    reason: SkipReason::IndirectPrefail(_),
                     ..
-                } => c.skipped.indirect_fail += 1,
+                } => c.skipped.indirect_prefail += 1,
                 ScanResult::Skipped {
                     reason: SkipReason::UnresolvedDep(_),
                     ..
                 } => c.skipped.unresolved += 1,
+                ScanResult::Skipped {
+                    reason: SkipReason::IndirectUnresolved(_),
+                    ..
+                } => c.skipped.indirect_unresolved += 1,
+                ScanResult::Skipped {
+                    reason: SkipReason::IndirectFailed(_),
+                    ..
+                } => c.skipped.indirect_failed += 1,
                 ScanResult::ScanFail { .. } => c.scanfail += 1,
             }
         }
@@ -394,21 +418,22 @@ impl ScanSummary {
     pub fn print_counts(&self, up_to_date: Option<usize>) {
         let c = self.counts();
         let s = &c.skipped;
+        let indirect =
+            s.indirect_preskip + s.indirect_prefail + s.indirect_unresolved + s.indirect_failed;
         match up_to_date {
             Some(n) => println!(
-                "{} to build, {} up-to-date, {} prefailed, \
-                 {} indirect-prefailed, {} unresolved",
+                "{} to build, {} up-to-date, {} prefailed, {} blocked, {} unresolved",
                 c.buildable.saturating_sub(n),
                 n,
                 s.pkg_skip + s.pkg_fail,
-                s.indirect_skip + s.indirect_fail,
+                indirect,
                 s.unresolved
             ),
             None => println!(
-                "{} buildable, {} prefailed, {} indirect-prefailed, {} unresolved",
+                "{} buildable, {} prefailed, {} blocked, {} unresolved",
                 c.buildable,
                 s.pkg_skip + s.pkg_fail,
-                s.indirect_skip + s.indirect_fail,
+                indirect,
                 s.unresolved
             ),
         }
@@ -1279,10 +1304,14 @@ impl Scan {
     /**
      * Propagate failures through the dependency graph.
      *
-     * If package A depends on B, and B is prefailed/preskipped, then A becomes
-     * indirect-prefailed/preskipped to match the dependency's status. Checks
-     * all dependencies to find a prefailed one first; if none are prefailed,
-     * uses a preskipped one. Iterates until no new entries are added.
+     * If package A depends on B, and B has a skip reason, then A gets an
+     * indirect skip reason matching the dependency's category:
+     * - preskipped dep → indirect-preskipped
+     * - prefailed dep → indirect-prefailed
+     * - unresolved dep → indirect-unresolved
+     *
+     * Priority: prefailed > unresolved > preskipped (we want to report the
+     * most severe blocker). Iterates until no new entries are added.
      */
     fn propagate_failures(
         depends: &HashMap<PkgName, Vec<PkgName>>,
@@ -1297,16 +1326,33 @@ impl Scan {
                 let mut blocking_reason: Option<SkipReason> = None;
                 for dep in pkg_depends {
                     if let Some(dep_reason) = skip_reasons.get(dep) {
-                        let is_fail = !matches!(
-                            dep_reason,
-                            SkipReason::PkgSkip(_) | SkipReason::IndirectSkip(_)
-                        );
                         let msg = format!("dependency {} {}", dep.pkgname(), dep_reason.status());
-                        if is_fail {
-                            blocking_reason = Some(SkipReason::IndirectFail(msg));
+                        let indirect = match dep_reason {
+                            SkipReason::PkgSkip(_) | SkipReason::IndirectPreskip(_) => {
+                                SkipReason::IndirectPreskip(msg)
+                            }
+                            SkipReason::PkgFail(_) | SkipReason::IndirectPrefail(_) => {
+                                SkipReason::IndirectPrefail(msg)
+                            }
+                            SkipReason::UnresolvedDep(_) | SkipReason::IndirectUnresolved(_) => {
+                                SkipReason::IndirectUnresolved(msg)
+                            }
+                            SkipReason::IndirectFailed(_) => SkipReason::IndirectFailed(msg),
+                        };
+                        let dominated = matches!(
+                            (&blocking_reason, &indirect),
+                            (None, _)
+                                | (Some(SkipReason::IndirectPreskip(_)), _)
+                                | (
+                                    Some(SkipReason::IndirectUnresolved(_)),
+                                    SkipReason::IndirectPrefail(_)
+                                )
+                        );
+                        if dominated {
+                            blocking_reason = Some(indirect);
+                        }
+                        if matches!(blocking_reason, Some(SkipReason::IndirectPrefail(_))) {
                             break;
-                        } else if blocking_reason.is_none() {
-                            blocking_reason = Some(SkipReason::IndirectSkip(msg));
                         }
                     }
                 }

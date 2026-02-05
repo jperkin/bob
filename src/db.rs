@@ -48,7 +48,7 @@ use crate::try_println;
 /**
  * Schema version - update when schema changes.
  */
-const SCHEMA_VERSION: i32 = 5;
+const SCHEMA_VERSION: i32 = 6;
 
 /**
  * Lightweight package row without full scan data.
@@ -1006,13 +1006,13 @@ impl Database {
         // 2. Have no skip_reason or fail_reason (not pre-failed)
         // 3. Depend (transitively) on a package with a direct failure
         // Group by package and aggregate failed deps into comma-separated string
-        // Only 'failed' and 'prefailed' are root causes, not 'indirect_*'
+        // Only 'failed' and 'pkg_fail' are root causes, not 'indirect_*'
         let mut stmt = self.conn.prepare(
             "WITH RECURSIVE
              -- Only direct failures are root causes
              failed_pkgs(id) AS (
                  SELECT package_id FROM builds
-                 WHERE outcome IN ('failed', 'prefailed')
+                 WHERE outcome IN ('failed', 'pkg_fail')
              ),
              -- Packages affected by failures (transitive closure)
              affected(id, root_id) AS (

@@ -1005,6 +1005,15 @@ impl BuildOutcome {
             BuildOutcome::Skipped(skip) => skip.status(),
         }
     }
+
+    /// Returns the reason string, if any.
+    pub fn reason(&self) -> Option<String> {
+        match self {
+            BuildOutcome::Success | BuildOutcome::UpToDate => None,
+            BuildOutcome::Failed(msg) => Some(msg.clone()),
+            BuildOutcome::Skipped(skip) => Some(skip.to_string()),
+        }
+    }
 }
 
 /// Result of building a single package.
@@ -1068,8 +1077,18 @@ impl BuildSummary {
                 BuildOutcome::Skipped(SkipReason::PkgSkip(_)) => c.skipped.pkg_skip += 1,
                 BuildOutcome::Skipped(SkipReason::PkgFail(_)) => c.skipped.pkg_fail += 1,
                 BuildOutcome::Skipped(SkipReason::UnresolvedDep(_)) => c.skipped.unresolved += 1,
-                BuildOutcome::Skipped(SkipReason::IndirectFail(_)) => c.skipped.indirect_fail += 1,
-                BuildOutcome::Skipped(SkipReason::IndirectSkip(_)) => c.skipped.indirect_skip += 1,
+                BuildOutcome::Skipped(SkipReason::IndirectPreskip(_)) => {
+                    c.skipped.indirect_preskip += 1
+                }
+                BuildOutcome::Skipped(SkipReason::IndirectPrefail(_)) => {
+                    c.skipped.indirect_prefail += 1
+                }
+                BuildOutcome::Skipped(SkipReason::IndirectUnresolved(_)) => {
+                    c.skipped.indirect_unresolved += 1
+                }
+                BuildOutcome::Skipped(SkipReason::IndirectFailed(_)) => {
+                    c.skipped.indirect_failed += 1
+                }
             }
         }
         c
@@ -1687,7 +1706,7 @@ impl BuildJobs {
                 (BuildOutcome::Failed(reason.to_string()), duration)
             } else {
                 (
-                    BuildOutcome::Skipped(SkipReason::IndirectFail(format!(
+                    BuildOutcome::Skipped(SkipReason::IndirectFailed(format!(
                         "dependency {} failed",
                         pkgname.pkgname()
                     ))),

@@ -111,7 +111,7 @@ pub fn write_html_report(db: &Database, logdir: &Path, path: &Path) -> Result<()
         results.push(BuildResult {
             pkgname: pkgsrc::PkgName::new(&pkgname),
             pkgpath: pkgpath.and_then(|p| pkgsrc::PkgPath::new(&p).ok()),
-            outcome: BuildOutcome::Skipped(SkipReason::IndirectFail(failed_dep)),
+            outcome: BuildOutcome::Skipped(SkipReason::IndirectFailed(failed_dep)),
             duration: std::time::Duration::ZERO,
             log_dir: None,
         });
@@ -432,8 +432,14 @@ fn write_summary_stats(file: &mut fs::File, summary: &BuildSummary) -> Result<()
 
     let c = summary.counts();
     let s = &c.skipped;
-    let skipped_count =
-        c.up_to_date + s.pkg_skip + s.pkg_fail + s.unresolved + s.indirect_skip + s.indirect_fail;
+    let skipped_count = c.up_to_date
+        + s.pkg_skip
+        + s.pkg_fail
+        + s.unresolved
+        + s.indirect_preskip
+        + s.indirect_prefail
+        + s.indirect_unresolved
+        + s.indirect_failed;
     writeln!(file, "<div class=\"summary\">")?;
     writeln!(
         file,

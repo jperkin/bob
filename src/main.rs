@@ -548,9 +548,6 @@ enum Cmd {
     List {
         #[command(subcommand)]
         cmd: cmd::list::ListCmd,
-        /// Output pkgpath instead of pkgname
-        #[arg(short, long, global = true)]
-        path: bool,
     },
     /// Utility commands for debugging and data import/export
     Util {
@@ -834,11 +831,11 @@ fn run() -> Result<()> {
 
             db.execute_raw(&sql)?;
         }
-        Cmd::List { cmd, path } => {
+        Cmd::List { cmd } => {
             let config = Config::load(args.config.as_deref())?;
             let db_path = config.logdir().join("bob").join("bob.db");
             let db = Database::open(&db_path)?;
-            cmd::list::run(&db, cmd, path)?;
+            cmd::list::run(&db, cmd)?;
         }
         Cmd::Util {
             cmd: UtilCmd::PrintDepGraph { output },

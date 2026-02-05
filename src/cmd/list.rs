@@ -31,22 +31,57 @@ fn use_color() -> bool {
     std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SkipCategory {
+/**
+ * Status filter for package listing.
+ */
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum StatusFilter {
+    /// Ready to build
+    Pending,
+    /// Built successfully
+    Success,
+    /// Binary already exists
+    #[value(name = "up-to-date")]
+    UpToDate,
+    /// Build attempted and failed
+    Failed,
+    /// PKG_SKIP_REASON set
+    Preskipped,
+    /// PKG_FAIL_REASON set
     Prefailed,
+    /// Blocked by preskipped package
+    #[value(name = "indirect-preskipped")]
+    IndirectPreskipped,
+    /// Blocked by prefailed package
+    #[value(name = "indirect-prefailed")]
     IndirectPrefailed,
-    IndirectFailed,
+    /// Has unresolved dependencies
     Unresolved,
+    /// Blocked by package with unresolved dependencies
+    #[value(name = "indirect-unresolved")]
+    IndirectUnresolved,
+    /// Blocked by package that failed to build
+    #[value(name = "indirect-failed")]
+    IndirectFailed,
 }
 
-impl From<&SkipReason> for SkipCategory {
-    fn from(reason: &SkipReason) -> Self {
-        match reason {
-            SkipReason::PkgSkip(_) => SkipCategory::Prefailed,
-            SkipReason::PkgFail(_) => SkipCategory::Prefailed,
-            SkipReason::IndirectSkip(_) => SkipCategory::IndirectPrefailed,
-            SkipReason::IndirectFail(_) => SkipCategory::IndirectFailed,
-            SkipReason::UnresolvedDep(_) => SkipCategory::Unresolved,
+impl StatusFilter {
+    /// Status string not backed by a BuildOutcome (package not yet built).
+    const PENDING: &'static str = "pending";
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => Self::PENDING,
+            Self::Success => BuildOutcome::Success.status(),
+            Self::UpToDate => BuildOutcome::UpToDate.status(),
+            Self::Failed => BuildOutcome::Failed(String::new()).status(),
+            Self::Preskipped => SkipReason::PkgSkip(String::new()).status(),
+            Self::Prefailed => SkipReason::PkgFail(String::new()).status(),
+            Self::IndirectPreskipped => SkipReason::IndirectPreskip(String::new()).status(),
+            Self::IndirectPrefailed => SkipReason::IndirectPrefail(String::new()).status(),
+            Self::Unresolved => SkipReason::UnresolvedDep(String::new()).status(),
+            Self::IndirectUnresolved => SkipReason::IndirectUnresolved(String::new()).status(),
+            Self::IndirectFailed => SkipReason::IndirectFailed(String::new()).status(),
         }
     }
 }
@@ -64,33 +99,47 @@ pub enum TreeOutput {
 
 #[derive(Debug, Subcommand)]
 pub enum ListCmd {
-    /// List all scanned packages
-    All,
-    /// List packages ready to build (no skip/fail reason)
-    Buildable,
-    /// List successfully built packages
-    Success,
-    /// List packages with existing binaries (up-to-date)
-    UpToDate,
-    /// List packages that failed to build
-    Failed,
-    /// List packages that depend on a package that failed to build
-    IndirectFailed,
-    /// List packages with PKG_SKIP_REASON or PKG_FAIL_REASON set
-    Prefailed,
-    /// List packages that depend on a prefailed package
-    IndirectPrefailed,
-    /// List packages with unresolved dependencies
-    Unresolved,
-    /// Show what's blocking a package from building
-    Blockers {
-        /// Package name or pkgpath
-        package: String,
-    },
-    /// Show packages blocked by a failed package
-    BlockedBy {
-        /// Package name or pkgpath
-        package: String,
+    /// Show package status with columns
+    #[command(after_long_help = "\
+Status values:
+  pending             Ready to build
+  success             Built successfully
+  up-to-date          Binary already exists
+  failed              Build attempted and failed
+  preskipped          PKG_SKIP_REASON set
+  prefailed           PKG_FAIL_REASON set
+  indirect-preskipped Blocked by preskipped package
+  indirect-prefailed  Blocked by prefailed package
+  unresolved          Has unresolved dependencies
+  indirect-unresolved Blocked by package with unresolved dependencies
+  indirect-failed     Blocked by package that failed to build
+
+Examples:
+  bob list status                        Show all packages
+  bob list status -s failed              Show failed packages
+  bob list status -s preskipped,prefailed
+                                         Show all pre-* packages
+  bob list status 'py-'                  Show packages matching 'py-'
+  bob list status -s failed -o pkgpath   Show failed with pkgpath column
+")]
+    Status {
+        /// Hide column headers
+        #[arg(short = 'H')]
+        no_header: bool,
+        /// Columns to display (comma-separated: pkgname,pkgpath,status,reason)
+        #[arg(short = 'o', value_delimiter = ',')]
+        columns: Option<Vec<String>>,
+        /// Filter by status (repeatable or comma-separated)
+        #[arg(
+            short = 's',
+            long = "status",
+            value_enum,
+            value_delimiter = ',',
+            hide_possible_values = true
+        )]
+        statuses: Vec<StatusFilter>,
+        /// Package filter (regex on name or path)
+        package: Option<String>,
     },
     /// Show dependency tree of packages to build
     Tree {
@@ -100,125 +149,59 @@ pub enum ListCmd {
         /// Output format
         #[arg(short = 'f', long, value_enum, default_value_t = TreeOutput::Utf8)]
         format: TreeOutput,
+        /// Output pkgpath instead of pkgname
+        #[arg(short, long)]
+        path: bool,
         /// Package to show tree for (regex pattern)
         package: Option<String>,
     },
-    /// Show package status with columns
-    Status {
-        /// Hide column headers
-        #[arg(short = 'H', long = "no-header")]
-        no_header: bool,
-        /// Columns to display (comma-separated: pkgname,pkgpath,status,reason)
-        #[arg(short = 'o', long, value_delimiter = ',')]
-        columns: Option<Vec<String>>,
-        /// Filter to specific package (name or path)
-        package: Option<String>,
+    /// Show what's blocking a package from building
+    Blockers {
+        /// Package name or pkgpath
+        package: String,
+        /// Output pkgpath instead of pkgname
+        #[arg(short, long)]
+        path: bool,
+    },
+    /// Show packages blocked by a failed package
+    BlockedBy {
+        /// Package name or pkgpath
+        package: String,
+        /// Output pkgpath instead of pkgname
+        #[arg(short, long)]
+        path: bool,
     },
 }
 
-pub fn run(db: &Database, cmd: ListCmd, path: bool) -> Result<()> {
+pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
     if db.count_packages()? == 0 {
         bail!("No packages in database. Run 'bob scan' first.");
     }
 
     match cmd {
-        ListCmd::All => {
-            for pkg in db.get_all_packages()? {
-                let s = if path { &pkg.pkgpath } else { &pkg.pkgname };
-                if !try_println(s) {
-                    break;
-                }
-            }
+        ListCmd::Status {
+            statuses,
+            columns,
+            no_header,
+            package,
+        } => {
+            print_build_status(
+                db,
+                &statuses,
+                columns.as_deref(),
+                no_header,
+                package.as_deref(),
+            )?;
         }
-        ListCmd::Buildable => {
-            for pkg in db.get_buildable_packages()? {
-                let s = if path { &pkg.pkgpath } else { &pkg.pkgname };
-                if !try_println(s) {
-                    break;
-                }
-            }
+        ListCmd::Tree {
+            all,
+            format,
+            path,
+            package,
+        } => {
+            print_build_tree(db, path, all, format, package.as_deref())?;
         }
-        ListCmd::Success => {
-            for result in db.get_all_build_results()? {
-                if matches!(
-                    result.outcome,
-                    BuildOutcome::Success | BuildOutcome::UpToDate
-                ) {
-                    let s = if path {
-                        result.pkgpath.as_ref().map(|p| p.to_string())
-                    } else {
-                        Some(result.pkgname.pkgname().to_string())
-                    };
-                    if let Some(s) = s {
-                        if !try_println(&s) {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        ListCmd::Failed => {
-            for result in db.get_all_build_results()? {
-                if matches!(result.outcome, BuildOutcome::Failed(_)) {
-                    let s = if path {
-                        result.pkgpath.as_ref().map(|p| p.to_string())
-                    } else {
-                        Some(result.pkgname.pkgname().to_string())
-                    };
-                    if let Some(s) = s {
-                        if !try_println(&s) {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        ListCmd::Prefailed
-        | ListCmd::IndirectPrefailed
-        | ListCmd::IndirectFailed
-        | ListCmd::Unresolved => {
-            let filter = match cmd {
-                ListCmd::Prefailed => SkipCategory::Prefailed,
-                ListCmd::IndirectPrefailed => SkipCategory::IndirectPrefailed,
-                ListCmd::IndirectFailed => SkipCategory::IndirectFailed,
-                ListCmd::Unresolved => SkipCategory::Unresolved,
-                _ => unreachable!(),
-            };
-
-            for result in db.get_all_build_results()? {
-                if let BuildOutcome::Skipped(ref skip) = result.outcome {
-                    if SkipCategory::from(skip) == filter {
-                        let s = if path {
-                            result.pkgpath.as_ref().map(|p| p.to_string())
-                        } else {
-                            Some(result.pkgname.pkgname().to_string())
-                        };
-                        if let Some(s) = s {
-                            if !try_println(&s) {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        ListCmd::UpToDate => {
-            for result in db.get_all_build_results()? {
-                if matches!(result.outcome, BuildOutcome::UpToDate) {
-                    let s = if path {
-                        result.pkgpath.as_ref().map(|p| p.to_string())
-                    } else {
-                        Some(result.pkgname.pkgname().to_string())
-                    };
-                    if let Some(s) = s {
-                        if !try_println(&s) {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        ListCmd::Blockers { package } => {
+        ListCmd::Blockers { package, path } => {
             for (pkgname, pkgpath, reason) in db.get_blockers(&package)? {
                 let s = if path {
                     format!("{} ({})", pkgpath, reason)
@@ -230,27 +213,13 @@ pub fn run(db: &Database, cmd: ListCmd, path: bool) -> Result<()> {
                 }
             }
         }
-        ListCmd::BlockedBy { package } => {
+        ListCmd::BlockedBy { package, path } => {
             for (pkgname, pkgpath) in db.get_blocked_by(&package)? {
                 let s = if path { pkgpath } else { pkgname };
                 if !try_println(&s) {
                     break;
                 }
             }
-        }
-        ListCmd::Tree {
-            all,
-            format,
-            package,
-        } => {
-            print_build_tree(db, path, all, format, package.as_deref())?;
-        }
-        ListCmd::Status {
-            no_header,
-            columns,
-            package,
-        } => {
-            print_build_status(db, no_header, columns.as_deref(), package.as_deref())?;
         }
     }
 
@@ -542,27 +511,24 @@ fn calculate_levels(
 }
 
 /**
- * Print package status with selectable columns in dependency order.
+ * Print package status with selectable columns in build order.
  *
  * Shows packages in topological order so dependencies appear before packages
- * that depend on them. Only includes packages in the resolved dependency graph
- * (the actual build set), so a prefailed package appears before packages it
- * blocks.
+ * that depend on them. Supports filtering by status and package name/path regex.
  */
 fn print_build_status(
     db: &Database,
-    no_header: bool,
+    statuses: &[StatusFilter],
     columns: Option<&[String]>,
-    filter: Option<&str>,
+    no_header: bool,
+    pkg_filter: Option<&str>,
 ) -> Result<()> {
-    // Default columns if none specified
     let all_cols = ["pkgname", "pkgpath", "status", "reason"];
     let default_cols = ["pkgname", "status", "reason"];
     let cols: Vec<&str> = columns
         .map(|c| c.iter().map(|s| s.as_str()).collect())
         .unwrap_or_else(|| default_cols.to_vec());
 
-    // Validate column names
     for col in &cols {
         if !all_cols.contains(col) {
             bail!(
@@ -573,7 +539,6 @@ fn print_build_status(
         }
     }
 
-    // Column width limits (for padding only - full values still displayed)
     let max_width = |col: &str| -> usize {
         match col {
             "pkgname" => 40,
@@ -582,30 +547,23 @@ fn print_build_status(
         }
     };
 
-    // Compile filter as regex
-    let filter_re = filter
+    let pkg_re = pkg_filter
         .map(Regex::new)
         .transpose()
-        .map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", filter.unwrap_or(""), e))?;
+        .map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", pkg_filter.unwrap_or(""), e))?;
 
-    // Get all packages for metadata lookup
     let all_pkgs = db.get_all_packages()?;
     let pkgname_to_pkg: HashMap<String, &_> =
         all_pkgs.iter().map(|p| (p.pkgname.clone(), p)).collect();
 
-    // Get resolved dependencies - this defines the actual build set
     let pkgname_to_deps = db.get_all_resolved_deps()?;
 
-    // Build set of packages in the resolved dependency graph
     let mut in_build: HashSet<String> = HashSet::new();
     for (pkg, deps) in &pkgname_to_deps {
         in_build.insert(pkg.clone());
-        for dep in deps {
-            in_build.insert(dep.clone());
-        }
+        in_build.extend(deps.iter().cloned());
     }
 
-    // Filter deps to only packages in the build set
     let filtered_deps: HashMap<String, Vec<String>> = pkgname_to_deps
         .into_iter()
         .filter(|(pkg, _)| in_build.contains(pkg))
@@ -615,15 +573,14 @@ fn print_build_status(
         })
         .collect();
 
-    // Get build results and reasons
     let build_results: HashMap<String, BuildOutcome> = db
         .get_all_build_results()?
         .into_iter()
         .map(|r| (r.pkgname.pkgname().to_string(), r.outcome))
         .collect();
+
     let build_reasons = db.get_all_build_reasons()?;
 
-    // Calculate topological levels for packages in the build
     let levels = calculate_levels(&in_build, &filtered_deps);
     let max_level = levels.values().max().copied().unwrap_or(0);
     let mut by_level: Vec<Vec<String>> = vec![Vec::new(); max_level + 1];
@@ -634,7 +591,34 @@ fn print_build_status(
         level_pkgs.sort();
     }
 
-    // Build rows in dependency order
+    let get_status = |pkgname: &str| -> (&'static str, String) {
+        if let Some(outcome) = build_results.get(pkgname) {
+            (outcome.status(), outcome.reason().unwrap_or_default())
+        } else if let Some(reason) = build_reasons.get(pkgname) {
+            (StatusFilter::Pending.as_str(), reason.clone())
+        } else if let Some(pkg) = pkgname_to_pkg.get(pkgname) {
+            if let Some(reason) = &pkg.fail_reason {
+                (
+                    StatusFilter::Prefailed.as_str(),
+                    format!("PKG_FAIL_REASON: {}", reason),
+                )
+            } else if let Some(reason) = &pkg.skip_reason {
+                (
+                    StatusFilter::Preskipped.as_str(),
+                    format!("PKG_SKIP_REASON: {}", reason),
+                )
+            } else {
+                (StatusFilter::Pending.as_str(), String::new())
+            }
+        } else {
+            (StatusFilter::Pending.as_str(), String::new())
+        }
+    };
+
+    let matches_status = |status: &str| -> bool {
+        statuses.is_empty() || statuses.iter().any(|f| f.as_str() == status)
+    };
+
     let mut rows: Vec<[String; 4]> = Vec::new();
     for pkgs in &by_level {
         for pkgname in pkgs {
@@ -643,31 +627,17 @@ fn print_build_status(
                 None => continue,
             };
 
-            // Apply regex filter if provided
-            if let Some(ref re) = filter_re {
-                if !re.is_match(pkgname) {
+            if let Some(ref re) = pkg_re {
+                if !re.is_match(pkgname) && !re.is_match(&pkg.pkgpath) {
                     continue;
                 }
             }
 
-            let (status, reason) = if let Some(outcome) = build_results.get(pkgname) {
-                match outcome {
-                    BuildOutcome::Success => ("success", String::new()),
-                    BuildOutcome::UpToDate => ("up-to-date", String::new()),
-                    BuildOutcome::Failed(msg) => ("failed", msg.clone()),
-                    BuildOutcome::Skipped(skip) => (skip.status(), skip.to_string()),
-                }
-            } else if let Some(reason) = build_reasons.get(pkgname) {
-                ("pending", reason.clone())
-            } else if let Some(reason) = &pkg.fail_reason {
-                let skip = SkipReason::PkgFail(reason.clone());
-                (skip.status(), skip.to_string())
-            } else if let Some(reason) = &pkg.skip_reason {
-                let skip = SkipReason::PkgSkip(reason.clone());
-                (skip.status(), skip.to_string())
-            } else {
-                ("pending", String::new())
-            };
+            let (status, reason) = get_status(pkgname);
+
+            if !matches_status(status) {
+                continue;
+            }
 
             rows.push([
                 pkgname.clone(),
@@ -679,11 +649,10 @@ fn print_build_status(
     }
 
     if rows.is_empty() {
-        println!("No packages to display");
+        println!("No packages match the criteria");
         return Ok(());
     }
 
-    // Map column names to indices
     let col_idx = |name: &str| -> usize {
         match name {
             "pkgname" => 0,
@@ -694,7 +663,6 @@ fn print_build_status(
         }
     };
 
-    // Calculate column widths (capped by max_width)
     let widths: Vec<usize> = cols
         .iter()
         .map(|&col| {
@@ -705,7 +673,6 @@ fn print_build_status(
         })
         .collect();
 
-    // Print header
     if !no_header {
         let header: Vec<String> = cols
             .iter()
@@ -717,7 +684,6 @@ fn print_build_status(
         }
     }
 
-    // Print rows
     for row in &rows {
         let values: Vec<String> = cols
             .iter()
