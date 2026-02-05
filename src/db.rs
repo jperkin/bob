@@ -43,6 +43,7 @@ use tracing::{debug, warn};
 
 use crate::build::{BuildOutcome, BuildResult};
 use crate::config::PkgsrcEnv;
+use crate::try_println;
 
 /**
  * Schema version - update when schema changes.
@@ -1251,7 +1252,9 @@ impl Database {
                             .unwrap_or_default()
                     })
                     .collect();
-                println!("{}", values.join("|"));
+                if !try_println(&values.join("|")) {
+                    break;
+                }
             }
         }
 

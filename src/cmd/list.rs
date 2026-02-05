@@ -15,7 +15,6 @@
  */
 
 use std::collections::{HashMap, HashSet};
-use std::io::{self, Write};
 
 use anyhow::{Result, bail};
 use clap::Subcommand;
@@ -25,12 +24,7 @@ use regex::Regex;
 use bob::build::BuildOutcome;
 use bob::db::Database;
 use bob::scan::SkipReason;
-
-/// Write a line to stdout, returning false on broken pipe (stop iteration).
-fn out(s: &str) -> bool {
-    let result = writeln!(io::stdout(), "{}", s);
-    !matches!(result, Err(e) if e.kind() == io::ErrorKind::BrokenPipe)
-}
+use bob::try_println;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SkipCategory {
@@ -126,7 +120,7 @@ pub fn run(db: &Database, cmd: ListCmd, path: bool) -> Result<()> {
         ListCmd::All => {
             for pkg in db.get_all_packages()? {
                 let s = if path { &pkg.pkgpath } else { &pkg.pkgname };
-                if !out(s) {
+                if !try_println(s) {
                     break;
                 }
             }
@@ -134,7 +128,7 @@ pub fn run(db: &Database, cmd: ListCmd, path: bool) -> Result<()> {
         ListCmd::Buildable => {
             for pkg in db.get_buildable_packages()? {
                 let s = if path { &pkg.pkgpath } else { &pkg.pkgname };
-                if !out(s) {
+                if !try_println(s) {
                     break;
                 }
             }
@@ -151,7 +145,7 @@ pub fn run(db: &Database, cmd: ListCmd, path: bool) -> Result<()> {
                         Some(result.pkgname.pkgname().to_string())
                     };
                     if let Some(s) = s {
-                        if !out(&s) {
+                        if !try_println(&s) {
                             break;
                         }
                     }
@@ -167,7 +161,7 @@ pub fn run(db: &Database, cmd: ListCmd, path: bool) -> Result<()> {
                         Some(result.pkgname.pkgname().to_string())
                     };
                     if let Some(s) = s {
-                        if !out(&s) {
+                        if !try_println(&s) {
                             break;
                         }
                     }
@@ -195,7 +189,7 @@ pub fn run(db: &Database, cmd: ListCmd, path: bool) -> Result<()> {
                             Some(result.pkgname.pkgname().to_string())
                         };
                         if let Some(s) = s {
-                            if !out(&s) {
+                            if !try_println(&s) {
                                 break;
                             }
                         }
@@ -212,7 +206,7 @@ pub fn run(db: &Database, cmd: ListCmd, path: bool) -> Result<()> {
                         Some(result.pkgname.pkgname().to_string())
                     };
                     if let Some(s) = s {
-                        if !out(&s) {
+                        if !try_println(&s) {
                             break;
                         }
                     }
@@ -226,7 +220,7 @@ pub fn run(db: &Database, cmd: ListCmd, path: bool) -> Result<()> {
                 } else {
                     format!("{} ({})", pkgname, reason)
                 };
-                if !out(&s) {
+                if !try_println(&s) {
                     break;
                 }
             }
@@ -234,7 +228,7 @@ pub fn run(db: &Database, cmd: ListCmd, path: bool) -> Result<()> {
         ListCmd::BlockedBy { package } => {
             for (pkgname, pkgpath) in db.get_blocked_by(&package)? {
                 let s = if path { pkgpath } else { pkgname };
-                if !out(&s) {
+                if !try_println(&s) {
                     break;
                 }
             }
@@ -437,7 +431,7 @@ fn print_build_tree(
         (TreeOutput::None, _) => ("", ""),
     };
 
-    for (level, pkgs) in by_level.iter().enumerate() {
+    'outer: for (level, pkgs) in by_level.iter().enumerate() {
         let last_idx = pkgs.len().saturating_sub(1);
         for (i, pkg) in pkgs.iter().enumerate() {
             let name = display_name(pkg);
@@ -447,14 +441,17 @@ fn print_build_tree(
                 ""
             };
 
-            if level == 0 {
-                println!("{}{}", name, suffix);
+            let line = if level == 0 {
+                format!("{}{}", name, suffix)
             } else if format == TreeOutput::None {
-                println!("{}{}{}", " ".repeat(indent_width * level), name, suffix);
+                format!("{}{}{}", " ".repeat(indent_width * level), name, suffix)
             } else {
                 let indent = " ".repeat(indent_width * (level - 1));
                 let conn = if i == last_idx { last_conn } else { mid_conn };
-                println!("{}{}{}{}", indent, conn, name, suffix);
+                format!("{}{}{}{}", indent, conn, name, suffix)
+            };
+            if !try_println(&line) {
+                break 'outer;
             }
         }
     }
@@ -683,7 +680,7 @@ fn print_build_status(
             .zip(&widths)
             .map(|(&col, &w)| format!("{:<width$}", col.to_uppercase(), width = w))
             .collect();
-        if !out(header.join("  ").trim_end()) {
+        if !try_println(header.join("  ").trim_end()) {
             return Ok(());
         }
     }
@@ -695,7 +692,7 @@ fn print_build_status(
             .zip(&widths)
             .map(|(&col, &w)| format!("{:<width$}", row[col_idx(col)], width = w))
             .collect();
-        if !out(values.join("  ").trim_end()) {
+        if !try_println(values.join("  ").trim_end()) {
             break;
         }
     }

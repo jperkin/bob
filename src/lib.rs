@@ -30,8 +30,19 @@ mod init;
 pub mod logging;
 mod tui;
 
+use std::io::{self, Write};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+
+/**
+ * Write a line to stdout, returning false on broken pipe.
+ *
+ * Use this in loops to gracefully handle SIGPIPE (e.g., when piped to `head`).
+ */
+pub fn try_println(s: &str) -> bool {
+    let result = writeln!(io::stdout(), "{}", s);
+    !matches!(result, Err(e) if e.kind() == io::ErrorKind::BrokenPipe)
+}
 
 /// Error indicating the operation was interrupted (e.g., by Ctrl+C).
 #[derive(Debug)]

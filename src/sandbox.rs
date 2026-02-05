@@ -74,6 +74,7 @@ mod sandbox_sunos;
 
 use crate::action::{ActionType, FSType};
 use crate::config::Config;
+use crate::try_println;
 use crate::{Interrupted, RunContext};
 use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
@@ -780,10 +781,13 @@ impl Sandbox {
     pub fn list_all(&self) -> Result<()> {
         for id in self.discover_sandboxes()? {
             let sandbox = self.path(id);
-            if self.is_sandbox_complete(id) {
-                println!("{}", sandbox.display())
+            let line = if self.is_sandbox_complete(id) {
+                format!("{}", sandbox.display())
             } else {
-                println!("{} (incomplete)", sandbox.display())
+                format!("{} (incomplete)", sandbox.display())
+            };
+            if !try_println(&line) {
+                break;
             }
         }
         Ok(())
