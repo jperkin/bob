@@ -89,8 +89,18 @@ pub enum BuildReason {
     BuildFileRemoved(String),
     /// A tracked source file has changed (hash or CVS ID mismatch).
     BuildFileChanged(String),
-    /// The dependency list has changed (added, removed).
-    DependencyListChanged(Vec<String>, Vec<String>),
+    /// A single dependency was added.
+    DependencyAdded(String),
+    /// A single dependency was removed.
+    DependencyRemoved(String),
+    /// A single dependency was upgraded (pkgbase, old_ver, new_ver).
+    DependencyUpgraded(String, String, String),
+    /// Multiple dependency changes (upgrades, additions, removals).
+    DependenciesChanged {
+        upgraded: Vec<(String, String, String)>,
+        added: Vec<String>,
+        removed: Vec<String>,
+    },
     /// A dependency package file is missing.
     DependencyMissing(String),
     /// A dependency is marked as refreshed (rebuild without changing version).
@@ -107,15 +117,31 @@ impl std::fmt::Display for BuildReason {
             BuildReason::BuildFileChanged(file) => {
                 write!(f, "build file changed: {}", file)
             }
-            BuildReason::DependencyListChanged(added, removed) => {
+            BuildReason::DependencyAdded(dep) => {
+                write!(f, "dependency added: {}", dep)
+            }
+            BuildReason::DependencyRemoved(dep) => {
+                write!(f, "dependency removed: {}", dep)
+            }
+            BuildReason::DependencyUpgraded(base, old, new) => {
+                write!(f, "dependency upgraded: {} {} -> {}", base, old, new)
+            }
+            BuildReason::DependenciesChanged {
+                upgraded,
+                added,
+                removed,
+            } => {
                 let mut parts = Vec::new();
-                if !added.is_empty() {
-                    parts.push(format!("+{}", added.join(", +")));
+                for r in removed {
+                    parts.push(format!("-{}", r));
                 }
-                if !removed.is_empty() {
-                    parts.push(format!("-{}", removed.join(", -")));
+                for a in added {
+                    parts.push(format!("+{}", a));
                 }
-                write!(f, "deps changed: {}", parts.join(", "))
+                for (base, old, new) in upgraded {
+                    parts.push(format!("{} {} -> {}", base, old, new));
+                }
+                write!(f, "dependencies changed: {}", parts.join(", "))
             }
             BuildReason::DependencyMissing(dep) => {
                 write!(f, "dependency missing: {}", dep)
@@ -226,16 +252,62 @@ pub fn pkg_up_to_date(
     let expected_deps: HashSet<&str> = depends.iter().copied().collect();
 
     if recorded_deps != expected_deps {
-        let added: Vec<String> = expected_deps
-            .difference(&recorded_deps)
-            .map(|s| (*s).to_string())
+        let added_set: HashSet<&str> = expected_deps.difference(&recorded_deps).copied().collect();
+        let removed_set: HashSet<&str> =
+            recorded_deps.difference(&expected_deps).copied().collect();
+
+        // Build map of pkgbase -> (full_name, version) for removed deps
+        let removed_by_base: HashMap<String, (&str, String)> = removed_set
+            .iter()
+            .map(|&name| {
+                let pkg = PkgName::new(name);
+                (
+                    pkg.pkgbase().to_string(),
+                    (name, pkg.pkgversion().to_string()),
+                )
+            })
             .collect();
-        let removed: Vec<String> = recorded_deps
-            .difference(&expected_deps)
-            .map(|s| (*s).to_string())
+
+        let mut upgraded = Vec::new();
+        let mut added = Vec::new();
+        let mut matched_removed = HashSet::new();
+
+        for &name in &added_set {
+            let pkg = PkgName::new(name);
+            if let Some((old_name, old_ver)) = removed_by_base.get(pkg.pkgbase()) {
+                upgraded.push((
+                    pkg.pkgbase().to_string(),
+                    old_ver.clone(),
+                    pkg.pkgversion().to_string(),
+                ));
+                matched_removed.insert(*old_name);
+            } else {
+                added.push(name.to_string());
+            }
+        }
+
+        let mut removed: Vec<String> = removed_set
+            .iter()
+            .filter(|&name| !matched_removed.contains(name))
+            .map(|s| s.to_string())
             .collect();
-        debug!(?added, ?removed, "Dependency list changed");
-        return Ok(Some(BuildReason::DependencyListChanged(added, removed)));
+
+        debug!(?upgraded, ?added, ?removed, "Dependency list changed");
+        let reason = if upgraded.is_empty() && removed.is_empty() && added.len() == 1 {
+            BuildReason::DependencyAdded(added.swap_remove(0))
+        } else if upgraded.is_empty() && added.is_empty() && removed.len() == 1 {
+            BuildReason::DependencyRemoved(removed.swap_remove(0))
+        } else if added.is_empty() && removed.is_empty() && upgraded.len() == 1 {
+            let (base, old, new) = upgraded.swap_remove(0);
+            BuildReason::DependencyUpgraded(base, old, new)
+        } else {
+            BuildReason::DependenciesChanged {
+                upgraded,
+                added,
+                removed,
+            }
+        };
+        return Ok(Some(reason));
     }
 
     for dep in &recorded_deps {
