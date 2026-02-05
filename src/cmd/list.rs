@@ -15,6 +15,7 @@
  */
 
 use std::collections::{HashMap, HashSet};
+use std::io::IsTerminal;
 
 use anyhow::{Result, bail};
 use clap::Subcommand;
@@ -25,6 +26,10 @@ use bob::build::BuildOutcome;
 use bob::db::Database;
 use bob::scan::SkipReason;
 use bob::try_println;
+
+fn use_color() -> bool {
+    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SkipCategory {
@@ -408,7 +413,7 @@ fn print_build_tree(
     let suffix_len = if include_all { 13 } else { 0 };
 
     let mut indent_width = 1;
-    for try_indent in [4, 3, 2, 1] {
+    for try_indent in [3, 2, 1] {
         let fits = by_level.iter().enumerate().all(|(level, pkgs)| {
             level == 0
                 || pkgs.iter().all(|pkg| {
@@ -421,18 +426,28 @@ fn print_build_tree(
         }
     }
 
-    let (mid_conn, last_conn) = match (format, indent_width) {
-        (TreeOutput::Utf8, 4) => ("├── ", "└── "),
-        (TreeOutput::Utf8, 3) => ("├─ ", "└─ "),
-        (TreeOutput::Utf8, _) => ("├ ", "└ "),
-        (TreeOutput::Ascii, 4) => ("|-- ", "`-- "),
-        (TreeOutput::Ascii, 3) => ("|- ", "`- "),
-        (TreeOutput::Ascii, _) => ("| ", "` "),
-        (TreeOutput::None, _) => ("", ""),
+    let (mid_conn, last_conn, span_mid, span_last) = match (format, indent_width) {
+        (TreeOutput::Utf8, 3) => ("├─ ", "╰─ ", "╰──┬─ ", "╰──── "),
+        (TreeOutput::Utf8, 2) => ("├ ", "╰ ", "╰─┬ ", "╰── "),
+        (TreeOutput::Utf8, _) => ("├ ", "╰ ", "╰┬ ", "╰─ "),
+        (TreeOutput::Ascii, 3) => ("|- ", "`- ", "`--+- ", "`---- "),
+        (TreeOutput::Ascii, 2) => ("| ", "` ", "`-+ ", "`-- "),
+        (TreeOutput::Ascii, _) => ("| ", "` ", "`+ ", "`- "),
+        (TreeOutput::None, _) => ("", "", "", ""),
+    };
+
+    let max_level = by_level.len().saturating_sub(1);
+
+    let (dim, reset) = if use_color() && format != TreeOutput::None {
+        ("\x1b[2m", "\x1b[0m")
+    } else {
+        ("", "")
     };
 
     'outer: for (level, pkgs) in by_level.iter().enumerate() {
-        let last_idx = pkgs.len().saturating_sub(1);
+        let pkg_count = pkgs.len();
+        let has_next_level = level < max_level;
+
         for (i, pkg) in pkgs.iter().enumerate() {
             let name = display_name(pkg);
             let suffix = if include_all && up_to_date.contains(pkg) {
@@ -441,14 +456,31 @@ fn print_build_tree(
                 ""
             };
 
+            let is_first = i == 0;
+            let is_last = i == pkg_count - 1;
+
             let line = if level == 0 {
                 format!("{}{}", name, suffix)
             } else if format == TreeOutput::None {
                 format!("{}{}{}", " ".repeat(indent_width * level), name, suffix)
+            } else if is_first && level > 1 {
+                // First item at level 2+ - use spanning connector from previous level
+                let prefix = " ".repeat(indent_width * (level - 2));
+                let span = if pkg_count == 1 && !has_next_level {
+                    span_last
+                } else {
+                    span_mid
+                };
+                format!("{}{}{}{}{}{}", dim, prefix, span, reset, name, suffix)
             } else {
+                // Level 1 items, or subsequent items at any level
                 let indent = " ".repeat(indent_width * (level - 1));
-                let conn = if i == last_idx { last_conn } else { mid_conn };
-                format!("{}{}{}{}", indent, conn, name, suffix)
+                let conn = if is_last && !has_next_level {
+                    last_conn
+                } else {
+                    mid_conn
+                };
+                format!("{}{}{}{}{}{}", dim, indent, conn, reset, name, suffix)
             };
             if !try_println(&line) {
                 break 'outer;
