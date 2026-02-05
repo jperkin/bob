@@ -101,6 +101,8 @@ pub enum ListCmd {
         /// Output format
         #[arg(short = 'f', long, value_enum, default_value_t = TreeOutput::Utf8)]
         format: TreeOutput,
+        /// Package to show tree for (regex pattern)
+        package: Option<String>,
     },
     /// Show package status with columns
     Status {
@@ -237,8 +239,12 @@ pub fn run(db: &Database, cmd: ListCmd, path: bool) -> Result<()> {
                 }
             }
         }
-        ListCmd::Tree { all, format } => {
-            print_build_tree(db, path, all, format)?;
+        ListCmd::Tree {
+            all,
+            format,
+            package,
+        } => {
+            print_build_tree(db, path, all, format, package.as_deref())?;
         }
         ListCmd::Status {
             no_header,
@@ -253,16 +259,34 @@ pub fn run(db: &Database, cmd: ListCmd, path: bool) -> Result<()> {
 }
 
 /**
+ * Collect transitive dependencies for a package.
+ */
+fn collect_transitive_deps<'a>(
+    pkg: &'a str,
+    deps: &'a HashMap<String, Vec<String>>,
+    result: &mut HashSet<&'a str>,
+) {
+    if let Some(pkg_deps) = deps.get(pkg) {
+        for dep in pkg_deps {
+            if result.insert(dep.as_str()) {
+                collect_transitive_deps(dep.as_str(), deps, result);
+            }
+        }
+    }
+}
+
+/**
  * Print the build tree showing packages in build order (dependencies first).
  *
- * Uses topological levels to determine correct placement - a package appears
- * under its highest-level dependency (the one that finishes building last).
+ * When a package pattern is provided, shows a proper dependency tree for
+ * matching packages. Otherwise, uses topological levels to show build order.
  */
 fn print_build_tree(
     db: &Database,
     use_path: bool,
     include_all: bool,
     format: TreeOutput,
+    package: Option<&str>,
 ) -> Result<()> {
     // Get all buildable packages
     let buildable_pkgs = db.get_buildable_packages()?;
@@ -276,73 +300,96 @@ fn print_build_tree(
     // Get resolved dependencies from database
     let pkgname_to_deps = db.get_all_resolved_deps()?;
 
-    // Build set of packages that were actually resolved (appear in dependency graph)
-    let mut resolved_pkgs: HashSet<String> = HashSet::new();
+    // Build set of packages in the resolved dependency graph
+    let mut resolved: HashSet<String> = HashSet::new();
     for (pkg, deps) in &pkgname_to_deps {
-        resolved_pkgs.insert(pkg.clone());
-        for dep in deps {
-            resolved_pkgs.insert(dep.clone());
-        }
+        resolved.insert(pkg.clone());
+        resolved.extend(deps.iter().cloned());
     }
 
-    // Only include buildable packages that were resolved
-    let all_buildable: HashSet<String> = buildable_pkgs
+    // Get build results for filtering
+    let results = db.get_all_build_results()?;
+    let excluded: HashSet<String> = results
         .iter()
-        .filter(|pkg| resolved_pkgs.contains(&pkg.pkgname))
-        .map(|pkg| pkg.pkgname.clone())
-        .collect();
-
-    // Get packages that don't need building (up-to-date or skipped)
-    let excluded: HashSet<String> = db
-        .get_all_build_results()?
-        .into_iter()
         .filter(|r| matches!(r.outcome, BuildOutcome::UpToDate | BuildOutcome::Skipped(_)))
         .map(|r| r.pkgname.pkgname().to_string())
         .collect();
-
-    // Get just up-to-date packages for display suffix
-    let up_to_date: HashSet<String> = db
-        .get_all_build_results()?
-        .into_iter()
+    let up_to_date: HashSet<String> = results
+        .iter()
         .filter(|r| matches!(r.outcome, BuildOutcome::UpToDate))
         .map(|r| r.pkgname.pkgname().to_string())
         .collect();
 
-    // Filter to packages that need building
-    let needs_build: HashSet<String> = if include_all {
-        all_buildable.clone()
-    } else {
-        all_buildable
+    // Determine package set
+    let packages: HashSet<String> = if let Some(pattern) = package {
+        let re = Regex::new(pattern)
+            .map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", pattern, e))?;
+
+        let matches: Vec<&str> = pkgname_to_pkgpath
             .iter()
-            .filter(|p| !excluded.contains(*p))
-            .cloned()
-            .collect()
+            .filter(|(name, path)| {
+                resolved.contains(*name) && (re.is_match(name) || re.is_match(path))
+            })
+            .map(|(name, _)| name.as_str())
+            .collect();
+
+        if matches.is_empty() {
+            println!("No packages match '{}'", pattern);
+            return Ok(());
+        }
+
+        let mut required: HashSet<&str> = HashSet::new();
+        for pkg in &matches {
+            required.insert(pkg);
+            collect_transitive_deps(pkg, &pkgname_to_deps, &mut required);
+        }
+
+        let required: HashSet<String> = required.iter().map(|s| s.to_string()).collect();
+        if include_all {
+            required
+        } else {
+            required
+                .into_iter()
+                .filter(|p| !excluded.contains(p))
+                .collect()
+        }
+    } else {
+        let all_buildable: HashSet<String> = buildable_pkgs
+            .iter()
+            .filter(|pkg| resolved.contains(&pkg.pkgname))
+            .map(|pkg| pkg.pkgname.clone())
+            .collect();
+
+        if include_all {
+            all_buildable
+        } else {
+            all_buildable
+                .into_iter()
+                .filter(|p| !excluded.contains(p))
+                .collect()
+        }
     };
 
-    if needs_build.is_empty() {
+    if packages.is_empty() {
         println!("All packages are up-to-date");
         return Ok(());
     }
 
-    // Filter dependencies to only those in the build set
     let filtered_deps: HashMap<String, Vec<String>> = pkgname_to_deps
         .iter()
-        .filter(|(pkg, _)| needs_build.contains(*pkg))
+        .filter(|(pkg, _)| packages.contains(*pkg))
         .map(|(pkg, deps)| {
-            let filtered: Vec<String> = deps
-                .iter()
-                .filter(|d| needs_build.contains(*d))
-                .cloned()
-                .collect();
-            (pkg.clone(), filtered)
+            (
+                pkg.clone(),
+                deps.iter()
+                    .filter(|d| packages.contains(*d))
+                    .cloned()
+                    .collect(),
+            )
         })
         .collect();
 
-    // Calculate topological level for each package
-    // Level 0 = no dependencies in build set, Level N = max(dep levels) + 1
-    let levels = calculate_levels(&needs_build, &filtered_deps);
-
-    // Group packages by level
+    let levels = calculate_levels(&packages, &filtered_deps);
     let max_level = levels.values().max().copied().unwrap_or(0);
     let mut by_level: Vec<Vec<String>> = vec![Vec::new(); max_level + 1];
     for (pkg, &level) in &levels {
@@ -363,22 +410,16 @@ fn print_build_tree(
         }
     };
 
-    // Calculate optimal indent based on terminal width
     let term_width = terminal::size().map(|(w, _)| w as usize).unwrap_or(80);
-    let suffix_len = if include_all { 13 } else { 0 }; // " (up-to-date)"
+    let suffix_len = if include_all { 13 } else { 0 };
 
-    // Find the largest indent that fits all lines, trying 4, 3, 2, then 1
     let mut indent_width = 1;
     for try_indent in [4, 3, 2, 1] {
         let fits = by_level.iter().enumerate().all(|(level, pkgs)| {
-            if level == 0 {
-                return true;
-            }
-            pkgs.iter().all(|pkg| {
-                let name = display_name(pkg);
-                let line_len = level * try_indent + name.len() + suffix_len;
-                line_len <= term_width
-            })
+            level == 0
+                || pkgs.iter().all(|pkg| {
+                    level * try_indent + display_name(pkg).len() + suffix_len <= term_width
+                })
         });
         if fits {
             indent_width = try_indent;
@@ -386,7 +427,6 @@ fn print_build_tree(
         }
     }
 
-    // Select connectors based on format and width
     let (mid_conn, last_conn) = match (format, indent_width) {
         (TreeOutput::Utf8, 4) => ("├── ", "└── "),
         (TreeOutput::Utf8, 3) => ("├─ ", "└─ "),
@@ -397,7 +437,6 @@ fn print_build_tree(
         (TreeOutput::None, _) => ("", ""),
     };
 
-    // Print packages grouped by level with tree connectors
     for (level, pkgs) in by_level.iter().enumerate() {
         let last_idx = pkgs.len().saturating_sub(1);
         for (i, pkg) in pkgs.iter().enumerate() {
@@ -411,12 +450,11 @@ fn print_build_tree(
             if level == 0 {
                 println!("{}{}", name, suffix);
             } else if format == TreeOutput::None {
-                let indent = " ".repeat(indent_width * level);
-                println!("{}{}{}", indent, name, suffix);
+                println!("{}{}{}", " ".repeat(indent_width * level), name, suffix);
             } else {
                 let indent = " ".repeat(indent_width * (level - 1));
-                let connector = if i == last_idx { last_conn } else { mid_conn };
-                println!("{}{}{}{}", indent, connector, name, suffix);
+                let conn = if i == last_idx { last_conn } else { mid_conn };
+                println!("{}{}{}{}", indent, conn, name, suffix);
             }
         }
     }
