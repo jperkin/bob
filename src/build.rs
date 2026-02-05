@@ -91,13 +91,19 @@ pub enum BuildReason {
     BuildFileChanged(String),
     /// A single dependency was added.
     DependencyAdded(String),
+    /// Multiple dependencies were added.
+    DependenciesAdded(Vec<String>),
     /// A single dependency was removed.
     DependencyRemoved(String),
-    /// A single dependency was upgraded (pkgbase, old_ver, new_ver).
-    DependencyUpgraded(String, String, String),
-    /// Multiple dependency changes (upgrades, additions, removals).
+    /// Multiple dependencies were removed.
+    DependenciesRemoved(Vec<String>),
+    /// A single dependency was updated (pkgbase, old_ver, new_ver).
+    DependencyUpdated(String, String, String),
+    /// Multiple dependencies were updated.
+    DependenciesUpdated(Vec<(String, String, String)>),
+    /// Mixed dependency changes (updates, additions, removals).
     DependenciesChanged {
-        upgraded: Vec<(String, String, String)>,
+        updated: Vec<(String, String, String)>,
         added: Vec<String>,
         removed: Vec<String>,
     },
@@ -120,14 +126,27 @@ impl std::fmt::Display for BuildReason {
             BuildReason::DependencyAdded(dep) => {
                 write!(f, "dependency added: {}", dep)
             }
+            BuildReason::DependenciesAdded(deps) => {
+                write!(f, "dependencies added: {}", deps.join(", "))
+            }
             BuildReason::DependencyRemoved(dep) => {
                 write!(f, "dependency removed: {}", dep)
             }
-            BuildReason::DependencyUpgraded(base, old, new) => {
-                write!(f, "dependency upgraded: {} {} -> {}", base, old, new)
+            BuildReason::DependenciesRemoved(deps) => {
+                write!(f, "dependencies removed: {}", deps.join(", "))
+            }
+            BuildReason::DependencyUpdated(base, old, new) => {
+                write!(f, "dependency updated: {} {} -> {}", base, old, new)
+            }
+            BuildReason::DependenciesUpdated(updates) => {
+                let parts: Vec<String> = updates
+                    .iter()
+                    .map(|(base, old, new)| format!("{} {} -> {}", base, old, new))
+                    .collect();
+                write!(f, "dependencies updated: {}", parts.join(", "))
             }
             BuildReason::DependenciesChanged {
-                upgraded,
+                updated,
                 added,
                 removed,
             } => {
@@ -138,7 +157,7 @@ impl std::fmt::Display for BuildReason {
                 for a in added {
                     parts.push(format!("+{}", a));
                 }
-                for (base, old, new) in upgraded {
+                for (base, old, new) in updated {
                     parts.push(format!("{} {} -> {}", base, old, new));
                 }
                 write!(f, "dependencies changed: {}", parts.join(", "))
@@ -268,14 +287,14 @@ pub fn pkg_up_to_date(
             })
             .collect();
 
-        let mut upgraded = Vec::new();
+        let mut updated = Vec::new();
         let mut added = Vec::new();
         let mut matched_removed = HashSet::new();
 
         for &name in &added_set {
             let pkg = PkgName::new(name);
             if let Some((old_name, old_ver)) = removed_by_base.get(pkg.pkgbase()) {
-                upgraded.push((
+                updated.push((
                     pkg.pkgbase().to_string(),
                     old_ver.clone(),
                     pkg.pkgversion().to_string(),
@@ -292,17 +311,29 @@ pub fn pkg_up_to_date(
             .map(|s| s.to_string())
             .collect();
 
-        debug!(?upgraded, ?added, ?removed, "Dependency list changed");
-        let reason = if upgraded.is_empty() && removed.is_empty() && added.len() == 1 {
-            BuildReason::DependencyAdded(added.swap_remove(0))
-        } else if upgraded.is_empty() && added.is_empty() && removed.len() == 1 {
-            BuildReason::DependencyRemoved(removed.swap_remove(0))
-        } else if added.is_empty() && removed.is_empty() && upgraded.len() == 1 {
-            let (base, old, new) = upgraded.swap_remove(0);
-            BuildReason::DependencyUpgraded(base, old, new)
+        debug!(?updated, ?added, ?removed, "Dependency list changed");
+        let reason = if updated.is_empty() && removed.is_empty() {
+            if added.len() == 1 {
+                BuildReason::DependencyAdded(added.swap_remove(0))
+            } else {
+                BuildReason::DependenciesAdded(added)
+            }
+        } else if updated.is_empty() && added.is_empty() {
+            if removed.len() == 1 {
+                BuildReason::DependencyRemoved(removed.swap_remove(0))
+            } else {
+                BuildReason::DependenciesRemoved(removed)
+            }
+        } else if added.is_empty() && removed.is_empty() {
+            if updated.len() == 1 {
+                let (base, old, new) = updated.swap_remove(0);
+                BuildReason::DependencyUpdated(base, old, new)
+            } else {
+                BuildReason::DependenciesUpdated(updated)
+            }
         } else {
             BuildReason::DependenciesChanged {
-                upgraded,
+                updated,
                 added,
                 removed,
             }
