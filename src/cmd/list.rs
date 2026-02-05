@@ -102,25 +102,26 @@ pub enum ListCmd {
     /// Show package status with columns
     #[command(after_long_help = "\
 Status values:
-  pending             Ready to build
-  success             Built successfully
-  up-to-date          Binary already exists
-  failed              Build attempted and failed
-  preskipped          PKG_SKIP_REASON set
-  prefailed           PKG_FAIL_REASON set
-  indirect-preskipped Blocked by preskipped package
-  indirect-prefailed  Blocked by prefailed package
-  unresolved          Has unresolved dependencies
-  indirect-unresolved Blocked by package with unresolved dependencies
-  indirect-failed     Blocked by package that failed to build
+  pending              Ready to build
+  success              Built successfully
+  up-to-date           Binary already exists
+  failed               Build attempted and failed
+  preskipped           PKG_SKIP_REASON set
+  prefailed            PKG_FAIL_REASON set
+  unresolved           Has unresolved dependencies
+  indirect-failed      Blocked by package that failed to build
+  indirect-preskipped  Blocked by preskipped package
+  indirect-prefailed   Blocked by prefailed package
+  indirect-unresolved  Blocked by package with unresolved dependencies
 
 Examples:
-  bob list status                        Show all packages
-  bob list status -s failed              Show failed packages
-  bob list status -s preskipped,prefailed
-                                         Show all pre-* packages
-  bob list status 'py-'                  Show packages matching 'py-'
-  bob list status -s failed -o pkgpath   Show failed with pkgpath column
+  bob list status                          Show all packages
+  bob list status -s failed                Show failed packages
+  bob list status -s preskipped,prefailed  Show all pre-* packages
+  bob list status py-                      Show packages matching 'py-'
+  bob list status flim glib2 mutt          Show multiple package matches
+  bob list status -s failed -o pkgpath     Show failed with pkgpath column
+  bob list status -Ho pkgpath -s pending   Show all pending pkgpath builds
 ")]
     Status {
         /// Hide column headers
@@ -138,8 +139,8 @@ Examples:
             hide_possible_values = true
         )]
         statuses: Vec<StatusFilter>,
-        /// Package filter (regex on name or path)
-        package: Option<String>,
+        /// Package filters (regex on name or path)
+        packages: Vec<String>,
     },
     /// Show dependency tree of packages to build
     Tree {
@@ -183,15 +184,9 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
             statuses,
             columns,
             no_header,
-            package,
+            packages,
         } => {
-            print_build_status(
-                db,
-                &statuses,
-                columns.as_deref(),
-                no_header,
-                package.as_deref(),
-            )?;
+            print_build_status(db, &statuses, columns.as_deref(), no_header, &packages)?;
         }
         ListCmd::Tree {
             all,
@@ -521,7 +516,7 @@ fn print_build_status(
     statuses: &[StatusFilter],
     columns: Option<&[String]>,
     no_header: bool,
-    pkg_filter: Option<&str>,
+    pkg_filters: &[String],
 ) -> Result<()> {
     let all_cols = ["pkgname", "pkgpath", "status", "reason"];
     let default_cols = ["pkgname", "status", "reason"];
@@ -547,10 +542,10 @@ fn print_build_status(
         }
     };
 
-    let pkg_re = pkg_filter
-        .map(Regex::new)
-        .transpose()
-        .map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", pkg_filter.unwrap_or(""), e))?;
+    let pkg_patterns: Vec<Regex> = pkg_filters
+        .iter()
+        .map(|p| Regex::new(p).map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", p, e)))
+        .collect::<Result<Vec<_>>>()?;
 
     let all_pkgs = db.get_all_packages()?;
     let pkgname_to_pkg: HashMap<String, &_> =
@@ -627,10 +622,12 @@ fn print_build_status(
                 None => continue,
             };
 
-            if let Some(ref re) = pkg_re {
-                if !re.is_match(pkgname) && !re.is_match(&pkg.pkgpath) {
-                    continue;
-                }
+            if !pkg_patterns.is_empty()
+                && !pkg_patterns
+                    .iter()
+                    .any(|re| re.is_match(pkgname) || re.is_match(&pkg.pkgpath))
+            {
+                continue;
             }
 
             let (status, reason) = get_status(pkgname);
