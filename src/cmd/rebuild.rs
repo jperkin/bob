@@ -32,7 +32,6 @@ use bob::build::Build;
 use bob::config::Config;
 use bob::db::Database;
 use bob::sandbox::{Sandbox, SandboxScope};
-use bob::scan::Scan;
 
 /**
  * Arguments for the rebuild command.
@@ -68,36 +67,31 @@ pub fn run(config: &Config, db: &Database, ctx: &RunContext, args: RebuildArgs) 
         println!("Cleared {} cached build result(s)", cleared);
     }
 
-    let mut scan = Scan::new(config);
-    let full_result = scan.resolve_with_report(db, config.strict_scan())?;
+    let all_resolved = db
+        .load_resolved_packages()
+        .context("No scan data cached - run 'bob scan' first")?;
 
-    let filtered_packages: Vec<_> = full_result
-        .packages
+    let buildable: indexmap::IndexMap<_, _> = all_resolved
         .into_iter()
-        .filter(|p| {
-            p.pkgname()
-                .map(|n| to_rebuild.contains(n.pkgname()))
-                .unwrap_or(false)
-        })
+        .filter(|p| to_rebuild.contains(p.pkgname().pkgname()))
+        .map(|p| (p.pkgname().clone(), p))
         .collect();
 
-    if filtered_packages.is_empty() {
+    if buildable.is_empty() {
         bail!("No buildable packages found");
     }
 
-    let scan_result = bob::scan::ScanSummary {
-        pkgpaths: filtered_packages
-            .iter()
-            .map(|p| p.pkgpath())
-            .collect::<HashSet<_>>()
-            .len(),
-        packages: filtered_packages,
-    };
+    let pkgsrc_env = db
+        .load_pkgsrc_env()
+        .context("PkgsrcEnv not cached - try 'bob clean' first")?;
 
     let sandbox = Sandbox::new(config);
     let scope = SandboxScope::new(sandbox, ctx.clone());
+    let mut build = Build::new(config, pkgsrc_env, scope, buildable);
+    build.load_cached_from_db(db)?;
+    build.start(ctx, db)?;
 
-    run_build(config, db, ctx, scan_result, scope)
+    Ok(())
 }
 
 /**
@@ -150,30 +144,4 @@ fn clear_build_cache(db: &Database, packages: &HashSet<String>) -> Result<usize>
         }
     }
     Ok(cleared)
-}
-
-/**
- * Run the build phase with the given scan result.
- */
-fn run_build(
-    config: &Config,
-    db: &Database,
-    ctx: &RunContext,
-    scan_result: bob::scan::ScanSummary,
-    scope: SandboxScope,
-) -> Result<()> {
-    let buildable: indexmap::IndexMap<_, _> = scan_result
-        .buildable()
-        .map(|p| (p.pkgname().clone(), p.clone()))
-        .collect();
-
-    let pkgsrc_env = db
-        .load_pkgsrc_env()
-        .context("PkgsrcEnv not cached - try 'bob clean' first")?;
-
-    let mut build = Build::new(config, pkgsrc_env, scope, buildable);
-    build.load_cached_from_db(db)?;
-    build.start(ctx, db)?;
-
-    Ok(())
 }

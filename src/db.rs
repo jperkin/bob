@@ -786,6 +786,59 @@ impl Database {
     }
 
     /**
+     * Load buildable packages with their resolved dependencies.
+     *
+     * Reconstructs [`ResolvedPackage`] objects from the database without
+     * re-running dependency resolution.  Excludes packages that were
+     * skipped during resolution (stored in the builds table).
+     */
+    pub fn load_resolved_packages(&self) -> Result<Vec<crate::scan::ResolvedPackage>> {
+        use crate::build::BuildOutcome;
+
+        let skipped_ids: HashSet<i64> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT package_id, outcome FROM builds")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut ids = HashSet::new();
+            for row in rows {
+                let (id, outcome) = row?;
+                if matches!(
+                    BuildOutcome::from_db(&outcome, None),
+                    Some(BuildOutcome::Skipped(_))
+                ) {
+                    ids.insert(id);
+                }
+            }
+            ids
+        };
+
+        let buildable = self.get_buildable_packages()?;
+        let all_deps = self.get_all_resolved_deps()?;
+
+        let mut packages = Vec::with_capacity(buildable.len());
+        for row in &buildable {
+            if skipped_ids.contains(&row.id) {
+                continue;
+            }
+            let mut index = self.get_full_scan_index(row.id)?;
+            let deps = all_deps.get(&row.pkgname).cloned().unwrap_or_default();
+            index.resolved_depends = Some(
+                deps.into_iter()
+                    .map(|d| d.parse())
+                    .collect::<Result<Vec<PkgName>, _>>()?,
+            );
+            packages.push(crate::scan::ResolvedPackage {
+                pkgpath: row.pkgpath.parse()?,
+                index,
+            });
+        }
+        Ok(packages)
+    }
+
+    /**
      * Get resolved dependency edges as raw integer IDs.
      *
      * Use with an id-to-pkgname map (from [`get_all_package_status`]) to

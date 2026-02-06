@@ -1790,6 +1790,37 @@ fn test_usergroup_phase_package() -> Result<()> {
     Ok(())
 }
 
+/// Verify that load_resolved_packages reconstructs the same buildable set
+/// and dependencies as the original scan resolution.  This is the code path
+/// used by `bob rebuild` — it must not re-resolve dependency patterns.
+#[test]
+fn test_load_resolved_packages_matches_scan() -> Result<()> {
+    let h = TestHarness::new()?;
+    let scan_result = h.run_scan()?;
+    let db = h.open_db()?;
+
+    let to_depset = |name: &str, deps: &[pkgsrc::PkgName]| -> (String, Vec<String>) {
+        let mut v: Vec<String> = deps.iter().map(|d| d.pkgname().to_string()).collect();
+        v.sort();
+        (name.to_string(), v)
+    };
+
+    let expected: HashMap<String, Vec<String>> = scan_result
+        .buildable()
+        .map(|p| to_depset(p.pkgname().pkgname(), p.depends()))
+        .collect();
+
+    let loaded = db.load_resolved_packages()?;
+    let actual: HashMap<String, Vec<String>> = loaded
+        .iter()
+        .map(|p| to_depset(p.pkgname().pkgname(), p.depends()))
+        .collect();
+
+    assert_eq!(expected, actual);
+
+    Ok(())
+}
+
 /// Verify that after building, build durations are recorded and non-zero
 /// for packages that actually built (not indirect-failed).
 #[test]
