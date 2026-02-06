@@ -55,7 +55,7 @@ use pkgsrc::archive::BinaryPackage;
 use pkgsrc::digest::Digest;
 use pkgsrc::metadata::FileRead;
 use pkgsrc::{PkgName, PkgPath};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -1726,9 +1726,8 @@ struct BuildJobs {
     /// Reverse dependency map: package -> packages that depend on it.
     /// Precomputed for O(1) lookup in mark_failure instead of O(n) scan.
     reverse_deps: HashMap<PkgName, HashSet<PkgName>>,
-    /// Effective weight: package's PBULK_WEIGHT + sum of weights of all
-    /// transitive dependents. Precomputed for efficient build ordering.
-    effective_weights: HashMap<PkgName, usize>,
+    /// Packages in build priority order, precomputed for scheduling.
+    build_order: Vec<PkgName>,
     running: HashSet<PkgName>,
     done: HashSet<PkgName>,
     failed: HashSet<PkgName>,
@@ -1848,38 +1847,17 @@ impl BuildJobs {
      * Get next package status.
      */
     fn get_next_build(&self) -> BuildStatus {
-        /*
-         * If incoming is empty then we're done.
-         */
         if self.incoming.is_empty() {
             return BuildStatus::Done;
         }
-
-        /*
-         * Get all packages in incoming that are cleared for building, ordered
-         * by effective weight (own weight + transitive dependents' weights).
-         */
-        let mut pkgs: Vec<(PkgName, usize)> = self
-            .incoming
-            .iter()
-            .filter(|(_, v)| v.is_empty())
-            .map(|(k, _)| (k.clone(), *self.effective_weights.get(k).unwrap_or(&100)))
-            .collect();
-
-        /*
-         * If no packages are returned then we're still waiting for
-         * dependencies to finish.  Clients should keep retrying until this
-         * changes.
-         */
-        if pkgs.is_empty() {
-            return BuildStatus::NoneAvailable;
+        for pkg in &self.build_order {
+            if let Some(deps) = self.incoming.get(pkg) {
+                if deps.is_empty() {
+                    return BuildStatus::Available(pkg.clone());
+                }
+            }
         }
-
-        /*
-         * Order packages by build weight and return the highest.
-         */
-        pkgs.sort_by_key(|&(_, weight)| std::cmp::Reverse(weight));
-        BuildStatus::Available(pkgs[0].0.clone())
+        BuildStatus::NoneAvailable
     }
 }
 
@@ -2083,33 +2061,11 @@ impl Build {
                 .unwrap_or(100)
         };
 
-        let mut effective_weights: HashMap<PkgName, usize> = HashMap::new();
-        let mut pending: HashMap<&PkgName, usize> = incoming
-            .keys()
-            .map(|p| (p, reverse_deps.get(p).map_or(0, |s| s.len())))
-            .collect();
-        let mut queue: VecDeque<&PkgName> = pending
+        let forward: HashMap<PkgName, Vec<PkgName>> = incoming
             .iter()
-            .filter(|(_, c)| **c == 0)
-            .map(|(&p, _)| p)
+            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
             .collect();
-        while let Some(pkg) = queue.pop_front() {
-            let mut total = get_weight(pkg);
-            if let Some(dependents) = reverse_deps.get(pkg) {
-                for dep in dependents {
-                    total += effective_weights.get(dep).unwrap_or(&0);
-                }
-            }
-            effective_weights.insert(pkg.clone(), total);
-            for dep in incoming.get(pkg).iter().flat_map(|s| s.iter()) {
-                if let Some(c) = pending.get_mut(dep) {
-                    *c -= 1;
-                    if *c == 0 {
-                        queue.push_back(dep);
-                    }
-                }
-            }
-        }
+        let build_order = crate::build_order(&forward, get_weight);
 
         let running: HashSet<PkgName> = HashSet::new();
         let logdir = self.config.logdir().clone();
@@ -2117,7 +2073,7 @@ impl Build {
             scanpkgs: self.scanpkgs.clone(),
             incoming,
             reverse_deps,
-            effective_weights,
+            build_order,
             running,
             done,
             failed,

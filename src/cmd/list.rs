@@ -340,7 +340,7 @@ fn print_build_tree(
         return Ok(());
     }
 
-    let filtered_deps: HashMap<String, Vec<String>> = pkgname_to_deps
+    let mut filtered_deps: HashMap<String, Vec<String>> = pkgname_to_deps
         .iter()
         .filter(|(pkg, _)| packages.contains(*pkg))
         .map(|(pkg, deps)| {
@@ -353,8 +353,27 @@ fn print_build_tree(
             )
         })
         .collect();
+    for pkg in &packages {
+        filtered_deps.entry(pkg.clone()).or_default();
+    }
 
-    let levels = calculate_levels(&packages, &filtered_deps);
+    let mut levels: HashMap<String, usize> = HashMap::new();
+    loop {
+        let before = levels.len();
+        for (pkg, deps) in &filtered_deps {
+            if !levels.contains_key(pkg) && deps.iter().all(|d| levels.contains_key(d)) {
+                let level = deps
+                    .iter()
+                    .filter_map(|d| levels.get(d))
+                    .max()
+                    .map_or(0, |m| m + 1);
+                levels.insert(pkg.clone(), level);
+            }
+        }
+        if levels.len() == before {
+            break;
+        }
+    }
     let max_level = levels.values().max().copied().unwrap_or(0);
     let mut by_level: Vec<Vec<String>> = vec![Vec::new(); max_level + 1];
     for (pkg, &level) in &levels {
@@ -458,60 +477,11 @@ fn print_build_tree(
 }
 
 /**
- * Calculate topological level for each package.
- * Level 0 = no dependencies in build set
- * Level N = max(level of dependencies) + 1
- */
-fn calculate_levels(
-    packages: &HashSet<String>,
-    deps: &HashMap<String, Vec<String>>,
-) -> HashMap<String, usize> {
-    let mut levels: HashMap<String, usize> = HashMap::new();
-
-    // Initialize: packages with no deps are level 0
-    for pkg in packages {
-        let pkg_deps = deps.get(pkg);
-        if pkg_deps.is_none_or(|d| d.is_empty()) {
-            levels.insert(pkg.clone(), 0);
-        }
-    }
-
-    // Iterate until all levels are assigned
-    loop {
-        let mut changed = false;
-        for pkg in packages {
-            if levels.contains_key(pkg) {
-                continue;
-            }
-            let pkg_deps = match deps.get(pkg) {
-                Some(d) => d,
-                None => continue,
-            };
-            // Check if all dependencies have levels assigned
-            let all_deps_have_levels = pkg_deps.iter().all(|d| levels.contains_key(d));
-            if all_deps_have_levels {
-                let max_dep_level = pkg_deps
-                    .iter()
-                    .map(|d| levels.get(d).unwrap_or(&0))
-                    .max()
-                    .unwrap_or(&0);
-                levels.insert(pkg.clone(), max_dep_level + 1);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    levels
-}
-
-/**
  * Print package status with selectable columns in build order.
  *
- * Shows packages in topological order so dependencies appear before packages
- * that depend on them. Supports filtering by status and package name/path regex.
+ * Shows packages ordered by effective weight so that packages with the
+ * most transitive dependents appear first. Supports filtering by status
+ * and package name/path regex.
  */
 fn print_build_status(
     db: &Database,
@@ -561,7 +531,7 @@ fn print_build_status(
         in_build.extend(deps.iter().cloned());
     }
 
-    let filtered_deps: HashMap<String, Vec<String>> = pkgname_to_deps
+    let mut filtered_deps: HashMap<String, Vec<String>> = pkgname_to_deps
         .into_iter()
         .filter(|(pkg, _)| in_build.contains(pkg))
         .map(|(pkg, deps)| {
@@ -569,6 +539,9 @@ fn print_build_status(
             (pkg, filtered)
         })
         .collect();
+    for pkg in &in_build {
+        filtered_deps.entry(pkg.clone()).or_default();
+    }
 
     let build_results: HashMap<String, BuildOutcome> = db
         .get_all_build_results()?
@@ -578,15 +551,7 @@ fn print_build_status(
 
     let build_reasons = db.get_all_build_reasons()?;
 
-    let levels = calculate_levels(&in_build, &filtered_deps);
-    let max_level = levels.values().max().copied().unwrap_or(0);
-    let mut by_level: Vec<Vec<String>> = vec![Vec::new(); max_level + 1];
-    for (pkg, &level) in &levels {
-        by_level[level].push(pkg.clone());
-    }
-    for level_pkgs in &mut by_level {
-        level_pkgs.sort();
-    }
+    let sorted_pkgs = bob::build_order(&filtered_deps, |_| 1);
 
     let get_status = |pkgname: &str| -> (&'static str, String) {
         if let Some(outcome) = build_results.get(pkgname) {
@@ -617,42 +582,40 @@ fn print_build_status(
     };
 
     let mut rows: Vec<[String; 5]> = Vec::new();
-    for pkgs in &by_level {
-        for pkgname in pkgs {
-            let pkg = match pkgname_to_pkg.get(pkgname) {
-                Some(p) => p,
-                None => continue,
-            };
+    for pkgname in &sorted_pkgs {
+        let pkg = match pkgname_to_pkg.get(pkgname) {
+            Some(p) => p,
+            None => continue,
+        };
 
-            if !pkg_patterns.is_empty()
-                && !pkg_patterns
-                    .iter()
-                    .any(|re| re.is_match(pkgname) || re.is_match(&pkg.pkgpath))
-            {
-                continue;
-            }
-
-            let (status, reason) = get_status(pkgname);
-
-            if !matches_status(status) {
-                continue;
-            }
-
-            let multi_version = pkg
-                .multi_version
-                .as_deref()
-                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
-                .map(|v| v.join(" "))
-                .unwrap_or_default();
-
-            rows.push([
-                pkgname.clone(),
-                pkg.pkgpath.clone(),
-                status.to_string(),
-                reason,
-                multi_version,
-            ]);
+        if !pkg_patterns.is_empty()
+            && !pkg_patterns
+                .iter()
+                .any(|re| re.is_match(pkgname) || re.is_match(&pkg.pkgpath))
+        {
+            continue;
         }
+
+        let (status, reason) = get_status(pkgname);
+
+        if !matches_status(status) {
+            continue;
+        }
+
+        let multi_version = pkg
+            .multi_version
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+            .map(|v| v.join(" "))
+            .unwrap_or_default();
+
+        rows.push([
+            pkgname.clone(),
+            pkg.pkgpath.clone(),
+            status.to_string(),
+            reason,
+            multi_version,
+        ]);
     }
 
     if rows.is_empty() {
