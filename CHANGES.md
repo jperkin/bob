@@ -2,7 +2,7 @@
 
 ## Version 0.8.1 (2026-02-06)
 
-* Fix output ordering of 'bob list status' to ensure it is identical to build
+* Fix output ordering of `bob list status` to ensure it is identical to build
   order, and improve performance.
 
 ## Version 0.8.0 (2026-02-06)
@@ -12,8 +12,8 @@
 * Rewrite up-to-date checks in native Rust using features from pkgsrc-rs,
   removing the dependency on `pkg_install` tools, and allowing full package
   status to be calculated (in parallel) up-front.  This provides significant
-  performance improvements, and the paves the way for the powerful `status`
-  command described below.
+  performance improvements, and paves the way for the powerful `status` command
+  described below.
 
 * Consolidate `bob list` subcommands into `bob list status` with filtering.
   Filter by status with `-s` (repeatable or comma-separated), customise column
@@ -31,11 +31,16 @@
 * Move `--path` flag from global `bob list` to individual subcommands (`tree`,
   `blockers`, `blocked-by`) as `-p`.
 
+* Overhaul `bob rebuild` to ensure it only acts upon scanned packages and
+  improve semantics.  Remove `-f`: if you ask for a package to be rebuilt then
+  it is rebuilt.  Add `--only` with a warning that it will leave packages in an
+  inconsistent state.
+
 * Support non-terminal plain output mode.
 
 * Provide comprehensive scan and build result variants to cover all cases.
 
-* Add `examples/scan.lua` for scan-only configurations.
+* Add [examples/scan.lua](examples/scan.lua) for scan-only configurations.
 
 * Various robustness and security improvements.
 
