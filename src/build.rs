@@ -2382,12 +2382,28 @@ impl Build {
 
             // Track which thread is building which package
             let mut thread_packages: HashMap<usize, PkgName> = HashMap::new();
+            let mut worker_stages: HashMap<usize, Option<String>> = HashMap::new();
 
             let build_threads = session.config.build_threads();
             let mut make_jobs_budget: Option<Box<dyn JobAllocator>> = session
                 .config
                 .dynamic_jobs()
                 .map(|dj| make_allocator(dj, build_threads));
+
+            if let Some(ref budget) = make_jobs_budget {
+                let dj = session.config.dynamic_jobs().unwrap();
+                debug!(
+                    algorithm = budget.name(),
+                    max = dj.max,
+                    min = dj.min,
+                    build_threads,
+                    total_packages = jobs.incoming.len(),
+                    "MAKE_JOBS init"
+                );
+            }
+
+            let build_start = Instant::now();
+            let mut last_snapshot = Instant::now();
 
             loop {
                 // Check shutdown flag periodically
@@ -2406,7 +2422,48 @@ impl Build {
 
                 let command = match manager_rx.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
                     Ok(cmd) => cmd,
-                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if make_jobs_budget.is_some()
+                            && last_snapshot.elapsed() >= Duration::from_secs(30)
+                        {
+                            last_snapshot = Instant::now();
+                            let budget_state = make_jobs_budget
+                                .as_ref()
+                                .map(|b| b.debug_state())
+                                .unwrap_or_default();
+                            let workers: Vec<String> = (0..build_threads)
+                                .map(|tid| {
+                                    let pkg = thread_packages
+                                        .get(&tid)
+                                        .filter(|p| jobs.running.contains(*p))
+                                        .map(|p| p.pkgname().to_string());
+                                    let stage = worker_stages
+                                        .get(&tid)
+                                        .and_then(|s| s.clone())
+                                        .unwrap_or_else(|| "idle".to_string());
+                                    match pkg {
+                                        Some(p) => {
+                                            format!("{}:{}:{}", tid, p, stage)
+                                        }
+                                        None => format!("{}:idle", tid),
+                                    }
+                                })
+                                .collect();
+                            let ready = jobs.incoming.values().filter(|d| d.is_empty()).count();
+                            debug!(
+                                budget_state,
+                                ?workers,
+                                running = jobs.running.len(),
+                                incoming = jobs.incoming.len(),
+                                done = jobs.done.len(),
+                                failed = jobs.failed.len(),
+                                ready,
+                                elapsed_secs = build_start.elapsed().as_secs(),
+                                "MAKE_JOBS snapshot"
+                            );
+                        }
+                        continue;
+                    }
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 };
 
@@ -2431,6 +2488,23 @@ impl Build {
                                         ));
                                     }
                                     let _ = p.render();
+                                }
+
+                                if make_jobs_budget.is_some() {
+                                    let weight = jobs.remaining_depth(&pkg).max(1);
+                                    let ready =
+                                        jobs.incoming.values().filter(|d| d.is_empty()).count();
+                                    debug!(
+                                        sid = c,
+                                        pkgname = %pkg.pkgname(),
+                                        weight,
+                                        running = jobs.running.len(),
+                                        incoming = jobs.incoming.len(),
+                                        done = jobs.done.len(),
+                                        failed = jobs.failed.len(),
+                                        ready,
+                                        "MAKE_JOBS dispatch"
+                                    );
                                 }
 
                                 let _ =
@@ -2472,6 +2546,18 @@ impl Build {
                                 .map(|(t, _)| t)
                             {
                                 budget.release(sid);
+                                debug!(
+                                    sid,
+                                    pkgname = %pkgname.pkgname(),
+                                    outcome = "success",
+                                    duration_secs = duration.as_secs_f64(),
+                                    budget_state = budget.debug_state(),
+                                    running = jobs.running.len(),
+                                    incoming = jobs.incoming.len(),
+                                    done = jobs.done.len(),
+                                    failed = jobs.failed.len(),
+                                    "MAKE_JOBS complete"
+                                );
                             }
                         }
 
@@ -2509,6 +2595,18 @@ impl Build {
                                 .map(|(t, _)| t)
                             {
                                 budget.release(sid);
+                                debug!(
+                                    sid,
+                                    pkgname = %pkgname.pkgname(),
+                                    outcome = "failed",
+                                    duration_secs = duration.as_secs_f64(),
+                                    budget_state = budget.debug_state(),
+                                    running = jobs.running.len(),
+                                    incoming = jobs.incoming.len(),
+                                    done = jobs.done.len(),
+                                    failed = jobs.failed.len(),
+                                    "MAKE_JOBS complete"
+                                );
                             }
                         }
 
@@ -2546,6 +2644,18 @@ impl Build {
                                 .map(|(t, _)| t)
                             {
                                 budget.release(sid);
+                                debug!(
+                                    sid,
+                                    pkgname = %pkgname.pkgname(),
+                                    outcome = "error",
+                                    duration_secs = duration.as_secs_f64(),
+                                    budget_state = budget.debug_state(),
+                                    running = jobs.running.len(),
+                                    incoming = jobs.incoming.len(),
+                                    done = jobs.done.len(),
+                                    failed = jobs.failed.len(),
+                                    "MAKE_JOBS complete"
+                                );
                             }
                         }
 
@@ -2573,7 +2683,8 @@ impl Build {
                         }
                         tracing::error!(error = %e, pkgname = %pkgname.pkgname(), "Build error");
                     }
-                    ChannelCommand::StageUpdate(tid, stage) => {
+                    ChannelCommand::StageUpdate(tid, ref stage) => {
+                        worker_stages.insert(tid, stage.clone());
                         if let Ok(mut p) = progress_clone.lock() {
                             p.state_mut().set_worker_stage(tid, stage.as_deref());
                             let _ = p.render();
@@ -2615,6 +2726,11 @@ impl Build {
                                 sole_builder,
                             };
                             let allocated = budget.allocate(&ctx);
+                            let all_weights: Vec<String> = all_dispatched
+                                .iter()
+                                .map(|(s, w)| format!("{}:{}", s, w))
+                                .collect();
+                            let ready = jobs.incoming.values().filter(|d| d.is_empty()).count();
                             debug!(
                                 sid,
                                 pkgname = pkg_name,
@@ -2622,8 +2738,11 @@ impl Build {
                                 my_weight,
                                 allocated,
                                 sole_builder,
+                                ?all_weights,
+                                budget_state = budget.debug_state(),
                                 dispatched = jobs.running.len(),
-                                ready = jobs.incoming.values().filter(|d| d.is_empty()).count(),
+                                ready,
+                                incoming = jobs.incoming.len(),
                                 "MAKE_JOBS allocate"
                             );
                             budget.lock(sid, allocated);
@@ -2639,8 +2758,13 @@ impl Build {
                                 .get(&sid)
                                 .map(|p| p.pkgname())
                                 .unwrap_or("?");
-                            debug!(sid, pkgname = pkg_name, "MAKE_JOBS release");
                             budget.release(sid);
+                            debug!(
+                                sid,
+                                pkgname = pkg_name,
+                                budget_state = budget.debug_state(),
+                                "MAKE_JOBS phase-exit"
+                            );
                         }
                     }
                     _ => {}

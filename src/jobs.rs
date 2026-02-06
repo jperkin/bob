@@ -56,16 +56,20 @@ pub trait JobAllocator {
 
     /// Name for logging/debugging.
     fn name(&self) -> &str;
+
+    /// Return a summary of internal state for debug logging.
+    fn debug_state(&self) -> String;
 }
 
 /**
  * Distribute extra budget proportional to critical path depth.
  *
- * Each worker's ideal allocation is proportional to its critical
- * path depth among ALL dispatched workers, not just those currently
- * in the build phase.  Locked allocations (workers mid-build)
- * cannot be reclaimed, so a new worker gets
- * `min(ideal_share, available_budget)`.
+ * The budget reserves `min_per_worker` for each of `build_threads`
+ * workers.  The remaining "extra" is distributed proportionally by
+ * weight using the largest-remainder method across unlocked workers,
+ * after subtracting what locked workers have already consumed.
+ * This prevents a worker from over-allocating when earlier workers
+ * already hold budget above the minimum.
  */
 struct WeightedFairShare {
     max_jobs: usize,
@@ -80,22 +84,66 @@ impl JobAllocator for WeightedFairShare {
             return self.max_jobs;
         }
 
-        let total_weight: usize = ctx.all_dispatched.iter().map(|(_, w)| *w).sum();
         let extra = self
             .max_jobs
             .saturating_sub(self.build_threads * self.min_per_worker);
+        let locked_extra: usize = self
+            .locked
+            .values()
+            .map(|j| j.saturating_sub(self.min_per_worker))
+            .sum();
+        let remaining_extra = extra.saturating_sub(locked_extra);
 
-        let ideal = if total_weight > 0 && extra > 0 {
-            let share = extra as f64 * ctx.my_weight as f64 / total_weight as f64;
-            self.min_per_worker + share.round() as usize
-        } else {
-            self.min_per_worker
-        };
+        if remaining_extra == 0 {
+            return self.min_per_worker;
+        }
 
-        let locked_total: usize = self.locked.values().sum();
-        let available = self.max_jobs.saturating_sub(locked_total);
+        let unlocked: Vec<(usize, usize)> = ctx
+            .all_dispatched
+            .iter()
+            .filter(|(sid, _)| !self.locked.contains_key(sid))
+            .copied()
+            .collect();
 
-        ideal.min(available).max(self.min_per_worker)
+        let total_weight: usize = unlocked.iter().map(|(_, w)| *w).sum();
+        if total_weight == 0 {
+            return self.min_per_worker;
+        }
+
+        /*
+         * Largest-remainder method: take the floor of each proportional
+         * share, then hand out the leftover one at a time to whichever
+         * entries have the biggest fractional parts.
+         */
+        let mut entries: Vec<(usize, usize, f64)> = unlocked
+            .iter()
+            .map(|&(sid, weight)| {
+                let exact = remaining_extra as f64 * weight as f64 / total_weight as f64;
+                let floor = exact as usize;
+                let remainder = exact - floor as f64;
+                (sid, floor, remainder)
+            })
+            .collect();
+
+        let floor_sum: usize = entries.iter().map(|(_, f, _)| f).sum();
+        let mut leftover = remaining_extra.saturating_sub(floor_sum);
+
+        entries.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        for entry in &mut entries {
+            if leftover == 0 {
+                break;
+            }
+            entry.1 += 1;
+            leftover -= 1;
+        }
+
+        let my_extra = entries
+            .iter()
+            .find(|(sid, _, _)| *sid == ctx.sandbox_id)
+            .map(|(_, e, _)| *e)
+            .unwrap_or(0);
+
+        self.min_per_worker + my_extra
     }
 
     fn lock(&mut self, sandbox_id: usize, jobs: usize) {
@@ -108,6 +156,19 @@ impl JobAllocator for WeightedFairShare {
 
     fn name(&self) -> &str {
         "weighted_fair_share"
+    }
+
+    fn debug_state(&self) -> String {
+        let mut pairs: Vec<_> = self.locked.iter().collect();
+        pairs.sort_by_key(|(sid, _)| *sid);
+        let locked_str: Vec<String> = pairs.iter().map(|(s, j)| format!("{}:{}", s, j)).collect();
+        let used: usize = self.locked.values().sum();
+        format!(
+            "locked:{{{}}} used:{}/{}",
+            locked_str.join(","),
+            used,
+            self.max_jobs
+        )
     }
 }
 
@@ -148,6 +209,19 @@ impl JobAllocator for EqualShare {
 
     fn name(&self) -> &str {
         "equal_share"
+    }
+
+    fn debug_state(&self) -> String {
+        let mut pairs: Vec<_> = self.locked.iter().collect();
+        pairs.sort_by_key(|(sid, _)| *sid);
+        let locked_str: Vec<String> = pairs.iter().map(|(s, j)| format!("{}:{}", s, j)).collect();
+        let used: usize = self.locked.values().sum();
+        format!(
+            "locked:{{{}}} used:{}/{}",
+            locked_str.join(","),
+            used,
+            self.max_jobs
+        )
     }
 }
 
