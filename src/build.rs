@@ -1222,6 +1222,16 @@ impl BuildSummary {
     }
 }
 
+/**
+ * Parallel package build orchestrator.
+ *
+ * Schedules packages for building using a dependency DAG, distributes
+ * work across sandbox worker threads, and collects results into a
+ * [`BuildSummary`].
+ *
+ * Sandboxes are owned via [`SandboxScope`] and automatically cleaned
+ * up on drop.
+ */
 #[derive(Debug)]
 pub struct Build {
     /// Parsed [`Config`].
@@ -1867,6 +1877,13 @@ impl BuildJobs {
 }
 
 impl Build {
+    /**
+     * Create a new build from scan results.
+     *
+     * The `scanpkgs` map should contain the buildable packages from
+     * [`Scan::resolve`](crate::Scan). The `scope` owns the sandboxes
+     * and will destroy them on drop.
+     */
     pub fn new(
         config: &Config,
         pkgsrc_env: PkgsrcEnv,
@@ -1919,6 +1936,14 @@ impl Build {
         Ok(count)
     }
 
+    /**
+     * Run the build.
+     *
+     * Builds all packages in dependency order across parallel sandbox
+     * workers. Respects the shutdown flag in `ctx` for graceful
+     * interruption. Results are persisted to `db` as each package
+     * completes.
+     */
     pub fn start(
         &mut self,
         ctx: &RunContext,

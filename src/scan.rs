@@ -440,7 +440,21 @@ impl ScanSummary {
     }
 }
 
-/// Package dependency scanner.
+/**
+ * Package dependency scanner.
+ *
+ * Discovers packages and their dependencies by running `make pbulk-index`
+ * in each package directory, then resolves dependency patterns to specific
+ * package versions.
+ *
+ * Supports two modes:
+ * - **Full tree**: scans all packages in the pkgsrc tree (default).
+ * - **Limited**: scans only explicitly added packages and their transitive
+ *   dependencies, matching pbulk's `presolve` behaviour.
+ *
+ * Results are cached in the [`Database`](crate::Database) for resumable
+ * operation after interruption.
+ */
 #[derive(Debug, Default)]
 pub struct Scan {
     config: Config,

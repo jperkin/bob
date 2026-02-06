@@ -199,7 +199,16 @@ pub fn wait_output_with_shutdown(child: Child, shutdown: &AtomicBool) -> Result<
     }
 }
 
-/// Build sandbox manager.
+/**
+ * Build sandbox manager.
+ *
+ * Provides a uniform interface for running commands regardless of
+ * whether sandboxes are enabled. When enabled, commands execute inside
+ * a chroot; when disabled, they run directly on the host.
+ *
+ * Use [`SandboxScope`] for RAII lifecycle management in build/scan
+ * operations.
+ */
 #[derive(Clone, Debug, Default)]
 pub struct Sandbox {
     config: Config,

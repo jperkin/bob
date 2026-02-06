@@ -14,6 +14,13 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+/*!
+ * Configuration directory initialisation.
+ *
+ * Creates a new bob configuration directory with a platform-appropriate
+ * `config.lua` and any bundled helper scripts.
+ */
+
 use anyhow::bail;
 use rust_embed::RustEmbed;
 use std::env;
@@ -26,9 +33,18 @@ use std::path::PathBuf;
 #[folder = "scripts/"]
 struct Scripts;
 
+/**
+ * Configuration directory generator for `bob init`.
+ */
 pub struct Init {}
 
 impl Init {
+    /**
+     * Create a new configuration directory at `dir`.
+     *
+     * Generates a platform-specific `config.lua` and installs bundled
+     * scripts. The directory must not already exist or must be empty.
+     */
     pub fn create(dir: &PathBuf) -> anyhow::Result<()> {
         let initdir = if dir.is_absolute() {
             dir.to_path_buf()

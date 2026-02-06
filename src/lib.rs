@@ -64,22 +64,31 @@ pub struct RunContext {
 }
 
 impl RunContext {
+    /**
+     * Create a new run context with the given shutdown flag.
+     *
+     * The shutdown flag is shared across all threads. Set it to `true`
+     * to trigger graceful shutdown of any running scan or build.
+     */
     pub fn new(shutdown: Arc<AtomicBool>) -> Self {
         Self { shutdown }
     }
 }
 
-// Re-export main types for convenience
+// Re-export main types for convenience.
+//
+// The typical workflow is:
+//   Config::load() → Scan::new() → scan.start() → scan.resolve()
+//   → Build::new() → build.start() → write_html_report()
+
 pub use action::{Action, ActionType, FSType};
 pub use build::{
     Build, BuildCounts, BuildOutcome, BuildReason, BuildResult, BuildSummary, pkg_up_to_date,
 };
 pub use config::{Config, Options, Pkgsrc, PkgsrcEnv, Sandboxes};
 pub use db::Database;
+pub use init::Init;
 pub use report::write_html_report;
 pub use sandbox::Sandbox;
 pub use scan::{ResolvedPackage, Scan, ScanResult, ScanSummary, SkipReason, SkippedCounts};
 pub use summary::generate_pkg_summary;
-
-// Re-export init for CLI use
-pub use init::Init;

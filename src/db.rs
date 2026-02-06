@@ -52,16 +52,27 @@ const SCHEMA_VERSION: i32 = 6;
 
 /**
  * Lightweight package row without full scan data.
+ *
+ * Use [`Database::get_full_scan_index`] when the complete
+ * [`ScanIndex`] is needed.
  */
 #[derive(Clone, Debug)]
 pub struct PackageRow {
+    /// Database row ID.
     pub id: i64,
+    /// Package name with version (e.g., `"curl-8.7.1"`).
     pub pkgname: String,
+    /// Package path in the pkgsrc tree (e.g., `"www/curl"`).
     pub pkgpath: String,
+    /// `PKG_SKIP_REASON` from scan, if set.
     pub skip_reason: Option<String>,
+    /// `PKG_FAIL_REASON` from scan, if set.
     pub fail_reason: Option<String>,
+    /// Whether this is a bootstrap package.
     pub is_bootstrap: bool,
+    /// Build priority weight from `PBULK_WEIGHT`.
     pub pbulk_weight: i32,
+    /// `MULTI_VERSION` value, if this package has multiple versions.
     pub multi_version: Option<String>,
 }
 
