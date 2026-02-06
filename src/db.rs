@@ -76,6 +76,25 @@ pub struct PackageRow {
     pub multi_version: Option<String>,
 }
 
+/**
+ * Package data combined with build status.
+ *
+ * Returned by [`Database::get_all_package_status`] which fetches
+ * package metadata and build results in a single query.
+ */
+#[derive(Clone, Debug)]
+pub struct PackageStatusRow {
+    pub id: i64,
+    pub pkgname: String,
+    pub pkgpath: String,
+    pub skip_reason: Option<String>,
+    pub fail_reason: Option<String>,
+    pub build_reason: Option<String>,
+    pub multi_version: Option<String>,
+    pub build_outcome: Option<String>,
+    pub outcome_detail: Option<String>,
+}
+
 impl PackageRow {
     /**
      * Construct a PackageRow from a database row.
@@ -462,6 +481,47 @@ impl Database {
     }
 
     /**
+     * Get all package data with build results in a single query.
+     *
+     * Combines packages, build outcomes, and build reasons into one
+     * LEFT JOIN, avoiding multiple round-trips.  Set `need_multi`
+     * to include the expensive `json_extract` for MULTI_VERSION.
+     */
+    pub fn get_all_package_status(&self, need_multi: bool) -> Result<Vec<PackageStatusRow>> {
+        let sql = if need_multi {
+            "SELECT p.id, p.pkgname, p.pkgpath, p.skip_reason,
+                    p.fail_reason, p.build_reason,
+                    json_extract(p.scan_data, '$.MULTI_VERSION'),
+                    b.outcome, b.outcome_detail
+             FROM packages p
+             LEFT JOIN builds b ON b.package_id = p.id"
+        } else {
+            "SELECT p.id, p.pkgname, p.pkgpath, p.skip_reason,
+                    p.fail_reason, p.build_reason,
+                    NULL,
+                    b.outcome, b.outcome_detail
+             FROM packages p
+             LEFT JOIN builds b ON b.package_id = p.id"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+
+        let mapped = stmt.query_map([], |row| {
+            Ok(PackageStatusRow {
+                id: row.get(0)?,
+                pkgname: row.get(1)?,
+                pkgpath: row.get(2)?,
+                skip_reason: row.get(3)?,
+                fail_reason: row.get(4)?,
+                build_reason: row.get(5)?,
+                multi_version: row.get(6)?,
+                build_outcome: row.get(7)?,
+                outcome_detail: row.get(8)?,
+            })
+        })?;
+        mapped.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /**
      * Get all buildable packages (no skip/fail reason).
      */
     pub fn get_buildable_packages(&self) -> Result<Vec<PackageRow>> {
@@ -723,6 +783,20 @@ impl Database {
             deps.entry(pkg).or_default().push(dep);
         }
         Ok(deps)
+    }
+
+    /**
+     * Get resolved dependency edges as raw integer IDs.
+     *
+     * Use with an id-to-pkgname map (from [`get_all_package_status`]) to
+     * avoid the double JOIN in [`get_all_resolved_deps`].
+     */
+    pub fn get_resolved_dep_ids(&self) -> Result<Vec<(i64, i64)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT package_id, depends_on_id FROM resolved_depends")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     // ========================================================================

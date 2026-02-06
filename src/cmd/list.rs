@@ -24,7 +24,7 @@ use regex::Regex;
 use serde_json;
 
 use bob::build::BuildOutcome;
-use bob::db::Database;
+use bob::db::{Database, PackageStatusRow};
 use bob::scan::SkipReason;
 use bob::try_println;
 
@@ -519,59 +519,38 @@ fn print_build_status(
         .map(|p| Regex::new(p).map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", p, e)))
         .collect::<Result<Vec<_>>>()?;
 
-    let all_pkgs = db.get_all_packages()?;
-    let pkgname_to_pkg: HashMap<String, &_> =
-        all_pkgs.iter().map(|p| (p.pkgname.clone(), p)).collect();
+    let need_multi = cols.contains(&"multi_version");
+    let all_pkgs = db.get_all_package_status(need_multi)?;
+    let id_to_pkg: HashMap<i64, &PackageStatusRow> = all_pkgs.iter().map(|p| (p.id, p)).collect();
 
-    let pkgname_to_deps = db.get_all_resolved_deps()?;
-
-    let mut in_build: HashSet<String> = HashSet::new();
-    for (pkg, deps) in &pkgname_to_deps {
-        in_build.insert(pkg.clone());
-        in_build.extend(deps.iter().cloned());
+    let dep_ids = db.get_resolved_dep_ids()?;
+    let mut id_deps: HashMap<i64, Vec<i64>> = HashMap::new();
+    for &(pkg_id, dep_id) in &dep_ids {
+        id_deps.entry(pkg_id).or_default().push(dep_id);
+        id_deps.entry(dep_id).or_default();
     }
 
-    let mut filtered_deps: HashMap<String, Vec<String>> = pkgname_to_deps
-        .into_iter()
-        .filter(|(pkg, _)| in_build.contains(pkg))
-        .map(|(pkg, deps)| {
-            let filtered: Vec<String> = deps.into_iter().filter(|d| in_build.contains(d)).collect();
-            (pkg, filtered)
-        })
-        .collect();
-    for pkg in &in_build {
-        filtered_deps.entry(pkg.clone()).or_default();
-    }
+    let sorted_ids = bob::build_order(&id_deps, |_| 1);
 
-    let build_results: HashMap<String, BuildOutcome> = db
-        .get_all_build_results()?
-        .into_iter()
-        .map(|r| (r.pkgname.pkgname().to_string(), r.outcome))
-        .collect();
-
-    let build_reasons = db.get_all_build_reasons()?;
-
-    let sorted_pkgs = bob::build_order(&filtered_deps, |_| 1);
-
-    let get_status = |pkgname: &str| -> (&'static str, String) {
-        if let Some(outcome) = build_results.get(pkgname) {
+    let get_status = |pkg: &PackageStatusRow| -> (&'static str, String) {
+        if let Some(outcome) = pkg
+            .build_outcome
+            .as_deref()
+            .and_then(|key| BuildOutcome::from_db(key, pkg.outcome_detail.clone()))
+        {
             (outcome.status(), outcome.reason().unwrap_or_default())
-        } else if let Some(reason) = build_reasons.get(pkgname) {
+        } else if let Some(reason) = &pkg.build_reason {
             (StatusFilter::Pending.as_str(), reason.clone())
-        } else if let Some(pkg) = pkgname_to_pkg.get(pkgname) {
-            if let Some(reason) = &pkg.fail_reason {
-                (
-                    StatusFilter::Prefailed.as_str(),
-                    format!("PKG_FAIL_REASON: {}", reason),
-                )
-            } else if let Some(reason) = &pkg.skip_reason {
-                (
-                    StatusFilter::Preskipped.as_str(),
-                    format!("PKG_SKIP_REASON: {}", reason),
-                )
-            } else {
-                (StatusFilter::Pending.as_str(), String::new())
-            }
+        } else if let Some(reason) = &pkg.fail_reason {
+            (
+                StatusFilter::Prefailed.as_str(),
+                format!("PKG_FAIL_REASON: {}", reason),
+            )
+        } else if let Some(reason) = &pkg.skip_reason {
+            (
+                StatusFilter::Preskipped.as_str(),
+                format!("PKG_SKIP_REASON: {}", reason),
+            )
         } else {
             (StatusFilter::Pending.as_str(), String::new())
         }
@@ -582,8 +561,8 @@ fn print_build_status(
     };
 
     let mut rows: Vec<[String; 5]> = Vec::new();
-    for pkgname in &sorted_pkgs {
-        let pkg = match pkgname_to_pkg.get(pkgname) {
+    for id in &sorted_ids {
+        let pkg = match id_to_pkg.get(id) {
             Some(p) => p,
             None => continue,
         };
@@ -591,12 +570,12 @@ fn print_build_status(
         if !pkg_patterns.is_empty()
             && !pkg_patterns
                 .iter()
-                .any(|re| re.is_match(pkgname) || re.is_match(&pkg.pkgpath))
+                .any(|re| re.is_match(&pkg.pkgname) || re.is_match(&pkg.pkgpath))
         {
             continue;
         }
 
-        let (status, reason) = get_status(pkgname);
+        let (status, reason) = get_status(pkg);
 
         if !matches_status(status) {
             continue;
@@ -610,7 +589,7 @@ fn print_build_status(
             .unwrap_or_default();
 
         rows.push([
-            pkgname.clone(),
+            pkg.pkgname.clone(),
             pkg.pkgpath.clone(),
             status.to_string(),
             reason,
