@@ -1,5 +1,10 @@
 # Changelog
 
+## Version 0.8.1 (2026-02-06)
+
+* Fix output ordering of 'bob list status' to ensure it is identical to build
+  order, and improve performance.
+
 ## Version 0.8.0 (2026-02-06)
 
 * Now published as `bob` on crates.io, thanks Wyatt!
