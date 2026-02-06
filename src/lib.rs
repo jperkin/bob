@@ -37,13 +37,18 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 /**
- * Return all packages in build priority order.
+ * Return all packages in build priority order, along with effective weights.
  *
  * Packages that unblock the most downstream work appear first.
  * `deps` maps each package to its dependencies; all packages must
  * be keys. `weight` provides per-package base weight.
+ *
+ * Returns a tuple of (sorted packages, effective weight map).
  */
-pub fn build_order<K>(deps: &HashMap<K, Vec<K>>, weight: impl Fn(&K) -> usize) -> Vec<K>
+pub fn build_order<K>(
+    deps: &HashMap<K, Vec<K>>,
+    weight: impl Fn(&K) -> usize,
+) -> (Vec<K>, HashMap<K, usize>)
 where
     K: Eq + Hash + Clone + Ord,
 {
@@ -79,7 +84,9 @@ where
     }
     let mut result: Vec<K> = deps.keys().cloned().collect();
     result.sort_by(|a, b| weights.get(b).cmp(&weights.get(a)).then_with(|| a.cmp(b)));
-    result
+    let owned_weights: HashMap<K, usize> =
+        weights.into_iter().map(|(k, v)| (k.clone(), v)).collect();
+    (result, owned_weights)
 }
 
 /**
@@ -133,7 +140,7 @@ pub use action::{Action, ActionType, FSType};
 pub use build::{
     Build, BuildCounts, BuildOutcome, BuildReason, BuildResult, BuildSummary, pkg_up_to_date,
 };
-pub use config::{Config, Options, Pkgsrc, PkgsrcEnv, Sandboxes};
+pub use config::{Config, DynamicJobs, Options, Pkgsrc, PkgsrcEnv, Sandboxes};
 pub use db::Database;
 pub use init::Init;
 pub use report::write_html_report;

@@ -502,29 +502,49 @@ impl<'a> PkgBuilder<'a> {
             return Ok(PkgBuildResult::Failed);
         }
 
+        // Request MAKE_JOBS budget before configure, as both configure
+        // and build can perform parallel work.
+        let make_jobs = self.request_make_jobs();
+        let jobs_arg = make_jobs.map(|j| format!("MAKE_JOBS={}", j));
+        let jobs_flag: Vec<&str> = jobs_arg.iter().map(|s| s.as_str()).collect();
+        let stage_suffix = make_jobs.map(|j| format!(" -j{}", j)).unwrap_or_default();
+
         // Configure
-        callback.stage(Stage::Configure.as_str());
+        callback.stage(&format!("{}{}", Stage::Configure.as_str(), stage_suffix));
         let configure_log = self.logdir.join("configure.log");
         if !self.run_usergroup_if_needed(Stage::Configure, &pkgdir, &configure_log)? {
+            self.notify_build_phase_exit();
             return Ok(PkgBuildResult::Failed);
         }
-        if !self.run_make_stage(
+        if !self.run_make_stage_with_flags(
             Stage::Configure,
             &pkgdir,
             &["configure"],
             self.build_run_as(),
             true,
+            &jobs_flag,
         )? {
+            self.notify_build_phase_exit();
             return Ok(PkgBuildResult::Failed);
         }
 
         // Build
-        callback.stage(Stage::Build.as_str());
+        callback.stage(&format!("{}{}", Stage::Build.as_str(), stage_suffix));
         let build_log = self.logdir.join("build.log");
         if !self.run_usergroup_if_needed(Stage::Build, &pkgdir, &build_log)? {
+            self.notify_build_phase_exit();
             return Ok(PkgBuildResult::Failed);
         }
-        if !self.run_make_stage(Stage::Build, &pkgdir, &["all"], self.build_run_as(), true)? {
+        let build_ok = self.run_make_stage_with_flags(
+            Stage::Build,
+            &pkgdir,
+            &["all"],
+            self.build_run_as(),
+            true,
+            &jobs_flag,
+        )?;
+        self.notify_build_phase_exit();
+        if !build_ok {
             return Ok(PkgBuildResult::Failed);
         }
 
@@ -628,15 +648,26 @@ impl<'a> PkgBuilder<'a> {
         run_as: RunAs,
         include_make_flags: bool,
     ) -> anyhow::Result<bool> {
-        // Write stage to .stage file
+        self.run_make_stage_with_flags(stage, pkgdir, targets, run_as, include_make_flags, &[])
+    }
+
+    fn run_make_stage_with_flags(
+        &self,
+        stage: Stage,
+        pkgdir: &Path,
+        targets: &[&str],
+        run_as: RunAs,
+        include_make_flags: bool,
+        extra_flags: &[&str],
+    ) -> anyhow::Result<bool> {
         let _ = self.write_stage(stage);
 
         let logfile = self.logdir.join(format!("{}.log", stage.as_str()));
         let work_log = self.logdir.join("work.log");
 
-        let owned_args = self.make_args(pkgdir, targets, include_make_flags, &work_log);
+        let owned_args =
+            self.make_args(pkgdir, targets, include_make_flags, &work_log, extra_flags);
 
-        // Convert to slice of &str for the command
         let args: Vec<&str> = owned_args.iter().map(|s| s.as_str()).collect();
 
         info!(stage = stage.as_str(), "Running make stage");
@@ -812,6 +843,7 @@ impl<'a> PkgBuilder<'a> {
             &["show-var", &format!("VARNAME={}", varname)],
             true,
             &work_log,
+            &[],
         );
 
         let bob_log = File::options()
@@ -934,6 +966,7 @@ impl<'a> PkgBuilder<'a> {
         targets: &[&str],
         include_make_flags: bool,
         work_log: &Path,
+        extra_flags: &[&str],
     ) -> Vec<String> {
         let mut owned_args: Vec<String> =
             vec!["-C".to_string(), pkgdir.to_str().unwrap().to_string()];
@@ -951,6 +984,8 @@ impl<'a> PkgBuilder<'a> {
 
             owned_args.push(format!("WRKLOG={}", work_log.display()));
         }
+
+        owned_args.extend(extra_flags.iter().map(|s| s.to_string()));
 
         owned_args
     }
@@ -1021,6 +1056,175 @@ impl<'a> PkgBuilder<'a> {
         // Merge stdout/stderr
         parts.push("2>&1".to_string());
         parts.join(" ")
+    }
+
+    /**
+     * Request MAKE_JOBS from the manager via one-shot channel.
+     *
+     * Sends a [`BuildPhaseEntry`] and blocks for the response.
+     * Returns `None` when dynamic_jobs is disabled.
+     */
+    fn request_make_jobs(&self) -> Option<usize> {
+        self.session.config.dynamic_jobs()?;
+        let output_tx = self.output_tx.as_ref()?;
+        let (tx, rx) = mpsc::channel();
+        let _ = output_tx.send(ChannelCommand::BuildPhaseEntry(
+            self.sandbox_id,
+            MakeJobsResponder(tx),
+        ));
+        rx.recv().ok()
+    }
+
+    fn notify_build_phase_exit(&self) {
+        if self.session.config.dynamic_jobs().is_none() {
+            return;
+        }
+        if let Some(ref output_tx) = self.output_tx {
+            let _ = output_tx.send(ChannelCommand::BuildPhaseExit(self.sandbox_id));
+        }
+    }
+}
+
+/**
+ * One-shot channel for returning MAKE_JOBS from the manager to a worker.
+ */
+struct MakeJobsResponder(Sender<usize>);
+
+impl std::fmt::Debug for MakeJobsResponder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MakeJobsResponder")
+    }
+}
+
+/**
+ * Tracks MAKE_JOBS budget allocation across concurrent builds.
+ *
+ * Dispatched workers are "pending" until they enter the build phase,
+ * at which point they become "locked" at their computed MAKE_JOBS.
+ * Pending allocations are recomputed whenever the set changes.
+ */
+struct MakeJobsBudget {
+    max_jobs: usize,
+    min_per_worker: usize,
+    build_threads: usize,
+    /// Pending workers: sandbox_id -> (make_jobs, effective_weight).
+    pending: HashMap<usize, (usize, usize)>,
+    /// Locked workers (in build phase): sandbox_id -> make_jobs.
+    locked: HashMap<usize, usize>,
+}
+
+impl MakeJobsBudget {
+    fn new(max_jobs: usize, min_per_worker: usize, build_threads: usize) -> Self {
+        Self {
+            max_jobs,
+            min_per_worker,
+            build_threads,
+            pending: HashMap::new(),
+            locked: HashMap::new(),
+        }
+    }
+
+    /**
+     * Register a newly dispatched worker and recompute pending allocations.
+     */
+    fn dispatch(&mut self, sandbox_id: usize, weight: usize) {
+        self.pending
+            .insert(sandbox_id, (self.min_per_worker, weight));
+        self.recompute_pending();
+    }
+
+    /**
+     * Lock a worker's allocation as it enters the build phase.
+     *
+     * If this is the only dispatched worker, it gets the full budget
+     * since every other build is blocked waiting for it.
+     */
+    fn lock(&mut self, sandbox_id: usize) -> usize {
+        let jobs = if let Some((jobs, _)) = self.pending.remove(&sandbox_id) {
+            if self.locked.is_empty() && self.pending.is_empty() {
+                self.max_jobs
+            } else {
+                jobs
+            }
+        } else {
+            self.min_per_worker
+        };
+        self.locked.insert(sandbox_id, jobs);
+        self.recompute_pending();
+        jobs
+    }
+
+    /**
+     * Release a worker's allocation and recompute pending.
+     */
+    fn release(&mut self, sandbox_id: usize) {
+        self.locked.remove(&sandbox_id);
+        self.pending.remove(&sandbox_id);
+        self.recompute_pending();
+    }
+
+    /**
+     * Recompute MAKE_JOBS for all pending (unlocked) workers.
+     *
+     * The budget reserves `min_per_worker` for each of `build_threads`
+     * workers.  The remaining "extra" is distributed proportionally
+     * by effective weight using the largest-remainder method.
+     */
+    fn recompute_pending(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let extra = self
+            .max_jobs
+            .saturating_sub(self.build_threads * self.min_per_worker);
+        let locked_extra: usize = self
+            .locked
+            .values()
+            .map(|j| j.saturating_sub(self.min_per_worker))
+            .sum();
+        let remaining_extra = extra.saturating_sub(locked_extra);
+        let total_weight: usize = self.pending.values().map(|(_, w)| *w).sum();
+
+        if total_weight == 0 || remaining_extra == 0 {
+            for (_, (jobs, _)) in self.pending.iter_mut() {
+                *jobs = self.min_per_worker;
+            }
+            return;
+        }
+
+        /*
+         * Largest-remainder method: take the floor of each proportional
+         * share, then hand out the leftover one at a time to whichever
+         * entries have the biggest fractional parts.
+         */
+        let mut entries: Vec<(usize, usize, f64)> = self
+            .pending
+            .iter()
+            .map(|(&sid, &(_, weight))| {
+                let exact = remaining_extra as f64 * weight as f64 / total_weight as f64;
+                let floor = exact as usize;
+                let remainder = exact - floor as f64;
+                (sid, floor, remainder)
+            })
+            .collect();
+
+        let floor_sum: usize = entries.iter().map(|(_, f, _)| f).sum();
+        let mut leftover = remaining_extra.saturating_sub(floor_sum);
+
+        entries.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        for entry in &mut entries {
+            if leftover == 0 {
+                break;
+            }
+            entry.1 += 1;
+            leftover -= 1;
+        }
+
+        for (sid, extra_share, _) in entries {
+            if let Some((jobs, _)) = self.pending.get_mut(&sid) {
+                *jobs = self.min_per_worker + extra_share;
+            }
+        }
     }
 }
 
@@ -1697,6 +1901,15 @@ enum ChannelCommand {
      * Client reporting output lines from a build.
      */
     OutputLines(usize, Vec<String>),
+    /**
+     * Client entering the build (compilation) phase.
+     * Carries a one-shot responder for the manager to return MAKE_JOBS.
+     */
+    BuildPhaseEntry(usize, MakeJobsResponder),
+    /**
+     * Client exiting the build (compilation) phase.
+     */
+    BuildPhaseExit(usize),
 }
 
 /**
@@ -1728,6 +1941,8 @@ struct BuildJobs {
     reverse_deps: HashMap<PkgName, HashSet<PkgName>>,
     /// Packages in build priority order, precomputed for scheduling.
     build_order: Vec<PkgName>,
+    /// Effective weights from build_order(), for dynamic MAKE_JOBS.
+    effective_weights: HashMap<PkgName, usize>,
     running: HashSet<PkgName>,
     done: HashSet<PkgName>,
     failed: HashSet<PkgName>,
@@ -2065,7 +2280,7 @@ impl Build {
             .iter()
             .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
             .collect();
-        let build_order = crate::build_order(&forward, get_weight);
+        let (build_order, effective_weights) = crate::build_order(&forward, get_weight);
 
         let running: HashSet<PkgName> = HashSet::new();
         let logdir = self.config.logdir().clone();
@@ -2074,6 +2289,7 @@ impl Build {
             incoming,
             reverse_deps,
             build_order,
+            effective_weights,
             running,
             done,
             failed,
@@ -2244,6 +2460,12 @@ impl Build {
             // Track which thread is building which package
             let mut thread_packages: HashMap<usize, PkgName> = HashMap::new();
 
+            let build_threads = session.config.build_threads();
+            let mut make_jobs_budget = session
+                .config
+                .dynamic_jobs()
+                .map(|dj| MakeJobsBudget::new(dj.max, dj.min, build_threads));
+
             loop {
                 // Check shutdown flag periodically
                 if shutdown_for_manager.load(Ordering::SeqCst) {
@@ -2288,6 +2510,10 @@ impl Build {
                                     let _ = p.render();
                                 }
 
+                                if let Some(ref mut budget) = make_jobs_budget {
+                                    let ew = jobs.effective_weights.get(&pkg).copied().unwrap_or(1);
+                                    budget.dispatch(c, ew);
+                                }
                                 let _ =
                                     client.send(ChannelCommand::JobData(Box::new(PackageBuild {
                                         session: Arc::clone(&session),
@@ -2320,6 +2546,15 @@ impl Build {
                     ChannelCommand::JobSuccess(pkgname, duration) => {
                         jobs.mark_success(&pkgname, duration);
                         jobs.running.remove(&pkgname);
+                        if let Some(ref mut budget) = make_jobs_budget {
+                            if let Some(&sid) = thread_packages
+                                .iter()
+                                .find(|(_, p)| *p == &pkgname)
+                                .map(|(t, _)| t)
+                            {
+                                budget.release(sid);
+                            }
+                        }
 
                         // Send result for immediate saving
                         if let Some(result) = jobs.results.last() {
@@ -2348,6 +2583,15 @@ impl Build {
                         let results_before = jobs.results.len();
                         jobs.mark_failure(&pkgname, duration, "Build failed");
                         jobs.running.remove(&pkgname);
+                        if let Some(ref mut budget) = make_jobs_budget {
+                            if let Some(&sid) = thread_packages
+                                .iter()
+                                .find(|(_, p)| *p == &pkgname)
+                                .map(|(t, _)| t)
+                            {
+                                budget.release(sid);
+                            }
+                        }
 
                         // Send all new results for immediate saving
                         for result in jobs.results.iter().skip(results_before) {
@@ -2376,6 +2620,15 @@ impl Build {
                         let results_before = jobs.results.len();
                         jobs.mark_failure(&pkgname, duration, &e.to_string());
                         jobs.running.remove(&pkgname);
+                        if let Some(ref mut budget) = make_jobs_budget {
+                            if let Some(&sid) = thread_packages
+                                .iter()
+                                .find(|(_, p)| *p == &pkgname)
+                                .map(|(t, _)| t)
+                            {
+                                budget.release(sid);
+                            }
+                        }
 
                         // Send all new results for immediate saving
                         for result in jobs.results.iter().skip(results_before) {
@@ -2414,6 +2667,19 @@ impl Build {
                                     buf.push(line);
                                 }
                             }
+                        }
+                    }
+                    ChannelCommand::BuildPhaseEntry(sid, responder) => {
+                        let jobs_val = if let Some(ref mut budget) = make_jobs_budget {
+                            budget.lock(sid)
+                        } else {
+                            1
+                        };
+                        let _ = responder.0.send(jobs_val);
+                    }
+                    ChannelCommand::BuildPhaseExit(sid) => {
+                        if let Some(ref mut budget) = make_jobs_budget {
+                            budget.release(sid);
                         }
                     }
                     _ => {}

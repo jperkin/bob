@@ -530,7 +530,7 @@ fn print_build_status(
         id_deps.entry(dep_id).or_default();
     }
 
-    let sorted_ids = bob::build_order(&id_deps, |_| 1);
+    let (sorted_ids, _) = bob::build_order(&id_deps, |_| 1);
 
     let get_status = |pkg: &PackageStatusRow| -> (&'static str, String) {
         if let Some(outcome) = pkg
