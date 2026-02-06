@@ -891,6 +891,16 @@ impl Config {
             }
         }
 
+        // Thread counts must be at least 1
+        if let Some(opts) = &self.file.options {
+            if opts.build_threads == Some(0) {
+                errors.push("build_threads must be at least 1".to_string());
+            }
+            if opts.scan_threads == Some(0) {
+                errors.push("scan_threads must be at least 1".to_string());
+            }
+        }
+
         if errors.is_empty() {
             Ok(())
         } else {
