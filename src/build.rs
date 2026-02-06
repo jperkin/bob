@@ -1145,15 +1145,23 @@ impl MakeJobsBudget {
      * since every other build is blocked waiting for it.
      */
     fn lock(&mut self, sandbox_id: usize) -> usize {
-        let jobs = if let Some((jobs, _)) = self.pending.remove(&sandbox_id) {
+        let (jobs, sole) = if let Some((jobs, _)) = self.pending.remove(&sandbox_id) {
             if self.locked.is_empty() && self.pending.is_empty() {
-                self.max_jobs
+                (self.max_jobs, true)
             } else {
-                jobs
+                (jobs, false)
             }
         } else {
-            self.min_per_worker
+            (self.min_per_worker, false)
         };
+        debug!(
+            sandbox_id,
+            jobs,
+            sole_builder = sole,
+            locked = ?self.locked,
+            pending_count = self.pending.len(),
+            "MAKE_JOBS lock"
+        );
         self.locked.insert(sandbox_id, jobs);
         self.recompute_pending();
         jobs
@@ -1163,8 +1171,11 @@ impl MakeJobsBudget {
      * Release a worker's allocation and recompute pending.
      */
     fn release(&mut self, sandbox_id: usize) {
-        self.locked.remove(&sandbox_id);
-        self.pending.remove(&sandbox_id);
+        let was_locked = self.locked.remove(&sandbox_id).is_some();
+        let was_pending = self.pending.remove(&sandbox_id).is_some();
+        if was_locked || was_pending {
+            debug!(sandbox_id, was_locked, was_pending, "MAKE_JOBS release");
+        }
         self.recompute_pending();
     }
 
@@ -2564,10 +2575,6 @@ impl Build {
                                     let _ = p.render();
                                 }
 
-                                if let Some(ref mut budget) = make_jobs_budget {
-                                    let rw = jobs.remaining_depth(&pkg).max(1);
-                                    budget.dispatch(c, rw);
-                                }
                                 let _ =
                                     client.send(ChannelCommand::JobData(Box::new(PackageBuild {
                                         session: Arc::clone(&session),
@@ -2725,10 +2732,20 @@ impl Build {
                     }
                     ChannelCommand::BuildPhaseEntry(sid, responder) => {
                         let jobs_val = if let Some(ref mut budget) = make_jobs_budget {
+                            let pkg_name = thread_packages
+                                .get(&sid)
+                                .map(|p| p.pkgname())
+                                .unwrap_or("?");
                             let rw = thread_packages
                                 .get(&sid)
                                 .map(|pkg| jobs.remaining_depth(pkg).max(1))
                                 .unwrap_or(1);
+                            debug!(
+                                sid,
+                                pkgname = pkg_name,
+                                remaining_depth = rw,
+                                "MAKE_JOBS phase entry"
+                            );
                             budget.dispatch(sid, rw);
                             budget.lock(sid)
                         } else {
@@ -2737,6 +2754,11 @@ impl Build {
                         let _ = responder.0.send(jobs_val);
                     }
                     ChannelCommand::BuildPhaseExit(sid) => {
+                        let pkg_name = thread_packages
+                            .get(&sid)
+                            .map(|p| p.pkgname())
+                            .unwrap_or("?");
+                        debug!(sid, pkgname = pkg_name, "MAKE_JOBS phase exit");
                         if let Some(ref mut budget) = make_jobs_budget {
                             budget.release(sid);
                         }
