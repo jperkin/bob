@@ -820,6 +820,7 @@ impl Scan {
 
         // Start transaction for all writes
         let tx = db.transaction()?;
+        let mut db_error: Option<anyhow::Error> = None;
 
         // Borrow config and sandbox separately for use in scanner thread,
         // allowing main thread to mutate self.done, self.incoming, etc.
@@ -950,6 +951,9 @@ impl Scan {
                     if !scanpkgs.is_empty() {
                         if let Err(e) = db.store_scan_pkgpath(&pkgpath.to_string(), &scanpkgs) {
                             error!(error = %e, "Failed to store scan results");
+                            if db_error.is_none() {
+                                db_error = Some(e);
+                            }
                         }
                     }
                 }
@@ -958,6 +962,11 @@ impl Scan {
             if let Ok(mut p) = progress.lock() {
                 let total = p.state_mut().total.saturating_sub(p.state_mut().cached);
                 let _ = p.flush_progress_dots(scanned_count, total);
+            }
+
+            // Don't start new waves if database writes are failing
+            if db_error.is_some() {
+                break;
             }
 
             /*
@@ -1001,8 +1010,12 @@ impl Scan {
             self.incoming = new_incoming;
         }
 
-        // Commit transaction (partial on interrupt, full on success)
-        tx.commit()?;
+        // Commit whatever succeeded (partial on interrupt/error, full on success)
+        if let Err(e) = tx.commit() {
+            if db_error.is_none() {
+                db_error = Some(e);
+            }
+        }
 
         // Stop the refresh thread and print final summary
         stop_refresh.store(true, Ordering::Relaxed);
@@ -1049,6 +1062,10 @@ impl Scan {
 
         if shutdown_flag.load(Ordering::SeqCst) {
             return Err(Interrupted.into());
+        }
+
+        if let Some(e) = db_error {
+            return Err(e.context("Failed to persist scan results to database"));
         }
 
         Ok(())

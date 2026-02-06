@@ -2492,6 +2492,7 @@ impl Build {
         // that were in-progress when interrupted are excluded (they never sent
         // a result to the channel).
         let mut saved_count = 0;
+        let mut db_error: Option<anyhow::Error> = None;
         while let Ok(result) = completed_rx.try_recv() {
             if let Err(e) = db.store_build_by_name(&result) {
                 warn!(
@@ -2499,6 +2500,9 @@ impl Build {
                     error = %e,
                     "Failed to save build result"
                 );
+                if db_error.is_none() {
+                    db_error = Some(e);
+                }
             } else {
                 saved_count += 1;
             }
@@ -2535,6 +2539,10 @@ impl Build {
             results,
             scanfail: Vec::new(),
         };
+
+        if let Some(e) = db_error {
+            return Err(e.context("Failed to persist build results to database"));
+        }
 
         // Guard is dropped when Build goes out of scope, destroying sandboxes
         Ok(summary)
