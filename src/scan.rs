@@ -819,7 +819,7 @@ impl Scan {
         });
 
         // Start transaction for all writes
-        db.begin_transaction()?;
+        let tx = db.transaction()?;
 
         // Borrow config and sandbox separately for use in scanner thread,
         // allowing main thread to mutate self.done, self.incoming, etc.
@@ -1002,7 +1002,7 @@ impl Scan {
         }
 
         // Commit transaction (partial on interrupt, full on success)
-        db.commit()?;
+        tx.commit()?;
 
         // Stop the refresh thread and print final summary
         stop_refresh.store(true, Ordering::Relaxed);

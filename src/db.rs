@@ -101,6 +101,41 @@ pub struct Database {
     conn: Connection,
 }
 
+/**
+ * RAII transaction guard that rolls back on drop unless committed.
+ */
+pub struct TransactionGuard<'a> {
+    conn: &'a Connection,
+    committed: bool,
+}
+
+impl<'a> TransactionGuard<'a> {
+    fn new(conn: &'a Connection) -> Result<Self> {
+        conn.execute("BEGIN TRANSACTION", [])?;
+        Ok(Self {
+            conn,
+            committed: false,
+        })
+    }
+
+    /**
+     * Commit the transaction.
+     */
+    pub fn commit(mut self) -> Result<()> {
+        self.conn.execute("COMMIT", [])?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for TransactionGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = self.conn.execute("ROLLBACK", []);
+        }
+    }
+}
+
 impl Database {
     /**
      * Open or create a database at the given path.
@@ -117,19 +152,11 @@ impl Database {
     }
 
     /**
-     * Begin a transaction.
+     * Begin a transaction, returning an RAII guard that rolls back on
+     * drop unless explicitly committed.
      */
-    pub fn begin_transaction(&self) -> Result<()> {
-        self.conn.execute("BEGIN TRANSACTION", [])?;
-        Ok(())
-    }
-
-    /**
-     * Commit the current transaction.
-     */
-    pub fn commit(&self) -> Result<()> {
-        self.conn.execute("COMMIT", [])?;
-        Ok(())
+    pub fn transaction(&self) -> Result<TransactionGuard<'_>> {
+        TransactionGuard::new(&self.conn)
     }
 
     /**
@@ -606,7 +633,7 @@ impl Database {
     pub fn store_scan_skipped(&self, summary: &crate::scan::ScanSummary) -> Result<()> {
         use crate::scan::ScanResult;
 
-        self.conn.execute("BEGIN TRANSACTION", [])?;
+        let tx = self.transaction()?;
 
         for pkg in &summary.packages {
             if let ScanResult::Skipped { reason, index, .. } = pkg {
@@ -629,15 +656,14 @@ impl Database {
             }
         }
 
-        self.conn.execute("COMMIT", [])?;
-        Ok(())
+        tx.commit()
     }
 
     /**
      * Store resolved dependencies in batch.
      */
     fn store_resolved_dependencies_batch(&self, deps: &[(i64, i64)]) -> Result<()> {
-        self.conn.execute("BEGIN TRANSACTION", [])?;
+        let tx = self.transaction()?;
         let mut stmt = self.conn.prepare(
             "INSERT OR IGNORE INTO resolved_depends (package_id, depends_on_id) VALUES (?1, ?2)",
         )?;
@@ -645,8 +671,7 @@ impl Database {
             stmt.execute(params![package_id, depends_on_id])?;
         }
         drop(stmt);
-        self.conn.execute("COMMIT", [])?;
-        Ok(())
+        tx.commit()
     }
 
     /**
@@ -1089,7 +1114,7 @@ impl Database {
             .collect();
 
         // Batch insert failures
-        self.conn.execute("BEGIN TRANSACTION", [])?;
+        let tx = self.transaction()?;
 
         for (id, depth) in &affected {
             let (outcome, detail, dur) = if *depth == 0 {
@@ -1110,7 +1135,7 @@ impl Database {
             )?;
         }
 
-        self.conn.execute("COMMIT", [])?;
+        tx.commit()?;
 
         debug!(
             package_id = package_id,
