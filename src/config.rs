@@ -981,7 +981,7 @@ fn parse_options(globals: &Table) -> LuaResult<Option<Options>> {
         .as_table()
         .ok_or_else(|| mlua::Error::runtime("'options' must be a table"))?;
 
-    const KNOWN_KEYS: &[&str] = &["build_threads", "scan_threads", "strict_scan", "log_level"];
+    const KNOWN_KEYS: &[&str] = &["build_threads", "log_level", "scan_threads", "strict_scan"];
     warn_unknown_keys(table, "options", KNOWN_KEYS);
 
     Ok(Some(Options {
