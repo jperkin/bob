@@ -915,12 +915,15 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
 
     // Add config directory to package.path so require() finds relative modules
     if let Some(config_dir) = filename.parent() {
-        let path_setup = format!(
-            "package.path = '{}' .. '/?.lua;' .. package.path",
-            config_dir.display()
-        );
-        lua.load(&path_setup)
-            .exec()
+        let globals = lua.globals();
+        let pkg: Table = globals
+            .get("package")
+            .map_err(|e| format!("Failed to get package table: {}", e))?;
+        let existing: String = pkg
+            .get("path")
+            .map_err(|e| format!("Failed to get package.path: {}", e))?;
+        let new_path = format!("{}/?.lua;{}", config_dir.display(), existing);
+        pkg.set("path", new_path)
             .map_err(|e| format!("Failed to set package.path: {}", e))?;
     }
 
