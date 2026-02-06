@@ -30,7 +30,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 use std::collections::VecDeque;
-use std::io::{self, Stdout, stdout};
+use std::io::{self, IsTerminal, Stdout, stdout};
 use std::time::{Duration, Instant};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -96,6 +96,15 @@ pub enum ViewMode {
     Inline,
     /// Fullscreen multi-panel view showing build output.
     MultiPanel,
+}
+
+/// Progress output mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressMode {
+    /// Full TUI with inline viewport and key handling.
+    Tui,
+    /// Plain line-based output to stdout.
+    Plain,
 }
 
 /// State for a single worker thread.
@@ -465,10 +474,15 @@ pub struct MultiProgress {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     state: ProgressState,
     view_mode: ViewMode,
+    progress_mode: ProgressMode,
     output_buffers: Vec<OutputBuffer>,
     num_workers: usize,
     /// Messages buffered while in fullscreen mode, printed when returning to inline.
     pending_messages: Vec<String>,
+    /// Whether raw mode was successfully enabled (false when not a terminal).
+    raw_mode: bool,
+    /// Number of dots on the current plain-mode progress line (0-49).
+    plain_dots: usize,
 }
 
 impl MultiProgress {
@@ -481,26 +495,90 @@ impl MultiProgress {
         // Calculate height: workers + progress bar
         let height = (num_workers + 1) as u16;
 
-        // Enable raw mode to capture keyboard events
-        enable_raw_mode()?;
+        let is_terminal = io::stdout().is_terminal();
+        let raw_mode = is_terminal && enable_raw_mode().is_ok();
+
+        let progress_mode = if raw_mode {
+            ProgressMode::Tui
+        } else {
+            ProgressMode::Plain
+        };
 
         let backend = CrosstermBackend::new(stdout());
-        let options = TerminalOptions {
-            viewport: Viewport::Inline(height),
+        let viewport = if progress_mode == ProgressMode::Tui && raw_mode {
+            Viewport::Inline(height)
+        } else {
+            Viewport::Fixed(Rect::default())
         };
-        let terminal = Terminal::with_options(backend, options)?;
+        let terminal = Terminal::with_options(backend, TerminalOptions { viewport })?;
 
         // Create output buffer for each worker (100 lines each)
         let output_buffers = (0..num_workers).map(|_| OutputBuffer::new(100)).collect();
 
+        let mut state = ProgressState::new(title, finished_title, total, num_workers);
+
+        match progress_mode {
+            ProgressMode::Plain => {
+                if raw_mode {
+                    let _ = disable_raw_mode();
+                }
+            }
+            ProgressMode::Tui => {
+                if !raw_mode {
+                    state.suppress();
+                }
+            }
+        }
+
         Ok(Self {
             terminal,
-            state: ProgressState::new(title, finished_title, total, num_workers),
+            state,
             view_mode: ViewMode::Inline,
+            progress_mode,
             output_buffers,
             num_workers,
             pending_messages: Vec::new(),
+            raw_mode: raw_mode && progress_mode == ProgressMode::Tui,
+            plain_dots: 0,
         })
+    }
+
+    /// Returns true if using plain (non-TUI) progress mode.
+    pub fn is_plain(&self) -> bool {
+        self.progress_mode == ProgressMode::Plain
+    }
+
+    /**
+     * Print a progress dot in plain mode, flushing the line every 50.
+     */
+    pub fn print_progress_dot(&mut self, done: usize, total: usize) -> io::Result<()> {
+        if self.progress_mode != ProgressMode::Plain || self.state.suppressed {
+            return Ok(());
+        }
+        self.plain_dots += 1;
+        if self.plain_dots >= 50 {
+            let counter = format!("{}/{}", done, total);
+            println!("    {:<50}  {:>11}", ".".repeat(50), counter);
+            self.plain_dots = 0;
+        }
+        Ok(())
+    }
+
+    /**
+     * Flush any pending progress dots in plain mode.
+     */
+    pub fn flush_progress_dots(&mut self, done: usize, total: usize) -> io::Result<()> {
+        if self.progress_mode != ProgressMode::Plain
+            || self.state.suppressed
+            || self.plain_dots == 0
+        {
+            return Ok(());
+        }
+        let dots = ".".repeat(self.plain_dots);
+        let counter = format!("{}/{}", done, total);
+        println!("    {:<50}  {:>11}", dots, counter);
+        self.plain_dots = 0;
+        Ok(())
     }
 
     pub fn state_mut(&mut self) -> &mut ProgressState {
@@ -523,6 +601,10 @@ impl MultiProgress {
         if self.state.suppressed {
             return Ok(());
         }
+        if self.progress_mode == ProgressMode::Plain {
+            println!("{}", msg);
+            return Ok(());
+        }
         // Buffer messages while in fullscreen mode
         if self.view_mode == ViewMode::MultiPanel {
             self.pending_messages.push(msg.to_string());
@@ -538,6 +620,9 @@ impl MultiProgress {
     }
 
     pub fn render(&mut self) -> io::Result<()> {
+        if self.progress_mode == ProgressMode::Plain {
+            return self.render_plain();
+        }
         match self.view_mode {
             ViewMode::Inline => self.render_inline(),
             ViewMode::MultiPanel => self.render_multipanel(),
@@ -649,10 +734,14 @@ impl MultiProgress {
         Ok(())
     }
 
+    fn render_plain(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
     /// Handle a pending terminal event (call only after poll returned true).
     /// Returns Ok(true) if view mode was toggled.
     pub fn handle_event(&mut self) -> io::Result<bool> {
-        if self.state.suppressed {
+        if self.state.suppressed || self.progress_mode == ProgressMode::Plain {
             return Ok(false);
         }
 
@@ -927,7 +1016,7 @@ impl MultiProgress {
             self.state.completed,
             self.state.cached,
             self.state.failed,
-            self.state.skipped
+            self.state.skipped,
         );
         Ok(())
     }
@@ -939,14 +1028,16 @@ impl MultiProgress {
             self.switch_to_inline()?;
         }
 
-        // Disable raw mode (always enabled during TUI)
-        let _ = disable_raw_mode();
+        if self.raw_mode {
+            let _ = disable_raw_mode();
+            self.raw_mode = false;
+        }
 
         // Clear the inline viewport area
-        self.terminal.clear()?;
-
-        // Restore cursor
-        stdout().execute(Show)?;
+        if !self.state.suppressed {
+            self.terminal.clear()?;
+            stdout().execute(Show)?;
+        }
 
         Ok(self.state.elapsed())
     }
@@ -965,8 +1056,10 @@ impl MultiProgress {
             let _ = self.switch_to_inline();
         }
 
-        // Disable raw mode (always enabled during TUI)
-        let _ = disable_raw_mode();
+        if self.raw_mode {
+            let _ = disable_raw_mode();
+            self.raw_mode = false;
+        }
 
         // Clear the inline viewport area
         self.terminal.clear()?;
@@ -1099,8 +1192,9 @@ impl Drop for MultiProgress {
         if self.view_mode == ViewMode::MultiPanel {
             let _ = stdout().execute(LeaveAlternateScreen);
         }
-        // Always disable raw mode (was enabled in new())
-        let _ = disable_raw_mode();
+        if self.raw_mode {
+            let _ = disable_raw_mode();
+        }
         // Ensure cursor is visible when dropped
         let _ = stdout().execute(Show);
     }

@@ -2103,7 +2103,7 @@ impl Build {
                 self.scanpkgs.len(),
                 self.config.build_threads(),
             )
-            .expect("Failed to initialize progress display"),
+            .context("Failed to initialize progress display")?,
         ));
 
         // Mark cached packages in progress display
@@ -2120,17 +2120,23 @@ impl Build {
         let progress_refresh = Arc::clone(&progress);
         let stop_flag = Arc::clone(&stop_refresh);
         let shutdown_for_refresh = Arc::clone(&shutdown_flag);
+        let is_plain = progress.lock().map(|p| p.is_plain()).unwrap_or(false);
         let refresh_thread = std::thread::spawn(move || {
             while !stop_flag.load(Ordering::Relaxed) && !shutdown_for_refresh.load(Ordering::SeqCst)
             {
-                // Poll outside lock to avoid blocking main thread
-                let has_event = event::poll(REFRESH_INTERVAL).unwrap_or(false);
-
-                if let Ok(mut p) = progress_refresh.lock() {
-                    if has_event {
-                        let _ = p.handle_event();
+                if is_plain {
+                    std::thread::sleep(REFRESH_INTERVAL);
+                    if let Ok(mut p) = progress_refresh.lock() {
+                        let _ = p.render();
                     }
-                    let _ = p.render();
+                } else {
+                    let has_event = event::poll(REFRESH_INTERVAL).unwrap_or(false);
+                    if let Ok(mut p) = progress_refresh.lock() {
+                        if has_event {
+                            let _ = p.handle_event();
+                        }
+                        let _ = p.render();
+                    }
                 }
             }
         });
@@ -2285,6 +2291,12 @@ impl Build {
                                 if let Ok(mut p) = progress_clone.lock() {
                                     p.clear_output_buffer(c);
                                     p.state_mut().set_worker_active(c, pkg.pkgname());
+                                    if p.is_plain() {
+                                        let _ = p.print_status(&format!(
+                                            "    Building {}",
+                                            pkg.pkgname()
+                                        ));
+                                    }
                                     let _ = p.render();
                                 }
 

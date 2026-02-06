@@ -766,7 +766,7 @@ impl Scan {
         let total_count = self.initial_cached + self.incoming.len();
         let progress = Arc::new(Mutex::new(
             MultiProgress::new("Scanning", "", total_count, self.config.scan_threads())
-                .expect("Failed to initialize progress display"),
+                .context("Failed to initialize progress display")?,
         ));
 
         // Mark cached packages in progress display
@@ -783,17 +783,23 @@ impl Scan {
         let progress_refresh = Arc::clone(&progress);
         let stop_flag = Arc::clone(&stop_refresh);
         let shutdown_for_refresh = Arc::clone(&shutdown_flag);
+        let is_plain = progress.lock().map(|p| p.is_plain()).unwrap_or(false);
         let refresh_thread = std::thread::spawn(move || {
             while !stop_flag.load(Ordering::Relaxed) && !shutdown_for_refresh.load(Ordering::SeqCst)
             {
-                // Poll outside lock to avoid blocking main thread
-                let has_event = event::poll(REFRESH_INTERVAL).unwrap_or(false);
-
-                if let Ok(mut p) = progress_refresh.lock() {
-                    if has_event {
-                        let _ = p.handle_event();
+                if is_plain {
+                    std::thread::sleep(REFRESH_INTERVAL);
+                    if let Ok(mut p) = progress_refresh.lock() {
+                        let _ = p.render();
                     }
-                    let _ = p.render();
+                } else {
+                    let has_event = event::poll(REFRESH_INTERVAL).unwrap_or(false);
+                    if let Ok(mut p) = progress_refresh.lock() {
+                        if has_event {
+                            let _ = p.handle_event();
+                        }
+                        let _ = p.render();
+                    }
                 }
             }
         });
@@ -828,6 +834,8 @@ impl Scan {
          * processed, and adding any dependencies to incoming to be processed
          * next.
          */
+        let mut scanned_count: usize = 0;
+
         loop {
             // Check for shutdown signal.
             // Use SeqCst for consistency with signal handler's store ordering,
@@ -908,6 +916,12 @@ impl Scan {
                  * Process results and write to DB.
                  */
                 for (pkgpath, result) in rx {
+                    scanned_count += 1;
+                    if let Ok(mut p) = progress.lock() {
+                        let total = p.state_mut().total.saturating_sub(p.state_mut().cached);
+                        let _ = p.print_progress_dot(scanned_count, total);
+                    }
+
                     let scanpkgs = match result {
                         Ok(pkgs) => pkgs,
                         Err(e) => {
@@ -926,6 +940,11 @@ impl Scan {
                     }
                 }
             });
+
+            if let Ok(mut p) = progress.lock() {
+                let total = p.state_mut().total.saturating_sub(p.state_mut().cached);
+                let _ = p.flush_progress_dots(scanned_count, total);
+            }
 
             /*
              * We're finished with the current incoming, replace it with the
