@@ -1446,7 +1446,7 @@ impl Scan {
      * packages with failed/skipped dependencies as IndirectFail/IndirectSkip.
      *
      * **Phase 5 - Build results**: Transform the packages map into a
-     * Vec<ScanResult>, filtering inactive packages for limited scans.
+     * `Vec<ScanResult>`, filtering inactive packages for limited scans.
      *
      * **Phase 6 - Finalize**: Check for circular dependencies, store resolved
      * dependency edges in the database for reverse lookups, return summary.
