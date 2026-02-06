@@ -2257,7 +2257,7 @@ impl Build {
                         ChannelCommand::Quit | ChannelCommand::Shutdown => {
                             break;
                         }
-                        _ => todo!(),
+                        _ => break,
                     }
                 }
             });
@@ -2477,7 +2477,9 @@ impl Build {
         debug!("Waiting for worker threads to complete");
         let join_start = Instant::now();
         for thread in threads {
-            thread.join().expect("thread panicked");
+            if let Err(e) = thread.join() {
+                warn!("Worker thread panicked: {:?}", e);
+            }
         }
         debug!(
             elapsed_ms = join_start.elapsed().as_millis(),
