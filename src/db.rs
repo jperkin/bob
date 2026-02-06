@@ -48,7 +48,7 @@ use crate::try_println;
 /**
  * Schema version - update when schema changes.
  */
-const SCHEMA_VERSION: i32 = 6;
+const SCHEMA_VERSION: i32 = 7;
 
 /**
  * Lightweight package row without full scan data.
@@ -260,11 +260,13 @@ impl Database {
                  outcome_detail TEXT,
                  duration_ms INTEGER NOT NULL DEFAULT 0,
                  log_dir TEXT,
+                 failed_dep_id INTEGER REFERENCES packages(id),
                  UNIQUE(package_id)
              );
 
              CREATE INDEX idx_builds_outcome ON builds(outcome);
              CREATE INDEX idx_builds_package ON builds(package_id);
+             CREATE INDEX idx_builds_failed_dep ON builds(failed_dep_id);
 
              CREATE TABLE metadata (
                  key TEXT PRIMARY KEY,
@@ -880,28 +882,20 @@ impl Database {
 
         let mut counts: HashMap<String, usize> = HashMap::new();
 
-        // Get all failed package IDs and their names
         let mut stmt = self.conn.prepare(
-            "SELECT p.id, p.pkgname FROM builds b
-             JOIN packages p ON b.package_id = p.id
-             WHERE b.outcome = 'failed'",
+            "SELECT p.pkgname, COUNT(*)
+             FROM builds b
+             JOIN packages p ON b.failed_dep_id = p.id
+             WHERE b.outcome = 'indirect_failed'
+             GROUP BY b.failed_dep_id",
         )?;
 
-        let failed: Vec<(i64, String)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-            .filter_map(|r| r.ok())
-            .collect();
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
 
-        // For each failed package, count indirect failures that reference it
-        for (_pkg_id, pkgname) in failed {
-            let count: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM builds b
-                 JOIN packages p ON b.package_id = p.id
-                 WHERE b.outcome = 'indirect_failed'
-                 AND b.outcome_detail LIKE ?1",
-                params![format!("%{}", pkgname)],
-                |row| row.get(0),
-            )?;
+        for row in rows {
+            let (pkgname, count) = row?;
             counts.insert(pkgname, count as usize);
         }
 
@@ -1117,21 +1111,27 @@ impl Database {
         let tx = self.transaction()?;
 
         for (id, depth) in &affected {
-            let (outcome, detail, dur) = if *depth == 0 {
-                ("failed", reason.to_string(), duration.as_millis() as i64)
+            let (outcome, detail, dur, dep_id) = if *depth == 0 {
+                (
+                    "failed",
+                    reason.to_string(),
+                    duration.as_millis() as i64,
+                    None,
+                )
             } else {
                 (
                     "indirect_failed",
                     format!("depends on failed {}", pkgname),
                     0,
+                    Some(package_id),
                 )
             };
 
             self.conn.execute(
                 "INSERT OR REPLACE INTO builds
-                 (package_id, outcome, outcome_detail, duration_ms)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![id, outcome, detail, dur],
+                 (package_id, outcome, outcome_detail, duration_ms, failed_dep_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, outcome, detail, dur, dep_id],
             )?;
         }
 
