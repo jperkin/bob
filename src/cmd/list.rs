@@ -21,6 +21,7 @@ use anyhow::{Result, bail};
 use clap::Subcommand;
 use crossterm::terminal;
 use regex::Regex;
+use serde_json;
 
 use bob::build::BuildOutcome;
 use bob::db::Database;
@@ -115,19 +116,20 @@ Status values:
   indirect-unresolved  Blocked by package with unresolved dependencies
 
 Examples:
-  bob list status                          Show all packages
-  bob list status -s failed                Show failed packages
-  bob list status -s preskipped,prefailed  Show all pre-* packages
-  bob list status py-                      Show packages matching 'py-'
-  bob list status flim glib2 mutt          Show multiple package matches
-  bob list status -s failed -o pkgpath     Show failed with pkgpath column
-  bob list status -Ho pkgpath -s pending   Show all pending pkgpath builds
+  bob list status                           Show all packages
+  bob list status -s failed                 Show failed packages
+  bob list status -s preskipped,prefailed   Show all pre-* packages
+  bob list status py-                       Show packages matching 'py-'
+  bob list status flim glib2 mutt           Show multiple package matches
+  bob list status -s failed -o pkgpath      Show failed with pkgpath column
+  bob list status -Ho pkgpath -s pending    Show all pending pkgpath builds
+  bob list status -o pkgpath,multi_version  Show MULTI_VERSION flags
 ")]
     Status {
         /// Hide column headers
         #[arg(short = 'H')]
         no_header: bool,
-        /// Columns to display (comma-separated: pkgname,pkgpath,status,reason)
+        /// Columns to display (comma-separated: pkgname,pkgpath,status,reason,multi_version)
         #[arg(short = 'o', value_delimiter = ',')]
         columns: Option<Vec<String>>,
         /// Filter by status (repeatable or comma-separated)
@@ -518,7 +520,7 @@ fn print_build_status(
     no_header: bool,
     pkg_filters: &[String],
 ) -> Result<()> {
-    let all_cols = ["pkgname", "pkgpath", "status", "reason"];
+    let all_cols = ["pkgname", "pkgpath", "status", "reason", "multi_version"];
     let default_cols = ["pkgname", "status", "reason"];
     let cols: Vec<&str> = columns
         .map(|c| c.iter().map(|s| s.as_str()).collect())
@@ -614,7 +616,7 @@ fn print_build_status(
         statuses.is_empty() || statuses.iter().any(|f| f.as_str() == status)
     };
 
-    let mut rows: Vec<[String; 4]> = Vec::new();
+    let mut rows: Vec<[String; 5]> = Vec::new();
     for pkgs in &by_level {
         for pkgname in pkgs {
             let pkg = match pkgname_to_pkg.get(pkgname) {
@@ -636,11 +638,19 @@ fn print_build_status(
                 continue;
             }
 
+            let multi_version = pkg
+                .multi_version
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                .map(|v| v.join(" "))
+                .unwrap_or_default();
+
             rows.push([
                 pkgname.clone(),
                 pkg.pkgpath.clone(),
                 status.to_string(),
                 reason,
+                multi_version,
             ]);
         }
     }
@@ -656,6 +666,7 @@ fn print_build_status(
             "pkgpath" => 1,
             "status" => 2,
             "reason" => 3,
+            "multi_version" => 4,
             _ => 0,
         }
     };

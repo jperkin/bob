@@ -62,6 +62,7 @@ pub struct PackageRow {
     pub fail_reason: Option<String>,
     pub is_bootstrap: bool,
     pub pbulk_weight: i32,
+    pub multi_version: Option<String>,
 }
 
 impl PackageRow {
@@ -77,6 +78,7 @@ impl PackageRow {
             fail_reason: row.get(4)?,
             is_bootstrap: row.get::<_, i32>(5)? != 0,
             pbulk_weight: row.get(6)?,
+            multi_version: row.get(7)?,
         })
     }
 }
@@ -312,7 +314,8 @@ impl Database {
      */
     pub fn get_package_by_name(&self, pkgname: &str) -> Result<Option<PackageRow>> {
         let result = self.conn.query_row(
-            "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight
+            "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight,
+                    json_extract(scan_data, '$.MULTI_VERSION')
              FROM packages WHERE pkgname = ?1",
             [pkgname],
             PackageRow::from_row,
@@ -360,7 +363,8 @@ impl Database {
      */
     pub fn get_packages_by_path(&self, pkgpath: &str) -> Result<Vec<PackageRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight
+            "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight,
+                    json_extract(scan_data, '$.MULTI_VERSION')
              FROM packages WHERE pkgpath = ?1",
         )?;
 
@@ -407,7 +411,8 @@ impl Database {
      */
     pub fn get_all_packages(&self) -> Result<Vec<PackageRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight
+            "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight,
+                    json_extract(scan_data, '$.MULTI_VERSION')
              FROM packages ORDER BY id",
         )?;
 
@@ -421,7 +426,8 @@ impl Database {
      */
     pub fn get_buildable_packages(&self) -> Result<Vec<PackageRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight
+            "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight,
+                    json_extract(scan_data, '$.MULTI_VERSION')
              FROM packages WHERE skip_reason IS NULL AND fail_reason IS NULL",
         )?;
 
