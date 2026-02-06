@@ -1583,7 +1583,12 @@ impl PackageBuild {
     }
 }
 
-/// Recursively walk a directory and save files matching patterns.
+/**
+ * Recursively walk a directory and save files matching patterns.
+ *
+ * Uses `DirEntry::file_type()` which does not follow symlinks, avoiding
+ * traversal outside the intended directory tree.
+ */
 fn walk_and_save(
     base: &Path,
     current: &Path,
@@ -1591,19 +1596,21 @@ fn walk_and_save(
     patterns: &[Pattern],
     saved_count: &mut usize,
 ) -> std::io::Result<()> {
-    if !current.is_dir() {
+    if !current.symlink_metadata()?.is_dir() {
         return Ok(());
     }
 
     for entry in fs::read_dir(current)? {
         let entry = entry?;
+        let ft = entry.file_type()?;
         let path = entry.path();
 
-        if path.is_dir() {
+        if ft.is_dir() {
             walk_and_save(base, &path, save_dir, patterns, saved_count)?;
-        } else if path.is_file() {
-            // Get relative path from base
-            let rel_path = path.strip_prefix(base).unwrap_or(&path);
+        } else if ft.is_file() {
+            let Some(rel_path) = path.strip_prefix(base).ok() else {
+                continue;
+            };
             let rel_str = rel_path.to_string_lossy();
 
             // Check if any pattern matches
