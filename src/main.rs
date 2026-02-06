@@ -74,7 +74,7 @@ impl BuildRunner {
                 eprintln!("\nInterrupted, shutting down...");
             }
         })
-        .expect("Error setting signal handler");
+        .context("Failed to set signal handler")?;
 
         let ctx = RunContext::new(Arc::clone(&shutdown_flag));
 
