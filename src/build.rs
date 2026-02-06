@@ -502,15 +502,14 @@ impl<'a> PkgBuilder<'a> {
             return Ok(PkgBuildResult::Failed);
         }
 
-        // Request MAKE_JOBS budget before configure, as both configure
-        // and build can perform parallel work.
-        let make_jobs = self.request_make_jobs();
-        let jobs_arg = make_jobs.map(|j| format!("MAKE_JOBS={}", j));
-        let jobs_flag: Vec<&str> = jobs_arg.iter().map(|s| s.as_str()).collect();
-        let stage_suffix = make_jobs.map(|j| format!(" -j{}", j)).unwrap_or_default();
+        // Configure — request MAKE_JOBS budget, release after configure
+        // so the build phase can re-request with updated weights.
+        let conf_jobs = self.request_make_jobs();
+        let conf_arg = conf_jobs.map(|j| format!("MAKE_JOBS={}", j));
+        let conf_flag: Vec<&str> = conf_arg.iter().map(|s| s.as_str()).collect();
+        let conf_suffix = conf_jobs.map(|j| format!(" -j{}", j)).unwrap_or_default();
 
-        // Configure
-        callback.stage(&format!("{}{}", Stage::Configure.as_str(), stage_suffix));
+        callback.stage(&format!("{}{}", Stage::Configure.as_str(), conf_suffix));
         let configure_log = self.logdir.join("configure.log");
         if !self.run_usergroup_if_needed(Stage::Configure, &pkgdir, &configure_log)? {
             self.notify_build_phase_exit();
@@ -522,14 +521,20 @@ impl<'a> PkgBuilder<'a> {
             &["configure"],
             self.build_run_as(),
             true,
-            &jobs_flag,
+            &conf_flag,
         )? {
             self.notify_build_phase_exit();
             return Ok(PkgBuildResult::Failed);
         }
+        self.notify_build_phase_exit();
 
-        // Build
-        callback.stage(&format!("{}{}", Stage::Build.as_str(), stage_suffix));
+        // Build — re-request MAKE_JOBS with current remaining weights.
+        let build_jobs = self.request_make_jobs();
+        let build_arg = build_jobs.map(|j| format!("MAKE_JOBS={}", j));
+        let build_flag: Vec<&str> = build_arg.iter().map(|s| s.as_str()).collect();
+        let build_suffix = build_jobs.map(|j| format!(" -j{}", j)).unwrap_or_default();
+
+        callback.stage(&format!("{}{}", Stage::Build.as_str(), build_suffix));
         let build_log = self.logdir.join("build.log");
         if !self.run_usergroup_if_needed(Stage::Build, &pkgdir, &build_log)? {
             self.notify_build_phase_exit();
@@ -541,7 +546,7 @@ impl<'a> PkgBuilder<'a> {
             &["all"],
             self.build_run_as(),
             true,
-            &jobs_flag,
+            &build_flag,
         )?;
         self.notify_build_phase_exit();
         if !build_ok {
@@ -1941,8 +1946,6 @@ struct BuildJobs {
     reverse_deps: HashMap<PkgName, HashSet<PkgName>>,
     /// Packages in build priority order, precomputed for scheduling.
     build_order: Vec<PkgName>,
-    /// Effective weights from build_order(), for dynamic MAKE_JOBS.
-    effective_weights: HashMap<PkgName, usize>,
     running: HashSet<PkgName>,
     done: HashSet<PkgName>,
     failed: HashSet<PkgName>,
@@ -2056,6 +2059,58 @@ impl BuildJobs {
             });
         }
         trace!(pkgname = %pkgname.pkgname(), total_results = self.results.len(), elapsed_ms = start.elapsed().as_millis(), "mark_failure completed");
+    }
+
+    /**
+     * Compute the critical path cost for a package: the heaviest chain
+     * of remaining (not done/failed) packages that depend on it,
+     * weighted by each dependent's PBULK_WEIGHT.
+     *
+     * This is the Critical Path Method with PBULK_WEIGHT as the
+     * estimated build time.  Serial chains through heavy packages
+     * produce higher cost than fan-out, so packages on the critical
+     * path get more MAKE_JOBS.
+     */
+    fn remaining_depth(&self, pkgname: &PkgName) -> usize {
+        let pkg_weight = |pkg: &PkgName| -> usize {
+            self.scanpkgs
+                .get(pkg)
+                .and_then(|p| p.pbulk_weight())
+                .and_then(|w| w.parse().ok())
+                .unwrap_or(100)
+        };
+        let mut depths: HashMap<&PkgName, usize> = HashMap::new();
+        let mut stack: Vec<(&PkgName, bool)> = vec![(pkgname, false)];
+        while let Some((pkg, children_done)) = stack.pop() {
+            if children_done {
+                let depth = self
+                    .reverse_deps
+                    .get(pkg)
+                    .map(|rdeps| {
+                        rdeps
+                            .iter()
+                            .filter(|r| !self.done.contains(*r) && !self.failed.contains(*r))
+                            .filter_map(|r| depths.get(r).map(|d| pkg_weight(r) + d))
+                            .max()
+                            .unwrap_or(0)
+                    })
+                    .unwrap_or(0);
+                depths.insert(pkg, depth);
+            } else if !depths.contains_key(pkg) {
+                stack.push((pkg, true));
+                if let Some(rdeps) = self.reverse_deps.get(pkg) {
+                    for rdep in rdeps {
+                        if !self.done.contains(rdep)
+                            && !self.failed.contains(rdep)
+                            && !depths.contains_key(rdep)
+                        {
+                            stack.push((rdep, false));
+                        }
+                    }
+                }
+            }
+        }
+        depths.get(pkgname).copied().unwrap_or(0)
     }
 
     /**
@@ -2280,7 +2335,7 @@ impl Build {
             .iter()
             .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
             .collect();
-        let (build_order, effective_weights) = crate::build_order(&forward, get_weight);
+        let (build_order, _) = crate::build_order(&forward, get_weight);
 
         let running: HashSet<PkgName> = HashSet::new();
         let logdir = self.config.logdir().clone();
@@ -2289,7 +2344,6 @@ impl Build {
             incoming,
             reverse_deps,
             build_order,
-            effective_weights,
             running,
             done,
             failed,
@@ -2511,8 +2565,8 @@ impl Build {
                                 }
 
                                 if let Some(ref mut budget) = make_jobs_budget {
-                                    let ew = jobs.effective_weights.get(&pkg).copied().unwrap_or(1);
-                                    budget.dispatch(c, ew);
+                                    let rw = jobs.remaining_depth(&pkg).max(1);
+                                    budget.dispatch(c, rw);
                                 }
                                 let _ =
                                     client.send(ChannelCommand::JobData(Box::new(PackageBuild {
@@ -2671,6 +2725,11 @@ impl Build {
                     }
                     ChannelCommand::BuildPhaseEntry(sid, responder) => {
                         let jobs_val = if let Some(ref mut budget) = make_jobs_budget {
+                            let rw = thread_packages
+                                .get(&sid)
+                                .map(|pkg| jobs.remaining_depth(pkg).max(1))
+                                .unwrap_or(1);
+                            budget.dispatch(sid, rw);
                             budget.lock(sid)
                         } else {
                             1
