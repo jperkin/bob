@@ -1,5 +1,39 @@
 # Changelog
 
+## Version 0.8.0 (2026-02-06)
+
+* Now published as `bob` on crates.io, thanks Wyatt!
+
+* Rewrite up-to-date checks in native Rust using features from pkgsrc-rs,
+  removing the dependency on `pkg_install` tools, and allowing full package
+  status to be calculated (in parallel) up-front.  This provides significant
+  performance improvements, and the paves the way for the powerful `status`
+  command described below.
+
+* Consolidate `bob list` subcommands into `bob list status` with filtering.
+  Filter by status with `-s` (repeatable or comma-separated), customise column
+  selection with `-o`, and filter packages by regex.  Include reasons where
+  appropriate for the status calculation.
+
+* Add `bob list tree` to show dependency tree in topological order.  Use `-f`
+  to select output format (`utf8`, `ascii`, `none`), `-a` to include up-to-date
+  packages, and `-p` for pkgpath output.  Optional package argument filters by
+  regex.
+
+* Add `bob scan --scan-only` to skip up-to-date checking, if the user does not
+  plan to perform any builds and wishes only to verify a coherent pkgsrc tree.
+
+* Move `--path` flag from global `bob list` to individual subcommands (`tree`,
+  `blockers`, `blocked-by`) as `-p`.
+
+* Support non-terminal plain output mode.
+
+* Provide comprehensive scan and build result variants to cover all cases.
+
+* Add `examples/scan.lua` for scan-only configurations.
+
+* Various robustness and security improvements.
+
 ## Version 0.7.0 (2026-01-30)
 
 * Add `bob list` command for querying package status.
