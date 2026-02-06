@@ -100,7 +100,7 @@ pub enum TreeOutput {
 
 #[derive(Debug, Subcommand)]
 pub enum ListCmd {
-    /// Show package status with columns
+    /// Show comprehensive package build status
     #[command(after_long_help = "\
 Status values:
   pending              Ready to build
@@ -158,7 +158,7 @@ Examples:
         /// Package to show tree for (regex pattern)
         package: Option<String>,
     },
-    /// Show what's blocking a package from building
+    /// Show what is blocking a package from building
     Blockers {
         /// Package name or pkgpath
         package: String,
