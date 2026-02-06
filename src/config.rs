@@ -499,6 +499,18 @@ pub struct DynamicJobs {
     pub max: usize,
     /// Minimum MAKE_JOBS reserved per build thread.
     pub min: usize,
+    /// Algorithm for distributing MAKE_JOBS across workers.
+    pub algorithm: JobAlgorithm,
+}
+
+/// Algorithm for distributing MAKE_JOBS across concurrent builds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum JobAlgorithm {
+    /// Distribute extra budget proportional to critical path depth.
+    #[default]
+    WeightedFairShare,
+    /// Simple equal division: each worker gets max / active.
+    EqualShare,
 }
 
 /// pkgsrc-related configuration from the `pkgsrc` section.
@@ -1045,7 +1057,26 @@ fn parse_options(globals: &Table) -> LuaResult<Option<Options>> {
             let min: usize = t
                 .get("min")
                 .map_err(|_| mlua::Error::runtime("dynamic_jobs.min is required"))?;
-            Some(DynamicJobs { max, min })
+            let algorithm = match t.get::<Option<String>>("algorithm")? {
+                None => JobAlgorithm::default(),
+                Some(s) => match s.as_str() {
+                    "weighted_fair_share" => JobAlgorithm::WeightedFairShare,
+                    "equal_share" => JobAlgorithm::EqualShare,
+                    other => {
+                        return Err(mlua::Error::runtime(format!(
+                            "unknown dynamic_jobs.algorithm '{}' \
+                             (expected 'weighted_fair_share' or \
+                             'equal_share')",
+                            other
+                        )));
+                    }
+                },
+            };
+            Some(DynamicJobs {
+                max,
+                min,
+                algorithm,
+            })
         }
         Value::Nil => None,
         _ => {

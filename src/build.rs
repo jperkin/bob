@@ -43,6 +43,7 @@
 //! - `clean` - Clean up build artifacts
 
 use crate::config::PkgsrcEnv;
+use crate::jobs::{AllocContext, JobAllocator, make_allocator};
 use crate::sandbox::{SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
 use crate::scan::{ResolvedPackage, SkipReason, SkippedCounts};
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
@@ -1098,149 +1099,6 @@ struct MakeJobsResponder(Sender<usize>);
 impl std::fmt::Debug for MakeJobsResponder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("MakeJobsResponder")
-    }
-}
-
-/**
- * Tracks MAKE_JOBS budget allocation across concurrent builds.
- *
- * Dispatched workers are "pending" until they enter the build phase,
- * at which point they become "locked" at their computed MAKE_JOBS.
- * Pending allocations are recomputed whenever the set changes.
- */
-struct MakeJobsBudget {
-    max_jobs: usize,
-    min_per_worker: usize,
-    build_threads: usize,
-    /// Pending workers: sandbox_id -> (make_jobs, effective_weight).
-    pending: HashMap<usize, (usize, usize)>,
-    /// Locked workers (in build phase): sandbox_id -> make_jobs.
-    locked: HashMap<usize, usize>,
-}
-
-impl MakeJobsBudget {
-    fn new(max_jobs: usize, min_per_worker: usize, build_threads: usize) -> Self {
-        Self {
-            max_jobs,
-            min_per_worker,
-            build_threads,
-            pending: HashMap::new(),
-            locked: HashMap::new(),
-        }
-    }
-
-    /**
-     * Register a newly dispatched worker and recompute pending allocations.
-     */
-    fn dispatch(&mut self, sandbox_id: usize, weight: usize) {
-        self.pending
-            .insert(sandbox_id, (self.min_per_worker, weight));
-        self.recompute_pending();
-    }
-
-    /**
-     * Lock a worker's allocation as it enters the build phase.
-     *
-     * If this is the only dispatched worker, it gets the full budget
-     * since every other build is blocked waiting for it.
-     */
-    fn lock(&mut self, sandbox_id: usize) -> usize {
-        let (jobs, sole) = if let Some((jobs, _)) = self.pending.remove(&sandbox_id) {
-            if self.locked.is_empty() && self.pending.is_empty() {
-                (self.max_jobs, true)
-            } else {
-                (jobs, false)
-            }
-        } else {
-            (self.min_per_worker, false)
-        };
-        debug!(
-            sandbox_id,
-            jobs,
-            sole_builder = sole,
-            locked = ?self.locked,
-            pending_count = self.pending.len(),
-            "MAKE_JOBS lock"
-        );
-        self.locked.insert(sandbox_id, jobs);
-        self.recompute_pending();
-        jobs
-    }
-
-    /**
-     * Release a worker's allocation and recompute pending.
-     */
-    fn release(&mut self, sandbox_id: usize) {
-        let was_locked = self.locked.remove(&sandbox_id).is_some();
-        let was_pending = self.pending.remove(&sandbox_id).is_some();
-        if was_locked || was_pending {
-            debug!(sandbox_id, was_locked, was_pending, "MAKE_JOBS release");
-        }
-        self.recompute_pending();
-    }
-
-    /**
-     * Recompute MAKE_JOBS for all pending (unlocked) workers.
-     *
-     * The budget reserves `min_per_worker` for each of `build_threads`
-     * workers.  The remaining "extra" is distributed proportionally
-     * by effective weight using the largest-remainder method.
-     */
-    fn recompute_pending(&mut self) {
-        if self.pending.is_empty() {
-            return;
-        }
-        let extra = self
-            .max_jobs
-            .saturating_sub(self.build_threads * self.min_per_worker);
-        let locked_extra: usize = self
-            .locked
-            .values()
-            .map(|j| j.saturating_sub(self.min_per_worker))
-            .sum();
-        let remaining_extra = extra.saturating_sub(locked_extra);
-        let total_weight: usize = self.pending.values().map(|(_, w)| *w).sum();
-
-        if total_weight == 0 || remaining_extra == 0 {
-            for (_, (jobs, _)) in self.pending.iter_mut() {
-                *jobs = self.min_per_worker;
-            }
-            return;
-        }
-
-        /*
-         * Largest-remainder method: take the floor of each proportional
-         * share, then hand out the leftover one at a time to whichever
-         * entries have the biggest fractional parts.
-         */
-        let mut entries: Vec<(usize, usize, f64)> = self
-            .pending
-            .iter()
-            .map(|(&sid, &(_, weight))| {
-                let exact = remaining_extra as f64 * weight as f64 / total_weight as f64;
-                let floor = exact as usize;
-                let remainder = exact - floor as f64;
-                (sid, floor, remainder)
-            })
-            .collect();
-
-        let floor_sum: usize = entries.iter().map(|(_, f, _)| f).sum();
-        let mut leftover = remaining_extra.saturating_sub(floor_sum);
-
-        entries.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-        for entry in &mut entries {
-            if leftover == 0 {
-                break;
-            }
-            entry.1 += 1;
-            leftover -= 1;
-        }
-
-        for (sid, extra_share, _) in entries {
-            if let Some((jobs, _)) = self.pending.get_mut(&sid) {
-                *jobs = self.min_per_worker + extra_share;
-            }
-        }
     }
 }
 
@@ -2526,10 +2384,10 @@ impl Build {
             let mut thread_packages: HashMap<usize, PkgName> = HashMap::new();
 
             let build_threads = session.config.build_threads();
-            let mut make_jobs_budget = session
+            let mut make_jobs_budget: Option<Box<dyn JobAllocator>> = session
                 .config
                 .dynamic_jobs()
-                .map(|dj| MakeJobsBudget::new(dj.max, dj.min, build_threads));
+                .map(|dj| make_allocator(dj, build_threads));
 
             loop {
                 // Check shutdown flag periodically
@@ -2736,30 +2594,52 @@ impl Build {
                                 .get(&sid)
                                 .map(|p| p.pkgname())
                                 .unwrap_or("?");
-                            let rw = thread_packages
+                            let my_weight = thread_packages
                                 .get(&sid)
                                 .map(|pkg| jobs.remaining_depth(pkg).max(1))
                                 .unwrap_or(1);
+
+                            let all_dispatched: Vec<(usize, usize)> = thread_packages
+                                .iter()
+                                .filter(|(_, pkg)| jobs.running.contains(*pkg))
+                                .map(|(&s, pkg)| (s, jobs.remaining_depth(pkg).max(1)))
+                                .collect();
+
+                            let sole_builder = jobs.running.len() == 1
+                                && !jobs.incoming.values().any(|deps| deps.is_empty());
+
+                            let ctx = AllocContext {
+                                sandbox_id: sid,
+                                my_weight,
+                                all_dispatched: &all_dispatched,
+                                sole_builder,
+                            };
+                            let allocated = budget.allocate(&ctx);
                             debug!(
                                 sid,
                                 pkgname = pkg_name,
-                                remaining_depth = rw,
-                                "MAKE_JOBS phase entry"
+                                algorithm = budget.name(),
+                                my_weight,
+                                allocated,
+                                sole_builder,
+                                dispatched = jobs.running.len(),
+                                ready = jobs.incoming.values().filter(|d| d.is_empty()).count(),
+                                "MAKE_JOBS allocate"
                             );
-                            budget.dispatch(sid, rw);
-                            budget.lock(sid)
+                            budget.lock(sid, allocated);
+                            allocated
                         } else {
                             1
                         };
                         let _ = responder.0.send(jobs_val);
                     }
                     ChannelCommand::BuildPhaseExit(sid) => {
-                        let pkg_name = thread_packages
-                            .get(&sid)
-                            .map(|p| p.pkgname())
-                            .unwrap_or("?");
-                        debug!(sid, pkgname = pkg_name, "MAKE_JOBS phase exit");
                         if let Some(ref mut budget) = make_jobs_budget {
+                            let pkg_name = thread_packages
+                                .get(&sid)
+                                .map(|p| p.pkgname())
+                                .unwrap_or("?");
+                            debug!(sid, pkgname = pkg_name, "MAKE_JOBS release");
                             budget.release(sid);
                         }
                     }
