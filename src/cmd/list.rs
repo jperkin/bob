@@ -413,9 +413,9 @@ fn print_build_tree(
 
     #[cfg(target_os = "netbsd")]
     let (mid_conn, last_conn, span_mid, span_last) = match (format, indent_width) {
-        (TreeOutput::Utf8, 3) => ("├─ ", "└─ ", "└──┬─ ", "└──── "),
-        (TreeOutput::Utf8, 2) => ("├ ", "└ ", "└─┬ ", "└── "),
-        (TreeOutput::Utf8, _) => ("├ ", "└ ", "└┬ ", "└─ "),
+        (TreeOutput::Utf8, 3) => ("├─ ", "└─ ", "└──── ", "└──── "),
+        (TreeOutput::Utf8, 2) => ("├ ", "└ ", "└── ", "└── "),
+        (TreeOutput::Utf8, _) => ("├ ", "└ ", "└─ ", "└─ "),
         (TreeOutput::Ascii, 3) => ("|- ", "`- ", "`--+- ", "`---- "),
         (TreeOutput::Ascii, 2) => ("| ", "` ", "`-+ ", "`-- "),
         (TreeOutput::Ascii, _) => ("| ", "` ", "`+ ", "`- "),
