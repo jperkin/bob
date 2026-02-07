@@ -2697,20 +2697,12 @@ impl Build {
                                 .map(|pkg| jobs.remaining_depth(pkg).max(1))
                                 .unwrap_or(1);
 
-                            let all_dispatched: Vec<(usize, usize)> = build_phase_workers
+                            let all_dispatched: Vec<(usize, usize)> = thread_packages
                                 .iter()
-                                .filter_map(|&s| {
-                                    thread_packages
-                                        .get(&s)
-                                        .map(|pkg| (s, jobs.remaining_depth(pkg).max(1)))
-                                })
+                                .filter(|(_, pkg)| jobs.running.contains(*pkg))
+                                .map(|(&s, pkg)| (s, jobs.remaining_depth(pkg).max(1)))
                                 .collect();
 
-                            /*
-                             * Look-ahead: ready packages that idle workers
-                             * will pick up soon.  Reserve proportional budget
-                             * so high-depth upcoming work isn't starved.
-                             */
                             let idle_slots =
                                 build_threads.saturating_sub(build_phase_workers.len());
                             let mut upcoming_weights: Vec<usize> = jobs

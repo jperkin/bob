@@ -34,14 +34,17 @@ pub struct AllocContext<'a> {
     pub sandbox_id: usize,
     /// This worker's critical path depth.
     pub my_weight: usize,
-    /// (sandbox_id, weight) for every worker currently in a build phase.
+    /// (sandbox_id, weight) for every currently dispatched worker.
     pub all_dispatched: &'a [(usize, usize)],
     /// True only when this is the sole dispatched worker AND nothing
     /// else is ready to dispatch.
     pub sole_builder: bool,
-    /// Weights of ready packages that idle workers will pick up soon.
-    /// The allocator reserves budget for these to avoid starving
-    /// high-depth upcoming work.
+    /// Weights of ready packages that will start soon.  These
+    /// participate in weight distribution (absorbing proportional
+    /// budget) but do not increase the active worker count.  This
+    /// holds back budget from low-depth current workers so that
+    /// high-depth upcoming work gets a larger allocation when it
+    /// enters its build phase.
     pub upcoming_weights: &'a [usize],
 }
 
@@ -68,8 +71,8 @@ pub trait JobAllocator {
 /**
  * Distribute extra budget proportional to critical path depth.
  *
- * The budget reserves `min_per_worker` for each of `build_threads`
- * workers.  The remaining "extra" is distributed proportionally by
+ * The budget reserves `min_per_worker` for each dispatched
+ * worker.  The remaining "extra" is distributed proportionally by
  * weight using the largest-remainder method across unlocked workers,
  * after subtracting what locked workers have already consumed.
  * This prevents a worker from over-allocating when earlier workers
@@ -87,8 +90,7 @@ impl JobAllocator for WeightedFairShare {
             return self.max_jobs;
         }
 
-        let upcoming = ctx.upcoming_weights.len();
-        let active = (ctx.all_dispatched.len() + upcoming).max(1);
+        let active = ctx.all_dispatched.len().max(1);
         let extra = self.max_jobs.saturating_sub(active * self.min_per_worker);
         let locked_extra: usize = self
             .locked
@@ -101,13 +103,6 @@ impl JobAllocator for WeightedFairShare {
             return self.min_per_worker;
         }
 
-        /*
-         * Build the unlocked worker list: real workers not yet locked
-         * plus upcoming ready packages as virtual entries.  Upcoming
-         * packages participate in weight distribution so the allocator
-         * reserves proportional budget for high-depth work that is
-         * about to start.
-         */
         let mut unlocked: Vec<(usize, usize)> = ctx
             .all_dispatched
             .iter()
@@ -203,7 +198,7 @@ impl JobAllocator for EqualShare {
             return self.max_jobs;
         }
 
-        let active = (ctx.all_dispatched.len() + ctx.upcoming_weights.len()).max(1);
+        let active = ctx.all_dispatched.len().max(1);
         let ideal = self.max_jobs / active;
 
         let locked_total: usize = self.locked.values().sum();
