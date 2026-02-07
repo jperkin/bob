@@ -74,7 +74,6 @@ pub trait JobAllocator {
 struct WeightedFairShare {
     max_jobs: usize,
     min_per_worker: usize,
-    build_threads: usize,
     locked: HashMap<usize, usize>,
 }
 
@@ -84,9 +83,8 @@ impl JobAllocator for WeightedFairShare {
             return self.max_jobs;
         }
 
-        let extra = self
-            .max_jobs
-            .saturating_sub(self.build_threads * self.min_per_worker);
+        let active = ctx.all_dispatched.len().max(1);
+        let extra = self.max_jobs.saturating_sub(active * self.min_per_worker);
         let locked_extra: usize = self
             .locked
             .values()
@@ -228,12 +226,11 @@ impl JobAllocator for EqualShare {
 /**
  * Create a [`JobAllocator`] from dynamic jobs configuration.
  */
-pub fn make_allocator(dj: &DynamicJobs, build_threads: usize) -> Box<dyn JobAllocator> {
+pub fn make_allocator(dj: &DynamicJobs) -> Box<dyn JobAllocator> {
     match dj.algorithm {
         JobAlgorithm::WeightedFairShare => Box::new(WeightedFairShare {
             max_jobs: dj.max,
             min_per_worker: dj.min,
-            build_threads,
             locked: HashMap::new(),
         }),
         JobAlgorithm::EqualShare => Box::new(EqualShare {

@@ -1813,8 +1813,6 @@ struct BuildJobs {
     /// Reverse dependency map: package -> packages that depend on it.
     /// Precomputed for O(1) lookup in mark_failure instead of O(n) scan.
     reverse_deps: HashMap<PkgName, HashSet<PkgName>>,
-    /// Packages in build priority order, precomputed for scheduling.
-    build_order: Vec<PkgName>,
     running: HashSet<PkgName>,
     done: HashSet<PkgName>,
     failed: HashSet<PkgName>,
@@ -1984,19 +1982,29 @@ impl BuildJobs {
 
     /**
      * Get next package status.
+     *
+     * Picks the ready package with the highest remaining critical path
+     * depth, so that packages starting deep serial chains are always
+     * dispatched before shallow leaves.
      */
     fn get_next_build(&self) -> BuildStatus {
         if self.incoming.is_empty() {
             return BuildStatus::Done;
         }
-        for pkg in &self.build_order {
-            if let Some(deps) = self.incoming.get(pkg) {
-                if deps.is_empty() {
-                    return BuildStatus::Available(pkg.clone());
-                }
+        let mut best: Option<(&PkgName, usize)> = None;
+        for (pkg, deps) in &self.incoming {
+            if !deps.is_empty() {
+                continue;
+            }
+            let depth = self.remaining_depth(pkg);
+            if best.is_none_or(|(_, d)| depth > d) {
+                best = Some((pkg, depth));
             }
         }
-        BuildStatus::NoneAvailable
+        match best {
+            Some((pkg, _)) => BuildStatus::Available(pkg.clone()),
+            None => BuildStatus::NoneAvailable,
+        }
     }
 }
 
@@ -2186,33 +2194,12 @@ impl Build {
         // Only create sandboxes when there's actual work to do
         self.scope.ensure(self.config.build_threads())?;
 
-        /*
-         * Compute effective weights for build ordering.  The effective weight
-         * is the package's own PBULK_WEIGHT plus the sum of weights of all
-         * packages that transitively depend on it.  This prioritises building
-         * packages that unblock the most downstream work.
-         */
-        let get_weight = |pkg: &PkgName| -> usize {
-            self.scanpkgs
-                .get(pkg)
-                .and_then(|idx| idx.pbulk_weight())
-                .and_then(|w| w.parse().ok())
-                .unwrap_or(100)
-        };
-
-        let forward: HashMap<PkgName, Vec<PkgName>> = incoming
-            .iter()
-            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
-            .collect();
-        let (build_order, _) = crate::build_order(&forward, get_weight);
-
         let running: HashSet<PkgName> = HashSet::new();
         let logdir = self.config.logdir().clone();
         let jobs = BuildJobs {
             scanpkgs: self.scanpkgs.clone(),
             incoming,
             reverse_deps,
-            build_order,
             running,
             done,
             failed,
@@ -2385,10 +2372,8 @@ impl Build {
             let mut worker_stages: HashMap<usize, Option<String>> = HashMap::new();
 
             let build_threads = session.config.build_threads();
-            let mut make_jobs_budget: Option<Box<dyn JobAllocator>> = session
-                .config
-                .dynamic_jobs()
-                .map(|dj| make_allocator(dj, build_threads));
+            let mut make_jobs_budget: Option<Box<dyn JobAllocator>> =
+                session.config.dynamic_jobs().map(make_allocator);
 
             if let Some(ref budget) = make_jobs_budget {
                 let dj = session.config.dynamic_jobs().unwrap();
