@@ -2370,6 +2370,7 @@ impl Build {
             // Track which thread is building which package
             let mut thread_packages: HashMap<usize, PkgName> = HashMap::new();
             let mut worker_stages: HashMap<usize, Option<String>> = HashMap::new();
+            let mut build_phase_workers: HashSet<usize> = HashSet::new();
 
             let build_threads = session.config.build_threads();
             let mut make_jobs_budget: Option<Box<dyn JobAllocator>> =
@@ -2685,6 +2686,7 @@ impl Build {
                         }
                     }
                     ChannelCommand::BuildPhaseEntry(sid, responder) => {
+                        build_phase_workers.insert(sid);
                         let jobs_val = if let Some(ref mut budget) = make_jobs_budget {
                             let pkg_name = thread_packages
                                 .get(&sid)
@@ -2695,11 +2697,30 @@ impl Build {
                                 .map(|pkg| jobs.remaining_depth(pkg).max(1))
                                 .unwrap_or(1);
 
-                            let all_dispatched: Vec<(usize, usize)> = thread_packages
+                            let all_dispatched: Vec<(usize, usize)> = build_phase_workers
                                 .iter()
-                                .filter(|(_, pkg)| jobs.running.contains(*pkg))
-                                .map(|(&s, pkg)| (s, jobs.remaining_depth(pkg).max(1)))
+                                .filter_map(|&s| {
+                                    thread_packages
+                                        .get(&s)
+                                        .map(|pkg| (s, jobs.remaining_depth(pkg).max(1)))
+                                })
                                 .collect();
+
+                            /*
+                             * Look-ahead: ready packages that idle workers
+                             * will pick up soon.  Reserve proportional budget
+                             * so high-depth upcoming work isn't starved.
+                             */
+                            let idle_slots =
+                                build_threads.saturating_sub(build_phase_workers.len());
+                            let mut upcoming_weights: Vec<usize> = jobs
+                                .incoming
+                                .iter()
+                                .filter(|(_, deps)| deps.is_empty())
+                                .map(|(pkg, _)| jobs.remaining_depth(pkg).max(1))
+                                .collect();
+                            upcoming_weights.sort_unstable_by(|a, b| b.cmp(a));
+                            upcoming_weights.truncate(idle_slots);
 
                             let sole_builder = jobs.running.len() == 1
                                 && !jobs.incoming.values().any(|deps| deps.is_empty());
@@ -2709,6 +2730,7 @@ impl Build {
                                 my_weight,
                                 all_dispatched: &all_dispatched,
                                 sole_builder,
+                                upcoming_weights: &upcoming_weights,
                             };
                             let allocated = budget.allocate(&ctx);
                             let all_weights: Vec<String> = all_dispatched
@@ -2724,8 +2746,10 @@ impl Build {
                                 allocated,
                                 sole_builder,
                                 ?all_weights,
+                                ?upcoming_weights,
                                 budget_state = budget.debug_state(),
-                                dispatched = jobs.running.len(),
+                                build_phase = build_phase_workers.len(),
+                                running = jobs.running.len(),
                                 ready,
                                 incoming = jobs.incoming.len(),
                                 "MAKE_JOBS allocate"
@@ -2738,6 +2762,7 @@ impl Build {
                         let _ = responder.0.send(jobs_val);
                     }
                     ChannelCommand::BuildPhaseExit(sid) => {
+                        build_phase_workers.remove(&sid);
                         if let Some(ref mut budget) = make_jobs_budget {
                             let pkg_name = thread_packages
                                 .get(&sid)

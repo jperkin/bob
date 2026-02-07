@@ -34,11 +34,15 @@ pub struct AllocContext<'a> {
     pub sandbox_id: usize,
     /// This worker's critical path depth.
     pub my_weight: usize,
-    /// (sandbox_id, weight) for every currently dispatched worker.
+    /// (sandbox_id, weight) for every worker currently in a build phase.
     pub all_dispatched: &'a [(usize, usize)],
     /// True only when this is the sole dispatched worker AND nothing
     /// else is ready to dispatch.
     pub sole_builder: bool,
+    /// Weights of ready packages that idle workers will pick up soon.
+    /// The allocator reserves budget for these to avoid starving
+    /// high-depth upcoming work.
+    pub upcoming_weights: &'a [usize],
 }
 
 /**
@@ -83,7 +87,8 @@ impl JobAllocator for WeightedFairShare {
             return self.max_jobs;
         }
 
-        let active = ctx.all_dispatched.len().max(1);
+        let upcoming = ctx.upcoming_weights.len();
+        let active = (ctx.all_dispatched.len() + upcoming).max(1);
         let extra = self.max_jobs.saturating_sub(active * self.min_per_worker);
         let locked_extra: usize = self
             .locked
@@ -96,12 +101,22 @@ impl JobAllocator for WeightedFairShare {
             return self.min_per_worker;
         }
 
-        let unlocked: Vec<(usize, usize)> = ctx
+        /*
+         * Build the unlocked worker list: real workers not yet locked
+         * plus upcoming ready packages as virtual entries.  Upcoming
+         * packages participate in weight distribution so the allocator
+         * reserves proportional budget for high-depth work that is
+         * about to start.
+         */
+        let mut unlocked: Vec<(usize, usize)> = ctx
             .all_dispatched
             .iter()
             .filter(|(sid, _)| !self.locked.contains_key(sid))
             .copied()
             .collect();
+        for (i, &w) in ctx.upcoming_weights.iter().enumerate() {
+            unlocked.push((usize::MAX - i, w));
+        }
 
         let total_weight: usize = unlocked.iter().map(|(_, w)| *w).sum();
         if total_weight == 0 {
@@ -188,7 +203,7 @@ impl JobAllocator for EqualShare {
             return self.max_jobs;
         }
 
-        let active = ctx.all_dispatched.len().max(1);
+        let active = (ctx.all_dispatched.len() + ctx.upcoming_weights.len()).max(1);
         let ideal = self.max_jobs / active;
 
         let locked_total: usize = self.locked.values().sum();
