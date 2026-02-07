@@ -109,8 +109,13 @@ impl JobAllocator for WeightedFairShare {
             .filter(|(sid, _)| !self.locked.contains_key(sid))
             .copied()
             .collect();
+        /*
+         * Amplify upcoming weights so high-depth ready packages exert
+         * stronger pull on the budget, holding back more from shallow
+         * current work to leave room for the deep build when it starts.
+         */
         for (i, &w) in ctx.upcoming_weights.iter().enumerate() {
-            unlocked.push((usize::MAX - i, w));
+            unlocked.push((usize::MAX - i, w * 2));
         }
 
         let total_weight: usize = unlocked.iter().map(|(_, w)| *w).sum();
