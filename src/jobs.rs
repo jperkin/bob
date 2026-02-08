@@ -17,14 +17,101 @@
 /*!
  * Pluggable MAKE_JOBS allocation algorithms.
  *
- * When dynamic_jobs is enabled, the build manager distributes a total
+ * When `dynamic_jobs` is enabled, the build manager distributes a total
  * CPU budget across concurrent package builds.  The [`JobAllocator`]
  * trait defines the interface, and [`make_allocator`] selects the
  * concrete implementation based on configuration.
+ *
+ * # Background
+ *
+ * Package builds run in parallel across `build_threads` sandboxed
+ * workers.  Each package goes through multiple phases, but only
+ * `configure` and `build` are CPU-intensive and parallelisable via
+ * `MAKE_JOBS`.  The other phases (depends, install, package, clean)
+ * are single-threaded and do not hold any CPU budget.
+ *
+ * The build manager locks a MAKE_JOBS allocation when a worker enters
+ * its configure or build phase, and releases it when that phase ends.
+ * Between configure and build the lock is released and re-acquired,
+ * allowing the allocator to adjust based on current state.  However,
+ * there is no mid-phase rebalancing: once a worker locks N cores for
+ * a build phase, it holds them until the phase completes.
+ *
+ * # Weights
+ *
+ * Each package's weight is its `remaining_depth`: the cost of the
+ * heaviest chain of not-yet-built packages that depend on it.
+ * A package with high remaining depth is on or near the critical
+ * path — building it faster directly reduces wall-clock time.
+ * A package with low remaining depth is a leaf or near-leaf whose
+ * build time has slack.
+ *
+ * # Sole builder
+ *
+ * When exactly one worker is running and no packages are ready to
+ * dispatch, the worker gets the full `max` budget.  This is safe
+ * because no other worker can enter a build phase and compete for
+ * cores.  This is the common case during the serial tail at the
+ * end of a build, where a deep dependency chain forces sequential
+ * building.
+ *
+ * # Look-ahead
+ *
+ * The allocator receives `upcoming_weights`: the weights of ready
+ * packages that idle workers will pick up soon.  These participate
+ * in the weight distribution as virtual entries, absorbing
+ * proportional budget that nobody locks.  This holds back cores
+ * from shallow current work so that high-depth upcoming packages
+ * get a larger allocation when they enter their build phase.
+ *
+ * The upcoming weights are amplified by [`UPCOMING_WEIGHT_FACTOR`]
+ * to strengthen this effect.  The virtual entries do not increase
+ * the active worker count (which determines total distributable
+ * budget), only the weight pool (which determines how the budget
+ * is split).
+ *
+ * # Choosing an algorithm
+ *
+ * ## `weighted_fair_share` (default)
+ *
+ * Best for builds with deep dependency chains where the serial tail
+ * dominates wall-clock time (e.g. cmake → re2c → ninja → meson →
+ * gnutls → gnupg2).  Gives more cores to high-depth packages at the
+ * expense of shallow leaves, reducing critical path duration.  The
+ * look-ahead mechanism deliberately under-utilises CPU when it knows
+ * deep work is about to start, so that work gets a larger share.
+ *
+ * ## `equal_share`
+ *
+ * Divides cores equally: each worker gets `max / active`.  Ignores
+ * weights and upcoming work entirely.  Useful as a baseline for
+ * comparison, or when the package set has no dominant serial chain
+ * and uniform throughput matters more than critical path latency.
  */
 
 use crate::config::{DynamicJobs, JobAlgorithm};
 use std::collections::HashMap;
+
+/*
+ * Multiplier applied to upcoming package weights before they enter the
+ * weight distribution pool.  Higher values cause the allocator to hold
+ * back more budget from current workers, reserving it for high-depth
+ * packages that are about to start.
+ *
+ * At 1, upcoming weights compete equally with real workers — the
+ * effect is subtle and mostly noticeable when weight ratios are large.
+ * At 2, a ready package with weight 800 competes as 1600, absorbing
+ * roughly twice as much of the extra budget and pushing current
+ * workers noticeably below the flat split.  At 3+, the effect
+ * becomes aggressive and may starve current workers below useful
+ * parallelism (e.g. -j2 on a package that benefits from -j4).
+ *
+ * The optimal value depends on the ratio of max_jobs to
+ * build_threads and the depth variance of the package set.  Start
+ * with 2 and adjust based on debug logs (`MAKE_JOBS allocate`
+ * messages show the actual allocations and upcoming weights).
+ */
+const UPCOMING_WEIGHT_FACTOR: usize = 2;
 
 /**
  * Context passed to the allocator for each MAKE_JOBS decision.
@@ -71,12 +158,44 @@ pub trait JobAllocator {
 /**
  * Distribute extra budget proportional to critical path depth.
  *
- * The budget reserves `min_per_worker` for each dispatched
- * worker.  The remaining "extra" is distributed proportionally by
- * weight using the largest-remainder method across unlocked workers,
- * after subtracting what locked workers have already consumed.
- * This prevents a worker from over-allocating when earlier workers
- * already hold budget above the minimum.
+ * The total CPU budget (`max`) is divided into two parts:
+ *
+ *   1. **Minimum reservation**: `min` cores for each dispatched worker.
+ *      This guarantees every worker can make progress regardless of
+ *      weight.  With 16 cores, 4 workers, and min=2, this reserves 8.
+ *
+ *   2. **Extra pool**: the remaining cores (`max - active * min`),
+ *      distributed proportionally by weight using the largest-remainder
+ *      method.  Workers with higher remaining depth get a larger share,
+ *      accelerating the critical path.
+ *
+ * The extra pool is further reduced by what already-locked workers
+ * have consumed above their minimum.  This prevents over-allocation:
+ * if one worker locked 6 cores (4 above min), only 4 of the original
+ * 8 extra remain for the next workers.
+ *
+ * ## Look-ahead
+ *
+ * Ready packages that idle workers will pick up are added to the
+ * weight pool as virtual entries (amplified by [`UPCOMING_WEIGHT_FACTOR`]).
+ * They absorb proportional extra budget that nobody locks, effectively
+ * reserving it.  When the high-depth package actually enters its build
+ * phase, the locked totals are lower (because earlier workers got
+ * less), so more extra is available.
+ *
+ * Example with 16 cores, 4 workers (min=2), a shallow worker
+ * (weight 100) entering build, and cmake (weight 800) ready:
+ *
+ * - Without look-ahead: extra=8, shallow gets 8*100/100=8 → locked
+ *   at 10.  cmake starts later, finds 10 locked, gets min=2.
+ * - With look-ahead (factor=2): extra=8, pool=[100, 1600],
+ *   shallow gets 8*100/1700≈0 → locked at 2.  cmake starts,
+ *   finds 2 locked, gets 2+6=8.
+ *
+ * The trade-off: the shallow worker runs slower (2 instead of 10),
+ * but it is off the critical path so this does not affect wall-clock
+ * time.  cmake runs much faster (8 instead of 2) and it IS on the
+ * critical path, directly reducing total build time.
  */
 struct WeightedFairShare {
     max_jobs: usize,
@@ -109,13 +228,8 @@ impl JobAllocator for WeightedFairShare {
             .filter(|(sid, _)| !self.locked.contains_key(sid))
             .copied()
             .collect();
-        /*
-         * Amplify upcoming weights so high-depth ready packages exert
-         * stronger pull on the budget, holding back more from shallow
-         * current work to leave room for the deep build when it starts.
-         */
         for (i, &w) in ctx.upcoming_weights.iter().enumerate() {
-            unlocked.push((usize::MAX - i, w * 2));
+            unlocked.push((usize::MAX - i, w * UPCOMING_WEIGHT_FACTOR));
         }
 
         let total_weight: usize = unlocked.iter().map(|(_, w)| *w).sum();
@@ -126,7 +240,8 @@ impl JobAllocator for WeightedFairShare {
         /*
          * Largest-remainder method: take the floor of each proportional
          * share, then hand out the leftover one at a time to whichever
-         * entries have the biggest fractional parts.
+         * entries have the biggest fractional parts.  This distributes
+         * integer cores fairly without rounding bias.
          */
         let mut entries: Vec<(usize, usize, f64)> = unlocked
             .iter()
@@ -186,10 +301,29 @@ impl JobAllocator for WeightedFairShare {
 }
 
 /**
- * Simple equal division: each build-phase worker gets max / active.
+ * Simple equal division: each worker gets `max / active`.
  *
- * Ignores weights entirely. Useful as a baseline for comparison
- * and for users who don't want weight-based skew.
+ * Every worker entering a build phase gets the same allocation:
+ * the total budget divided by the number of dispatched workers.
+ * Weights, remaining depth, and upcoming packages are all ignored.
+ *
+ * The actual allocation is capped by the available (unlocked) budget
+ * and floored at `min` to guarantee minimum progress.
+ *
+ * This algorithm is predictable and avoids any risk of starving one
+ * worker to benefit another.  It works well when:
+ *
+ * - The package set has no dominant serial chain (all paths through
+ *   the dependency graph are roughly equal length).
+ * - Build times are similar across packages, so there is little
+ *   benefit to weighting.
+ * - You want a simple baseline to compare against `weighted_fair_share`.
+ *
+ * The downside is that it cannot optimise for the critical path.
+ * A leaf package with no dependents gets the same cores as the
+ * package gating 20 downstream builds.  For builds with deep serial
+ * tails (common in real-world pkgsrc), this leaves significant
+ * wall-clock time on the table.
  */
 struct EqualShare {
     max_jobs: usize,
