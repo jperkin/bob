@@ -36,6 +36,7 @@
 //! | Field | Type | Default | Description |
 //! |-------|------|---------|-------------|
 //! | `build_threads` | integer | 1 | Number of parallel build sandboxes. Each sandbox builds one package at a time. |
+//! | `dbdir` | string | "./db" | Directory for bob state files (database, tracing log). Relative to config file directory. |
 //! | `scan_threads` | integer | 1 | Number of parallel scan processes for dependency discovery. |
 //! | `strict_scan` | boolean | false | If true, abort on scan errors. If false, continue and report failures separately. |
 //! | `log_level` | string | "info" | Log level: "trace", "debug", "info", "warn", or "error". Can be overridden by `RUST_LOG` env var. |
@@ -85,7 +86,6 @@
 //! | Field | Type | Description |
 //! |-------|------|-------------|
 //! | `basedir` | string | Absolute path to the pkgsrc source tree (e.g., `/data/pkgsrc`). |
-//! | `logdir` | string | Directory for all logs. Per-package build logs go in subdirectories. Failed builds leave logs here; successful builds clean up. |
 //! | `make` | string | Absolute path to the bmake binary (e.g., `/usr/pkg/bin/bmake`). |
 //!
 //! ## Optional Fields
@@ -94,6 +94,7 @@
 //! |-------|------|---------|-------------|
 //! | `bootstrap` | string | none | Path to a bootstrap tarball. Required on non-NetBSD systems. Unpacked into each sandbox before builds. |
 //! | `build_user` | string | none | Unprivileged user to run builds as. If set, builds run as this user instead of root. |
+//! | `logdir` | string | `dbdir/logs` | Directory for per-package build logs. Failed builds leave logs here; successful builds clean up. |
 //! | `cachevars` | table | `{}` | List of pkgsrc variable names to fetch once and cache. These are set in the environment for scans and builds (e.g., `{"NATIVE_OPSYS", "NATIVE_OS_VERSION"}`). |
 //! | `env` | function or table | `{}` | Environment variables for builds. Can be a table of key-value pairs, or a function receiving package metadata and returning a table. See [Environment Function](#environment-function). |
 //! | `pkgpaths` | table | `{}` | List of package paths to build (e.g., `{"mail/mutt", "www/curl"}`). Dependencies are discovered automatically. |
@@ -140,7 +141,7 @@
 //!
 //! | Variable | Description |
 //! |----------|-------------|
-//! | `bob_logdir` | Path to the log directory. |
+//! | `bob_logdir` | Path to the build logs directory. |
 //! | `bob_make` | Path to the bmake binary. |
 //! | `bob_packages` | Path to the packages directory. |
 //! | `bob_pkg_dbdir` | PKG_DBDIR from pkgsrc. |
@@ -448,6 +449,8 @@ impl LuaEnv {
 #[derive(Clone, Debug, Default)]
 pub struct Config {
     file: ConfigFile,
+    dbdir: PathBuf,
+    logdir: PathBuf,
     log_level: String,
     lua_env: LuaEnv,
 }
@@ -478,6 +481,8 @@ pub struct ConfigFile {
 pub struct Options {
     /// Number of parallel build sandboxes.
     pub build_threads: Option<usize>,
+    /// Directory for bob state files (database, tracing log).
+    pub dbdir: Option<PathBuf>,
     /// Dynamic MAKE_JOBS allocation settings.
     pub dynamic_jobs: Option<DynamicJobs>,
     /// Number of parallel scan processes.
@@ -506,13 +511,13 @@ pub struct DynamicJobs {
 /// # Required Fields
 ///
 /// - `basedir`: Path to pkgsrc source tree
-/// - `logdir`: Directory for logs
 /// - `make`: Path to bmake binary
 ///
 /// # Optional Fields
 ///
 /// - `bootstrap`: Path to bootstrap tarball (required on non-NetBSD systems)
 /// - `build_user`: Unprivileged user for builds
+/// - `logdir`: Directory for build logs (defaults to `dbdir/logs`)
 /// - `pkgpaths`: List of packages to build
 /// - `save_wrkdir_patterns`: Glob patterns for files to save on build failure
 /// - `tar`: Path to tar binary (defaults to `tar`)
@@ -524,8 +529,8 @@ pub struct Pkgsrc {
     pub bootstrap: Option<PathBuf>,
     /// Unprivileged user for builds.
     pub build_user: Option<String>,
-    /// Directory for logs.
-    pub logdir: PathBuf,
+    /// Directory for build logs (defaults to dbdir/logs).
+    pub logdir: Option<PathBuf>,
     /// Path to bmake binary.
     pub make: PathBuf,
     /// List of packages to build.
@@ -678,6 +683,27 @@ impl Config {
         }
 
         /*
+         * Resolve dbdir: explicit value from options, or default to
+         * "./db" relative to the config file directory.  Relative paths
+         * are resolved against the config directory.
+         */
+        let raw_dbdir = file.options.as_ref().and_then(|o| o.dbdir.clone());
+        let dbdir = match raw_dbdir {
+            Some(p) if p.is_absolute() => p,
+            Some(p) => base_dir.join(p),
+            None => base_dir.join("db"),
+        };
+
+        /*
+         * Default logdir to dbdir/logs if not explicitly set.
+         */
+        let logdir = file
+            .pkgsrc
+            .logdir
+            .clone()
+            .unwrap_or_else(|| dbdir.join("logs"));
+
+        /*
          * Set log_level from config file, defaulting to "info".
          */
         let log_level = if let Some(opts) = &file.options {
@@ -688,6 +714,8 @@ impl Config {
 
         Ok(Config {
             file,
+            dbdir,
+            logdir,
             log_level,
             lua_env,
         })
@@ -760,8 +788,12 @@ impl Config {
         &self.log_level
     }
 
+    pub fn dbdir(&self) -> &PathBuf {
+        &self.dbdir
+    }
+
     pub fn logdir(&self) -> &PathBuf {
-        &self.file.pkgsrc.logdir
+        &self.logdir
     }
 
     pub fn save_wrkdir_patterns(&self) -> &[String] {
@@ -904,11 +936,11 @@ impl Config {
             }
         }
 
-        // Check logdir can be created
-        if let Some(parent) = self.file.pkgsrc.logdir.parent() {
+        // Check dbdir can be created
+        if let Some(parent) = self.dbdir.parent() {
             if !parent.exists() {
                 errors.push(format!(
-                    "logdir parent directory does not exist: {}",
+                    "dbdir parent directory does not exist: {}",
                     parent.display()
                 ));
             }
@@ -1030,6 +1062,7 @@ fn parse_options(globals: &Table) -> LuaResult<Option<Options>> {
 
     const KNOWN_KEYS: &[&str] = &[
         "build_threads",
+        "dbdir",
         "dynamic_jobs",
         "log_level",
         "scan_threads",
@@ -1055,8 +1088,11 @@ fn parse_options(globals: &Table) -> LuaResult<Option<Options>> {
         }
     };
 
+    let dbdir: Option<PathBuf> = table.get::<Option<String>>("dbdir")?.map(PathBuf::from);
+
     Ok(Some(Options {
         build_threads: table.get("build_threads").ok(),
+        dbdir,
         dynamic_jobs,
         scan_threads: table.get("scan_threads").ok(),
         strict_scan: table.get("strict_scan").ok(),
@@ -1113,7 +1149,7 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         .get::<Option<String>>("bootstrap")?
         .map(PathBuf::from);
     let build_user: Option<String> = pkgsrc.get::<Option<String>>("build_user")?;
-    let logdir = get_required_string(&pkgsrc, "logdir")?;
+    let logdir: Option<PathBuf> = pkgsrc.get::<Option<String>>("logdir")?.map(PathBuf::from);
     let make = get_required_string(&pkgsrc, "make")?;
     let tar: Option<PathBuf> = pkgsrc.get::<Option<String>>("tar")?.map(PathBuf::from);
 
@@ -1153,7 +1189,7 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         bootstrap,
         build_user,
         cachevars,
-        logdir: PathBuf::from(logdir),
+        logdir,
         make: PathBuf::from(make),
         pkgpaths,
         save_wrkdir_patterns,

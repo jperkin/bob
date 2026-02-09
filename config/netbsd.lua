@@ -25,7 +25,6 @@ environment = {
 -- Variables that configure pkgsrc, where it is, what packages to build, etc.
 pkgsrc = {
     basedir = "/usr/pkgsrc",
-    logdir = initdir .. "/logs",
     make = "/usr/bin/make",
     -- or pkgpaths = read_pkgpaths("/path/to/file"),
     pkgpaths = {

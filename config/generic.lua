@@ -16,7 +16,6 @@ options = {
 pkgsrc = {
     basedir = "/usr/pkgsrc",
     bootstrap = initdir .. "/bootstrap.tar.gz",
-    logdir = initdir .. "/logs",
     make = "/usr/pkg/bin/bmake",
     -- or pkgpaths = read_pkgpaths("/path/to/file"),
     pkgpaths = {
