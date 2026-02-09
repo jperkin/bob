@@ -54,15 +54,12 @@ pub fn init_stderr_if_enabled() {
 /**
  * Initialize the logging system.
  *
- * Creates a logs directory and writes JSON-formatted logs there.
+ * Creates the dbdir and writes bob.log there.
  */
-pub fn init(logs_dir: &PathBuf, log_level: &str) -> Result<()> {
-    // Create logs directory
-    fs::create_dir_all(logs_dir)
-        .with_context(|| format!("Failed to create logs directory {:?}", logs_dir))?;
+pub fn init(dbdir: &PathBuf, log_level: &str) -> Result<()> {
+    fs::create_dir_all(dbdir).with_context(|| format!("Failed to create dbdir {:?}", dbdir))?;
 
-    // Create a rolling file appender that writes to logs/bob.log
-    let file_appender = tracing_appender::rolling::never(logs_dir, "bob.log");
+    let file_appender = tracing_appender::rolling::never(dbdir, "bob.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     // Store the guard to keep the writer alive
@@ -91,7 +88,7 @@ pub fn init(logs_dir: &PathBuf, log_level: &str) -> Result<()> {
         .with(file_layer)
         .init();
 
-    tracing::info!(logs_dir = %logs_dir.display(),
+    tracing::info!(dbdir = %dbdir.display(),
         log_level = log_level,
         "Logging initialized"
     );

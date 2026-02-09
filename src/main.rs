@@ -51,9 +51,8 @@ impl BuildRunner {
     /// Set up the build environment: config, logging, validation, db, signals.
     fn new(config_path: Option<&Path>) -> Result<Self> {
         let config = Config::load(config_path)?;
-        let logs_dir = config.logdir().join("bob");
 
-        logging::init(&logs_dir, config.log_level())?;
+        logging::init(config.dbdir(), config.log_level())?;
 
         if let Err(errors) = config.validate() {
             eprintln!("Configuration errors:");
@@ -63,7 +62,7 @@ impl BuildRunner {
             bail!("{} configuration error(s) found", errors.len());
         }
 
-        let db_path = logs_dir.join("bob.db");
+        let db_path = config.dbdir().join("bob.db");
         let db = Database::open(&db_path)?;
 
         let shutdown_flag = Arc::new(AtomicBool::new(false));
@@ -658,8 +657,7 @@ fn run() -> Result<()> {
         }
         Cmd::Report => {
             let config = Config::load(args.config.as_deref())?;
-            let logdir = config.logdir();
-            let db_path = logdir.join("bob").join("bob.db");
+            let db_path = config.dbdir().join("bob.db");
 
             if !db_path.exists() {
                 bail!(
@@ -670,34 +668,26 @@ fn run() -> Result<()> {
 
             println!("Generating report...");
             let db = Database::open(&db_path)?;
-            let report_path = logdir.join("report.html");
-            report::write_html_report(&db, logdir, &report_path)?;
+            let report_path = config.logdir().join("report.html");
+            report::write_html_report(&db, config.logdir(), &report_path)?;
             println!("HTML report written to: {}", report_path.display());
         }
         Cmd::Clean { logs_only } => {
             let config = Config::load(args.config.as_deref())?;
             let logdir = config.logdir();
+            let dbdir = config.dbdir();
 
-            if !logdir.exists() {
-                return Ok(());
+            if !logs_only {
+                let _ = std::fs::remove_file(dbdir.join("bob.db"));
+                let _ = std::fs::remove_file(dbdir.join("bob.log"));
             }
-
-            if logs_only {
-                for entry in std::fs::read_dir(logdir)? {
-                    let entry = entry?;
-                    let path = entry.path();
-                    if path.is_dir() && entry.file_name() != "bob" {
-                        std::fs::remove_dir_all(&path)
-                            .with_context(|| format!("Failed to remove {}", path.display()))?;
-                    }
-                }
-            } else {
-                std::fs::remove_dir_all(logdir).context("Failed to remove logs directory")?;
+            if logdir.exists() {
+                std::fs::remove_dir_all(logdir).context("Failed to remove log directory")?;
             }
         }
         Cmd::Db { sql } => {
             let config = Config::load(args.config.as_deref())?;
-            let db_path = config.logdir().join("bob").join("bob.db");
+            let db_path = config.dbdir().join("bob.db");
             let db = Database::open(&db_path)?;
 
             let Some(sql) = sql else {
@@ -708,7 +698,7 @@ fn run() -> Result<()> {
         }
         Cmd::List { cmd } => {
             let config = Config::load(args.config.as_deref())?;
-            let db_path = config.logdir().join("bob").join("bob.db");
+            let db_path = config.dbdir().join("bob.db");
             let db = Database::open(&db_path)?;
             cmd::list::run(&db, cmd)?;
         }
@@ -716,8 +706,7 @@ fn run() -> Result<()> {
             cmd: UtilCmd::PrintDepGraph { output },
         } => {
             let config = Config::load(args.config.as_deref())?;
-            let logs_dir = config.logdir().join("bob");
-            let db_path = logs_dir.join("bob.db");
+            let db_path = config.dbdir().join("bob.db");
             let db = Database::open(&db_path)?;
 
             let count = db.count_packages()?;
@@ -758,8 +747,7 @@ fn run() -> Result<()> {
             cmd: UtilCmd::PrintPresolve { output },
         } => {
             let config = Config::load(args.config.as_deref())?;
-            let logs_dir = config.logdir().join("bob");
-            let db_path = logs_dir.join("bob.db");
+            let db_path = config.dbdir().join("bob.db");
             let db = Database::open(&db_path)?;
 
             let count = db.count_packages()?;
@@ -810,8 +798,7 @@ fn run() -> Result<()> {
             use std::io::BufReader;
 
             let config = Config::load(args.config.as_deref())?;
-            let logs_dir = config.logdir().join("bob");
-            let db_path = logs_dir.join("bob.db");
+            let db_path = config.dbdir().join("bob.db");
             let db = Database::open(&db_path)?;
 
             println!("Importing scan data from {}", file.display());
@@ -869,8 +856,7 @@ fn run() -> Result<()> {
             cmd: UtilCmd::PrintPscan { output },
         } => {
             let config = Config::load(args.config.as_deref())?;
-            let logs_dir = config.logdir().join("bob");
-            let db_path = logs_dir.join("bob.db");
+            let db_path = config.dbdir().join("bob.db");
             let db = Database::open(&db_path)?;
 
             let packages = db.get_all_packages()?;

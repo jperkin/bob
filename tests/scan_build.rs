@@ -125,8 +125,12 @@ impl TestHarness {
         self.root.join("pkgsrc")
     }
 
+    fn dbdir(&self) -> PathBuf {
+        self.root.join("db")
+    }
+
     fn logdir(&self) -> PathBuf {
-        self.root.join("logs")
+        self.dbdir().join("logs")
     }
 
     fn config_path(&self) -> PathBuf {
@@ -134,7 +138,7 @@ impl TestHarness {
     }
 
     fn db_path(&self) -> PathBuf {
-        self.logdir().join("bob.db")
+        self.dbdir().join("bob.db")
     }
 
     fn packages_dir(&self) -> PathBuf {
@@ -384,17 +388,17 @@ show-vars:
             "\
 options = {{
     build_threads = 2,
+    dbdir = \"{dbdir}\",
     scan_threads = 2,
     progress = \"plain\",
 }}
 pkgsrc = {{
     basedir = \"{pkgsrc}\",
-    logdir = \"{logdir}\",
     make = \"{make}\",
 }}
 ",
+            dbdir = self.dbdir().display(),
             pkgsrc = self.pkgsrc().display(),
-            logdir = self.logdir().display(),
             make = self.make.display(),
         );
         fs::write(self.config_path(), content)?;
@@ -1058,12 +1062,12 @@ fn test_config_options_and_environment() -> Result<()> {
         "\
 options = {{
     build_threads = 4,
+    dbdir = \"{dbdir}\",
     scan_threads = 3,
     strict_scan = true,
 }}
 pkgsrc = {{
     basedir = \"{pkgsrc}\",
-    logdir = \"{logdir}\",
     make = \"{make}\",
     cachevars = {{ \"NATIVE_OPSYS\" }},
     save_wrkdir_patterns = {{ \"**/config.log\" }},
@@ -1074,8 +1078,8 @@ environment = {{
     set = {{ PATH = \"/sbin:/bin\", LC_ALL = \"C\" }},
 }}
 ",
+        dbdir = h.dbdir().display(),
         pkgsrc = h.pkgsrc().display(),
-        logdir = h.logdir().display(),
         make = h.make.display(),
     );
     fs::write(h.config_path(), content)?;
@@ -1109,12 +1113,10 @@ fn test_config_validation() -> Result<()> {
         "\
 pkgsrc = {{
     basedir = \"{pkgsrc}\",
-    logdir = \"{logdir}\",
     make = \"/nonexistent/bmake\",
 }}
 ",
         pkgsrc = h.pkgsrc().display(),
-        logdir = h.logdir().display(),
     );
     fs::write(h.config_path(), &content)?;
     let config = h.load_config()?;
@@ -1127,12 +1129,14 @@ pkgsrc = {{
         errors
     );
 
-    // Invalid logdir parent
+    // Invalid dbdir parent
     let content = format!(
         "\
+options = {{
+    dbdir = \"/nonexistent/parent/db\",
+}}
 pkgsrc = {{
     basedir = \"{pkgsrc}\",
-    logdir = \"/nonexistent/parent/logs\",
     make = \"{make}\",
 }}
 ",
@@ -1142,11 +1146,11 @@ pkgsrc = {{
     fs::write(h.config_path(), &content)?;
     let config = h.load_config()?;
     let result = config.validate();
-    assert!(result.is_err(), "validate should fail with bad logdir");
+    assert!(result.is_err(), "validate should fail with bad dbdir");
     let errors = result.expect_err("expected validation errors");
     assert!(
-        errors.iter().any(|e| e.contains("logdir")),
-        "errors should mention logdir: {:?}",
+        errors.iter().any(|e| e.contains("dbdir")),
+        "errors should mention dbdir: {:?}",
         errors
     );
 
@@ -1567,17 +1571,17 @@ fn test_single_threaded_build() -> Result<()> {
         "\
 options = {{
     build_threads = 1,
+    dbdir = \"{dbdir}\",
     scan_threads = 1,
     progress = \"plain\",
 }}
 pkgsrc = {{
     basedir = \"{pkgsrc}\",
-    logdir = \"{logdir}\",
     make = \"{make}\",
 }}
 ",
+        dbdir = h.dbdir().display(),
         pkgsrc = h.pkgsrc().display(),
-        logdir = h.logdir().display(),
         make = h.make.display(),
     );
     fs::write(h.config_path(), content)?;
