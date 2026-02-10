@@ -116,8 +116,10 @@ fn write_pkg_summary(pkgsrc_env: &PkgsrcEnv, entries: &[String]) -> Result<()> {
         let gz = s.spawn(|| write_pkg_summary_gz(&all_dir, entries));
         let zst = s.spawn(|| write_pkg_summary_zst(&all_dir, entries));
 
-        gz.join().map_err(|_| anyhow::anyhow!("gz thread panicked"))??;
-        zst.join().map_err(|_| anyhow::anyhow!("zst thread panicked"))??;
+        gz.join()
+            .map_err(|_| anyhow::anyhow!("gz thread panicked"))??;
+        zst.join()
+            .map_err(|_| anyhow::anyhow!("zst thread panicked"))??;
         Ok(())
     })
 }
