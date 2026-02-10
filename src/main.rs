@@ -403,25 +403,25 @@ impl BuildRunner {
         Ok(summary)
     }
 
-    /// Generate pkg_summary.gz for all successful packages.
+    /// Generate pkg_summary.gz and pkg_summary.zst for all successful packages.
     fn generate_pkg_summary(&self) {
-        print!("Generating pkg_summary.gz...");
+        print!("Generating pkg_summary...");
         if std::io::Write::flush(&mut std::io::stdout()).is_err() {
             return;
         }
-        tracing::debug!("Generating pkg_summary.gz");
+        tracing::debug!("Generating pkg_summary");
         let start = std::time::Instant::now();
         match bob::generate_pkg_summary(&self.db, self.config.build_threads()) {
             Ok(()) => {
                 println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
                 tracing::debug!(
                     elapsed_ms = start.elapsed().as_millis(),
-                    "Finished generating pkg_summary.gz"
+                    "Finished generating pkg_summary"
                 );
             }
             Err(e) => {
                 println!();
-                eprintln!("Warning: Failed to generate pkg_summary.gz: {}", e);
+                eprintln!("Warning: Failed to generate pkg_summary: {}", e);
             }
         }
     }

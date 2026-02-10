@@ -15,10 +15,10 @@
  */
 
 /*!
- * Generate pkg_summary.gz for binary packages.
+ * Generate pkg_summary.gz and pkg_summary.zst for binary packages.
  *
- * This module provides functionality to generate a `pkg_summary.gz` file
- * containing metadata for binary packages tracked in the database.
+ * This module provides functionality to generate compressed pkg_summary
+ * files containing metadata for binary packages tracked in the database.
  */
 
 use std::fs::File;
@@ -31,16 +31,19 @@ use flate2::write::GzEncoder;
 use pkgsrc::archive::BinaryPackage;
 use rayon::prelude::*;
 use tracing::{debug, warn};
+use zstd::stream::raw::CParameter;
 
 use crate::config::PkgsrcEnv;
 use crate::db::Database;
 
 /**
- * Generate pkg_summary.gz for all successful packages in the database.
+ * Generate pkg_summary.gz and pkg_summary.zst for all successful packages.
  *
  * Queries the database for packages with successful build outcomes, generates
  * Summary entries using pkgsrc::archive::BinaryPackage, and writes the
- * concatenated output to `PACKAGES/All/pkg_summary.gz`.
+ * concatenated output to `PACKAGES/All/pkg_summary.{gz,zst}`.
+ *
+ * The gz and zst files are written in parallel.
  */
 pub fn generate_pkg_summary(db: &Database, threads: usize) -> Result<()> {
     let pkgsrc_env = db.load_pkgsrc_env()?;
@@ -107,22 +110,42 @@ fn generate_summary_entry(pkgfile: &Path) -> Option<String> {
 }
 
 fn write_pkg_summary(pkgsrc_env: &PkgsrcEnv, entries: &[String]) -> Result<()> {
-    let summary_path = pkgsrc_env.packages.join("All/pkg_summary.gz");
-    let file = File::create(&summary_path)
-        .with_context(|| format!("Failed to create {}", summary_path.display()))?;
-    let mut encoder = GzEncoder::new(file, Compression::default());
+    let all_dir = pkgsrc_env.packages.join("All");
 
+    std::thread::scope(|s| {
+        let gz = s.spawn(|| write_pkg_summary_gz(&all_dir, entries));
+        let zst = s.spawn(|| write_pkg_summary_zst(&all_dir, entries));
+
+        gz.join().map_err(|_| anyhow::anyhow!("gz thread panicked"))??;
+        zst.join().map_err(|_| anyhow::anyhow!("zst thread panicked"))??;
+        Ok(())
+    })
+}
+
+fn write_pkg_summary_gz(dir: &Path, entries: &[String]) -> Result<()> {
+    let path = dir.join("pkg_summary.gz");
+    let file =
+        File::create(&path).with_context(|| format!("Failed to create {}", path.display()))?;
+    let mut encoder = GzEncoder::new(file, Compression::default());
     for entry in entries {
         encoder.write_all(entry.as_bytes())?;
     }
-
     encoder.finish()?;
+    debug!(path = %path.display(), count = entries.len(), "pkg_summary.gz written");
+    Ok(())
+}
 
-    debug!(
-        path = %summary_path.display(),
-        count = entries.len(),
-        "pkg_summary.gz written"
-    );
-
+fn write_pkg_summary_zst(dir: &Path, entries: &[String]) -> Result<()> {
+    let path = dir.join("pkg_summary.zst");
+    let file =
+        File::create(&path).with_context(|| format!("Failed to create {}", path.display()))?;
+    let mut encoder = zstd::Encoder::new(file, 19)?;
+    encoder.set_parameter(CParameter::EnableLongDistanceMatching(true))?;
+    encoder.set_parameter(CParameter::WindowLog(25))?;
+    for entry in entries {
+        encoder.write_all(entry.as_bytes())?;
+    }
+    encoder.finish()?;
+    debug!(path = %path.display(), count = entries.len(), "pkg_summary.zst written");
     Ok(())
 }
