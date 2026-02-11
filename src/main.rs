@@ -297,8 +297,8 @@ impl BuildRunner {
                         pkgname: pkg.pkgname().clone(),
                         pkgpath: Some(pkg.pkgpath.clone()),
                         outcome: bob::BuildOutcome::UpToDate,
-                        duration: std::time::Duration::ZERO,
                         log_dir: None,
+                        build_stats: bob::PkgBuildStats::default(),
                     };
                     self.db.store_build_by_name(&build_result)?;
                     up_to_date_count += 1;
@@ -389,8 +389,8 @@ impl BuildRunner {
                         pkgname: pkgname.clone(),
                         pkgpath: Some(pkgpath.clone()),
                         outcome: build::BuildOutcome::Skipped(reason.clone()),
-                        duration: std::time::Duration::ZERO,
                         log_dir: None,
+                        build_stats: build::PkgBuildStats::default(),
                     });
                 }
                 ScanResult::ScanFail { pkgpath, error } => {

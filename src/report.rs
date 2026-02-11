@@ -47,7 +47,7 @@
 //!
 //! Shows all successfully built packages with their build duration.
 
-use crate::build::{BuildOutcome, BuildResult, BuildSummary};
+use crate::build::{BuildOutcome, BuildResult, BuildSummary, PkgBuildStats};
 use crate::db::Database;
 use crate::scan::SkipReason;
 use anyhow::Result;
@@ -101,8 +101,8 @@ pub fn write_html_report(db: &Database, logdir: &Path, path: &Path) -> Result<()
             pkgname: pkgsrc::PkgName::new(&pkgname),
             pkgpath: pkgpath.and_then(|p| pkgsrc::PkgPath::new(&p).ok()),
             outcome: BuildOutcome::Skipped(SkipReason::PkgFail(reason)),
-            duration: std::time::Duration::ZERO,
             log_dir: None,
+            build_stats: PkgBuildStats::default(),
         });
     }
 
@@ -112,8 +112,8 @@ pub fn write_html_report(db: &Database, logdir: &Path, path: &Path) -> Result<()
             pkgname: pkgsrc::PkgName::new(&pkgname),
             pkgpath: pkgpath.and_then(|p| pkgsrc::PkgPath::new(&p).ok()),
             outcome: BuildOutcome::Skipped(SkipReason::IndirectFailed(failed_dep)),
-            duration: std::time::Duration::ZERO,
             log_dir: None,
+            build_stats: PkgBuildStats::default(),
         });
     }
 
@@ -548,7 +548,7 @@ fn write_failed_section(
                 "breaks-zero"
             };
 
-            let dur_secs = info.result.duration.as_secs();
+            let dur_secs = info.result.build_stats.total_duration.as_secs();
             let duration = if dur_secs >= 60 {
                 format!("{}m {}s", dur_secs / 60, dur_secs % 60)
             } else {
@@ -680,7 +680,7 @@ fn write_success_section(
                 .as_ref()
                 .map(|p| p.as_path().display().to_string())
                 .unwrap_or_default();
-            let dur_secs = result.duration.as_secs();
+            let dur_secs = result.build_stats.total_duration.as_secs();
             let duration = if dur_secs >= 60 {
                 format!("{}m {}s", dur_secs / 60, dur_secs % 60)
             } else {

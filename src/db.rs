@@ -41,7 +41,7 @@ use pkgsrc::{PkgName, PkgPath, ScanIndex};
 use rusqlite::{Connection, params};
 use tracing::{debug, warn};
 
-use crate::build::{BuildOutcome, BuildResult};
+use crate::build::{BuildOutcome, BuildResult, PkgBuildStats};
 use crate::config::PkgsrcEnv;
 use crate::try_println;
 
@@ -862,7 +862,7 @@ impl Database {
     pub fn store_build_result(&self, package_id: i64, result: &BuildResult) -> Result<()> {
         let outcome = result.outcome.db_key();
         let detail = result.outcome.db_detail();
-        let duration_ms = result.duration.as_millis() as i64;
+        let duration_ms = result.build_stats.total_duration.as_millis() as i64;
         let log_dir = result.log_dir.as_ref().map(|p| p.display().to_string());
 
         self.conn.execute(
@@ -922,8 +922,11 @@ impl Database {
                     pkgname: PkgName::new(&pkgname),
                     pkgpath: pkgpath.and_then(|p| PkgPath::new(&p).ok()),
                     outcome: build_outcome,
-                    duration: Duration::from_millis(duration_ms as u64),
                     log_dir: log_dir.map(std::path::PathBuf::from),
+                    build_stats: PkgBuildStats {
+                        total_duration: Duration::from_millis(duration_ms as u64),
+                        ..PkgBuildStats::default()
+                    },
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -992,8 +995,11 @@ impl Database {
                 pkgname: PkgName::new(&pkgname),
                 pkgpath: pkgpath.and_then(|p| PkgPath::new(&p).ok()),
                 outcome: build_outcome,
-                duration: Duration::from_millis(duration_ms as u64),
                 log_dir: log_dir.map(std::path::PathBuf::from),
+                build_stats: PkgBuildStats {
+                    total_duration: Duration::from_millis(duration_ms as u64),
+                    ..PkgBuildStats::default()
+                },
             });
         }
 

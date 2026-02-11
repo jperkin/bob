@@ -61,8 +61,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc, mpsc::Sender};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, info_span, trace, warn};
+
+fn epoch_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 /// How often to batch and send build output lines to the UI channel.
 /// This is the floor on log display responsiveness — output cannot appear
@@ -360,9 +367,12 @@ pub fn pkg_up_to_date(
     Ok(None)
 }
 
-/// Build stages in order of execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Stage {
+/**
+ * Build stages in order of execution.
+ */
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Stage {
     PreClean,
     Depends,
     Checksum,
@@ -375,7 +385,7 @@ enum Stage {
 }
 
 impl Stage {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Stage::PreClean => "pre-clean",
             Stage::Depends => "depends",
@@ -390,11 +400,82 @@ impl Stage {
     }
 }
 
+/**
+ * MAKE_JOBS configuration for a package build.
+ */
+#[derive(Clone, Copy, Debug, Default)]
+pub enum MakeJobs {
+    /**
+     * Package has MAKE_JOBS_SAFE=no; parallel make not supported.
+     */
+    #[default]
+    NotSafe,
+    /**
+     * Parallel make with this many jobs.
+     */
+    Jobs(usize),
+}
+
+impl MakeJobs {
+    fn is_safe(&self) -> bool {
+        matches!(self, Self::Jobs(_))
+    }
+
+    /**
+     * Integer representation for storage (0 = not safe).
+     */
+    pub fn count(&self) -> usize {
+        match self {
+            Self::NotSafe => 0,
+            Self::Jobs(n) => *n,
+        }
+    }
+}
+
+impl serde::Serialize for MakeJobs {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_u64(self.count() as u64)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for MakeJobs {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let n = u64::deserialize(d)? as usize;
+        Ok(if n == 0 { Self::NotSafe } else { Self::Jobs(n) })
+    }
+}
+
+/**
+ * Metrics captured during a package build.
+ */
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct PkgBuildStats {
+    /// MAKE_JOBS used for this build.
+    pub make_jobs: MakeJobs,
+    /// Last build stage attempted.
+    pub stage: Option<Stage>,
+    /// Duration of the build (compilation) phase, if reached.
+    pub build_duration: Option<Duration>,
+    /// Wall-clock duration for the entire build.
+    pub total_duration: Duration,
+    /// Unix epoch when the build started.
+    pub timestamp: i64,
+}
+
 /// Result of a package build.
 #[derive(Debug)]
 enum PkgBuildResult {
-    Success,
-    Failed,
+    Success(PkgBuildStats),
+    Failed(PkgBuildStats),
+}
+
+impl std::fmt::Display for PkgBuildResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Success(_) => write!(f, "success"),
+            Self::Failed(_) => write!(f, "failed"),
+        }
+    }
 }
 
 /// How to run a command.
@@ -427,6 +508,7 @@ struct PkgBuilder<'a> {
     build_user: Option<String>,
     envs: Vec<(String, String)>,
     output_tx: Option<Sender<ChannelCommand>>,
+    make_jobs: MakeJobs,
 }
 
 impl<'a> PkgBuilder<'a> {
@@ -436,6 +518,7 @@ impl<'a> PkgBuilder<'a> {
         pkginfo: &'a ResolvedPackage,
         envs: Vec<(String, String)>,
         output_tx: Option<Sender<ChannelCommand>>,
+        make_jobs: MakeJobs,
     ) -> Self {
         let logdir = session
             .config
@@ -450,6 +533,7 @@ impl<'a> PkgBuilder<'a> {
             build_user,
             envs,
             output_tx,
+            make_jobs,
         }
     }
 
@@ -457,6 +541,11 @@ impl<'a> PkgBuilder<'a> {
     fn build<C: BuildCallback>(&self, callback: &mut C) -> anyhow::Result<PkgBuildResult> {
         let pkgname_str = self.pkginfo.pkgname().pkgname();
         let pkgpath = &self.pkginfo.pkgpath;
+
+        let mut stats = PkgBuildStats {
+            make_jobs: self.make_jobs,
+            ..PkgBuildStats::default()
+        };
 
         // Clean up and create log directory
         if self.logdir.exists() {
@@ -484,36 +573,42 @@ impl<'a> PkgBuilder<'a> {
         let pkgdir = self.session.config.pkgsrc().join(pkgpath.as_path());
 
         // Pre-clean
+        stats.stage = Some(Stage::PreClean);
         callback.stage(Stage::PreClean.as_str());
         self.run_make_stage(Stage::PreClean, &pkgdir, &["clean"], RunAs::Root, false)?;
 
         // Install dependencies
         if !self.pkginfo.depends().is_empty() {
+            stats.stage = Some(Stage::Depends);
             callback.stage(Stage::Depends.as_str());
             let _ = self.write_stage(Stage::Depends);
             if !self.install_dependencies()? {
-                return Ok(PkgBuildResult::Failed);
+                return Ok(PkgBuildResult::Failed(stats));
             }
         }
 
         // Checksum
+        stats.stage = Some(Stage::Checksum);
         callback.stage(Stage::Checksum.as_str());
         if !self.run_make_stage(Stage::Checksum, &pkgdir, &["checksum"], RunAs::Root, true)? {
-            return Ok(PkgBuildResult::Failed);
+            return Ok(PkgBuildResult::Failed(stats));
         }
 
-        // Configure — request MAKE_JOBS budget, release after configure
-        // so the build phase can re-request with updated weights.
+        /*
+         * Configure — request MAKE_JOBS budget, release after configure
+         * so the build phase can re-request with updated weights.
+         */
         let conf_jobs = self.request_make_jobs();
         let conf_arg = conf_jobs.map(|j| format!("MAKE_JOBS={}", j));
         let conf_flag: Vec<&str> = conf_arg.iter().map(|s| s.as_str()).collect();
         let conf_suffix = conf_jobs.map(|j| format!(" -j{}", j)).unwrap_or_default();
 
+        stats.stage = Some(Stage::Configure);
         callback.stage(&format!("{}{}", Stage::Configure.as_str(), conf_suffix));
         let configure_log = self.logdir.join("configure.log");
         if !self.run_usergroup_if_needed(Stage::Configure, &pkgdir, &configure_log)? {
-            self.notify_build_phase_exit();
-            return Ok(PkgBuildResult::Failed);
+            self.release_make_jobs();
+            return Ok(PkgBuildResult::Failed(stats));
         }
         if !self.run_make_stage_with_flags(
             Stage::Configure,
@@ -523,22 +618,28 @@ impl<'a> PkgBuilder<'a> {
             true,
             &conf_flag,
         )? {
-            self.notify_build_phase_exit();
-            return Ok(PkgBuildResult::Failed);
+            self.release_make_jobs();
+            return Ok(PkgBuildResult::Failed(stats));
         }
-        self.notify_build_phase_exit();
+        self.release_make_jobs();
 
         // Build — re-request MAKE_JOBS with current remaining weights.
+        let build_phase_start = Instant::now();
         let build_jobs = self.request_make_jobs();
+        if let MakeJobs::Jobs(default) = self.make_jobs {
+            stats.make_jobs = MakeJobs::Jobs(build_jobs.unwrap_or(default));
+        }
         let build_arg = build_jobs.map(|j| format!("MAKE_JOBS={}", j));
         let build_flag: Vec<&str> = build_arg.iter().map(|s| s.as_str()).collect();
         let build_suffix = build_jobs.map(|j| format!(" -j{}", j)).unwrap_or_default();
 
+        stats.stage = Some(Stage::Build);
         callback.stage(&format!("{}{}", Stage::Build.as_str(), build_suffix));
         let build_log = self.logdir.join("build.log");
         if !self.run_usergroup_if_needed(Stage::Build, &pkgdir, &build_log)? {
-            self.notify_build_phase_exit();
-            return Ok(PkgBuildResult::Failed);
+            stats.build_duration = Some(build_phase_start.elapsed());
+            self.release_make_jobs();
+            return Ok(PkgBuildResult::Failed(stats));
         }
         let build_ok = self.run_make_stage_with_flags(
             Stage::Build,
@@ -548,16 +649,18 @@ impl<'a> PkgBuilder<'a> {
             true,
             &build_flag,
         )?;
-        self.notify_build_phase_exit();
+        stats.build_duration = Some(build_phase_start.elapsed());
+        self.release_make_jobs();
         if !build_ok {
-            return Ok(PkgBuildResult::Failed);
+            return Ok(PkgBuildResult::Failed(stats));
         }
 
         // Install
+        stats.stage = Some(Stage::Install);
         callback.stage(Stage::Install.as_str());
         let install_log = self.logdir.join("install.log");
         if !self.run_usergroup_if_needed(Stage::Install, &pkgdir, &install_log)? {
-            return Ok(PkgBuildResult::Failed);
+            return Ok(PkgBuildResult::Failed(stats));
         }
         if !self.run_make_stage(
             Stage::Install,
@@ -566,10 +669,11 @@ impl<'a> PkgBuilder<'a> {
             self.build_run_as(),
             true,
         )? {
-            return Ok(PkgBuildResult::Failed);
+            return Ok(PkgBuildResult::Failed(stats));
         }
 
         // Package
+        stats.stage = Some(Stage::Package);
         callback.stage(Stage::Package.as_str());
         if !self.run_make_stage(
             Stage::Package,
@@ -578,7 +682,7 @@ impl<'a> PkgBuilder<'a> {
             RunAs::Root,
             true,
         )? {
-            return Ok(PkgBuildResult::Failed);
+            return Ok(PkgBuildResult::Failed(stats));
         }
 
         // Get the package file path
@@ -588,14 +692,15 @@ impl<'a> PkgBuilder<'a> {
         let is_bootstrap = self.pkginfo.bootstrap_pkg() == Some("yes");
         if !is_bootstrap {
             if !self.pkg_add(&pkgfile)? {
-                return Ok(PkgBuildResult::Failed);
+                return Ok(PkgBuildResult::Failed(stats));
             }
 
             // Test package deinstall
+            stats.stage = Some(Stage::Deinstall);
             callback.stage(Stage::Deinstall.as_str());
             let _ = self.write_stage(Stage::Deinstall);
             if !self.pkg_delete(pkgname_str)? {
-                return Ok(PkgBuildResult::Failed);
+                return Ok(PkgBuildResult::Failed(stats));
             }
         }
 
@@ -619,13 +724,14 @@ impl<'a> PkgBuilder<'a> {
         fs::copy(&host_pkgfile, &dest)?;
 
         // Clean
+        stats.stage = Some(Stage::Clean);
         callback.stage(Stage::Clean.as_str());
         let _ = self.run_make_stage(Stage::Clean, &pkgdir, &["clean"], RunAs::Root, false);
 
         // Remove log directory on success
         let _ = fs::remove_dir_all(&self.logdir);
 
-        Ok(PkgBuildResult::Success)
+        Ok(PkgBuildResult::Success(stats))
     }
 
     /// Determine how to run build commands.
@@ -1067,9 +1173,13 @@ impl<'a> PkgBuilder<'a> {
      * Request MAKE_JOBS from the manager via one-shot channel.
      *
      * Sends a [`BuildPhaseEntry`] and blocks for the response.
-     * Returns `None` when dynamic_jobs is disabled.
+     * Returns `None` for packages that don't support parallel make
+     * or when dynamic_jobs is disabled.
      */
     fn request_make_jobs(&self) -> Option<usize> {
+        if !self.make_jobs.is_safe() {
+            return None;
+        }
         self.session.config.dynamic_jobs()?;
         let output_tx = self.output_tx.as_ref()?;
         let (tx, rx) = mpsc::channel();
@@ -1080,7 +1190,16 @@ impl<'a> PkgBuilder<'a> {
         rx.recv().ok()
     }
 
-    fn notify_build_phase_exit(&self) {
+    /**
+     * Release the MAKE_JOBS budget back to the manager.
+     *
+     * No-op for packages that don't support parallel make or when
+     * dynamic_jobs is disabled.
+     */
+    fn release_make_jobs(&self) {
+        if !self.make_jobs.is_safe() {
+            return;
+        }
         if self.session.config.dynamic_jobs().is_none() {
             return;
         }
@@ -1339,13 +1458,14 @@ pub struct BuildResult {
     pub pkgpath: Option<PkgPath>,
     /// Build outcome (success, failure, or skipped).
     pub outcome: BuildOutcome,
-    /// Time spent building this package.
-    pub duration: Duration,
     /// Path to build logs directory, if available.
     ///
     /// For failed builds, this contains `pre-clean.log`, `build.log`, etc.
     /// Successful builds clean up their log directories.
     pub log_dir: Option<PathBuf>,
+    /// Build-phase metrics (timing, parallelism).
+    #[serde(flatten, default)]
+    pub build_stats: PkgBuildStats,
 }
 
 /// Counts of build results by outcome category.
@@ -1541,26 +1661,8 @@ impl<'a> MakeQuery<'a> {
     }
 }
 
-/// Result of a single package build attempt.
-#[derive(Debug)]
-enum PackageBuildResult {
-    /// Build succeeded
-    Success,
-    /// Build failed
-    Failed,
-}
-
-impl std::fmt::Display for PackageBuildResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Success => write!(f, "success"),
-            Self::Failed => write!(f, "failed"),
-        }
-    }
-}
-
 impl PackageBuild {
-    fn build(&self, status_tx: &Sender<ChannelCommand>) -> anyhow::Result<PackageBuildResult> {
+    fn build(&self, status_tx: &Sender<ChannelCommand>) -> anyhow::Result<PkgBuildResult> {
         let pkgname = self.pkginfo.index.pkgname.pkgname();
         info!("Starting package build");
 
@@ -1587,6 +1689,19 @@ impl PackageBuild {
 
         let patterns = self.session.config.save_wrkdir_patterns();
 
+        // Query MAKE_JOBS_SAFE and _MAKE_JOBS_N for this package
+        let make = MakeQuery::new(&self.session, self.sandbox_id, pkgpath, &pkg_env);
+        let make_jobs_safe = make
+            .var("MAKE_JOBS_SAFE")
+            .map(|v| !v.eq_ignore_ascii_case("no"))
+            .unwrap_or(true);
+        let make_jobs = if make_jobs_safe {
+            let n = make.var("_MAKE_JOBS_N").and_then(|v| v.parse().ok());
+            MakeJobs::Jobs(n.unwrap_or(1))
+        } else {
+            MakeJobs::NotSafe
+        };
+
         // Run pre-build script if defined (always runs)
         if !self.session.sandbox.run_pre_build(
             self.sandbox_id,
@@ -1603,6 +1718,7 @@ impl PackageBuild {
             &self.pkginfo,
             envs.clone(),
             Some(status_tx.clone()),
+            make_jobs,
         );
 
         let mut callback = ChannelCallback::new(self.sandbox_id, status_tx);
@@ -1611,24 +1727,27 @@ impl PackageBuild {
         // Clear stage display
         let _ = status_tx.send(ChannelCommand::StageUpdate(self.sandbox_id, None));
 
-        let result = match &result {
-            Ok(PkgBuildResult::Success) => {
+        let result = match result {
+            Ok(r @ PkgBuildResult::Success(_)) => {
                 info!("Package build completed successfully");
-                PackageBuildResult::Success
+                r
             }
-            Ok(PkgBuildResult::Failed) => {
+            Ok(r @ PkgBuildResult::Failed(_)) => {
                 error!("Package build failed");
                 self.cleanup_after_failure(
                     status_tx, pkgname, pkgpath, logdir, patterns, &pkg_env, &envs,
                 );
-                PackageBuildResult::Failed
+                r
             }
             Err(e) => {
                 error!(error = %e, "Package build error");
                 self.cleanup_after_failure(
                     status_tx, pkgname, pkgpath, logdir, patterns, &pkg_env, &envs,
                 );
-                PackageBuildResult::Failed
+                PkgBuildResult::Failed(PkgBuildStats {
+                    make_jobs,
+                    ..PkgBuildStats::default()
+                })
             }
         };
 
@@ -1879,17 +1998,13 @@ enum ChannelCommand {
      */
     JobData(Box<PackageBuild>),
     /**
-     * Client returning a successful package build with duration.
+     * Client returning a successful package build.
      */
-    JobSuccess(PkgName, Duration),
+    JobSuccess(BuildResult),
     /**
-     * Client returning a failed package build with duration.
+     * Client returning a failed package build.
      */
-    JobFailed(PkgName, Duration),
-    /**
-     * Client returning an error during the package build.
-     */
-    JobError((PkgName, Duration, anyhow::Error)),
+    JobFailed(BuildResult),
     /**
      * Manager directing a client to quit.
      */
@@ -1957,66 +2072,40 @@ impl BuildJobs {
     /**
      * Mark a package as successful and remove it from pending dependencies.
      */
-    fn mark_success(&mut self, pkgname: &PkgName, duration: Duration) {
-        self.mark_done(pkgname, BuildOutcome::Success, duration);
-    }
-
-    /**
-     * Mark a package as done and remove it from pending dependencies.
-     */
-    fn mark_done(&mut self, pkgname: &PkgName, outcome: BuildOutcome, duration: Duration) {
-        /*
-         * Remove the package from the list of dependencies in all
-         * packages it is listed in.  Once a package has no outstanding
-         * dependencies remaining it is ready for building.
-         */
+    fn mark_success(&mut self, result: BuildResult) {
         for dep in self.incoming.values_mut() {
-            if dep.contains(pkgname) {
-                dep.remove(pkgname);
-            }
+            dep.remove(&result.pkgname);
         }
-        /*
-         * The package was already removed from "incoming" when it started
-         * building, so we only need to add it to "done".
-         */
-        self.done.insert(pkgname.clone());
-
-        // Record the result
-        let scanpkg = self.scanpkgs.get(pkgname);
-        let log_dir = Some(self.logdir.join(pkgname.pkgname()));
-        self.results.push(BuildResult {
-            pkgname: pkgname.clone(),
-            pkgpath: scanpkg.map(|s| s.pkgpath.clone()),
-            outcome,
-            duration,
-            log_dir,
-        });
+        self.done.insert(result.pkgname.clone());
+        self.results.push(result);
     }
 
     /**
      * Recursively mark a package and its dependents as failed.
      */
-    fn mark_failure(&mut self, pkgname: &PkgName, duration: Duration, reason: &str) {
+    fn mark_failure(&mut self, result: BuildResult) {
+        let pkgname = &result.pkgname;
         trace!(pkgname = %pkgname.pkgname(), "mark_failure called");
         let start = std::time::Instant::now();
         let mut broken: HashSet<PkgName> = HashSet::new();
         let mut to_check: Vec<PkgName> = vec![];
-        to_check.push(pkgname.clone());
         /*
          * Starting with the original failed package, recursively loop through
          * adding any packages that depend on it, adding them to broken.
          * Uses precomputed reverse_deps for O(1) lookup instead of O(n) scan.
          */
+        if let Some(dependents) = self.reverse_deps.get(pkgname) {
+            for pkg in dependents {
+                to_check.push(pkg.clone());
+            }
+        }
         loop {
-            /* No packages left to check, we're done. */
             let Some(badpkg) = to_check.pop() else {
                 break;
             };
-            /* Already checked this package. */
             if broken.contains(&badpkg) {
                 continue;
             }
-            /* Add all packages that depend on this one. */
             if let Some(dependents) = self.reverse_deps.get(&badpkg) {
                 for pkg in dependents {
                     to_check.push(pkg.clone());
@@ -2024,38 +2113,30 @@ impl BuildJobs {
             }
             broken.insert(badpkg);
         }
-        trace!(pkgname = %pkgname.pkgname(), broken_count = broken.len(), elapsed_ms = start.elapsed().as_millis(), "mark_failure found broken packages");
-        /*
-         * We now have a full HashSet of affected packages.  Remove them from
-         * incoming and move to failed.  The original failed package will
-         * already be removed from incoming, we rely on .remove() accepting
-         * this.
-         */
-        let is_original = |p: &PkgName| p == pkgname;
+        trace!(pkgname = %pkgname.pkgname(), broken_count = broken.len() + 1, elapsed_ms = start.elapsed().as_millis(), "mark_failure found broken packages");
+
+        // Record the original failure
+        self.incoming.remove(pkgname);
+        self.failed.insert(pkgname.clone());
+        let pkgname = result.pkgname.clone();
+        self.results.push(result);
+
+        // Record indirect failures for all dependents
         for pkg in broken {
             self.incoming.remove(&pkg);
             self.failed.insert(pkg.clone());
 
-            // Record the result
             let scanpkg = self.scanpkgs.get(&pkg);
             let log_dir = Some(self.logdir.join(pkg.pkgname()));
-            let (outcome, dur) = if is_original(&pkg) {
-                (BuildOutcome::Failed(reason.to_string()), duration)
-            } else {
-                (
-                    BuildOutcome::Skipped(SkipReason::IndirectFailed(format!(
-                        "dependency {} failed",
-                        pkgname.pkgname()
-                    ))),
-                    Duration::ZERO,
-                )
-            };
             self.results.push(BuildResult {
                 pkgname: pkg,
                 pkgpath: scanpkg.map(|s| s.pkgpath.clone()),
-                outcome,
-                duration: dur,
+                outcome: BuildOutcome::Skipped(SkipReason::IndirectFailed(format!(
+                    "dependency {} failed",
+                    pkgname.pkgname()
+                ))),
                 log_dir,
+                build_stats: PkgBuildStats::default(),
             });
         }
         trace!(pkgname = %pkgname.pkgname(), total_results = self.results.len(), elapsed_ms = start.elapsed().as_millis(), "mark_failure completed");
@@ -2439,7 +2520,7 @@ impl Build {
                         }
                         ChannelCommand::JobData(pkg) => {
                             let pkgname = pkg.pkginfo.index.pkgname.clone();
-                            let pkgpath = &pkg.pkginfo.pkgpath;
+                            let pkgpath = pkg.pkginfo.pkgpath.clone();
                             let span = info_span!(
                                 "build",
                                 sandbox_id = pkg.sandbox_id,
@@ -2448,29 +2529,65 @@ impl Build {
                             );
                             let _guard = span.enter();
 
+                            let log_dir = pkg.session.config.logdir().join(pkgname.pkgname());
+                            let timestamp = epoch_secs();
                             let build_start = Instant::now();
                             let result = pkg.build(&manager_tx);
-                            let duration = build_start.elapsed();
+                            let total_duration = build_start.elapsed();
                             trace!(
-                                elapsed_ms = duration.as_millis(),
+                                elapsed_ms = total_duration.as_millis(),
                                 result = %result.as_ref().map_or("error".to_string(), |r| r.to_string()),
                                 "Build finished"
                             );
 
-                            match result {
-                                Ok(PackageBuildResult::Success) => {
-                                    let _ = manager_tx
-                                        .send(ChannelCommand::JobSuccess(pkgname, duration));
+                            let mut build_stats = match &result {
+                                Ok(PkgBuildResult::Success(s) | PkgBuildResult::Failed(s)) => {
+                                    s.clone()
                                 }
-                                Ok(PackageBuildResult::Failed) => {
-                                    let _ = manager_tx
-                                        .send(ChannelCommand::JobFailed(pkgname, duration));
+                                Err(_) => PkgBuildStats::default(),
+                            };
+                            build_stats.total_duration = total_duration;
+                            build_stats.timestamp = timestamp;
+
+                            match result {
+                                Ok(PkgBuildResult::Success(_)) => {
+                                    let _ =
+                                        manager_tx.send(ChannelCommand::JobSuccess(BuildResult {
+                                            pkgname,
+                                            pkgpath: Some(pkgpath),
+                                            outcome: BuildOutcome::Success,
+                                            log_dir: Some(log_dir),
+                                            build_stats,
+                                        }));
+                                }
+                                Ok(PkgBuildResult::Failed(_)) => {
+                                    let _ =
+                                        manager_tx.send(ChannelCommand::JobFailed(BuildResult {
+                                            pkgname,
+                                            pkgpath: Some(pkgpath),
+                                            outcome: BuildOutcome::Failed(
+                                                "Build failed".to_string(),
+                                            ),
+                                            log_dir: Some(log_dir),
+                                            build_stats,
+                                        }));
                                 }
                                 Err(e) => {
-                                    // Don't report errors caused by shutdown
                                     if !shutdown_for_worker.load(Ordering::SeqCst) {
-                                        let _ = manager_tx
-                                            .send(ChannelCommand::JobError((pkgname, duration, e)));
+                                        tracing::error!(
+                                            error = %e,
+                                            pkgname = %pkgname.pkgname(),
+                                            "Build error"
+                                        );
+                                        let _ = manager_tx.send(ChannelCommand::JobFailed(
+                                            BuildResult {
+                                                pkgname,
+                                                pkgpath: Some(pkgpath),
+                                                outcome: BuildOutcome::Failed(e.to_string()),
+                                                log_dir: Some(log_dir),
+                                                build_stats,
+                                            },
+                                        ));
                                     }
                                 }
                             }
@@ -2597,8 +2714,10 @@ impl Build {
                             }
                         };
                     }
-                    ChannelCommand::JobSuccess(pkgname, duration) => {
-                        jobs.mark_success(&pkgname, duration);
+                    ChannelCommand::JobSuccess(result) => {
+                        let pkgname = result.pkgname.clone();
+                        let duration = result.build_stats.total_duration;
+                        jobs.mark_success(result);
                         jobs.running.remove(&pkgname);
                         if let Some(ref mut budget) = make_jobs_budget {
                             if let Some(&sid) = thread_packages
@@ -2610,12 +2729,10 @@ impl Build {
                             }
                         }
 
-                        // Send result for immediate saving
-                        if let Some(result) = jobs.results.last() {
-                            let _ = completed_tx.send(result.clone());
+                        if let Some(r) = jobs.results.last() {
+                            let _ = completed_tx.send(r.clone());
                         }
 
-                        // Find which thread completed and mark idle
                         if let Ok(mut p) = progress_clone.lock() {
                             let _ = p.print_status(&format!(
                                 "       Built {} ({})",
@@ -2633,9 +2750,11 @@ impl Build {
                             let _ = p.render();
                         }
                     }
-                    ChannelCommand::JobFailed(pkgname, duration) => {
+                    ChannelCommand::JobFailed(result) => {
+                        let pkgname = result.pkgname.clone();
+                        let duration = result.build_stats.total_duration;
                         let results_before = jobs.results.len();
-                        jobs.mark_failure(&pkgname, duration, "Build failed");
+                        jobs.mark_failure(result);
                         jobs.running.remove(&pkgname);
                         if let Some(ref mut budget) = make_jobs_budget {
                             if let Some(&sid) = thread_packages
@@ -2647,12 +2766,10 @@ impl Build {
                             }
                         }
 
-                        // Send all new results for immediate saving
-                        for result in jobs.results.iter().skip(results_before) {
-                            let _ = completed_tx.send(result.clone());
+                        for r in jobs.results.iter().skip(results_before) {
+                            let _ = completed_tx.send(r.clone());
                         }
 
-                        // Find which thread failed and mark idle
                         if let Ok(mut p) = progress_clone.lock() {
                             let _ = p.print_status(&format!(
                                 "      Failed {} ({})",
@@ -2669,44 +2786,6 @@ impl Build {
                             }
                             let _ = p.render();
                         }
-                    }
-                    ChannelCommand::JobError((pkgname, duration, e)) => {
-                        let results_before = jobs.results.len();
-                        jobs.mark_failure(&pkgname, duration, &e.to_string());
-                        jobs.running.remove(&pkgname);
-                        if let Some(ref mut budget) = make_jobs_budget {
-                            if let Some(&sid) = thread_packages
-                                .iter()
-                                .find(|(_, p)| *p == &pkgname)
-                                .map(|(t, _)| t)
-                            {
-                                budget.release(sid);
-                            }
-                        }
-
-                        // Send all new results for immediate saving
-                        for result in jobs.results.iter().skip(results_before) {
-                            let _ = completed_tx.send(result.clone());
-                        }
-
-                        // Find which thread errored and mark idle
-                        if let Ok(mut p) = progress_clone.lock() {
-                            let _ = p.print_status(&format!(
-                                "      Failed {} ({})",
-                                pkgname.pkgname(),
-                                format_duration(duration)
-                            ));
-                            p.state_mut().increment_failed();
-                            for (tid, pkg) in &thread_packages {
-                                if pkg == &pkgname {
-                                    p.clear_output_buffer(*tid);
-                                    p.state_mut().set_worker_idle(*tid);
-                                    break;
-                                }
-                            }
-                            let _ = p.render();
-                        }
-                        tracing::error!(error = %e, pkgname = %pkgname.pkgname(), "Build error");
                     }
                     ChannelCommand::StageUpdate(tid, stage) => {
                         if let Ok(mut p) = progress_clone.lock() {

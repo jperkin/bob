@@ -138,7 +138,8 @@ impl RunContext {
 
 pub use action::{Action, ActionType, FSType};
 pub use build::{
-    Build, BuildCounts, BuildOutcome, BuildReason, BuildResult, BuildSummary, pkg_up_to_date,
+    Build, BuildCounts, BuildOutcome, BuildReason, BuildResult, BuildSummary, MakeJobs,
+    PkgBuildStats, Stage, pkg_up_to_date,
 };
 pub use config::{Config, DynamicJobs, Options, Pkgsrc, PkgsrcEnv, Sandboxes};
 pub use db::Database;
