@@ -1468,6 +1468,30 @@ pub struct BuildResult {
     pub build_stats: PkgBuildStats,
 }
 
+impl BuildResult {
+    /**
+     * Build a history input record for actual builds (success/failed).
+     * Returns None for skipped, up-to-date, or indirect outcomes.
+     */
+    pub fn history_input(&self) -> Option<crate::db::HistoryInput> {
+        let outcome = match &self.outcome {
+            BuildOutcome::Success => "success",
+            BuildOutcome::Failed(_) => "failed",
+            _ => return None,
+        };
+        Some(crate::db::HistoryInput {
+            pkgpath: self.pkgpath.as_ref()?.to_string(),
+            pkgname: self.pkgname.pkgname().to_string(),
+            outcome: outcome.to_string(),
+            make_jobs: self.build_stats.make_jobs.count(),
+            stage: self.build_stats.stage.map(|s| s.as_str().to_string()),
+            build_duration: self.build_stats.build_duration,
+            total_duration: self.build_stats.total_duration,
+            timestamp: self.build_stats.timestamp,
+        })
+    }
+}
+
 /// Counts of build results by outcome category.
 #[derive(Clone, Debug, Default)]
 pub struct BuildCounts {
@@ -2846,7 +2870,7 @@ impl Build {
             "Worker threads completed"
         );
 
-        // Save all completed results to database.
+        // Save all completed results to database and history.
         // Important: We save results even on interrupt - these are builds that
         // COMPLETED before the interrupt, and should be preserved. Only builds
         // that were in-progress when interrupted are excluded (they never sent
@@ -2865,6 +2889,16 @@ impl Build {
                 }
             } else {
                 saved_count += 1;
+            }
+
+            if let Some(input) = result.history_input() {
+                if let Err(e) = db.record_history(&input) {
+                    warn!(
+                        pkgname = %result.pkgname.pkgname(),
+                        error = %e,
+                        "Failed to save build history"
+                    );
+                }
             }
         }
         if saved_count > 0 {

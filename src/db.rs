@@ -32,6 +32,7 @@
  * - `metadata` - Key-value store for flags and cached data
  */
 
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -46,9 +47,14 @@ use crate::config::PkgsrcEnv;
 use crate::try_println;
 
 /**
- * Schema version - update when schema changes.
+ * Schema version for bob.db - update when schema changes.
  */
 const SCHEMA_VERSION: i32 = 7;
+
+/**
+ * Schema version for history.db - update when history schema changes.
+ */
+const HISTORY_SCHEMA_VERSION: i32 = 2;
 
 /**
  * Lightweight package row without full scan data.
@@ -114,10 +120,49 @@ impl PackageRow {
 }
 
 /**
- * SQLite database for scan and build caching.
+ * Input for recording a build to the history database.
+ */
+pub struct HistoryInput {
+    pub pkgpath: String,
+    pub pkgname: String,
+    pub outcome: String,
+    /// MAKE_JOBS used: 0 means MAKE_JOBS_SAFE=no (parallel make not supported).
+    pub make_jobs: usize,
+    /// Last build stage attempted, if any.
+    pub stage: Option<String>,
+    /// Duration of the build (compilation) phase only, None if never reached.
+    pub build_duration: Option<Duration>,
+    /// Wall-clock duration for the entire build.
+    pub total_duration: Duration,
+    /// Unix epoch when the build started.
+    pub timestamp: i64,
+}
+
+/**
+ * A build history record read from the database.
+ */
+pub struct HistoryRecord {
+    pub pkgpath: String,
+    pub pkgname: String,
+    pub outcome: String,
+    pub make_jobs: usize,
+    pub stage: Option<String>,
+    pub build_duration: Option<Duration>,
+    pub total_duration: Duration,
+    /// Pre-formatted local timestamp from SQLite's `datetime()`.
+    pub timestamp: String,
+}
+
+/**
+ * SQLite database for scan, build, and history data.
+ *
+ * The history connection is opened lazily on first use, so commands
+ * that don't touch history (e.g. `bob scan`) never create `history.db`.
  */
 pub struct Database {
     conn: Connection,
+    dbdir: PathBuf,
+    history_conn: OnceCell<Connection>,
 }
 
 /**
@@ -157,14 +202,20 @@ impl Drop for TransactionGuard<'_> {
 
 impl Database {
     /**
-     * Open or create a database at the given path.
+     * Open or create the database in the given directory.
+     *
+     * Opens `bob.db` (scan/build cache) immediately. The history
+     * connection to `history.db` is opened lazily on first use.
      */
-    pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).context("Failed to create database directory")?;
-        }
-        let conn = Connection::open(path).context("Failed to open database")?;
-        let db = Self { conn };
+    pub fn open(dbdir: &Path) -> Result<Self> {
+        std::fs::create_dir_all(dbdir).context("Failed to create database directory")?;
+
+        let conn = Connection::open(dbdir.join("bob.db")).context("Failed to open database")?;
+        let db = Self {
+            conn,
+            dbdir: dbdir.to_path_buf(),
+            history_conn: OnceCell::new(),
+        };
         db.configure_pragmas()?;
         db.init()?;
         Ok(db)
@@ -1453,4 +1504,168 @@ impl Database {
 
         Ok(())
     }
+
+    // ========================================================================
+    // BUILD HISTORY
+    // ========================================================================
+
+    /**
+     * Get the history database connection, opening it on first use.
+     */
+    fn history_conn(&self) -> Result<&Connection> {
+        if let Some(conn) = self.history_conn.get() {
+            return Ok(conn);
+        }
+        let conn = open_history_conn(&self.dbdir)?;
+        let _ = self.history_conn.set(conn);
+        self.history_conn
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("history connection not initialized"))
+    }
+
+    /**
+     * Record a build in the history database.
+     */
+    pub fn record_history(&self, rec: &HistoryInput) -> Result<()> {
+        let conn = self.history_conn()?;
+        let build_ms = rec.build_duration.map(|d| d.as_millis() as i64);
+        let total_ms = rec.total_duration.as_millis() as i64;
+        conn.execute(
+            "INSERT INTO build_history \
+                 (pkgpath, pkgname, outcome, make_jobs, stage, \
+                  build_duration_ms, total_duration_ms, timestamp) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                rec.pkgpath,
+                rec.pkgname,
+                rec.outcome,
+                rec.make_jobs as i64,
+                rec.stage,
+                build_ms,
+                total_ms,
+                rec.timestamp,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /**
+     * Query build history, optionally filtering by regex on pkgpath
+     * or pkgname. Results are returned most recent first.
+     */
+    pub fn query_history(&self, pattern: Option<&regex::Regex>) -> Result<Vec<HistoryRecord>> {
+        let conn = self.history_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT pkgpath, pkgname, outcome, make_jobs, stage, \
+                    build_duration_ms, total_duration_ms, \
+                    datetime(timestamp, 'unixepoch', 'localtime') \
+             FROM build_history ORDER BY timestamp DESC, id DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let build_ms: Option<i64> = row.get(5)?;
+            let total_ms: i64 = row.get(6)?;
+            Ok(HistoryRecord {
+                pkgpath: row.get(0)?,
+                pkgname: row.get(1)?,
+                outcome: row.get(2)?,
+                make_jobs: row.get::<_, i64>(3)? as usize,
+                stage: row.get(4)?,
+                build_duration: build_ms.map(|ms| Duration::from_millis(ms as u64)),
+                total_duration: Duration::from_millis(total_ms as u64),
+                timestamp: row.get(7)?,
+            })
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            let rec = row?;
+            if let Some(re) = pattern {
+                if !re.is_match(&rec.pkgpath) && !re.is_match(&rec.pkgname) {
+                    continue;
+                }
+            }
+            results.push(rec);
+        }
+        Ok(results)
+    }
+
+    /**
+     * Return the average build-phase duration for a package, based on
+     * successful builds only.
+     */
+    pub fn avg_build_duration(&self, pkgpath: &str) -> Result<Option<Duration>> {
+        let conn = self.history_conn()?;
+        let result: Option<f64> = conn.query_row(
+            "SELECT AVG(build_duration_ms) FROM build_history \
+             WHERE pkgpath = ?1 AND outcome = 'success' \
+               AND build_duration_ms IS NOT NULL",
+            params![pkgpath],
+            |row| row.get(0),
+        )?;
+        Ok(result.map(|ms| Duration::from_millis(ms as u64)))
+    }
+}
+
+/**
+ * Open and initialize the history database connection.
+ */
+fn open_history_conn(dbdir: &Path) -> Result<Connection> {
+    let conn =
+        Connection::open(dbdir.join("history.db")).context("Failed to open history database")?;
+
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA cache_size = -8000;
+         PRAGMA temp_store = MEMORY;
+         PRAGMA foreign_keys = ON;",
+    )?;
+
+    let has_schema: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master \
+         WHERE type='table' AND name='schema_version'",
+        [],
+        |row| row.get::<_, i32>(0).map(|c| c > 0),
+    )?;
+
+    if !has_schema {
+        conn.execute_batch(&format!(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL);
+             INSERT INTO schema_version (version) VALUES ({});
+
+             CREATE TABLE build_history (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 pkgpath TEXT NOT NULL,
+                 pkgname TEXT NOT NULL,
+                 outcome TEXT NOT NULL,
+                 make_jobs INTEGER NOT NULL,
+                 stage TEXT,
+                 build_duration_ms INTEGER,
+                 total_duration_ms INTEGER NOT NULL,
+                 timestamp INTEGER NOT NULL
+             );
+
+             CREATE INDEX idx_history_pkgpath
+                 ON build_history(pkgpath);
+             CREATE INDEX idx_history_timestamp
+                 ON build_history(timestamp);",
+            HISTORY_SCHEMA_VERSION
+        ))?;
+    } else {
+        let version: i32 =
+            conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+                row.get(0)
+            })?;
+
+        if version != HISTORY_SCHEMA_VERSION {
+            anyhow::bail!(
+                "History schema mismatch: found v{}, expected v{}. \
+                 Remove history.db to reset.",
+                version,
+                HISTORY_SCHEMA_VERSION
+            );
+        }
+    }
+
+    Ok(conn)
 }

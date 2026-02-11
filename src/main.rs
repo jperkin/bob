@@ -62,8 +62,7 @@ impl BuildRunner {
             bail!("{} configuration error(s) found", errors.len());
         }
 
-        let db_path = config.dbdir().join("bob.db");
-        let db = Database::open(&db_path)?;
+        let db = Database::open(config.dbdir())?;
 
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let shutdown_for_handler = Arc::clone(&shutdown_flag);
@@ -503,6 +502,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: UtilCmd,
     },
+    /// View build history
+    History {
+        /// Filter by pkgpath or pkgname (regex)
+        package: Option<String>,
+    },
     /// Run SQL commands against the database
     Db {
         /// SQL command to execute (omit for interactive mode)
@@ -667,10 +671,15 @@ fn run() -> Result<()> {
             }
 
             println!("Generating report...");
-            let db = Database::open(&db_path)?;
+            let db = Database::open(config.dbdir())?;
             let report_path = config.logdir().join("report.html");
             report::write_html_report(&db, config.logdir(), &report_path)?;
             println!("HTML report written to: {}", report_path.display());
+        }
+        Cmd::History { package } => {
+            let config = Config::load(args.config.as_deref())?;
+            let db = Database::open(config.dbdir())?;
+            cmd::history::run(&db, package.as_deref())?;
         }
         Cmd::Clean { logs_only } => {
             let config = Config::load(args.config.as_deref())?;
@@ -687,8 +696,7 @@ fn run() -> Result<()> {
         }
         Cmd::Db { sql } => {
             let config = Config::load(args.config.as_deref())?;
-            let db_path = config.dbdir().join("bob.db");
-            let db = Database::open(&db_path)?;
+            let db = Database::open(config.dbdir())?;
 
             let Some(sql) = sql else {
                 bail!("SQL command required");
@@ -698,16 +706,14 @@ fn run() -> Result<()> {
         }
         Cmd::List { cmd } => {
             let config = Config::load(args.config.as_deref())?;
-            let db_path = config.dbdir().join("bob.db");
-            let db = Database::open(&db_path)?;
+            let db = Database::open(config.dbdir())?;
             cmd::list::run(&db, cmd)?;
         }
         Cmd::Util {
             cmd: UtilCmd::PrintDepGraph { output },
         } => {
             let config = Config::load(args.config.as_deref())?;
-            let db_path = config.dbdir().join("bob.db");
-            let db = Database::open(&db_path)?;
+            let db = Database::open(config.dbdir())?;
 
             let count = db.count_packages()?;
             if count == 0 {
@@ -747,8 +753,7 @@ fn run() -> Result<()> {
             cmd: UtilCmd::PrintPresolve { output },
         } => {
             let config = Config::load(args.config.as_deref())?;
-            let db_path = config.dbdir().join("bob.db");
-            let db = Database::open(&db_path)?;
+            let db = Database::open(config.dbdir())?;
 
             let count = db.count_packages()?;
             if count == 0 {
@@ -798,8 +803,7 @@ fn run() -> Result<()> {
             use std::io::BufReader;
 
             let config = Config::load(args.config.as_deref())?;
-            let db_path = config.dbdir().join("bob.db");
-            let db = Database::open(&db_path)?;
+            let db = Database::open(config.dbdir())?;
 
             println!("Importing scan data from {}", file.display());
 
@@ -856,8 +860,7 @@ fn run() -> Result<()> {
             cmd: UtilCmd::PrintPscan { output },
         } => {
             let config = Config::load(args.config.as_deref())?;
-            let db_path = config.dbdir().join("bob.db");
-            let db = Database::open(&db_path)?;
+            let db = Database::open(config.dbdir())?;
 
             let packages = db.get_all_packages()?;
             if packages.is_empty() {

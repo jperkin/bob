@@ -137,10 +137,6 @@ impl TestHarness {
         self.root.join("config.lua")
     }
 
-    fn db_path(&self) -> PathBuf {
-        self.dbdir().join("bob.db")
-    }
-
     fn packages_dir(&self) -> PathBuf {
         self.root.join("packages")
     }
@@ -413,7 +409,7 @@ pkgsrc = {{
 
     /// Open the database.
     fn open_db(&self) -> Result<Database> {
-        Database::open(&self.db_path())
+        Database::open(&self.dbdir())
     }
 
     /// Create a RunContext with no shutdown.
