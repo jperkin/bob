@@ -86,7 +86,7 @@ impl<'a> PkgDef<'a> {
 
 /// Detect a usable bmake binary.
 fn find_make() -> Option<PathBuf> {
-    for candidate in &["/opt/pkg/bin/bmake", "/usr/pkg/bin/bmake", "/usr/bin/bmake"] {
+    for candidate in &["/opt/pkg/bin/bmake", "/usr/pkg/bin/bmake", "/usr/bin/make"] {
         let p = PathBuf::from(candidate);
         if p.exists() {
             return Some(p);
