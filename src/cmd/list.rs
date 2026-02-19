@@ -23,7 +23,7 @@ use crossterm::terminal;
 use regex::Regex;
 use serde_json;
 
-use bob::build::BuildOutcome;
+use bob::build::{BuildOutcome, OutcomeType};
 use bob::db::{Database, PackageStatusRow};
 use bob::scan::SkipReason;
 use bob::try_println;
@@ -546,8 +546,8 @@ fn print_build_status(
     let get_status = |pkg: &PackageStatusRow| -> (&'static str, String) {
         if let Some(outcome) = pkg
             .build_outcome
-            .as_deref()
-            .and_then(|key| BuildOutcome::from_db(key, pkg.outcome_detail.clone()))
+            .and_then(|id| OutcomeType::try_from(id).ok())
+            .map(|ot| BuildOutcome::from_db(ot, pkg.outcome_detail.clone()))
         {
             (outcome.status(), outcome.reason().unwrap_or_default())
         } else if let Some(reason) = &pkg.build_reason {

@@ -369,19 +369,40 @@ pub fn pkg_up_to_date(
 
 /**
  * Build stages in order of execution.
+ *
+ * Discriminants match the `stage_types` lookup table in the database.
  */
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[repr(i32)]
 pub enum Stage {
-    PreClean,
-    Depends,
-    Checksum,
-    Configure,
-    Build,
-    Install,
-    Package,
-    Deinstall,
-    Clean,
+    PreClean = 1,
+    Depends = 2,
+    Checksum = 3,
+    Configure = 4,
+    Build = 5,
+    Install = 6,
+    Package = 7,
+    Deinstall = 8,
+    Clean = 9,
+}
+
+impl TryFrom<i32> for Stage {
+    type Error = anyhow::Error;
+    fn try_from(v: i32) -> anyhow::Result<Self> {
+        match v {
+            1 => Ok(Self::PreClean),
+            2 => Ok(Self::Depends),
+            3 => Ok(Self::Checksum),
+            4 => Ok(Self::Configure),
+            5 => Ok(Self::Build),
+            6 => Ok(Self::Install),
+            7 => Ok(Self::Package),
+            8 => Ok(Self::Deinstall),
+            9 => Ok(Self::Clean),
+            _ => anyhow::bail!("Unknown stage id: {}", v),
+        }
+    }
 }
 
 impl Stage {
@@ -396,6 +417,67 @@ impl Stage {
             Stage::Package => "package",
             Stage::Deinstall => "deinstall",
             Stage::Clean => "clean",
+        }
+    }
+}
+
+/**
+ * Database representation of build outcomes.
+ *
+ * This is the flat discriminant stored in the `outcome_types` lookup
+ * table.  [`BuildOutcome`] and [`SkipReason`] carry associated data;
+ * `OutcomeType` is the integer key.
+ */
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum OutcomeType {
+    Success = 1,
+    Failed = 2,
+    UpToDate = 3,
+    PkgSkip = 4,
+    PkgFail = 5,
+    IndirectPreskip = 6,
+    IndirectPrefail = 7,
+    Unresolved = 8,
+    IndirectUnresolved = 9,
+    IndirectFailed = 10,
+}
+
+impl OutcomeType {
+    /**
+     * Display name matching the lookup table.
+     */
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failed => "failed",
+            Self::UpToDate => "up_to_date",
+            Self::PkgSkip => "pkg_skip",
+            Self::PkgFail => "pkg_fail",
+            Self::IndirectPreskip => "indirect_preskip",
+            Self::IndirectPrefail => "indirect_prefail",
+            Self::Unresolved => "unresolved",
+            Self::IndirectUnresolved => "indirect_unresolved",
+            Self::IndirectFailed => "indirect_failed",
+        }
+    }
+}
+
+impl TryFrom<i32> for OutcomeType {
+    type Error = anyhow::Error;
+    fn try_from(v: i32) -> anyhow::Result<Self> {
+        match v {
+            1 => Ok(Self::Success),
+            2 => Ok(Self::Failed),
+            3 => Ok(Self::UpToDate),
+            4 => Ok(Self::PkgSkip),
+            5 => Ok(Self::PkgFail),
+            6 => Ok(Self::IndirectPreskip),
+            7 => Ok(Self::IndirectPrefail),
+            8 => Ok(Self::Unresolved),
+            9 => Ok(Self::IndirectUnresolved),
+            10 => Ok(Self::IndirectFailed),
+            _ => anyhow::bail!("Unknown outcome type id: {}", v),
         }
     }
 }
@@ -1398,13 +1480,15 @@ pub enum BuildOutcome {
 }
 
 impl BuildOutcome {
-    /// Returns the database key for this outcome variant.
-    pub fn db_key(&self) -> &'static str {
+    /**
+     * Returns the outcome type for database storage.
+     */
+    pub fn outcome_type(&self) -> OutcomeType {
         match self {
-            BuildOutcome::Success => "success",
-            BuildOutcome::UpToDate => "up_to_date",
-            BuildOutcome::Failed(_) => "failed",
-            BuildOutcome::Skipped(skip) => skip.db_key(),
+            BuildOutcome::Success => OutcomeType::Success,
+            BuildOutcome::UpToDate => OutcomeType::UpToDate,
+            BuildOutcome::Failed(_) => OutcomeType::Failed,
+            BuildOutcome::Skipped(skip) => skip.outcome_type(),
         }
     }
 
@@ -1417,13 +1501,16 @@ impl BuildOutcome {
         }
     }
 
-    /// Creates a BuildOutcome from database key and detail.
-    pub fn from_db(key: &str, detail: Option<String>) -> Option<Self> {
-        match key {
-            "success" => Some(BuildOutcome::Success),
-            "up_to_date" => Some(BuildOutcome::UpToDate),
-            "failed" => Some(BuildOutcome::Failed(detail.unwrap_or_default())),
-            _ => SkipReason::from_db(key, detail.unwrap_or_default()).map(BuildOutcome::Skipped),
+    /**
+     * Creates a BuildOutcome from database outcome type and detail.
+     */
+    pub fn from_db(ot: OutcomeType, detail: Option<String>) -> Self {
+        match ot {
+            OutcomeType::Success => BuildOutcome::Success,
+            OutcomeType::UpToDate => BuildOutcome::UpToDate,
+            OutcomeType::Failed => BuildOutcome::Failed(detail.unwrap_or_default()),
+            _ => SkipReason::from_db(ot, detail.unwrap_or_default())
+                .map_or_else(|| unreachable!(), BuildOutcome::Skipped),
         }
     }
 
@@ -1475,16 +1562,16 @@ impl BuildResult {
      */
     pub fn history_input(&self) -> Option<crate::db::HistoryInput> {
         let outcome = match &self.outcome {
-            BuildOutcome::Success => "success",
-            BuildOutcome::Failed(_) => "failed",
+            BuildOutcome::Success => OutcomeType::Success,
+            BuildOutcome::Failed(_) => OutcomeType::Failed,
             _ => return None,
         };
         Some(crate::db::HistoryInput {
             pkgpath: self.pkgpath.as_ref()?.to_string(),
             pkgname: self.pkgname.pkgname().to_string(),
-            outcome: outcome.to_string(),
+            outcome,
             make_jobs: self.build_stats.make_jobs.count(),
-            stage: self.build_stats.stage.map(|s| s.as_str().to_string()),
+            stage: self.build_stats.stage,
             build_duration: self.build_stats.build_duration,
             total_duration: self.build_stats.total_duration,
             timestamp: self.build_stats.timestamp,

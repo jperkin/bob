@@ -65,7 +65,10 @@ pub fn run(db: &Database, package: Option<&str>) -> Result<()> {
     let mut rows: Vec<[String; 8]> = Vec::new();
     for rec in &records {
         let ts = rec.timestamp.clone();
-        let stage = rec.stage.as_deref().unwrap_or("-").to_string();
+        let stage = rec
+            .stage
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_else(|| "-".to_string());
         let jobs = if rec.make_jobs == 0 {
             "-".to_string()
         } else {
@@ -80,7 +83,7 @@ pub fn run(db: &Database, package: Option<&str>) -> Result<()> {
             ts,
             rec.pkgpath.clone(),
             rec.pkgname.clone(),
-            rec.outcome.clone(),
+            rec.outcome.as_str().to_string(),
             stage,
             jobs,
             build,

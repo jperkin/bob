@@ -42,19 +42,19 @@ use pkgsrc::{PkgName, PkgPath, ScanIndex};
 use rusqlite::{Connection, params};
 use tracing::{debug, warn};
 
-use crate::build::{BuildOutcome, BuildResult, PkgBuildStats};
+use crate::build::{BuildOutcome, BuildResult, OutcomeType, PkgBuildStats, Stage};
 use crate::config::PkgsrcEnv;
 use crate::try_println;
 
 /**
  * Schema version for bob.db - update when schema changes.
  */
-const SCHEMA_VERSION: i32 = 7;
+const SCHEMA_VERSION: i32 = 8;
 
 /**
  * Schema version for history.db - update when history schema changes.
  */
-const HISTORY_SCHEMA_VERSION: i32 = 2;
+const HISTORY_SCHEMA_VERSION: i32 = 3;
 
 /**
  * Lightweight package row without full scan data.
@@ -97,7 +97,7 @@ pub struct PackageStatusRow {
     pub fail_reason: Option<String>,
     pub build_reason: Option<String>,
     pub multi_version: Option<String>,
-    pub build_outcome: Option<String>,
+    pub build_outcome: Option<i32>,
     pub outcome_detail: Option<String>,
 }
 
@@ -125,11 +125,11 @@ impl PackageRow {
 pub struct HistoryInput {
     pub pkgpath: String,
     pub pkgname: String,
-    pub outcome: String,
+    pub outcome: OutcomeType,
     /// MAKE_JOBS used: 0 means MAKE_JOBS_SAFE=no (parallel make not supported).
     pub make_jobs: usize,
     /// Last build stage attempted, if any.
-    pub stage: Option<String>,
+    pub stage: Option<Stage>,
     /// Duration of the build (compilation) phase only, None if never reached.
     pub build_duration: Option<Duration>,
     /// Wall-clock duration for the entire build.
@@ -144,9 +144,9 @@ pub struct HistoryInput {
 pub struct HistoryRecord {
     pub pkgpath: String,
     pub pkgname: String,
-    pub outcome: String,
+    pub outcome: OutcomeType,
     pub make_jobs: usize,
-    pub stage: Option<String>,
+    pub stage: Option<Stage>,
     pub build_duration: Option<Duration>,
     pub total_duration: Duration,
     /// Pre-formatted local timestamp from SQLite's `datetime()`.
@@ -287,6 +287,26 @@ impl Database {
             "CREATE TABLE schema_version (version INTEGER NOT NULL);
              INSERT INTO schema_version (version) VALUES ({});
 
+             CREATE TABLE outcome_types (
+                 id INTEGER PRIMARY KEY,
+                 name TEXT UNIQUE NOT NULL
+             );
+             INSERT INTO outcome_types (id, name) VALUES
+                 (1, 'success'), (2, 'failed'), (3, 'up_to_date'),
+                 (4, 'pkg_skip'), (5, 'pkg_fail'),
+                 (6, 'indirect_preskip'), (7, 'indirect_prefail'),
+                 (8, 'unresolved'), (9, 'indirect_unresolved'),
+                 (10, 'indirect_failed');
+
+             CREATE TABLE stage_types (
+                 id INTEGER PRIMARY KEY,
+                 name TEXT UNIQUE NOT NULL
+             );
+             INSERT INTO stage_types (id, name) VALUES
+                 (1, 'pre-clean'), (2, 'depends'), (3, 'checksum'),
+                 (4, 'configure'), (5, 'build'), (6, 'install'),
+                 (7, 'package'), (8, 'deinstall'), (9, 'clean');
+
              CREATE TABLE packages (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  pkgname TEXT UNIQUE NOT NULL,
@@ -326,8 +346,9 @@ impl Database {
              CREATE TABLE builds (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
-                 outcome TEXT NOT NULL,
+                 outcome INTEGER NOT NULL REFERENCES outcome_types(id),
                  outcome_detail TEXT,
+                 stage INTEGER REFERENCES stage_types(id),
                  duration_ms INTEGER NOT NULL DEFAULT 0,
                  log_dir TEXT,
                  failed_dep_id INTEGER REFERENCES packages(id),
@@ -757,7 +778,7 @@ impl Database {
                     continue;
                 };
 
-                let outcome = reason.db_key();
+                let outcome = reason.outcome_type() as i32;
                 let detail = reason.to_string();
 
                 self.conn.execute(
@@ -850,17 +871,15 @@ impl Database {
             let mut stmt = self
                 .conn
                 .prepare("SELECT package_id, outcome FROM builds")?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })?;
+            let rows =
+                stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i32>(1)?)))?;
             let mut ids = HashSet::new();
             for row in rows {
-                let (id, outcome) = row?;
-                if matches!(
-                    BuildOutcome::from_db(&outcome, None),
-                    Some(BuildOutcome::Skipped(_))
-                ) {
-                    ids.insert(id);
+                let (id, outcome_id) = row?;
+                if let Ok(ot) = OutcomeType::try_from(outcome_id) {
+                    if matches!(BuildOutcome::from_db(ot, None), BuildOutcome::Skipped(_)) {
+                        ids.insert(id);
+                    }
                 }
             }
             ids
@@ -911,16 +930,17 @@ impl Database {
      * Store a build result by package ID.
      */
     pub fn store_build_result(&self, package_id: i64, result: &BuildResult) -> Result<()> {
-        let outcome = result.outcome.db_key();
+        let outcome = result.outcome.outcome_type() as i32;
         let detail = result.outcome.db_detail();
+        let stage = result.build_stats.stage.map(|s| s as i32);
         let duration_ms = result.build_stats.total_duration.as_millis() as i64;
         let log_dir = result.log_dir.as_ref().map(|p| p.display().to_string());
 
         self.conn.execute(
             "INSERT OR REPLACE INTO builds
-             (package_id, outcome, outcome_detail, duration_ms, log_dir)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![package_id, outcome, detail, duration_ms, log_dir],
+             (package_id, outcome, outcome_detail, stage, duration_ms, log_dir)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![package_id, outcome, detail, stage, duration_ms, log_dir],
         )?;
 
         debug!(
@@ -948,7 +968,8 @@ impl Database {
      */
     pub fn get_build_result(&self, package_id: i64) -> Result<Option<BuildResult>> {
         let result = self.conn.query_row(
-            "SELECT p.pkgname, p.pkgpath, b.outcome, b.outcome_detail, b.duration_ms, b.log_dir
+            "SELECT p.pkgname, p.pkgpath, b.outcome, b.outcome_detail,
+                    b.stage, b.duration_ms, b.log_dir
              FROM builds b
              JOIN packages p ON b.package_id = p.id
              WHERE b.package_id = ?1",
@@ -956,25 +977,34 @@ impl Database {
             |row| {
                 let pkgname: String = row.get(0)?;
                 let pkgpath: Option<String> = row.get(1)?;
-                let outcome: String = row.get(2)?;
+                let outcome_id: i32 = row.get(2)?;
                 let detail: Option<String> = row.get(3)?;
-                let duration_ms: i64 = row.get(4)?;
-                let log_dir: Option<String> = row.get(5)?;
-                Ok((pkgname, pkgpath, outcome, detail, duration_ms, log_dir))
+                let stage_id: Option<i32> = row.get(4)?;
+                let duration_ms: i64 = row.get(5)?;
+                let log_dir: Option<String> = row.get(6)?;
+                Ok((
+                    pkgname,
+                    pkgpath,
+                    outcome_id,
+                    detail,
+                    stage_id,
+                    duration_ms,
+                    log_dir,
+                ))
             },
         );
 
         match result {
-            Ok((pkgname, pkgpath, outcome, detail, duration_ms, log_dir)) => {
-                let Some(build_outcome) = BuildOutcome::from_db(&outcome, detail) else {
-                    anyhow::bail!("Unknown build outcome: {}", outcome);
-                };
+            Ok((pkgname, pkgpath, outcome_id, detail, stage_id, duration_ms, log_dir)) => {
+                let ot = OutcomeType::try_from(outcome_id)?;
+                let stage = stage_id.map(Stage::try_from).transpose()?;
                 Ok(Some(BuildResult {
                     pkgname: PkgName::new(&pkgname),
                     pkgpath: pkgpath.and_then(|p| PkgPath::new(&p).ok()),
-                    outcome: build_outcome,
+                    outcome: BuildOutcome::from_db(ot, detail),
                     log_dir: log_dir.map(std::path::PathBuf::from),
                     build_stats: PkgBuildStats {
+                        stage,
                         total_duration: Duration::from_millis(duration_ms as u64),
                         ..PkgBuildStats::default()
                     },
@@ -1020,7 +1050,8 @@ impl Database {
      */
     pub fn get_all_build_results(&self) -> Result<Vec<BuildResult>> {
         let mut stmt = self.conn.prepare(
-            "SELECT p.pkgname, p.pkgpath, b.outcome, b.outcome_detail, b.duration_ms, b.log_dir
+            "SELECT p.pkgname, p.pkgpath, b.outcome, b.outcome_detail,
+                    b.stage, b.duration_ms, b.log_dir
              FROM builds b
              JOIN packages p ON b.package_id = p.id
              ORDER BY p.pkgname",
@@ -1029,25 +1060,36 @@ impl Database {
         let rows = stmt.query_map([], |row| {
             let pkgname: String = row.get(0)?;
             let pkgpath: Option<String> = row.get(1)?;
-            let outcome: String = row.get(2)?;
+            let outcome_id: i32 = row.get(2)?;
             let detail: Option<String> = row.get(3)?;
-            let duration_ms: i64 = row.get(4)?;
-            let log_dir: Option<String> = row.get(5)?;
-            Ok((pkgname, pkgpath, outcome, detail, duration_ms, log_dir))
+            let stage_id: Option<i32> = row.get(4)?;
+            let duration_ms: i64 = row.get(5)?;
+            let log_dir: Option<String> = row.get(6)?;
+            Ok((
+                pkgname,
+                pkgpath,
+                outcome_id,
+                detail,
+                stage_id,
+                duration_ms,
+                log_dir,
+            ))
         })?;
 
         let mut results = Vec::new();
         for row in rows {
-            let (pkgname, pkgpath, outcome, detail, duration_ms, log_dir) = row?;
-            let Some(build_outcome) = BuildOutcome::from_db(&outcome, detail) else {
+            let (pkgname, pkgpath, outcome_id, detail, stage_id, duration_ms, log_dir) = row?;
+            let Ok(ot) = OutcomeType::try_from(outcome_id) else {
                 continue;
             };
+            let stage = stage_id.and_then(|id| Stage::try_from(id).ok());
             results.push(BuildResult {
                 pkgname: PkgName::new(&pkgname),
                 pkgpath: pkgpath.and_then(|p| PkgPath::new(&p).ok()),
-                outcome: build_outcome,
+                outcome: BuildOutcome::from_db(ot, detail),
                 log_dir: log_dir.map(std::path::PathBuf::from),
                 build_stats: PkgBuildStats {
+                    stage,
                     total_duration: Duration::from_millis(duration_ms as u64),
                     ..PkgBuildStats::default()
                 },
@@ -1070,11 +1112,11 @@ impl Database {
             "SELECT p.pkgname, COUNT(*)
              FROM builds b
              JOIN packages p ON b.failed_dep_id = p.id
-             WHERE b.outcome = 'indirect_failed'
+             WHERE b.outcome = ?1
              GROUP BY b.failed_dep_id",
         )?;
 
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map([OutcomeType::IndirectFailed as i32], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
 
@@ -1115,6 +1157,13 @@ impl Database {
             anyhow::bail!("Package '{}' not found in database", package);
         };
 
+        let success = OutcomeType::Success as i32;
+        let up_to_date = OutcomeType::UpToDate as i32;
+        let failed = OutcomeType::Failed as i32;
+        let pkg_fail = OutcomeType::PkgFail as i32;
+        let pkg_skip = OutcomeType::PkgSkip as i32;
+        let unresolved = OutcomeType::Unresolved as i32;
+
         let mut stmt = self.conn.prepare(
             "WITH RECURSIVE
              blocking(id, outcome) AS (
@@ -1123,32 +1172,37 @@ impl Database {
                  FROM resolved_depends rd
                  JOIN builds b ON b.package_id = rd.depends_on_id
                  WHERE rd.package_id = ?1
-                   AND b.outcome NOT IN ('success', 'up_to_date')
+                   AND b.outcome NOT IN (?2, ?3)
                  UNION
                  -- Transitive: deps of deps that are blocked
                  SELECT rd.depends_on_id, b.outcome
                  FROM resolved_depends rd
                  JOIN blocking bl ON rd.package_id = bl.id
                  JOIN builds b ON b.package_id = rd.depends_on_id
-                 WHERE b.outcome NOT IN ('success', 'up_to_date')
+                 WHERE b.outcome NOT IN (?2, ?3)
              )
              SELECT DISTINCT p.pkgname, p.pkgpath, bl.outcome
              FROM blocking bl
              JOIN packages p ON bl.id = p.id
              -- Only show root causes (failed or prefailed/preskipped), not indirect
-             WHERE bl.outcome IN ('failed', 'pkg_fail', 'pkg_skip', 'unresolved')
+             WHERE bl.outcome IN (?4, ?5, ?6, ?7)
              ORDER BY p.pkgname",
         )?;
 
-        let rows = stmt.query_map([pkg.id], |row| {
-            let pkgname: String = row.get(0)?;
-            let pkgpath: String = row.get(1)?;
-            let outcome: String = row.get(2)?;
-            let status = BuildOutcome::from_db(&outcome, None)
-                .map(|o| o.status())
-                .unwrap_or("unknown");
-            Ok((pkgname, pkgpath, status.to_string()))
-        })?;
+        let rows = stmt.query_map(
+            params![
+                pkg.id, success, up_to_date, failed, pkg_fail, pkg_skip, unresolved
+            ],
+            |row| {
+                let pkgname: String = row.get(0)?;
+                let pkgpath: String = row.get(1)?;
+                let outcome_id: i32 = row.get(2)?;
+                let status = OutcomeType::try_from(outcome_id)
+                    .map(|ot| BuildOutcome::from_db(ot, None).status())
+                    .unwrap_or("unknown");
+                Ok((pkgname, pkgpath, status.to_string()))
+            },
+        )?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -1232,7 +1286,7 @@ impl Database {
              -- Only direct failures are root causes
              failed_pkgs(id) AS (
                  SELECT package_id FROM builds
-                 WHERE outcome IN ('failed', 'pkg_fail')
+                 WHERE outcome IN (?1, ?2)
              ),
              -- Packages affected by failures (transitive closure)
              affected(id, root_id) AS (
@@ -1255,7 +1309,10 @@ impl Database {
              ORDER BY p.pkgname",
         )?;
 
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        let rows = stmt.query_map(
+            params![OutcomeType::Failed as i32, OutcomeType::PkgFail as i32],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -1297,14 +1354,14 @@ impl Database {
         for (id, depth) in &affected {
             let (outcome, detail, dur, dep_id) = if *depth == 0 {
                 (
-                    "failed",
+                    OutcomeType::Failed as i32,
                     reason.to_string(),
                     duration.as_millis() as i64,
                     None,
                 )
             } else {
                 (
-                    "indirect_failed",
+                    OutcomeType::IndirectFailed as i32,
                     format!("depends on failed {}", pkgname),
                     0,
                     Some(package_id),
@@ -1313,7 +1370,8 @@ impl Database {
 
             self.conn.execute(
                 "INSERT OR REPLACE INTO builds
-                 (package_id, outcome, outcome_detail, duration_ms, failed_dep_id)
+                 (package_id, outcome, outcome_detail, duration_ms,
+                  failed_dep_id)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![id, outcome, detail, dur, dep_id],
             )?;
@@ -1432,12 +1490,12 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT p.pkgname FROM builds b
              JOIN packages p ON b.package_id = p.id
-             WHERE b.outcome = 'failed'
+             WHERE b.outcome = ?1
              ORDER BY p.pkgname",
         )?;
 
         let pkgnames = stmt
-            .query_map([], |row| row.get::<_, String>(0))?
+            .query_map([OutcomeType::Failed as i32], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(pkgnames)
@@ -1450,12 +1508,15 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT p.pkgname FROM builds b
              JOIN packages p ON b.package_id = p.id
-             WHERE b.outcome IN ('success', 'up_to_date')
+             WHERE b.outcome IN (?1, ?2)
              ORDER BY p.pkgname",
         )?;
 
         let pkgnames = stmt
-            .query_map([], |row| row.get::<_, String>(0))?
+            .query_map(
+                params![OutcomeType::Success as i32, OutcomeType::UpToDate as i32],
+                |row| row.get::<_, String>(0),
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(pkgnames)
@@ -1530,6 +1591,7 @@ impl Database {
         let conn = self.history_conn()?;
         let build_ms = rec.build_duration.map(|d| d.as_millis() as i64);
         let total_ms = rec.total_duration.as_millis() as i64;
+        let stage = rec.stage.map(|s| s as i32);
         conn.execute(
             "INSERT INTO build_history \
                  (pkgpath, pkgname, outcome, make_jobs, stage, \
@@ -1538,9 +1600,9 @@ impl Database {
             params![
                 rec.pkgpath,
                 rec.pkgname,
-                rec.outcome,
+                rec.outcome as i32,
                 rec.make_jobs as i64,
-                rec.stage,
+                stage,
                 build_ms,
                 total_ms,
                 rec.timestamp,
@@ -1564,27 +1626,40 @@ impl Database {
         let rows = stmt.query_map([], |row| {
             let build_ms: Option<i64> = row.get(5)?;
             let total_ms: i64 = row.get(6)?;
-            Ok(HistoryRecord {
-                pkgpath: row.get(0)?,
-                pkgname: row.get(1)?,
-                outcome: row.get(2)?,
-                make_jobs: row.get::<_, i64>(3)? as usize,
-                stage: row.get(4)?,
-                build_duration: build_ms.map(|ms| Duration::from_millis(ms as u64)),
-                total_duration: Duration::from_millis(total_ms as u64),
-                timestamp: row.get(7)?,
-            })
+            let outcome_id: i32 = row.get(2)?;
+            let stage_id: Option<i32> = row.get(4)?;
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                outcome_id,
+                row.get::<_, i64>(3)? as usize,
+                stage_id,
+                build_ms,
+                total_ms,
+                row.get::<_, String>(7)?,
+            ))
         })?;
 
         let mut results = Vec::new();
         for row in rows {
-            let rec = row?;
+            let (pkgpath, pkgname, outcome_id, make_jobs, stage_id, build_ms, total_ms, ts) = row?;
             if let Some(re) = pattern {
-                if !re.is_match(&rec.pkgpath) && !re.is_match(&rec.pkgname) {
+                if !re.is_match(&pkgpath) && !re.is_match(&pkgname) {
                     continue;
                 }
             }
-            results.push(rec);
+            let outcome = OutcomeType::try_from(outcome_id)?;
+            let stage = stage_id.map(Stage::try_from).transpose()?;
+            results.push(HistoryRecord {
+                pkgpath,
+                pkgname,
+                outcome,
+                make_jobs,
+                stage,
+                build_duration: build_ms.map(|ms| Duration::from_millis(ms as u64)),
+                total_duration: Duration::from_millis(total_ms as u64),
+                timestamp: ts,
+            });
         }
         Ok(results)
     }
@@ -1597,9 +1672,9 @@ impl Database {
         let conn = self.history_conn()?;
         let result: Option<f64> = conn.query_row(
             "SELECT AVG(build_duration_ms) FROM build_history \
-             WHERE pkgpath = ?1 AND outcome = 'success' \
+             WHERE pkgpath = ?1 AND outcome = ?2 \
                AND build_duration_ms IS NOT NULL",
-            params![pkgpath],
+            params![pkgpath, OutcomeType::Success as i32],
             |row| row.get(0),
         )?;
         Ok(result.map(|ms| Duration::from_millis(ms as u64)))
@@ -1633,13 +1708,33 @@ fn open_history_conn(dbdir: &Path) -> Result<Connection> {
             "CREATE TABLE schema_version (version INTEGER NOT NULL);
              INSERT INTO schema_version (version) VALUES ({});
 
+             CREATE TABLE outcome_types (
+                 id INTEGER PRIMARY KEY,
+                 name TEXT UNIQUE NOT NULL
+             );
+             INSERT INTO outcome_types (id, name) VALUES
+                 (1, 'success'), (2, 'failed'), (3, 'up_to_date'),
+                 (4, 'pkg_skip'), (5, 'pkg_fail'),
+                 (6, 'indirect_preskip'), (7, 'indirect_prefail'),
+                 (8, 'unresolved'), (9, 'indirect_unresolved'),
+                 (10, 'indirect_failed');
+
+             CREATE TABLE stage_types (
+                 id INTEGER PRIMARY KEY,
+                 name TEXT UNIQUE NOT NULL
+             );
+             INSERT INTO stage_types (id, name) VALUES
+                 (1, 'pre-clean'), (2, 'depends'), (3, 'checksum'),
+                 (4, 'configure'), (5, 'build'), (6, 'install'),
+                 (7, 'package'), (8, 'deinstall'), (9, 'clean');
+
              CREATE TABLE build_history (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  pkgpath TEXT NOT NULL,
                  pkgname TEXT NOT NULL,
-                 outcome TEXT NOT NULL,
+                 outcome INTEGER NOT NULL REFERENCES outcome_types(id),
                  make_jobs INTEGER NOT NULL,
-                 stage TEXT,
+                 stage INTEGER REFERENCES stage_types(id),
                  build_duration_ms INTEGER,
                  total_duration_ms INTEGER NOT NULL,
                  timestamp INTEGER NOT NULL

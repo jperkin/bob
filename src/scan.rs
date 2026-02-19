@@ -86,29 +86,35 @@ impl SkipReason {
         }
     }
 
-    /// Returns the database key for this skip reason variant.
-    pub fn db_key(&self) -> &'static str {
+    /**
+     * Returns the outcome type for database storage.
+     */
+    pub fn outcome_type(&self) -> crate::build::OutcomeType {
+        use crate::build::OutcomeType;
         match self {
-            SkipReason::PkgSkip(_) => "pkg_skip",
-            SkipReason::PkgFail(_) => "pkg_fail",
-            SkipReason::IndirectPreskip(_) => "indirect_preskip",
-            SkipReason::IndirectPrefail(_) => "indirect_prefail",
-            SkipReason::UnresolvedDep(_) => "unresolved",
-            SkipReason::IndirectUnresolved(_) => "indirect_unresolved",
-            SkipReason::IndirectFailed(_) => "indirect_failed",
+            SkipReason::PkgSkip(_) => OutcomeType::PkgSkip,
+            SkipReason::PkgFail(_) => OutcomeType::PkgFail,
+            SkipReason::IndirectPreskip(_) => OutcomeType::IndirectPreskip,
+            SkipReason::IndirectPrefail(_) => OutcomeType::IndirectPrefail,
+            SkipReason::UnresolvedDep(_) => OutcomeType::Unresolved,
+            SkipReason::IndirectUnresolved(_) => OutcomeType::IndirectUnresolved,
+            SkipReason::IndirectFailed(_) => OutcomeType::IndirectFailed,
         }
     }
 
-    /// Creates a SkipReason from database key and detail string.
-    pub fn from_db(key: &str, detail: String) -> Option<Self> {
-        match key {
-            "pkg_skip" => Some(SkipReason::PkgSkip(detail)),
-            "pkg_fail" => Some(SkipReason::PkgFail(detail)),
-            "indirect_preskip" => Some(SkipReason::IndirectPreskip(detail)),
-            "indirect_prefail" => Some(SkipReason::IndirectPrefail(detail)),
-            "unresolved" => Some(SkipReason::UnresolvedDep(detail)),
-            "indirect_unresolved" => Some(SkipReason::IndirectUnresolved(detail)),
-            "indirect_failed" => Some(SkipReason::IndirectFailed(detail)),
+    /**
+     * Creates a SkipReason from outcome type and detail string.
+     */
+    pub fn from_db(ot: crate::build::OutcomeType, detail: String) -> Option<Self> {
+        use crate::build::OutcomeType;
+        match ot {
+            OutcomeType::PkgSkip => Some(SkipReason::PkgSkip(detail)),
+            OutcomeType::PkgFail => Some(SkipReason::PkgFail(detail)),
+            OutcomeType::IndirectPreskip => Some(SkipReason::IndirectPreskip(detail)),
+            OutcomeType::IndirectPrefail => Some(SkipReason::IndirectPrefail(detail)),
+            OutcomeType::Unresolved => Some(SkipReason::UnresolvedDep(detail)),
+            OutcomeType::IndirectUnresolved => Some(SkipReason::IndirectUnresolved(detail)),
+            OutcomeType::IndirectFailed => Some(SkipReason::IndirectFailed(detail)),
             _ => None,
         }
     }
