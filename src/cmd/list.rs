@@ -116,8 +116,8 @@ Status values:
   indirect-unresolved  Blocked by package with unresolved dependencies
 
 Examples:
-  bob list status                           Show all packages
-  bob list status -s failed                 Show failed packages
+  bob list status                           Show pending/failed packages
+  bob list status -a                        Show all packages
   bob list status -s preskipped,prefailed   Show all pre-* packages
   bob list status py-                       Show packages matching 'py-'
   bob list status flim glib2 mutt           Show multiple package matches
@@ -126,6 +126,9 @@ Examples:
   bob list status -o pkgpath,multi_version  Show MULTI_VERSION flags
 ")]
     Status {
+        /// Show all packages including success and up-to-date
+        #[arg(short, long)]
+        all: bool,
         /// Hide column headers
         #[arg(short = 'H')]
         no_header: bool,
@@ -183,12 +186,13 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
 
     match cmd {
         ListCmd::Status {
+            all,
             statuses,
             columns,
             no_header,
             packages,
         } => {
-            print_build_status(db, &statuses, columns.as_deref(), no_header, &packages)?;
+            print_build_status(db, &statuses, columns.as_deref(), no_header, &packages, all)?;
         }
         ListCmd::Tree {
             all,
@@ -500,6 +504,7 @@ fn print_build_status(
     columns: Option<&[String]>,
     no_header: bool,
     pkg_filters: &[String],
+    show_all: bool,
 ) -> Result<()> {
     let all_cols = ["pkgname", "pkgpath", "status", "reason", "multi_version"];
     let default_cols = ["pkgname", "status", "reason"];
@@ -568,7 +573,13 @@ fn print_build_status(
     };
 
     let matches_status = |status: &str| -> bool {
-        statuses.is_empty() || statuses.iter().any(|f| f.as_str() == status)
+        if !statuses.is_empty() {
+            return statuses.iter().any(|f| f.as_str() == status);
+        }
+        if show_all {
+            return true;
+        }
+        status != StatusFilter::Success.as_str() && status != StatusFilter::UpToDate.as_str()
     };
 
     let mut rows: Vec<[String; 5]> = Vec::new();
