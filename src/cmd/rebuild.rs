@@ -26,12 +26,11 @@
 use std::collections::HashSet;
 
 use anyhow::{Context, Result, bail};
+use indexmap::IndexMap;
+use pkgsrc::PkgName;
 
-use bob::RunContext;
-use bob::build::Build;
-use bob::config::Config;
 use bob::db::Database;
-use bob::sandbox::{Sandbox, SandboxScope};
+use bob::scan::ResolvedPackage;
 
 /**
  * Arguments for the rebuild command.
@@ -43,9 +42,10 @@ pub struct RebuildArgs {
 }
 
 /**
- * Run the rebuild command.
+ * Prepare rebuild targets: collect packages, expand dependents, clear
+ * cached build results, and return the filtered buildable set.
  */
-pub fn run(config: &Config, db: &Database, ctx: &RunContext, args: RebuildArgs) -> Result<()> {
+pub fn prepare(db: &Database, args: RebuildArgs) -> Result<IndexMap<PkgName, ResolvedPackage>> {
     let targets = collect_targets(db, &args)?;
 
     let mut to_rebuild: HashSet<String> = targets.iter().cloned().collect();
@@ -71,7 +71,7 @@ pub fn run(config: &Config, db: &Database, ctx: &RunContext, args: RebuildArgs) 
         .load_resolved_packages()
         .context("No scan data cached - run 'bob scan' first")?;
 
-    let buildable: indexmap::IndexMap<_, _> = all_resolved
+    let buildable: IndexMap<_, _> = all_resolved
         .into_iter()
         .filter(|p| to_rebuild.contains(p.pkgname().pkgname()))
         .map(|p| (p.pkgname().clone(), p))
@@ -81,17 +81,7 @@ pub fn run(config: &Config, db: &Database, ctx: &RunContext, args: RebuildArgs) 
         bail!("No buildable packages found");
     }
 
-    let pkgsrc_env = db
-        .load_pkgsrc_env()
-        .context("PkgsrcEnv not cached - try 'bob clean' first")?;
-
-    let sandbox = Sandbox::new(config);
-    let scope = SandboxScope::new(sandbox, ctx.clone());
-    let mut build = Build::new(config, pkgsrc_env, scope, buildable);
-    build.load_cached_from_db(db)?;
-    build.start(ctx, db)?;
-
-    Ok(())
+    Ok(buildable)
 }
 
 /**

@@ -327,12 +327,55 @@ impl BuildRunner {
         Ok(up_to_date_count)
     }
 
+    /**
+     * Execute a build from resolved packages and run post-build steps.
+     *
+     * Shared by the build and rebuild commands: loads cached results,
+     * runs the build, and generates pkg_summary on success.
+     */
+    fn run_build(
+        &self,
+        buildable: indexmap::IndexMap<pkgsrc::PkgName, bob::scan::ResolvedPackage>,
+        scope: SandboxScope,
+    ) -> Result<build::BuildSummary> {
+        let pkgsrc_env = self
+            .db
+            .load_pkgsrc_env()
+            .context("PkgsrcEnv not cached - try 'bob clean' first")?;
+
+        let mut build = Build::new(&self.config, pkgsrc_env, scope, buildable);
+        build.load_cached_from_db(&self.db)?;
+
+        tracing::debug!("Calling build.start()");
+        let build_start_time = std::time::Instant::now();
+        let summary = build.start(&self.ctx, &self.db)?;
+        tracing::debug!(
+            elapsed_ms = build_start_time.elapsed().as_millis(),
+            "build.start() returned"
+        );
+
+        /*
+         * Check if we were interrupted.  All builds that completed before
+         * the interrupt have already been saved to the database inside
+         * build.start().  Builds that were in-progress when interrupted
+         * were killed and their results discarded (not saved).
+         */
+        if self.ctx.shutdown.load(Ordering::SeqCst) {
+            return Err(Interrupted.into());
+        }
+
+        if summary.counts().success > 0 {
+            self.generate_pkg_summary();
+        }
+
+        Ok(summary)
+    }
+
     fn run_build_with(
-        &mut self,
+        &self,
         scan_result: bob::scan::ScanSummary,
         scope: SandboxScope,
     ) -> Result<build::BuildSummary> {
-        // Validate config before sandbox expansion
         if scan_result.count_buildable() == 0 {
             bail!("No packages to build");
         }
@@ -342,36 +385,8 @@ impl BuildRunner {
             .map(|p| (p.pkgname().clone(), p.clone()))
             .collect();
 
-        let pkgsrc_env = self
-            .db
-            .load_pkgsrc_env()
-            .context("PkgsrcEnv not cached - try 'bob clean' first")?;
+        let mut summary = self.run_build(buildable, scope)?;
 
-        let mut build = Build::new(&self.config, pkgsrc_env, scope, buildable);
-
-        // Load cached build results from database
-        build.load_cached_from_db(&self.db)?;
-
-        tracing::debug!("Calling build.start()");
-        let build_start_time = std::time::Instant::now();
-        let mut summary = build.start(&self.ctx, &self.db)?;
-        tracing::debug!(
-            elapsed_ms = build_start_time.elapsed().as_millis(),
-            "build.start() returned"
-        );
-
-        // Check if we were interrupted. All builds that completed before the
-        // interrupt have already been saved to the database inside build.start().
-        // Builds that were in-progress when interrupted were killed and their
-        // results discarded (not saved). This ensures:
-        //   - Completed builds are preserved
-        //   - Interrupted (partial) builds are not saved
-        //   - Dependencies of interrupted builds are not saved
-        if self.ctx.shutdown.load(Ordering::SeqCst) {
-            return Err(Interrupted.into());
-        }
-
-        // Add pre-skipped/failed/unresolved packages from scan to summary
         for pkg in scan_result.packages.iter() {
             match pkg {
                 ScanResult::Skipped {
@@ -613,7 +628,7 @@ fn run() -> Result<()> {
         Cmd::Build {
             pkgpaths: cmdline_pkgs,
         } => {
-            let mut runner = BuildRunner::new(args.config.as_deref())?;
+            let runner = BuildRunner::new(args.config.as_deref())?;
             tracing::info!("Build command started");
 
             let mut scan = Scan::new(&runner.config);
@@ -637,10 +652,7 @@ fn run() -> Result<()> {
             runner.run_scan_phase(&mut scan, &mut scope)?;
             let scan_result = scan.resolve_with_report(&runner.db, runner.config.strict_scan())?;
             runner.check_up_to_date(&scan_result)?;
-            let summary = runner.run_build_with(scan_result, scope)?;
-            if summary.counts().success > 0 {
-                runner.generate_pkg_summary();
-            }
+            runner.run_build_with(scan_result, scope)?;
         }
         Cmd::Rebuild {
             all,
@@ -648,16 +660,17 @@ fn run() -> Result<()> {
             packages,
         } => {
             let runner = BuildRunner::new(args.config.as_deref())?;
-            cmd::rebuild::run(
-                &runner.config,
+            let buildable = cmd::rebuild::prepare(
                 &runner.db,
-                &runner.ctx,
                 cmd::rebuild::RebuildArgs {
                     all,
                     only,
                     packages,
                 },
             )?;
+            let sandbox = Sandbox::new(&runner.config);
+            let scope = SandboxScope::new(sandbox, runner.ctx.clone());
+            runner.run_build(buildable, scope)?;
         }
         Cmd::Report => {
             let config = Config::load(args.config.as_deref())?;
