@@ -2805,10 +2805,7 @@ impl Build {
                                     p.clear_output_buffer(c);
                                     p.state_mut().set_worker_active(c, pkg.pkgname());
                                     if p.is_plain() {
-                                        let _ = p.print_status(&format!(
-                                            "    Building {}",
-                                            pkg.pkgname()
-                                        ));
+                                        let _ = p.print_status("Building", pkg.pkgname());
                                     }
                                     let _ = p.render();
                                 }
@@ -2866,11 +2863,10 @@ impl Build {
                         }
 
                         if let Ok(mut p) = progress_clone.lock() {
-                            let _ = p.print_status(&format!(
-                                "       Built {} ({})",
-                                pkgname.pkgname(),
-                                format_duration(duration)
-                            ));
+                            let _ = p.print_status(
+                                "Built",
+                                &format!("{} ({})", pkgname.pkgname(), format_duration(duration)),
+                            );
                             p.state_mut().increment_completed();
                             for (tid, pkg) in &thread_packages {
                                 if pkg == &pkgname {
@@ -2903,11 +2899,10 @@ impl Build {
                         }
 
                         if let Ok(mut p) = progress_clone.lock() {
-                            let _ = p.print_status(&format!(
-                                "      Failed {} ({})",
-                                pkgname.pkgname(),
-                                format_duration(duration)
-                            ));
+                            let _ = p.print_status(
+                                "Failed",
+                                &format!("{} ({})", pkgname.pkgname(), format_duration(duration)),
+                            );
                             p.state_mut().increment_failed();
                             for (tid, pkg) in &thread_packages {
                                 if pkg == &pkgname {

@@ -26,7 +26,8 @@ use ratatui::{
     Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
-    text::Line,
+    style::{Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
 use std::collections::VecDeque;
@@ -37,6 +38,10 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// Default refresh interval for UI updates (10fps).
 /// Used for both event polling timeout and render throttling.
 pub const REFRESH_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Fixed-width column for status verbs and progress titles,
+/// matching cargo's 12-character status column.
+const STATUS_WIDTH: usize = 12;
 
 /// Strip ANSI escape sequences and sanitize control characters.
 fn sanitize_output(s: &str) -> String {
@@ -269,7 +274,7 @@ pub fn format_duration(d: Duration) -> String {
 }
 
 /// Format the progress/status bar line for a given width.
-fn format_status_line(state: &ProgressState, hint: &str, width: usize) -> String {
+fn format_status_line(state: &ProgressState, msg: &str, width: usize) -> Line<'static> {
     let ratio = state.progress_ratio();
     let elapsed_str = format_duration_short(state.elapsed());
     let counts = format!(
@@ -278,12 +283,13 @@ fn format_status_line(state: &ProgressState, hint: &str, width: usize) -> String
         state.total
     );
 
-    let fixed = 14
-        + 2
-        + counts.len()
-        + 1
-        + elapsed_str.len()
-        + if hint.is_empty() { 0 } else { 1 + hint.len() };
+    let bar_chrome = " [".len() + "] ".len();
+    let msg_width = if msg.is_empty() {
+        0
+    } else {
+        " ".len() + msg.len() + " ".len()
+    };
+    let fixed = STATUS_WIDTH + bar_chrome + counts.len() + 1 + elapsed_str.len() + msg_width;
     let bar_width = width.saturating_sub(fixed).clamp(1, 30);
     let padding = width.saturating_sub(fixed + bar_width);
 
@@ -297,19 +303,36 @@ fn format_status_line(state: &ProgressState, hint: &str, width: usize) -> String
         format!("{}>{}", "=".repeat(filled), " ".repeat(empty))
     };
 
-    if hint.is_empty() {
-        format!("{:>12} [{}] {} {}", state.title, bar, counts, elapsed_str)
+    let bold = Style::new().add_modifier(Modifier::BOLD);
+    let title = Span::styled(format!("{:>tw$}", state.title, tw = STATUS_WIDTH), bold);
+    if msg.is_empty() {
+        Line::from(vec![
+            title,
+            Span::raw(format!(" [{}] {} {}", bar, counts, elapsed_str)),
+        ])
     } else {
-        format!(
-            "{:>12} [{}] {} {}{:pad$} {}",
-            state.title,
-            bar,
-            counts,
-            elapsed_str,
-            "",
-            hint,
-            pad = padding
-        )
+        Line::from(vec![
+            title,
+            Span::raw(format!(
+                " [{}] {} {}{:pad$} {} ",
+                bar,
+                counts,
+                elapsed_str,
+                "",
+                msg,
+                pad = padding
+            )),
+        ])
+    }
+}
+
+fn status_msg(interrupt_announced: bool, title: &str) -> &'static str {
+    if interrupt_announced {
+        "(stopping, ^C to force quit)"
+    } else if title == "Building" {
+        "(press 'v' to toggle full-screen)"
+    } else {
+        ""
     }
 }
 
@@ -523,7 +546,7 @@ pub struct MultiProgress {
     output_buffers: Vec<OutputBuffer>,
     num_workers: usize,
     /// Messages buffered while in fullscreen mode, printed when returning to inline.
-    pending_messages: Vec<String>,
+    pending_messages: Vec<Line<'static>>,
     /// Whether raw mode was successfully enabled (false when not a terminal).
     raw_mode: bool,
     /// Number of dots on the current plain-mode progress line (0-49).
@@ -644,23 +667,24 @@ impl MultiProgress {
     }
 
     /// Print a status message above the progress display.
-    pub fn print_status(&mut self, msg: &str) -> io::Result<()> {
-        // Don't print if suppressed
+    pub fn print_status(&mut self, verb: &str, detail: &str) -> io::Result<()> {
         if self.state.suppressed {
             return Ok(());
         }
         if self.progress_mode == ProgressMode::Plain {
-            println!("{}", msg);
+            println!("{:>tw$} {}", verb, detail, tw = STATUS_WIDTH);
             return Ok(());
         }
-        // Buffer messages while in fullscreen mode
+        let bold = Style::new().add_modifier(Modifier::BOLD);
+        let line = Line::from(vec![
+            Span::styled(format!("{:>tw$}", verb, tw = STATUS_WIDTH), bold),
+            Span::raw(format!(" {}", detail)),
+        ]);
         if self.view_mode == ViewMode::MultiPanel {
-            self.pending_messages.push(msg.to_string());
+            self.pending_messages.push(line);
             return Ok(());
         }
-        // Insert blank lines to scroll up the viewport, then print message
         self.terminal.insert_before(1, |buf| {
-            let line = Line::raw(msg);
             let area = buf.area;
             buf.set_line(0, 0, &line, area.width);
         })?;
@@ -719,42 +743,34 @@ impl MultiProgress {
             let chunks = Layout::vertical(constraints).split(area);
 
             // Render worker lines
+            let bold = Style::new().add_modifier(Modifier::BOLD);
             let tw = state.timer_width;
             for (i, worker) in state.workers.iter().enumerate() {
-                let text = if let (Some(pkg), Some(elapsed)) = (&worker.package, worker.elapsed()) {
+                let line = if let (Some(pkg), Some(elapsed)) = (&worker.package, worker.elapsed()) {
+                    let prefix = format!(
+                        "  [{:>2}:{:>tw$} ] ",
+                        i,
+                        format_duration_short(elapsed),
+                        tw = tw
+                    );
                     if let Some(stage) = &worker.stage {
-                        format!(
-                            "  [{:>2}:{:>tw$} ] {} ({})",
-                            i,
-                            format_duration_short(elapsed),
-                            pkg,
-                            stage,
-                            tw = tw
-                        )
+                        Line::from(vec![
+                            Span::raw(prefix),
+                            Span::styled(pkg.clone(), bold),
+                            Span::raw(format!(" ({})", stage)),
+                        ])
                     } else {
-                        format!(
-                            "  [{:>2}:{:>tw$} ] {}",
-                            i,
-                            format_duration_short(elapsed),
-                            pkg,
-                            tw = tw
-                        )
+                        Line::from(vec![Span::raw(prefix), Span::styled(pkg.clone(), bold)])
                     }
                 } else {
-                    format!("  [{:>2}:{:>tw$} ]", i, "idle", tw = tw)
+                    Line::raw(format!("  [{:>2}:{:>tw$} ]", i, "idle", tw = tw))
                 };
-                frame.render_widget(Line::raw(text), chunks[i]);
+                frame.render_widget(line, chunks[i]);
             }
 
-            let hint = if interrupt_announced {
-                "(stopping, ^C to force quit)"
-            } else if state.title == "Building" {
-                "(press 'v' to toggle full-screen)"
-            } else {
-                ""
-            };
-            let status = format_status_line(state, hint, area.width as usize);
-            frame.render_widget(Line::raw(status.as_str()), chunks[state.workers.len()]);
+            let msg = status_msg(interrupt_announced, &state.title);
+            let status = format_status_line(state, msg, area.width as usize);
+            frame.render_widget(status, chunks[state.workers.len()]);
         })?;
 
         Ok(())
@@ -839,9 +855,8 @@ impl MultiProgress {
         self.view_mode = ViewMode::Inline;
 
         // Print any messages that were buffered while in fullscreen mode
-        for msg in self.pending_messages.drain(..) {
+        for line in self.pending_messages.drain(..) {
             self.terminal.insert_before(1, |buf| {
-                let line = Line::raw(&msg);
                 let area = buf.area;
                 buf.set_line(0, 0, &line, area.width);
             })?;
@@ -883,18 +898,14 @@ impl MultiProgress {
         let size = self.terminal.size()?;
         let area = Rect::new(0, 0, size.width, size.height);
 
-        let hint = if self.interrupt_announced {
-            "(stopping, ^C to force quit)"
-        } else {
-            ""
-        };
-        let status_text = format_status_line(&self.state, hint, size.width as usize);
+        let msg = status_msg(self.interrupt_announced, &self.state.title);
+        let status_line = format_status_line(&self.state, msg, size.width as usize);
 
         // Use different grouping strategy based on terminal width
         if area.width < 160 {
-            self.render_multipanel_linear(&is_active, &elapsed_secs, area, &status_text)
+            self.render_multipanel_linear(&is_active, &elapsed_secs, area, status_line)
         } else {
-            self.render_multipanel_grid(&is_active, &elapsed_secs, area, &status_text)
+            self.render_multipanel_grid(&is_active, &elapsed_secs, area, status_line)
         }
     }
 
@@ -903,7 +914,7 @@ impl MultiProgress {
         is_active: &[bool],
         elapsed_secs: &[u64],
         area: Rect,
-        status_text: &str,
+        status_line: Line<'static>,
     ) -> io::Result<()> {
         let panel_area = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
         let status_area = Rect::new(area.x, area.y + panel_area.height, area.width, 1);
@@ -912,7 +923,7 @@ impl MultiProgress {
         let panels = calculate_linear_layout(panel_area, &groups, elapsed_secs);
 
         // Pre-compute titles
-        let titles: Vec<String> = groups
+        let titles: Vec<Line<'static>> = groups
             .iter()
             .map(|group| self.format_group_title(group))
             .collect();
@@ -940,7 +951,7 @@ impl MultiProgress {
                 frame.render_widget(Clear, *panel_rect);
 
                 let block = Block::default()
-                    .title(titles[i].as_str())
+                    .title(titles[i].clone())
                     .borders(Borders::ALL);
 
                 let inner_width = panel_rect.width.saturating_sub(2) as usize;
@@ -951,7 +962,7 @@ impl MultiProgress {
                 let paragraph = Paragraph::new(visible).block(block);
                 frame.render_widget(paragraph, *panel_rect);
             }
-            frame.render_widget(Line::raw(status_text), status_area);
+            frame.render_widget(status_line, status_area);
         })?;
 
         Ok(())
@@ -962,7 +973,7 @@ impl MultiProgress {
         is_active: &[bool],
         elapsed_secs: &[u64],
         area: Rect,
-        status_text: &str,
+        status_line: Line<'static>,
     ) -> io::Result<()> {
         let panel_area = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
         let status_area = Rect::new(area.x, area.y + panel_area.height, area.width, 1);
@@ -978,7 +989,7 @@ impl MultiProgress {
         let column_rects = calculate_grid_layout(panel_area, &column_groups, elapsed_secs);
 
         // Pre-compute titles for each group in each column
-        let column_titles: Vec<Vec<String>> = column_groups
+        let column_titles: Vec<Vec<Line<'static>>> = column_groups
             .iter()
             .map(|groups| groups.iter().map(|g| self.format_group_title(g)).collect())
             .collect();
@@ -1012,8 +1023,8 @@ impl MultiProgress {
                 for (row_idx, panel_rect) in rects.iter().enumerate() {
                     frame.render_widget(Clear, *panel_rect);
 
-                    let title = &column_titles[col_idx][row_idx];
-                    let block = Block::default().title(title.as_str()).borders(Borders::ALL);
+                    let title = column_titles[col_idx][row_idx].clone();
+                    let block = Block::default().title(title).borders(Borders::ALL);
 
                     let inner_width = panel_rect.width.saturating_sub(2) as usize;
                     let inner_height = panel_rect.height.saturating_sub(2) as usize;
@@ -1025,32 +1036,41 @@ impl MultiProgress {
                     frame.render_widget(paragraph, *panel_rect);
                 }
             }
-            frame.render_widget(Line::raw(status_text), status_area);
+            frame.render_widget(status_line, status_area);
         })?;
 
         Ok(())
     }
 
-    fn format_group_title(&self, group: &PanelGroup) -> String {
+    fn format_group_title(&self, group: &PanelGroup) -> Line<'static> {
         match group {
             PanelGroup::Active(i) => {
                 if let Some(w) = self.state.workers.get(*i) {
                     if let Some(pkg) = &w.package {
+                        let bold = Style::new().add_modifier(Modifier::BOLD);
                         let stage = w.stage.as_deref().unwrap_or("");
                         let elapsed = w.elapsed().map(format_duration_short).unwrap_or_default();
                         if stage.is_empty() {
-                            format!("[{}] {} {} ", i, pkg, elapsed)
+                            Line::from(vec![
+                                Span::raw(format!("[{}] ", i)),
+                                Span::styled(pkg.clone(), bold),
+                                Span::raw(format!(" {} ", elapsed)),
+                            ])
                         } else {
-                            format!("[{}] {} ({}) {} ", i, pkg, stage, elapsed)
+                            Line::from(vec![
+                                Span::raw(format!("[{}] ", i)),
+                                Span::styled(pkg.clone(), bold),
+                                Span::raw(format!(" ({}) {} ", stage, elapsed)),
+                            ])
                         }
                     } else {
-                        format!("[{}] idle ", i)
+                        Line::raw(format!("[{}] idle ", i))
                     }
                 } else {
-                    format!("[{}] ", i)
+                    Line::raw(format!("[{}] ", i))
                 }
             }
-            PanelGroup::Idle(_) => group.format_title(),
+            PanelGroup::Idle(_) => Line::raw(group.format_title()),
         }
     }
 
