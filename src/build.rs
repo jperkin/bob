@@ -46,7 +46,7 @@ use crate::config::PkgsrcEnv;
 use crate::sandbox::{SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
 use crate::scan::{ResolvedPackage, SkipReason, SkippedCounts};
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
-use crate::{Config, RunContext, Sandbox};
+use crate::{Config, RunState, Sandbox};
 use anyhow::{Context, bail};
 use crossterm::event;
 use glob::Pattern;
@@ -578,7 +578,7 @@ struct BuildSession {
     config: Config,
     pkgsrc_env: PkgsrcEnv,
     sandbox: Sandbox,
-    shutdown: Arc<AtomicBool>,
+    state: RunState,
 }
 
 /// Package builder that executes build stages.
@@ -958,7 +958,7 @@ impl<'a> PkgBuilder<'a> {
                 }
             });
 
-            let status = wait_with_shutdown(&mut child, &self.session.shutdown)?;
+            let status = wait_with_shutdown(&mut child, &self.session.state)?;
 
             // Reader thread will exit when pipe closes (process exits)
             let _ = tee_handle.join();
@@ -994,7 +994,7 @@ impl<'a> PkgBuilder<'a> {
                     .stderr(Stdio::from(log_err))
                     .spawn()
                     .with_context(|| format!("Failed to spawn {}", cmd.display()))?;
-                wait_with_shutdown(&mut child, &self.session.shutdown)
+                wait_with_shutdown(&mut child, &self.session.state)
             }
             RunAs::User => {
                 let user = self.build_user.as_ref().unwrap();
@@ -1017,7 +1017,7 @@ impl<'a> PkgBuilder<'a> {
                     .stderr(Stdio::from(log_err))
                     .spawn()
                     .context("Failed to spawn su command")?;
-                wait_with_shutdown(&mut child, &self.session.shutdown)
+                wait_with_shutdown(&mut child, &self.session.state)
             }
         }
     }
@@ -2387,20 +2387,19 @@ impl Build {
      * Run the build.
      *
      * Builds all packages in dependency order across parallel sandbox
-     * workers. Respects the shutdown flag in `ctx` for graceful
-     * interruption. Results are persisted to `db` as each package
-     * completes.
+     * workers. Respects the run state for graceful interruption.
+     * Results are persisted to `db` as each package completes.
      */
     pub fn start(
         &mut self,
-        ctx: &RunContext,
+        state: &RunState,
         db: &crate::db::Database,
     ) -> anyhow::Result<BuildSummary> {
         let started = Instant::now();
 
         info!(package_count = self.scanpkgs.len(), "Build::start() called");
 
-        let shutdown_flag = Arc::clone(&ctx.shutdown);
+        let state_flag = state.clone();
 
         /*
          * Populate BuildJobs.
@@ -2569,11 +2568,10 @@ impl Build {
         // Spawn a thread to periodically refresh the display (for timer updates)
         let progress_refresh = Arc::clone(&progress);
         let stop_flag = Arc::clone(&stop_refresh);
-        let shutdown_for_refresh = Arc::clone(&shutdown_flag);
+        let state_for_refresh = state_flag.clone();
         let is_plain = progress.lock().map(|p| p.is_plain()).unwrap_or(false);
         let refresh_thread = std::thread::spawn(move || {
-            while !stop_flag.load(Ordering::Relaxed) && !shutdown_for_refresh.load(Ordering::SeqCst)
-            {
+            while !stop_flag.load(Ordering::Relaxed) && !state_for_refresh.is_shutdown() {
                 if is_plain {
                     std::thread::sleep(REFRESH_INTERVAL);
                     if let Ok(mut p) = progress_refresh.lock() {
@@ -2608,10 +2606,10 @@ impl Build {
             let (client_tx, client_rx) = mpsc::channel::<ChannelCommand>();
             clients.insert(i, client_tx);
             let manager_tx = manager_tx.clone();
-            let shutdown_for_worker = Arc::clone(&shutdown_flag);
+            let state_for_worker = state_flag.clone();
             let thread = std::thread::spawn(move || {
                 loop {
-                    if shutdown_for_worker.load(Ordering::SeqCst) {
+                    if state_for_worker.is_shutdown() {
                         break;
                     }
 
@@ -2684,7 +2682,7 @@ impl Build {
                                         }));
                                 }
                                 Err(e) => {
-                                    if !shutdown_for_worker.load(Ordering::SeqCst) {
+                                    if !state_for_worker.is_shutdown() {
                                         tracing::error!(
                                             error = %e,
                                             pkgname = %pkgname.pkgname(),
@@ -2703,7 +2701,7 @@ impl Build {
                                 }
                             }
 
-                            if shutdown_for_worker.load(Ordering::SeqCst) {
+                            if state_for_worker.is_shutdown() {
                                 break;
                             }
                             continue;
@@ -2726,18 +2724,17 @@ impl Build {
             config: self.config.clone(),
             pkgsrc_env: self.pkgsrc_env.clone(),
             sandbox: self.scope.sandbox().clone(),
-            shutdown: Arc::clone(&shutdown_flag),
+            state: state_flag.clone(),
         });
         let progress_clone = Arc::clone(&progress);
-        let shutdown_for_manager = Arc::clone(&shutdown_flag);
+        let state_for_manager = state_flag.clone();
         let (results_tx, results_rx) = mpsc::channel::<Vec<BuildResult>>();
-        let (interrupted_tx, interrupted_rx) = mpsc::channel::<bool>();
         // Channel for completed results to save immediately
         let (completed_tx, completed_rx) = mpsc::channel::<BuildResult>();
         let manager = std::thread::spawn(move || {
             let mut clients = clients.clone();
             let mut jobs = jobs.clone();
-            let mut was_interrupted = false;
+            let mut announced_interrupt = false;
 
             // Track which thread is building which package
             let mut thread_packages: HashMap<usize, PkgName> = HashMap::new();
@@ -2749,18 +2746,24 @@ impl Build {
                 .map(|dj| MakeJobsBudget::new(dj.max, dj.min, build_threads));
 
             loop {
-                // Check shutdown flag periodically
-                if shutdown_for_manager.load(Ordering::SeqCst) {
-                    // Suppress all further output
-                    if let Ok(mut p) = progress_clone.lock() {
-                        p.state_mut().suppress();
+                if state_for_manager.is_shutdown() {
+                    let was_first = if let Ok(mut p) = progress_clone.lock() {
+                        p.finish_interrupted().unwrap_or(false)
+                    } else {
+                        false
+                    };
+                    if was_first {
+                        eprintln!("Interrupted, shutting down...");
                     }
-                    // Send shutdown to all remaining clients
                     for (_, client) in clients.drain() {
                         let _ = client.send(ChannelCommand::Shutdown);
                     }
-                    was_interrupted = true;
                     break;
+                } else if state_for_manager.is_stopping() && !announced_interrupt {
+                    if let Ok(mut p) = progress_clone.lock() {
+                        p.announce_interrupt();
+                    }
+                    announced_interrupt = true;
                 }
 
                 let command = match manager_rx.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
@@ -2770,6 +2773,24 @@ impl Build {
                 };
 
                 match command {
+                    ChannelCommand::ClientReady(c) if state_for_manager.is_stopping() => {
+                        /*
+                         * When stopping, don't start new builds -- send Quit
+                         * so the worker exits after finishing its current job.
+                         */
+                        if let Ok(mut p) = progress_clone.lock() {
+                            p.clear_output_buffer(c);
+                            p.state_mut().set_worker_idle(c);
+                            let _ = p.render();
+                        }
+                        if let Some(client) = clients.get(&c) {
+                            let _ = client.send(ChannelCommand::Quit);
+                        }
+                        clients.remove(&c);
+                        if clients.is_empty() {
+                            break;
+                        }
+                    }
                     ChannelCommand::ClientReady(c) => {
                         let client = clients.get(&c).unwrap();
                         match jobs.get_next_build() {
@@ -2935,13 +2956,11 @@ impl Build {
                 }
             }
 
-            // Send results and interrupted status back
             debug!(
                 result_count = jobs.results.len(),
                 "Manager sending results back"
             );
             let _ = results_tx.send(jobs.results);
-            let _ = interrupted_tx.send(was_interrupted);
         });
 
         threads.push(manager);
@@ -2996,12 +3015,8 @@ impl Build {
         stop_refresh.store(true, Ordering::Relaxed);
         let _ = refresh_thread.join();
 
-        // Check if we were interrupted
-        let was_interrupted = interrupted_rx.recv().unwrap_or(false);
-
-        // Print appropriate summary
         if let Ok(mut p) = progress.lock() {
-            if was_interrupted {
+            if state_flag.interrupted() {
                 let _ = p.finish_interrupted();
             } else {
                 let _ = p.finish();

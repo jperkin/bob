@@ -268,6 +268,51 @@ pub fn format_duration(d: Duration) -> String {
     }
 }
 
+/// Format the progress/status bar line for a given width.
+fn format_status_line(state: &ProgressState, hint: &str, width: usize) -> String {
+    let ratio = state.progress_ratio();
+    let elapsed_str = format_duration_short(state.elapsed());
+    let counts = format!(
+        "{}/{}",
+        state.completed + state.cached + state.failed + state.skipped,
+        state.total
+    );
+
+    let fixed = 14
+        + 2
+        + counts.len()
+        + 1
+        + elapsed_str.len()
+        + if hint.is_empty() { 0 } else { 1 + hint.len() };
+    let bar_width = width.saturating_sub(fixed).clamp(1, 30);
+    let padding = width.saturating_sub(fixed + bar_width);
+
+    let filled = (ratio * bar_width as f64) as usize;
+    let empty = bar_width.saturating_sub(filled).saturating_sub(1);
+    let bar = if filled >= bar_width {
+        "=".repeat(bar_width)
+    } else if filled == 0 {
+        format!(">{}", " ".repeat(bar_width.saturating_sub(1)))
+    } else {
+        format!("{}>{}", "=".repeat(filled), " ".repeat(empty))
+    };
+
+    if hint.is_empty() {
+        format!("{:>12} [{}] {} {}", state.title, bar, counts, elapsed_str)
+    } else {
+        format!(
+            "{:>12} [{}] {} {}{:pad$} {}",
+            state.title,
+            bar,
+            counts,
+            elapsed_str,
+            "",
+            hint,
+            pad = padding
+        )
+    }
+}
+
 /// Format a duration with decimal seconds for short durations.
 fn format_duration_short(d: Duration) -> String {
     let secs = d.as_secs_f64();
@@ -483,6 +528,8 @@ pub struct MultiProgress {
     raw_mode: bool,
     /// Number of dots on the current plain-mode progress line (0-49).
     plain_dots: usize,
+    /// Whether an interrupt has been announced to the user.
+    interrupt_announced: bool,
 }
 
 impl MultiProgress {
@@ -540,6 +587,7 @@ impl MultiProgress {
             pending_messages: Vec::new(),
             raw_mode: raw_mode && progress_mode == ProgressMode::Tui,
             plain_dots: 0,
+            interrupt_announced: false,
         })
     }
 
@@ -619,6 +667,25 @@ impl MultiProgress {
         Ok(())
     }
 
+    /**
+     * Announce an interrupt to the user via the progress display.
+     *
+     * In TUI mode, sets a flag so the next render shows a stopping
+     * indicator in the status bar.  In plain mode, prints a message
+     * immediately.  Only the first call has any effect; subsequent
+     * calls are no-ops so that both `handle_event` and the
+     * manager/scan loop can call this without duplicating output.
+     */
+    pub fn announce_interrupt(&mut self) {
+        if self.interrupt_announced {
+            return;
+        }
+        self.interrupt_announced = true;
+        if self.progress_mode == ProgressMode::Plain {
+            eprintln!("Interrupted, stopping...");
+        }
+    }
+
     pub fn render(&mut self) -> io::Result<()> {
         if self.progress_mode == ProgressMode::Plain {
             return self.render_plain();
@@ -635,6 +702,7 @@ impl MultiProgress {
             return Ok(());
         }
         self.state.update_timer_width();
+        let interrupt_announced = self.interrupt_announced;
         let state = &self.state;
 
         self.terminal.draw(|frame| {
@@ -678,57 +746,15 @@ impl MultiProgress {
                 frame.render_widget(Line::raw(text), chunks[i]);
             }
 
-            // Render cargo-style progress bar: Scanning [====>        ] 5/20 1.2s
-            let ratio = state.progress_ratio();
-            let elapsed_str = format_duration_short(state.elapsed());
-            let counts = format!(
-                "{}/{}",
-                state.completed + state.cached + state.failed + state.skipped,
-                state.total
-            );
-
-            // Calculate bar width: shrink if needed to fit hint, max 30
-            let hint = if state.title == "Building" {
+            let hint = if interrupt_announced {
+                "(stopping, ^C to force quit)"
+            } else if state.title == "Building" {
                 "(press 'v' to toggle full-screen)"
             } else {
                 ""
             };
-            let width = area.width as usize;
-            // Fixed parts: "{:>12} [" (14) + "] " (2) + counts + " " + elapsed + " " + hint
-            let fixed = 14
-                + 2
-                + counts.len()
-                + 1
-                + elapsed_str.len()
-                + if hint.is_empty() { 0 } else { 1 + hint.len() };
-            let bar_width = width.saturating_sub(fixed).clamp(1, 30);
-            let padding = width.saturating_sub(fixed + bar_width);
-
-            let filled = (ratio * bar_width as f64) as usize;
-            let empty = bar_width.saturating_sub(filled).saturating_sub(1);
-            let bar = if filled >= bar_width {
-                "=".repeat(bar_width)
-            } else if filled == 0 {
-                format!(">{}", " ".repeat(bar_width.saturating_sub(1)))
-            } else {
-                format!("{}>{}", "=".repeat(filled), " ".repeat(empty))
-            };
-
-            let line = if hint.is_empty() {
-                format!("{:>12} [{}] {} {}", state.title, bar, counts, elapsed_str)
-            } else {
-                format!(
-                    "{:>12} [{}] {} {}{:pad$} {}",
-                    state.title,
-                    bar,
-                    counts,
-                    elapsed_str,
-                    "",
-                    hint,
-                    pad = padding
-                )
-            };
-            frame.render_widget(Line::raw(line), chunks[state.workers.len()]);
+            let status = format_status_line(state, hint, area.width as usize);
+            frame.render_widget(Line::raw(status.as_str()), chunks[state.workers.len()]);
         })?;
 
         Ok(())
@@ -751,11 +777,20 @@ impl MultiProgress {
                 self.toggle_view_mode()?;
                 return Ok(true);
             }
-            // Handle Ctrl+C - immediately show interrupted message, then
-            // raise SIGINT to trigger shutdown. This ensures the user sees
-            // feedback right away, even if cleanup takes time.
+            /*
+             * Handle Ctrl+C.  First press: show a stopping indicator
+             * in the status bar and keep the TUI active so the user
+             * can watch in-progress work finish.  Second press: tear
+             * down the TUI and print the shutdown message.
+             */
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                let _ = self.finish_interrupted();
+                if self.interrupt_announced {
+                    if self.finish_interrupted().unwrap_or(false) {
+                        eprintln!("Interrupted, shutting down...");
+                    }
+                } else {
+                    self.announce_interrupt();
+                }
                 unsafe {
                     libc::raise(libc::SIGINT);
                 }
@@ -848,11 +883,18 @@ impl MultiProgress {
         let size = self.terminal.size()?;
         let area = Rect::new(0, 0, size.width, size.height);
 
+        let hint = if self.interrupt_announced {
+            "(stopping, ^C to force quit)"
+        } else {
+            ""
+        };
+        let status_text = format_status_line(&self.state, hint, size.width as usize);
+
         // Use different grouping strategy based on terminal width
         if area.width < 160 {
-            self.render_multipanel_linear(&is_active, &elapsed_secs, area)
+            self.render_multipanel_linear(&is_active, &elapsed_secs, area, &status_text)
         } else {
-            self.render_multipanel_grid(&is_active, &elapsed_secs, area)
+            self.render_multipanel_grid(&is_active, &elapsed_secs, area, &status_text)
         }
     }
 
@@ -861,9 +903,13 @@ impl MultiProgress {
         is_active: &[bool],
         elapsed_secs: &[u64],
         area: Rect,
+        status_text: &str,
     ) -> io::Result<()> {
+        let panel_area = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
+        let status_area = Rect::new(area.x, area.y + panel_area.height, area.width, 1);
+
         let groups = group_workers_linear(is_active);
-        let panels = calculate_linear_layout(area, &groups, elapsed_secs);
+        let panels = calculate_linear_layout(panel_area, &groups, elapsed_secs);
 
         // Pre-compute titles
         let titles: Vec<String> = groups
@@ -890,21 +936,22 @@ impl MultiProgress {
             .collect();
 
         self.terminal.draw(|frame| {
-            for (i, panel_area) in panels.iter().enumerate() {
-                frame.render_widget(Clear, *panel_area);
+            for (i, panel_rect) in panels.iter().enumerate() {
+                frame.render_widget(Clear, *panel_rect);
 
                 let block = Block::default()
                     .title(titles[i].as_str())
                     .borders(Borders::ALL);
 
-                let inner_width = panel_area.width.saturating_sub(2) as usize;
-                let inner_height = panel_area.height.saturating_sub(2) as usize;
+                let inner_width = panel_rect.width.saturating_sub(2) as usize;
+                let inner_height = panel_rect.height.saturating_sub(2) as usize;
 
                 let visible = build_visible_lines(&panel_lines[i], inner_width, inner_height);
 
                 let paragraph = Paragraph::new(visible).block(block);
-                frame.render_widget(paragraph, *panel_area);
+                frame.render_widget(paragraph, *panel_rect);
             }
+            frame.render_widget(Line::raw(status_text), status_area);
         })?;
 
         Ok(())
@@ -915,16 +962,20 @@ impl MultiProgress {
         is_active: &[bool],
         elapsed_secs: &[u64],
         area: Rect,
+        status_text: &str,
     ) -> io::Result<()> {
+        let panel_area = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
+        let status_area = Rect::new(area.x, area.y + panel_area.height, area.width, 1);
+
         let num_workers = is_active.len();
 
         // Calculate grid dimensions based on worker count and width
         let max_cols_by_count = (num_workers as f64).sqrt().ceil() as usize;
-        let max_cols_by_width = (area.width as usize) / 80;
+        let max_cols_by_width = (panel_area.width as usize) / 80;
         let cols = max_cols_by_count.min(max_cols_by_width).max(1);
 
         let (column_groups, _rows) = group_workers_grid(is_active, cols);
-        let column_rects = calculate_grid_layout(area, &column_groups, elapsed_secs);
+        let column_rects = calculate_grid_layout(panel_area, &column_groups, elapsed_secs);
 
         // Pre-compute titles for each group in each column
         let column_titles: Vec<Vec<String>> = column_groups
@@ -958,22 +1009,23 @@ impl MultiProgress {
 
         self.terminal.draw(|frame| {
             for (col_idx, rects) in column_rects.iter().enumerate() {
-                for (row_idx, panel_area) in rects.iter().enumerate() {
-                    frame.render_widget(Clear, *panel_area);
+                for (row_idx, panel_rect) in rects.iter().enumerate() {
+                    frame.render_widget(Clear, *panel_rect);
 
                     let title = &column_titles[col_idx][row_idx];
                     let block = Block::default().title(title.as_str()).borders(Borders::ALL);
 
-                    let inner_width = panel_area.width.saturating_sub(2) as usize;
-                    let inner_height = panel_area.height.saturating_sub(2) as usize;
+                    let inner_width = panel_rect.width.saturating_sub(2) as usize;
+                    let inner_height = panel_rect.height.saturating_sub(2) as usize;
 
                     let lines = &column_lines[col_idx][row_idx];
                     let visible = build_visible_lines(lines, inner_width, inner_height);
 
                     let paragraph = Paragraph::new(visible).block(block);
-                    frame.render_widget(paragraph, *panel_area);
+                    frame.render_widget(paragraph, *panel_rect);
                 }
             }
+            frame.render_widget(Line::raw(status_text), status_area);
         })?;
 
         Ok(())
@@ -1042,12 +1094,17 @@ impl MultiProgress {
         Ok(self.state.elapsed())
     }
 
-    /// Finish display with an interrupted message (for Ctrl+C handling).
-    /// This method is idempotent - safe to call multiple times.
-    pub fn finish_interrupted(&mut self) -> io::Result<()> {
-        // Only run once - subsequent calls are no-ops
+    /**
+     * Clean up the display for an interrupt.
+     *
+     * Returns `true` if cleanup was performed (first call), `false` if
+     * already suppressed (idempotent -- safe to call multiple times).
+     * Callers should print their interrupt message only when this
+     * returns `true`, to avoid duplicates.
+     */
+    pub fn finish_interrupted(&mut self) -> io::Result<bool> {
         if self.state.suppressed {
-            return Ok(());
+            return Ok(false);
         }
         self.state.suppressed = true;
 
@@ -1067,7 +1124,7 @@ impl MultiProgress {
         // Restore cursor
         stdout().execute(Show)?;
 
-        Ok(())
+        Ok(true)
     }
 }
 

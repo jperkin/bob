@@ -75,7 +75,7 @@ mod sandbox_sunos;
 use crate::action::{ActionType, FSType};
 use crate::config::Config;
 use crate::try_println;
-use crate::{Interrupted, RunContext};
+use crate::{Interrupted, RunState};
 use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
 use std::fs;
@@ -83,8 +83,6 @@ use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, info_span, warn};
@@ -146,12 +144,13 @@ pub(crate) fn format_process_info(pids: &[&str]) -> String {
 }
 
 /*
- * Poll for child process exit while checking a shutdown flag.  If shutdown
- * is requested, kill the child and return an error.
+ * Poll for child process exit while checking a run state flag.  If
+ * shutdown is requested, kill the child and return an error.  During
+ * stop the child is allowed to continue running.
  */
-pub fn wait_with_shutdown(child: &mut Child, shutdown: &AtomicBool) -> Result<ExitStatus> {
+pub fn wait_with_shutdown(child: &mut Child, state: &RunState) -> Result<ExitStatus> {
     loop {
-        if shutdown.load(Ordering::SeqCst) {
+        if state.is_shutdown() {
             let _ = child.kill();
             let _ = child.wait();
             bail!("Interrupted by shutdown");
@@ -173,7 +172,7 @@ pub fn wait_with_shutdown(child: &mut Child, shutdown: &AtomicBool) -> Result<Ex
  * channel for results while checking the shutdown flag.  This avoids the
  * polling latency of try_wait() while still allowing shutdown interruption.
  */
-pub fn wait_output_with_shutdown(child: Child, shutdown: &AtomicBool) -> Result<Output> {
+pub fn wait_output_with_shutdown(child: Child, state: &RunState) -> Result<Output> {
     let pid = child.id();
     let (tx, rx) = std::sync::mpsc::channel();
 
@@ -182,7 +181,7 @@ pub fn wait_output_with_shutdown(child: Child, shutdown: &AtomicBool) -> Result<
     });
 
     loop {
-        if shutdown.load(Ordering::SeqCst) {
+        if state.is_shutdown() {
             unsafe {
                 libc::kill(pid as i32, libc::SIGKILL);
             }
@@ -1270,7 +1269,7 @@ impl Sandbox {
 pub struct SandboxScope {
     sandbox: Sandbox,
     count: usize,
-    ctx: RunContext,
+    state: RunState,
 }
 
 impl SandboxScope {
@@ -1279,11 +1278,11 @@ impl SandboxScope {
      *
      * Use `ensure()` to create sandboxes when needed.
      */
-    pub fn new(sandbox: Sandbox, ctx: RunContext) -> Self {
+    pub fn new(sandbox: Sandbox, state: RunState) -> Self {
         Self {
             sandbox,
             count: 0,
-            ctx,
+            state,
         }
     }
 
@@ -1314,7 +1313,7 @@ impl SandboxScope {
             .collect();
 
         // Check for interrupt - roll back newly created sandboxes
-        if self.ctx.shutdown.load(Ordering::SeqCst) {
+        if self.state.interrupted() {
             for (i, result) in &results {
                 if result.is_ok() {
                     let _ = self.sandbox.destroy(*i);
@@ -1357,9 +1356,9 @@ impl SandboxScope {
         self.sandbox.enabled()
     }
 
-    /// Access the shutdown flag.
-    pub fn shutdown(&self) -> &Arc<AtomicBool> {
-        &self.ctx.shutdown
+    /// Access the run state flag.
+    pub fn state(&self) -> &RunState {
+        &self.state
     }
 }
 

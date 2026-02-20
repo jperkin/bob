@@ -40,7 +40,7 @@
 use crate::config::PkgsrcEnv;
 use crate::sandbox::{SandboxScope, wait_output_with_shutdown};
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
-use crate::{Config, Interrupted, Sandbox};
+use crate::{Config, Interrupted, RunState, Sandbox};
 use anyhow::{Context, Result, bail};
 use crossterm::event;
 use indexmap::IndexMap;
@@ -588,7 +588,7 @@ impl Scan {
     fn discover_packages(
         &mut self,
         pool: &rayon::ThreadPool,
-        shutdown: &AtomicBool,
+        shutdown: &RunState,
     ) -> anyhow::Result<()> {
         println!("Discovering packages...");
         let pkgsrc = self.config.pkgsrc().display().to_string();
@@ -696,7 +696,7 @@ impl Scan {
             .build()
             .context("Failed to build scan thread pool")?;
 
-        let shutdown_flag = Arc::clone(scope.shutdown());
+        let shutdown_flag = scope.state().clone();
 
         // For full tree scans where a previous scan completed, all packages
         // are already cached - nothing to do.
@@ -802,11 +802,10 @@ impl Scan {
         // Spawn a thread to periodically refresh the display (for timer updates)
         let progress_refresh = Arc::clone(&progress);
         let stop_flag = Arc::clone(&stop_refresh);
-        let shutdown_for_refresh = Arc::clone(&shutdown_flag);
+        let shutdown_for_refresh = shutdown_flag.clone();
         let is_plain = progress.lock().map(|p| p.is_plain()).unwrap_or(false);
         let refresh_thread = std::thread::spawn(move || {
-            while !stop_flag.load(Ordering::Relaxed) && !shutdown_for_refresh.load(Ordering::SeqCst)
-            {
+            while !stop_flag.load(Ordering::Relaxed) && !shutdown_for_refresh.is_shutdown() {
                 if is_plain {
                     std::thread::sleep(REFRESH_INTERVAL);
                     if let Ok(mut p) = progress_refresh.lock() {
@@ -858,13 +857,12 @@ impl Scan {
         let mut scanned_count: usize = 0;
 
         loop {
-            // Check for shutdown signal.
-            // Use SeqCst for consistency with signal handler's store ordering,
-            // ensuring the shutdown is observed promptly on all architectures.
-            if shutdown_flag.load(Ordering::SeqCst) {
-                stop_refresh.store(true, Ordering::Relaxed);
-                if let Ok(mut p) = progress.lock() {
-                    let _ = p.finish_interrupted();
+            // Check for interrupt (stop or shutdown).
+            if shutdown_flag.interrupted() {
+                if shutdown_flag.is_stopping() {
+                    if let Ok(mut p) = progress.lock() {
+                        p.announce_interrupt();
+                    }
                 }
                 break;
             }
@@ -888,15 +886,15 @@ impl Scan {
             std::thread::scope(|s| {
                 // Spawn scanning thread
                 let progress_clone = Arc::clone(&progress);
-                let shutdown_clone = Arc::clone(&shutdown_flag);
+                let shutdown_clone = shutdown_flag.clone();
                 let pool_ref = &pool;
                 let scan_env_ref = &scan_env;
 
                 s.spawn(move || {
                     pool_ref.install(|| {
                         pkgpaths.par_iter().for_each(|pkgpath| {
-                            // Check for shutdown before starting
-                            if shutdown_clone.load(Ordering::SeqCst) {
+                            // Check for interrupt before starting
+                            if shutdown_clone.interrupted() {
                                 return;
                             }
 
@@ -970,6 +968,16 @@ impl Scan {
                 let _ = p.flush_progress_dots(scanned_count, total);
             }
 
+            // Check for interrupt after batch completes.
+            if shutdown_flag.interrupted() {
+                if shutdown_flag.is_stopping() {
+                    if let Ok(mut p) = progress.lock() {
+                        p.announce_interrupt();
+                    }
+                }
+                break;
+            }
+
             // Don't start new waves if database writes are failing
             if db_error.is_some() {
                 break;
@@ -1027,9 +1035,18 @@ impl Scan {
         stop_refresh.store(true, Ordering::Relaxed);
         let _ = refresh_thread.join();
 
-        // Only print summary for normal completion; finish_interrupted()
-        // was already called immediately when interrupt was detected
-        if !shutdown_flag.load(Ordering::SeqCst) {
+        if shutdown_flag.interrupted() {
+            let was_first = if let Ok(mut p) = progress.lock() {
+                p.finish_interrupted().unwrap_or(false)
+            } else {
+                false
+            };
+            if was_first && shutdown_flag.is_shutdown() {
+                eprintln!("Interrupted, shutting down...");
+            }
+        }
+
+        if !shutdown_flag.interrupted() {
             // Get elapsed time and clean up TUI without printing generic summary
             let elapsed = if let Ok(mut p) = progress.lock() {
                 p.finish_silent().ok()
@@ -1066,7 +1083,7 @@ impl Scan {
             self.run_post_build()?;
         }
 
-        if shutdown_flag.load(Ordering::SeqCst) {
+        if shutdown_flag.interrupted() {
             return Err(Interrupted.into());
         }
 
@@ -1123,7 +1140,7 @@ impl Scan {
         sandbox: &Sandbox,
         pkgpath: &PkgPath,
         scan_env: &[(String, String)],
-        shutdown: &AtomicBool,
+        shutdown: &RunState,
     ) -> anyhow::Result<Vec<ScanIndex>> {
         let pkgpath_str = pkgpath.as_path().display().to_string();
         let span = info_span!("scan", pkgpath = %pkgpath_str);

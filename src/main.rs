@@ -17,7 +17,7 @@
 use anyhow::{Context, Result, bail};
 use bob::Init;
 use bob::Interrupted;
-use bob::RunContext;
+use bob::RunState;
 use bob::build::{self, Build};
 use bob::config::Config;
 use bob::db::Database;
@@ -31,8 +31,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::error;
 
 mod cmd;
@@ -44,7 +42,7 @@ const EXIT_INTERRUPTED: u8 = 128 + libc::SIGINT as u8;
 struct BuildRunner {
     config: Config,
     db: Database,
-    ctx: RunContext,
+    state: RunState,
 }
 
 impl BuildRunner {
@@ -64,19 +62,10 @@ impl BuildRunner {
 
         let db = Database::open(config.dbdir())?;
 
-        let shutdown_flag = Arc::new(AtomicBool::new(false));
-        let shutdown_for_handler = Arc::clone(&shutdown_flag);
-        ctrlc::set_handler(move || {
-            // Print message only on first interrupt (swap returns previous value)
-            if !shutdown_for_handler.swap(true, Ordering::SeqCst) {
-                eprintln!("\nInterrupted, shutting down...");
-            }
-        })
-        .context("Failed to set signal handler")?;
+        let state = bob::RunState::new();
+        state.register_signals()?;
 
-        let ctx = RunContext::new(Arc::clone(&shutdown_flag));
-
-        Ok(Self { config, db, ctx })
+        Ok(Self { config, db, state })
     }
 
     /**
@@ -348,7 +337,7 @@ impl BuildRunner {
 
         tracing::debug!("Calling build.start()");
         let build_start_time = std::time::Instant::now();
-        let summary = build.start(&self.ctx, &self.db)?;
+        let summary = build.start(&self.state, &self.db)?;
         tracing::debug!(
             elapsed_ms = build_start_time.elapsed().as_millis(),
             "build.start() returned"
@@ -357,10 +346,10 @@ impl BuildRunner {
         /*
          * Check if we were interrupted.  All builds that completed before
          * the interrupt have already been saved to the database inside
-         * build.start().  Builds that were in-progress when interrupted
-         * were killed and their results discarded (not saved).
+         * build.start().  When stopping, in-progress builds ran to
+         * completion; during shutdown they were killed and discarded.
          */
-        if self.ctx.shutdown.load(Ordering::SeqCst) {
+        if self.state.interrupted() {
             return Err(Interrupted.into());
         }
 
@@ -612,7 +601,7 @@ fn run() -> Result<()> {
             }
 
             let sandbox = Sandbox::new(&runner.config);
-            let mut scope = SandboxScope::new(sandbox, runner.ctx.clone());
+            let mut scope = SandboxScope::new(sandbox, runner.state.clone());
             runner.run_scan_phase(&mut scan, &mut scope)?;
             drop(scope);
 
@@ -648,7 +637,7 @@ fn run() -> Result<()> {
             }
 
             let sandbox = Sandbox::new(&runner.config);
-            let mut scope = SandboxScope::new(sandbox, runner.ctx.clone());
+            let mut scope = SandboxScope::new(sandbox, runner.state.clone());
             runner.run_scan_phase(&mut scan, &mut scope)?;
             let scan_result = scan.resolve_with_report(&runner.db, runner.config.strict_scan())?;
             runner.check_up_to_date(&scan_result)?;
@@ -669,7 +658,7 @@ fn run() -> Result<()> {
                 },
             )?;
             let sandbox = Sandbox::new(&runner.config);
-            let scope = SandboxScope::new(sandbox, runner.ctx.clone());
+            let scope = SandboxScope::new(sandbox, runner.state.clone());
             runner.run_build(buildable, scope)?;
         }
         Cmd::Report => {

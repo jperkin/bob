@@ -23,6 +23,7 @@ pub mod db;
 pub mod report;
 pub mod sandbox;
 pub mod scan;
+pub mod state;
 pub mod summary;
 
 // Internal modules - exposed for binary use but not primary API
@@ -33,8 +34,6 @@ mod tui;
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::io::{self, Write};
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 /**
  * Return all packages in build priority order, along with effective weights.
@@ -111,25 +110,6 @@ impl std::fmt::Display for Interrupted {
 
 impl std::error::Error for Interrupted {}
 
-/// Shared context for a build or scan run.
-#[derive(Clone, Debug)]
-pub struct RunContext {
-    /// Flag to signal graceful shutdown.
-    pub shutdown: Arc<AtomicBool>,
-}
-
-impl RunContext {
-    /**
-     * Create a new run context with the given shutdown flag.
-     *
-     * The shutdown flag is shared across all threads. Set it to `true`
-     * to trigger graceful shutdown of any running scan or build.
-     */
-    pub fn new(shutdown: Arc<AtomicBool>) -> Self {
-        Self { shutdown }
-    }
-}
-
 // Re-export main types for convenience.
 //
 // The typical workflow is:
@@ -147,4 +127,5 @@ pub use init::Init;
 pub use report::write_html_report;
 pub use sandbox::Sandbox;
 pub use scan::{ResolvedPackage, Scan, ScanResult, ScanSummary, SkipReason, SkippedCounts};
+pub use state::RunState;
 pub use summary::generate_pkg_summary;

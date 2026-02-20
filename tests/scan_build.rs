@@ -10,15 +10,13 @@
 
 use anyhow::{Context, Result};
 use bob::{
-    Build, BuildOutcome, Config, Database, RunContext, Sandbox, Scan, ScanSummary, SkipReason,
+    Build, BuildOutcome, Config, Database, RunState, Sandbox, Scan, ScanSummary, SkipReason,
     config::PkgsrcEnv, sandbox::SandboxScope,
 };
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use tempfile::TempDir;
 
 struct PkgDef<'a> {
@@ -412,9 +410,9 @@ pkgsrc = {{
         Database::open(&self.dbdir())
     }
 
-    /// Create a RunContext with no shutdown.
-    fn run_context(&self) -> RunContext {
-        RunContext::new(Arc::new(AtomicBool::new(false)))
+    /// Create a RunState with no shutdown.
+    fn run_state(&self) -> RunState {
+        RunState::new()
     }
 
     /// Create a PkgsrcEnv from our known paths.
@@ -433,9 +431,8 @@ pkgsrc = {{
     fn run_scan(&self) -> Result<ScanSummary> {
         let config = self.load_config()?;
         let db = self.open_db()?;
-        let ctx = self.run_context();
         let sandbox = Sandbox::new(&config);
-        let mut scope = SandboxScope::new(sandbox, ctx);
+        let mut scope = SandboxScope::new(sandbox, self.run_state());
 
         let mut scan = Scan::new(&config);
         scan.init_from_db(&db)?;
@@ -550,9 +547,9 @@ fn test_limited_scan() -> Result<()> {
     let h = TestHarness::new()?;
     let config = h.load_config()?;
     let db = h.open_db()?;
-    let ctx = h.run_context();
+    let state = h.run_state();
     let sandbox = Sandbox::new(&config);
-    let mut scope = SandboxScope::new(sandbox, ctx);
+    let mut scope = SandboxScope::new(sandbox, state);
 
     let mut scan = Scan::new(&config);
     let top = pkgsrc::PkgPath::new("test/top")?;
@@ -596,11 +593,11 @@ fn test_full_build() -> Result<()> {
     let h = TestHarness::new()?;
     let config = h.load_config()?;
     let db = h.open_db()?;
-    let ctx = h.run_context();
+    let state = h.run_state();
 
     // Run scan first
     let sandbox = Sandbox::new(&config);
-    let mut scan_scope = SandboxScope::new(sandbox, ctx.clone());
+    let mut scan_scope = SandboxScope::new(sandbox, state.clone());
     let mut scan = Scan::new(&config);
     scan.init_from_db(&db)?;
     scan.start(&db, &mut scan_scope)?;
@@ -617,9 +614,9 @@ fn test_full_build() -> Result<()> {
 
     // Run build
     let build_sandbox = Sandbox::new(&config);
-    let build_scope = SandboxScope::new(build_sandbox, ctx.clone());
+    let build_scope = SandboxScope::new(build_sandbox, state.clone());
     let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
-    let build_result = build.start(&ctx, &db)?;
+    let build_result = build.start(&state, &db)?;
 
     let bc = build_result.counts();
 
@@ -744,9 +741,9 @@ fn test_scan_database_caching() -> Result<()> {
 
     // With full_scan_complete set, start() should skip re-scanning
     scan2.set_full_scan_complete();
-    let ctx = h.run_context();
+    let state = h.run_state();
     let sandbox = Sandbox::new(&config);
-    let mut scope = SandboxScope::new(sandbox, ctx);
+    let mut scope = SandboxScope::new(sandbox, state);
     scan2.start(&db, &mut scope)?;
 
     // Resolve should still work with cached data
@@ -765,11 +762,11 @@ fn test_build_bootstrap_skips_deinstall() -> Result<()> {
     let h = TestHarness::new()?;
     let config = h.load_config()?;
     let db = h.open_db()?;
-    let ctx = h.run_context();
+    let state = h.run_state();
 
     // Run scan
     let sandbox = Sandbox::new(&config);
-    let mut scan_scope = SandboxScope::new(sandbox, ctx.clone());
+    let mut scan_scope = SandboxScope::new(sandbox, state.clone());
     let mut scan = Scan::new(&config);
     scan.init_from_db(&db)?;
     scan.start(&db, &mut scan_scope)?;
@@ -784,9 +781,9 @@ fn test_build_bootstrap_skips_deinstall() -> Result<()> {
 
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
-    let build_scope = SandboxScope::new(build_sandbox, ctx.clone());
+    let build_scope = SandboxScope::new(build_sandbox, state.clone());
     let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
-    let build_result = build.start(&ctx, &db)?;
+    let build_result = build.start(&state, &db)?;
 
     // base should succeed
     assert_eq!(build_result.counts().success, 1);
@@ -809,20 +806,19 @@ fn test_scan_resume() -> Result<()> {
     let db = h.open_db()?;
 
     // Run first scan with early shutdown
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let ctx = RunContext::new(Arc::clone(&shutdown));
+    let state = bob::RunState::new();
     let sandbox = Sandbox::new(&config);
-    let mut scope = SandboxScope::new(sandbox, ctx);
+    let mut scope = SandboxScope::new(sandbox, state.clone());
 
     let mut scan = Scan::new(&config);
     scan.init_from_db(&db)?;
 
     // Set shutdown flag after a short delay to interrupt the scan.
     // We use a thread to set it while the scan is running.
-    let shutdown_clone = Arc::clone(&shutdown);
+    let state_clone = state.clone();
     let _trigger = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(200));
-        shutdown_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        state_clone.shutdown();
     });
 
     // Start scan - may be interrupted
@@ -834,9 +830,9 @@ fn test_scan_resume() -> Result<()> {
     // The key test is that resuming works correctly.
 
     // Now resume: create a new scan with a fresh context (no shutdown)
-    let ctx2 = h.run_context();
+    let state2 = h.run_state();
     let sandbox2 = Sandbox::new(&config);
-    let mut scope2 = SandboxScope::new(sandbox2, ctx2);
+    let mut scope2 = SandboxScope::new(sandbox2, state2);
 
     let mut scan2 = Scan::new(&config);
     let (cached, _) = scan2.init_from_db(&db)?;
@@ -872,10 +868,10 @@ fn test_scan_resume() -> Result<()> {
 fn run_scan_and_build(h: &TestHarness) -> Result<(Database, ScanSummary, bob::BuildSummary)> {
     let config = h.load_config()?;
     let db = h.open_db()?;
-    let ctx = h.run_context();
+    let state = h.run_state();
 
     let sandbox = Sandbox::new(&config);
-    let mut scan_scope = SandboxScope::new(sandbox, ctx.clone());
+    let mut scan_scope = SandboxScope::new(sandbox, state.clone());
     let mut scan = Scan::new(&config);
     scan.init_from_db(&db)?;
     scan.start(&db, &mut scan_scope)?;
@@ -887,9 +883,9 @@ fn run_scan_and_build(h: &TestHarness) -> Result<(Database, ScanSummary, bob::Bu
         .collect();
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
-    let build_scope = SandboxScope::new(build_sandbox, ctx.clone());
+    let build_scope = SandboxScope::new(build_sandbox, state.clone());
     let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
-    let build_result = build.start(&ctx, &db)?;
+    let build_result = build.start(&state, &db)?;
 
     Ok((db, scan_result, build_result))
 }
@@ -904,7 +900,7 @@ fn test_cached_build_resume() -> Result<()> {
     // Second build using the same DB (results are cached)
     let config = h.load_config()?;
     let db = h.open_db()?;
-    let ctx = h.run_context();
+    let state = h.run_state();
 
     let scanpkgs = scan_result
         .buildable()
@@ -912,13 +908,13 @@ fn test_cached_build_resume() -> Result<()> {
         .collect();
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
-    let build_scope = SandboxScope::new(build_sandbox, ctx.clone());
+    let build_scope = SandboxScope::new(build_sandbox, state.clone());
     let mut build2 = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
 
     let cached = build2.load_cached_from_db(&db)?;
     assert_eq!(cached, 15, "expected 15 cached results, got {}", cached);
 
-    let result2 = build2.start(&ctx, &db)?;
+    let result2 = build2.start(&state, &db)?;
     assert!(
         result2.results.is_empty(),
         "second build should produce no new results (all cached), got {}",
@@ -998,9 +994,9 @@ fn test_strict_scan() -> Result<()> {
     let h = TestHarness::new()?;
     let config = h.load_config()?;
     let db = h.open_db()?;
-    let ctx = h.run_context();
+    let state = h.run_state();
     let sandbox = Sandbox::new(&config);
-    let mut scope = SandboxScope::new(sandbox, ctx);
+    let mut scope = SandboxScope::new(sandbox, state);
 
     let mut scan = Scan::new(&config);
     scan.init_from_db(&db)?;
@@ -1441,11 +1437,11 @@ fn test_limited_build() -> Result<()> {
     let h = TestHarness::new()?;
     let config = h.load_config()?;
     let db = h.open_db()?;
-    let ctx = h.run_context();
+    let state = h.run_state();
 
     // Limited scan from test/top
     let sandbox = Sandbox::new(&config);
-    let mut scan_scope = SandboxScope::new(sandbox, ctx.clone());
+    let mut scan_scope = SandboxScope::new(sandbox, state.clone());
     let mut scan = Scan::new(&config);
     let top = pkgsrc::PkgPath::new("test/top")?;
     scan.add(&top);
@@ -1465,9 +1461,9 @@ fn test_limited_build() -> Result<()> {
         .collect();
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
-    let build_scope = SandboxScope::new(build_sandbox, ctx.clone());
+    let build_scope = SandboxScope::new(build_sandbox, state.clone());
     let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
-    let build_result = build.start(&ctx, &db)?;
+    let build_result = build.start(&state, &db)?;
 
     // All 4 should succeed
     let bc = build_result.counts();
@@ -1533,20 +1529,20 @@ fn test_build_resume_no_new_work() -> Result<()> {
     // Second build with same config - should produce no new results
     let config = h.load_config()?;
     let db = h.open_db()?;
-    let ctx = h.run_context();
+    let state = h.run_state();
     let scanpkgs = scan_result
         .buildable()
         .map(|p| (p.pkgname().clone(), p.clone()))
         .collect();
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
-    let build_scope = SandboxScope::new(build_sandbox, ctx.clone());
+    let build_scope = SandboxScope::new(build_sandbox, state.clone());
     let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
 
     let cached = build.load_cached_from_db(&db)?;
     assert_eq!(cached, 15, "all 15 buildable should be cached");
 
-    let result = build.start(&ctx, &db)?;
+    let result = build.start(&state, &db)?;
     assert!(
         result.results.is_empty(),
         "second build should produce no new results, got {}",
@@ -1584,10 +1580,10 @@ pkgsrc = {{
 
     let config = h.load_config()?;
     let db = h.open_db()?;
-    let ctx = h.run_context();
+    let state = h.run_state();
 
     let sandbox = Sandbox::new(&config);
-    let mut scan_scope = SandboxScope::new(sandbox, ctx.clone());
+    let mut scan_scope = SandboxScope::new(sandbox, state.clone());
     let mut scan = Scan::new(&config);
     scan.init_from_db(&db)?;
     scan.start(&db, &mut scan_scope)?;
@@ -1599,9 +1595,9 @@ pkgsrc = {{
         .collect();
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
-    let build_scope = SandboxScope::new(build_sandbox, ctx.clone());
+    let build_scope = SandboxScope::new(build_sandbox, state.clone());
     let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
-    let build_result = build.start(&ctx, &db)?;
+    let build_result = build.start(&state, &db)?;
 
     let bc = build_result.counts();
     assert_eq!(bc.success, 5, "expected 5 successful builds");
@@ -1626,20 +1622,20 @@ fn test_rebuild_after_clear() -> Result<()> {
 
     // Rebuild - should produce new results
     let config = h.load_config()?;
-    let ctx = h.run_context();
+    let state = h.run_state();
     let scanpkgs = scan_result
         .buildable()
         .map(|p| (p.pkgname().clone(), p.clone()))
         .collect();
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
-    let build_scope = SandboxScope::new(build_sandbox, ctx.clone());
+    let build_scope = SandboxScope::new(build_sandbox, state.clone());
     let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
 
     let cached = build.load_cached_from_db(&db)?;
     assert_eq!(cached, 0, "no cached results after clear");
 
-    let rebuild_result = build.start(&ctx, &db)?;
+    let rebuild_result = build.start(&state, &db)?;
     assert_eq!(
         rebuild_result.counts().success,
         5,
@@ -1704,14 +1700,14 @@ show-var:
 
     // Rebuild with cached results (most will be cached)
     let config = h.load_config()?;
-    let ctx = h.run_context();
+    let state = h.run_state();
     let scanpkgs = scan_result
         .buildable()
         .map(|p| (p.pkgname().clone(), p.clone()))
         .collect();
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
-    let build_scope = SandboxScope::new(build_sandbox, ctx.clone());
+    let build_scope = SandboxScope::new(build_sandbox, state.clone());
     let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
 
     let cached = build.load_cached_from_db(&db)?;
@@ -1723,7 +1719,7 @@ show-var:
         first.results.len()
     );
 
-    let result = build.start(&ctx, &db)?;
+    let result = build.start(&state, &db)?;
 
     // build-fail should now succeed
     let bf_result = result
