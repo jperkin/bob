@@ -1674,47 +1674,7 @@ fn test_selective_rebuild_after_failure() -> Result<()> {
     assert!(db.delete_build_by_name("dep-bfail-1.0")?);
 
     // "Fix" the package by replacing its Makefile with a working one
-    let pkgdir = h.pkgsrc().join("test/build-fail");
-    let content = "\
-PKGNAME=build-fail-1.0
-
-pbulk-index:
-\t@printf 'PKGNAME=build-fail-1.0\\n\
-PKG_LOCATION=test/build-fail\\n\
-ALL_DEPENDS=\\n\
-PKG_SKIP_REASON=\\n\
-PKG_FAIL_REASON=\\n\
-NO_BIN_ON_FTP=\\n\
-RESTRICTED=\\n\
-CATEGORIES=test\\n\
-MAINTAINER=test@example.com\\n\
-USE_DESTDIR=yes\\n\
-BOOTSTRAP_PKG=\\n\
-USERGROUP_PHASE=\\n\
-SCAN_DEPENDS=\\n'
-
-clean checksum configure all stage-install create-usergroup:
-\t@true
-
-stage-package-create:
-\t@mkdir -p ${.CURDIR}/pkg
-\t@d=$$(mktemp -d) && \
-\tprintf '@name build-fail-1.0\\n' > \"$$d/+CONTENTS\" && \
-\tprintf 'Test package\\n' > \"$$d/+COMMENT\" && \
-\tprintf 'Test package description\\n' > \"$$d/+DESC\" && \
-\tprintf '0\\n' > \"$$d/+SIZE_PKG\" && \
-\tprintf 'BUILD_DATE=%s\\nCATEGORIES=test\\nMACHINE_ARCH=x86_64\\nOPSYS=Test\\nOS_VERSION=1.0\\nPKGPATH=test/build-fail\\nPKGTOOLS_VERSION=20210710\\n' \
-\t\"$$(date '+%Y-%m-%d %H:%M:%S %z')\" > \"$$d/+BUILD_INFO\" && \
-\t(cd \"$$d\" && COPYFILE_DISABLE=1 tar czf \"${.CURDIR}/pkg/build-fail-1.0.tgz\" \
-\t+CONTENTS +COMMENT +DESC +SIZE_PKG +BUILD_INFO) && \
-\trm -rf \"$$d\"
-
-show-var:
-\t@case \"${VARNAME}\" in \
-\tSTAGE_PKGFILE) echo \"${.CURDIR}/pkg/build-fail-1.0.tgz\" ;; \
-\tesac
-";
-    fs::write(pkgdir.join("Makefile"), content)?;
+    h.write_pkg_makefile(&PkgDef::new("test/build-fail", "build-fail-1.0"))?;
 
     // Rebuild with cached results (most will be cached)
     let config = h.load_config()?;
@@ -2034,47 +1994,7 @@ fn test_pkg_summary_regenerated_when_rebuild_succeeds() -> Result<()> {
     std::thread::sleep(std::time::Duration::from_millis(50));
 
     // Fix build-fail by replacing its Makefile with a working version.
-    let pkgdir = h.pkgsrc().join("test/build-fail");
-    let content = "\
-PKGNAME=build-fail-1.0
-
-pbulk-index:
-\t@printf 'PKGNAME=build-fail-1.0\\n\
-PKG_LOCATION=test/build-fail\\n\
-ALL_DEPENDS=\\n\
-PKG_SKIP_REASON=\\n\
-PKG_FAIL_REASON=\\n\
-NO_BIN_ON_FTP=\\n\
-RESTRICTED=\\n\
-CATEGORIES=test\\n\
-MAINTAINER=test@example.com\\n\
-USE_DESTDIR=yes\\n\
-BOOTSTRAP_PKG=\\n\
-USERGROUP_PHASE=\\n\
-SCAN_DEPENDS=\\n'
-
-clean checksum configure all stage-install create-usergroup:
-\t@true
-
-stage-package-create:
-\t@mkdir -p ${.CURDIR}/pkg
-\t@d=$$(mktemp -d) && \
-\tprintf '@name build-fail-1.0\\n' > \"$$d/+CONTENTS\" && \
-\tprintf 'Test package\\n' > \"$$d/+COMMENT\" && \
-\tprintf 'Test package description\\n' > \"$$d/+DESC\" && \
-\tprintf '0\\n' > \"$$d/+SIZE_PKG\" && \
-\tprintf 'BUILD_DATE=%s\\nCATEGORIES=test\\nMACHINE_ARCH=x86_64\\nOPSYS=Test\\nOS_VERSION=1.0\\nPKGPATH=test/build-fail\\nPKGTOOLS_VERSION=20210710\\n' \
-\t\"$$(date '+%Y-%m-%d %H:%M:%S %z')\" > \"$$d/+BUILD_INFO\" && \
-\t(cd \"$$d\" && COPYFILE_DISABLE=1 tar czf \"${.CURDIR}/pkg/build-fail-1.0.tgz\" \
-\t+CONTENTS +COMMENT +DESC +SIZE_PKG +BUILD_INFO) && \
-\trm -rf \"$$d\"
-
-show-var:
-\t@case \"${VARNAME}\" in \
-\tSTAGE_PKGFILE) echo \"${.CURDIR}/pkg/build-fail-1.0.tgz\" ;; \
-\tesac
-";
-    fs::write(pkgdir.join("Makefile"), content)?;
+    h.write_pkg_makefile(&PkgDef::new("test/build-fail", "build-fail-1.0"))?;
 
     let prior = db.get_successful_packages()?;
     assert!(
@@ -2138,37 +2058,11 @@ fn test_pkg_summary_regenerated_when_successful_pkg_fails() -> Result<()> {
     std::thread::sleep(std::time::Duration::from_millis(50));
 
     // Break top-1.0 (nothing depends on it, so no cascade concerns).
-    let pkgdir = h.pkgsrc().join("test/top");
-    let content = "\
-PKGNAME=top-1.0
-
-pbulk-index:
-\t@printf 'PKGNAME=top-1.0\\n\
-PKG_LOCATION=test/top\\n\
-ALL_DEPENDS=mid-[0-9]*:test/mid also-base-[0-9]*:test/also-base\\n\
-PKG_SKIP_REASON=\\n\
-PKG_FAIL_REASON=\\n\
-NO_BIN_ON_FTP=\\n\
-RESTRICTED=\\n\
-CATEGORIES=test\\n\
-MAINTAINER=test@example.com\\n\
-USE_DESTDIR=yes\\n\
-BOOTSTRAP_PKG=\\n\
-USERGROUP_PHASE=\\n\
-SCAN_DEPENDS=\\n'
-
-clean checksum all stage-install stage-package-create create-usergroup:
-\t@true
-
-configure:
-\t@echo 'broken' >&2; exit 1
-
-show-var:
-\t@case \"${VARNAME}\" in \
-\tSTAGE_PKGFILE) echo \"${.CURDIR}/pkg/top-1.0.tgz\" ;; \
-\tesac
-";
-    fs::write(pkgdir.join("Makefile"), content)?;
+    h.write_pkg_makefile(
+        &PkgDef::new("test/top", "top-1.0")
+            .depends("mid-[0-9]*:test/mid also-base-[0-9]*:test/also-base")
+            .fail_at("configure", "broken"),
+    )?;
 
     let prior = db.get_successful_packages()?;
     assert!(prior.contains(&"top-1.0".to_string()));
