@@ -343,9 +343,18 @@ show-vars:
                     sections.push(format!(
                         "\nstage-package-create:\n\
                          \t@mkdir -p ${{.CURDIR}}/pkg\n\
-                         \t@printf 'dummy' > \
-                         ${{.CURDIR}}/pkg/{pkgname}.tgz",
+                         \t@d=$$(mktemp -d) && \\\n\
+                         \tprintf '@name {pkgname}\\n' > \"$$d/+CONTENTS\" && \\\n\
+                         \tprintf 'Test package\\n' > \"$$d/+COMMENT\" && \\\n\
+                         \tprintf 'Test package description\\n' > \"$$d/+DESC\" && \\\n\
+                         \tprintf '0\\n' > \"$$d/+SIZE_PKG\" && \\\n\
+                         \tprintf 'BUILD_DATE=%s\\nCATEGORIES=test\\nMACHINE_ARCH=x86_64\\nOPSYS=Test\\nOS_VERSION=1.0\\nPKGPATH={pkgpath}\\nPKGTOOLS_VERSION=20210710\\n' \
+                         \"$$(date '+%Y-%m-%d %H:%M:%S %z')\" > \"$$d/+BUILD_INFO\" && \\\n\
+                         \t(cd \"$$d\" && COPYFILE_DISABLE=1 tar czf \"${{.CURDIR}}/pkg/{pkgname}.tgz\" \
+                         +CONTENTS +COMMENT +DESC +SIZE_PKG +BUILD_INFO) && \\\n\
+                         \trm -rf \"$$d\"",
                         pkgname = pkg.pkgname,
+                        pkgpath = pkg.pkgpath,
                     ));
                 }
             }
@@ -1689,7 +1698,16 @@ clean checksum configure all stage-install create-usergroup:
 
 stage-package-create:
 \t@mkdir -p ${.CURDIR}/pkg
-\t@printf 'dummy' > ${.CURDIR}/pkg/build-fail-1.0.tgz
+\t@d=$$(mktemp -d) && \
+\tprintf '@name build-fail-1.0\\n' > \"$$d/+CONTENTS\" && \
+\tprintf 'Test package\\n' > \"$$d/+COMMENT\" && \
+\tprintf 'Test package description\\n' > \"$$d/+DESC\" && \
+\tprintf '0\\n' > \"$$d/+SIZE_PKG\" && \
+\tprintf 'BUILD_DATE=%s\\nCATEGORIES=test\\nMACHINE_ARCH=x86_64\\nOPSYS=Test\\nOS_VERSION=1.0\\nPKGPATH=test/build-fail\\nPKGTOOLS_VERSION=20210710\\n' \
+\t\"$$(date '+%Y-%m-%d %H:%M:%S %z')\" > \"$$d/+BUILD_INFO\" && \
+\t(cd \"$$d\" && COPYFILE_DISABLE=1 tar czf \"${.CURDIR}/pkg/build-fail-1.0.tgz\" \
+\t+CONTENTS +COMMENT +DESC +SIZE_PKG +BUILD_INFO) && \
+\trm -rf \"$$d\"
 
 show-var:
 \t@case \"${VARNAME}\" in \
@@ -1848,6 +1866,691 @@ fn test_build_durations() -> Result<()> {
             _ => {}
         }
     }
+
+    Ok(())
+}
+
+// ====== pkg_summary generation tests ======
+
+/// Get mtime of pkg_summary.gz, if it exists.
+fn pkg_summary_gz_mtime(h: &TestHarness) -> Option<std::time::SystemTime> {
+    let path = h.packages_dir().join("All").join("pkg_summary.gz");
+    fs::metadata(path).ok().and_then(|m| m.modified().ok())
+}
+
+/// Read and decode pkg_summary.gz, returning its content as a String.
+fn read_pkg_summary_gz(h: &TestHarness) -> Result<String> {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+    let path = h.packages_dir().join("All").join("pkg_summary.gz");
+    let file =
+        fs::File::open(&path).with_context(|| format!("Failed to open {}", path.display()))?;
+    let mut decoder = GzDecoder::new(file);
+    let mut content = String::new();
+    decoder.read_to_string(&mut content)?;
+    Ok(content)
+}
+
+/// Count the number of package entries in pkg_summary content.
+/// Entries are separated by blank lines; each starts with PKGNAME=.
+fn count_pkg_summary_entries(content: &str) -> usize {
+    content
+        .split("\n\n")
+        .filter(|block| block.starts_with("PKGNAME=") || block.contains("\nPKGNAME="))
+        .count()
+}
+
+/// Replicate the maybe_generate_pkg_summary condition from main.rs.
+/// Returns true if pkg_summary was regenerated.
+fn maybe_generate(db: &Database, prior: &[String], summary: &bob::BuildSummary) -> Result<bool> {
+    let current = db.get_successful_packages()?;
+    if prior != current || summary.counts().success > 0 {
+        bob::generate_pkg_summary(db, 2)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Run a build loading cached results, simulating a rebuild or re-run.
+fn run_cached_build(
+    h: &TestHarness,
+    db: &Database,
+    scan_result: &ScanSummary,
+) -> Result<bob::BuildSummary> {
+    let config = h.load_config()?;
+    let state = h.run_state();
+    let scanpkgs = scan_result
+        .buildable()
+        .map(|p| (p.pkgname().clone(), p.clone()))
+        .collect();
+    let pkgsrc_env = h.pkgsrc_env();
+    let sandbox = Sandbox::new(&config);
+    let scope = SandboxScope::new(sandbox, state.clone());
+    let mut build = Build::new(&config, pkgsrc_env, scope, scanpkgs);
+    build.load_cached_from_db(db)?;
+    build.start(&state, db)
+}
+
+/// After a first build with successful packages, pkg_summary should be
+/// generated (prior was empty, current has packages).
+#[test]
+fn test_pkg_summary_generated_after_first_build() -> Result<()> {
+    let h = TestHarness::new()?;
+    let (db, _, summary) = run_scan_and_build(&h)?;
+
+    let prior: Vec<String> = vec![];
+    let generated = maybe_generate(&db, &prior, &summary)?;
+
+    assert!(generated, "should generate after first build");
+    assert!(h.packages_dir().join("All/pkg_summary.gz").exists());
+    assert!(h.packages_dir().join("All/pkg_summary.zst").exists());
+
+    let content = read_pkg_summary_gz(&h)?;
+    assert!(!content.is_empty(), "pkg_summary.gz should have content");
+
+    let successful = db.get_successful_packages()?;
+    let entry_count = count_pkg_summary_entries(&content);
+    assert_eq!(
+        entry_count,
+        successful.len(),
+        "pkg_summary should have one entry per successful package"
+    );
+
+    for pkgname in &successful {
+        assert!(
+            content.contains(&format!("PKGNAME={}", pkgname)),
+            "pkg_summary should contain entry for {}",
+            pkgname
+        );
+    }
+
+    Ok(())
+}
+
+/// When all packages are up-to-date (second run, all cached), pkg_summary
+/// should NOT be regenerated.
+#[test]
+fn test_pkg_summary_skipped_when_up_to_date() -> Result<()> {
+    let h = TestHarness::new()?;
+    let (db, scan_result, _) = run_scan_and_build(&h)?;
+
+    bob::generate_pkg_summary(&db, 2)?;
+    let mtime_before = pkg_summary_gz_mtime(&h).expect("pkg_summary.gz should exist");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let prior = db.get_successful_packages()?;
+    let summary = run_cached_build(&h, &db, &scan_result)?;
+    let generated = maybe_generate(&db, &prior, &summary)?;
+
+    assert!(!generated, "should not regenerate when all up-to-date");
+    assert_eq!(
+        pkg_summary_gz_mtime(&h).expect("should exist"),
+        mtime_before,
+        "pkg_summary.gz mtime should be unchanged"
+    );
+
+    Ok(())
+}
+
+/// Rebuilding a failed package that fails again should NOT regenerate
+/// pkg_summary -- the set of successful packages is unchanged.
+#[test]
+fn test_pkg_summary_skipped_when_rebuild_fails_again() -> Result<()> {
+    let h = TestHarness::new()?;
+    let (db, scan_result, _) = run_scan_and_build(&h)?;
+
+    bob::generate_pkg_summary(&db, 2)?;
+    let mtime_before = pkg_summary_gz_mtime(&h).expect("pkg_summary.gz should exist");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let prior = db.get_successful_packages()?;
+    db.delete_build_by_name("build-fail-1.0")?;
+
+    let summary = run_cached_build(&h, &db, &scan_result)?;
+    let generated = maybe_generate(&db, &prior, &summary)?;
+
+    assert!(
+        !generated,
+        "should not regenerate when failed rebuild fails again"
+    );
+    assert_eq!(
+        pkg_summary_gz_mtime(&h).expect("should exist"),
+        mtime_before,
+    );
+
+    Ok(())
+}
+
+/// Rebuilding a failed package that now succeeds should regenerate
+/// pkg_summary -- a new package joined the successful set.
+#[test]
+fn test_pkg_summary_regenerated_when_rebuild_succeeds() -> Result<()> {
+    let h = TestHarness::new()?;
+    let (db, scan_result, _) = run_scan_and_build(&h)?;
+
+    bob::generate_pkg_summary(&db, 2)?;
+    let mtime_before = pkg_summary_gz_mtime(&h).expect("pkg_summary.gz should exist");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Fix build-fail by replacing its Makefile with a working version.
+    let pkgdir = h.pkgsrc().join("test/build-fail");
+    let content = "\
+PKGNAME=build-fail-1.0
+
+pbulk-index:
+\t@printf 'PKGNAME=build-fail-1.0\\n\
+PKG_LOCATION=test/build-fail\\n\
+ALL_DEPENDS=\\n\
+PKG_SKIP_REASON=\\n\
+PKG_FAIL_REASON=\\n\
+NO_BIN_ON_FTP=\\n\
+RESTRICTED=\\n\
+CATEGORIES=test\\n\
+MAINTAINER=test@example.com\\n\
+USE_DESTDIR=yes\\n\
+BOOTSTRAP_PKG=\\n\
+USERGROUP_PHASE=\\n\
+SCAN_DEPENDS=\\n'
+
+clean checksum configure all stage-install create-usergroup:
+\t@true
+
+stage-package-create:
+\t@mkdir -p ${.CURDIR}/pkg
+\t@d=$$(mktemp -d) && \
+\tprintf '@name build-fail-1.0\\n' > \"$$d/+CONTENTS\" && \
+\tprintf 'Test package\\n' > \"$$d/+COMMENT\" && \
+\tprintf 'Test package description\\n' > \"$$d/+DESC\" && \
+\tprintf '0\\n' > \"$$d/+SIZE_PKG\" && \
+\tprintf 'BUILD_DATE=%s\\nCATEGORIES=test\\nMACHINE_ARCH=x86_64\\nOPSYS=Test\\nOS_VERSION=1.0\\nPKGPATH=test/build-fail\\nPKGTOOLS_VERSION=20210710\\n' \
+\t\"$$(date '+%Y-%m-%d %H:%M:%S %z')\" > \"$$d/+BUILD_INFO\" && \
+\t(cd \"$$d\" && COPYFILE_DISABLE=1 tar czf \"${.CURDIR}/pkg/build-fail-1.0.tgz\" \
+\t+CONTENTS +COMMENT +DESC +SIZE_PKG +BUILD_INFO) && \
+\trm -rf \"$$d\"
+
+show-var:
+\t@case \"${VARNAME}\" in \
+\tSTAGE_PKGFILE) echo \"${.CURDIR}/pkg/build-fail-1.0.tgz\" ;; \
+\tesac
+";
+    fs::write(pkgdir.join("Makefile"), content)?;
+
+    let prior = db.get_successful_packages()?;
+    assert!(
+        !prior.contains(&"build-fail-1.0".to_string()),
+        "build-fail should not be in successful set before fix"
+    );
+    db.delete_build_by_name("build-fail-1.0")?;
+    db.delete_build_by_name("dep-bfail-1.0")?;
+
+    let summary = run_cached_build(&h, &db, &scan_result)?;
+    let generated = maybe_generate(&db, &prior, &summary)?;
+
+    assert!(
+        generated,
+        "should regenerate when failed package now succeeds"
+    );
+
+    let current = db.get_successful_packages()?;
+    assert!(current.contains(&"build-fail-1.0".to_string()));
+
+    let mtime_after = pkg_summary_gz_mtime(&h).expect("should exist");
+    assert!(
+        mtime_after > mtime_before,
+        "pkg_summary.gz should have newer mtime than before rebuild"
+    );
+
+    let content = read_pkg_summary_gz(&h)?;
+    assert!(
+        content.contains("PKGNAME=build-fail-1.0"),
+        "pkg_summary should now include the fixed package"
+    );
+    let entry_count = count_pkg_summary_entries(&content);
+    assert_eq!(
+        entry_count,
+        current.len(),
+        "pkg_summary should have one entry per successful package"
+    );
+
+    // pkg_summary should be at least as recent as unchanged package files
+    let unchanged_tgz = h.packages_dir().join("All").join("base-1.0.tgz");
+    if unchanged_tgz.exists() {
+        let tgz_mtime = fs::metadata(&unchanged_tgz)?.modified()?;
+        assert!(
+            mtime_after >= tgz_mtime,
+            "pkg_summary.gz should be at least as recent as unchanged .tgz files"
+        );
+    }
+
+    Ok(())
+}
+
+/// Rebuilding a successful package that now fails should regenerate
+/// pkg_summary -- the package left the successful set.
+#[test]
+fn test_pkg_summary_regenerated_when_successful_pkg_fails() -> Result<()> {
+    let h = TestHarness::new()?;
+    let (db, scan_result, _) = run_scan_and_build(&h)?;
+
+    bob::generate_pkg_summary(&db, 2)?;
+    let mtime_before = pkg_summary_gz_mtime(&h).expect("pkg_summary.gz should exist");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Break top-1.0 (nothing depends on it, so no cascade concerns).
+    let pkgdir = h.pkgsrc().join("test/top");
+    let content = "\
+PKGNAME=top-1.0
+
+pbulk-index:
+\t@printf 'PKGNAME=top-1.0\\n\
+PKG_LOCATION=test/top\\n\
+ALL_DEPENDS=mid-[0-9]*:test/mid also-base-[0-9]*:test/also-base\\n\
+PKG_SKIP_REASON=\\n\
+PKG_FAIL_REASON=\\n\
+NO_BIN_ON_FTP=\\n\
+RESTRICTED=\\n\
+CATEGORIES=test\\n\
+MAINTAINER=test@example.com\\n\
+USE_DESTDIR=yes\\n\
+BOOTSTRAP_PKG=\\n\
+USERGROUP_PHASE=\\n\
+SCAN_DEPENDS=\\n'
+
+clean checksum all stage-install stage-package-create create-usergroup:
+\t@true
+
+configure:
+\t@echo 'broken' >&2; exit 1
+
+show-var:
+\t@case \"${VARNAME}\" in \
+\tSTAGE_PKGFILE) echo \"${.CURDIR}/pkg/top-1.0.tgz\" ;; \
+\tesac
+";
+    fs::write(pkgdir.join("Makefile"), content)?;
+
+    let prior = db.get_successful_packages()?;
+    assert!(prior.contains(&"top-1.0".to_string()));
+    db.delete_build_by_name("top-1.0")?;
+
+    let summary = run_cached_build(&h, &db, &scan_result)?;
+
+    let current = db.get_successful_packages()?;
+    assert!(
+        !current.contains(&"top-1.0".to_string()),
+        "top-1.0 should no longer be in successful set"
+    );
+
+    let generated = maybe_generate(&db, &prior, &summary)?;
+
+    assert!(
+        generated,
+        "should regenerate when successful package now fails"
+    );
+    assert!(
+        pkg_summary_gz_mtime(&h).expect("should exist") > mtime_before,
+        "pkg_summary.gz should have newer mtime"
+    );
+
+    let content = read_pkg_summary_gz(&h)?;
+    assert!(
+        !content.contains("PKGNAME=top-1.0"),
+        "pkg_summary should no longer include the now-failed package"
+    );
+    assert_eq!(
+        count_pkg_summary_entries(&content),
+        current.len(),
+        "pkg_summary entry count should match successful package count"
+    );
+
+    Ok(())
+}
+
+/// Rebuilding a successful package that succeeds again (same pkgname, new
+/// binary) should regenerate pkg_summary -- metadata may have changed.
+#[test]
+fn test_pkg_summary_regenerated_on_same_name_rebuild() -> Result<()> {
+    let h = TestHarness::new()?;
+    let (db, scan_result, _) = run_scan_and_build(&h)?;
+
+    bob::generate_pkg_summary(&db, 2)?;
+    let mtime_before = pkg_summary_gz_mtime(&h).expect("pkg_summary.gz should exist");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let prior = db.get_successful_packages()?;
+    assert!(prior.contains(&"top-1.0".to_string()));
+    db.delete_build_by_name("top-1.0")?;
+
+    let summary = run_cached_build(&h, &db, &scan_result)?;
+
+    let top = summary
+        .results
+        .iter()
+        .find(|r| r.pkgname.pkgname() == "top-1.0");
+    assert!(
+        matches!(top.map(|r| &r.outcome), Some(BuildOutcome::Success)),
+        "top-1.0 should have been rebuilt successfully"
+    );
+
+    let current = db.get_successful_packages()?;
+    assert_eq!(prior, current, "same set of successful package names");
+    assert!(
+        summary.counts().success > 0,
+        "but a new build succeeded (metadata may differ)"
+    );
+
+    let generated = maybe_generate(&db, &prior, &summary)?;
+    assert!(
+        generated,
+        "should regenerate when package rebuilt with same name"
+    );
+    assert!(
+        pkg_summary_gz_mtime(&h).expect("should exist") > mtime_before,
+        "pkg_summary.gz should have newer mtime"
+    );
+
+    // The rebuilt .tgz should not be newer than the regenerated pkg_summary
+    let rebuilt_tgz = h.packages_dir().join("All").join("top-1.0.tgz");
+    if rebuilt_tgz.exists() {
+        let tgz_mtime = fs::metadata(&rebuilt_tgz)?.modified()?;
+        let summary_mtime = pkg_summary_gz_mtime(&h).expect("should exist");
+        assert!(
+            summary_mtime >= tgz_mtime,
+            "pkg_summary.gz should be at least as recent as rebuilt .tgz"
+        );
+    }
+
+    Ok(())
+}
+
+/// When ALL packages fail on a first build (prior empty, current empty),
+/// pkg_summary should not be generated.
+#[test]
+fn test_pkg_summary_skipped_when_all_fail() -> Result<()> {
+    let h = TestHarness::new()?;
+    let config = h.load_config()?;
+    let db = h.open_db()?;
+    let state = h.run_state();
+
+    // Scan only build-fail (no deps, will fail at configure)
+    let sandbox = Sandbox::new(&config);
+    let mut scope = SandboxScope::new(sandbox, state.clone());
+    let mut scan = Scan::new(&config);
+    scan.add(&pkgsrc::PkgPath::new("test/build-fail")?);
+    scan.init_from_db(&db)?;
+    scan.start(&db, &mut scope)?;
+    let scan_result = scan.resolve_with_report(&db, false)?;
+
+    let scanpkgs = scan_result
+        .buildable()
+        .map(|p| (p.pkgname().clone(), p.clone()))
+        .collect();
+    let pkgsrc_env = h.pkgsrc_env();
+    let build_sandbox = Sandbox::new(&config);
+    let build_scope = SandboxScope::new(build_sandbox, state.clone());
+    let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
+    let summary = build.start(&state, &db)?;
+
+    assert_eq!(summary.counts().success, 0);
+    assert!(summary.counts().failed > 0);
+
+    let prior: Vec<String> = vec![];
+    let generated = maybe_generate(&db, &prior, &summary)?;
+
+    assert!(!generated, "should not generate when all packages fail");
+    assert!(
+        pkg_summary_gz_mtime(&h).is_none(),
+        "pkg_summary.gz should not exist"
+    );
+
+    Ok(())
+}
+
+/// Adding new packages to an existing build should regenerate pkg_summary
+/// when the new packages succeed (successful set grows).
+#[test]
+fn test_pkg_summary_regenerated_when_new_packages_added() -> Result<()> {
+    let h = TestHarness::new()?;
+    let config = h.load_config()?;
+    let db = h.open_db()?;
+    let state = h.run_state();
+
+    // First build: only test/base (1 package)
+    let sandbox = Sandbox::new(&config);
+    let mut scope = SandboxScope::new(sandbox, state.clone());
+    let mut scan = Scan::new(&config);
+    scan.add(&pkgsrc::PkgPath::new("test/base")?);
+    scan.init_from_db(&db)?;
+    scan.start(&db, &mut scope)?;
+    let scan_result = scan.resolve_with_report(&db, false)?;
+
+    let scanpkgs = scan_result
+        .buildable()
+        .map(|p| (p.pkgname().clone(), p.clone()))
+        .collect();
+    let pkgsrc_env = h.pkgsrc_env();
+    let build_sandbox = Sandbox::new(&config);
+    let build_scope = SandboxScope::new(build_sandbox, state.clone());
+    let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
+    let first_summary = build.start(&state, &db)?;
+
+    assert_eq!(first_summary.counts().success, 1);
+    let prior_first: Vec<String> = vec![];
+    let generated = maybe_generate(&db, &prior_first, &first_summary)?;
+    assert!(generated);
+
+    let mtime_first = pkg_summary_gz_mtime(&h).expect("should exist after first build");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Second build: test/top (pulls in base, mid, also-base, top)
+    let state2 = h.run_state();
+    let sandbox2 = Sandbox::new(&config);
+    let mut scope2 = SandboxScope::new(sandbox2, state2.clone());
+    let mut scan2 = Scan::new(&config);
+    scan2.add(&pkgsrc::PkgPath::new("test/top")?);
+    scan2.init_from_db(&db)?;
+    scan2.start(&db, &mut scope2)?;
+    let scan_result2 = scan2.resolve_with_report(&db, false)?;
+
+    let prior = db.get_successful_packages()?;
+    assert_eq!(
+        prior,
+        vec!["base-1.0"],
+        "only base should be successful so far"
+    );
+
+    let scanpkgs2 = scan_result2
+        .buildable()
+        .map(|p| (p.pkgname().clone(), p.clone()))
+        .collect();
+    let pkgsrc_env2 = h.pkgsrc_env();
+    let build_sandbox2 = Sandbox::new(&config);
+    let build_scope2 = SandboxScope::new(build_sandbox2, state2.clone());
+    let mut build2 = Build::new(&config, pkgsrc_env2, build_scope2, scanpkgs2);
+    build2.load_cached_from_db(&db)?;
+    let second_summary = build2.start(&state2, &db)?;
+
+    assert!(
+        second_summary.counts().success >= 3,
+        "mid, also-base, top should succeed (base cached)"
+    );
+
+    let generated = maybe_generate(&db, &prior, &second_summary)?;
+    assert!(generated, "should regenerate when new packages are added");
+    assert!(
+        pkg_summary_gz_mtime(&h).expect("should exist") > mtime_first,
+        "pkg_summary.gz should be newer after adding packages"
+    );
+
+    let current = db.get_successful_packages()?;
+    assert!(
+        current.len() > prior.len(),
+        "successful set should have grown"
+    );
+
+    Ok(())
+}
+
+/// Adding new packages that all fail should NOT regenerate pkg_summary --
+/// the successful set is unchanged.
+#[test]
+fn test_pkg_summary_skipped_when_new_packages_fail() -> Result<()> {
+    let h = TestHarness::new()?;
+    let (db, _, _) = run_scan_and_build(&h)?;
+
+    bob::generate_pkg_summary(&db, 2)?;
+    let mtime_before = pkg_summary_gz_mtime(&h).expect("should exist");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Clear only the failed packages and rebuild them (they'll fail again).
+    // This simulates "adding new (failing) packages" from the perspective
+    // of maybe_generate: prior == current, success == 0.
+    let prior = db.get_successful_packages()?;
+    db.delete_build_by_name("build-fail-1.0")?;
+    db.delete_build_by_name("fail-checksum-1.0")?;
+    db.delete_build_by_name("fail-at-build-1.0")?;
+    db.delete_build_by_name("fail-install-1.0")?;
+    db.delete_build_by_name("fail-package-1.0")?;
+
+    let config = h.load_config()?;
+    let state = h.run_state();
+
+    // Full scan to get all packages
+    let sandbox = Sandbox::new(&config);
+    let mut scope = SandboxScope::new(sandbox, state.clone());
+    let mut scan = Scan::new(&config);
+    scan.init_from_db(&db)?;
+    scan.start(&db, &mut scope)?;
+    let scan_result = scan.resolve_with_report(&db, false)?;
+
+    let summary = run_cached_build(&h, &db, &scan_result)?;
+    let generated = maybe_generate(&db, &prior, &summary)?;
+
+    assert!(
+        !generated,
+        "should not regenerate when only new failures occur"
+    );
+    assert_eq!(
+        pkg_summary_gz_mtime(&h).expect("should exist"),
+        mtime_before,
+    );
+
+    Ok(())
+}
+
+/// Interrupted build should NOT generate pkg_summary, even if the DB state
+/// changed (packages completed before the interrupt).
+#[test]
+fn test_pkg_summary_skipped_when_interrupted() -> Result<()> {
+    let h = TestHarness::new()?;
+    let (db, scan_result, _) = run_scan_and_build(&h)?;
+
+    bob::generate_pkg_summary(&db, 2)?;
+    let mtime_before = pkg_summary_gz_mtime(&h).expect("should exist");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Clear a successful package to create work that would change the DB
+    let prior = db.get_successful_packages()?;
+    db.delete_build_by_name("top-1.0")?;
+
+    // Run build with pre-set shutdown (build exits immediately)
+    let config = h.load_config()?;
+    let state = h.run_state();
+    state.shutdown();
+
+    let scanpkgs = scan_result
+        .buildable()
+        .map(|p| (p.pkgname().clone(), p.clone()))
+        .collect();
+    let pkgsrc_env = h.pkgsrc_env();
+    let sandbox = Sandbox::new(&config);
+    let scope = SandboxScope::new(sandbox, state.clone());
+    let mut build = Build::new(&config, pkgsrc_env, scope, scanpkgs);
+    build.load_cached_from_db(&db)?;
+    let summary = build.start(&state, &db)?;
+
+    // Replicate run_build + caller logic: interrupted -> skip pkg_summary
+    assert!(state.interrupted(), "state should be interrupted");
+    // Don't call maybe_generate -- this is the Err(Interrupted) path
+
+    assert_eq!(
+        pkg_summary_gz_mtime(&h).expect("should exist"),
+        mtime_before,
+        "pkg_summary.gz mtime should be unchanged after interrupt"
+    );
+
+    // Verify the DB state actually changed (top-1.0 was cleared and not rebuilt)
+    let current = db.get_successful_packages()?;
+    assert!(
+        prior != current,
+        "DB state should differ (top-1.0 cleared but not rebuilt)"
+    );
+
+    // Without the interrupt, this WOULD have triggered regeneration
+    assert!(
+        prior != current || summary.counts().success > 0,
+        "condition should be true (would regenerate if not interrupted)"
+    );
+
+    Ok(())
+}
+
+/// After an interrupted build that changed the DB, the next non-interrupted
+/// build should regenerate pkg_summary.
+#[test]
+fn test_pkg_summary_recovered_after_interrupt() -> Result<()> {
+    let h = TestHarness::new()?;
+    let (db, scan_result, _) = run_scan_and_build(&h)?;
+
+    bob::generate_pkg_summary(&db, 2)?;
+    let mtime_before = pkg_summary_gz_mtime(&h).expect("should exist");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Simulate interrupted rebuild: clear a package, don't regenerate
+    db.delete_build_by_name("top-1.0")?;
+
+    // Run build with pre-set shutdown (interrupted, pkg_summary NOT generated)
+    let config = h.load_config()?;
+    let state = h.run_state();
+    state.shutdown();
+
+    let scanpkgs = scan_result
+        .buildable()
+        .map(|p| (p.pkgname().clone(), p.clone()))
+        .collect();
+    let pkgsrc_env = h.pkgsrc_env();
+    let sandbox = Sandbox::new(&config);
+    let scope = SandboxScope::new(sandbox, state.clone());
+    let mut build = Build::new(&config, pkgsrc_env, scope, scanpkgs);
+    build.load_cached_from_db(&db)?;
+    let _interrupted_summary = build.start(&state, &db)?;
+
+    // pkg_summary is stale -- top-1.0 was cleared but not rebuilt
+    assert_eq!(
+        pkg_summary_gz_mtime(&h).expect("should exist"),
+        mtime_before,
+        "pkg_summary should be unchanged after interrupted build"
+    );
+
+    // Recovery: non-interrupted build rebuilds top-1.0
+    let prior = db.get_successful_packages()?;
+    assert!(!prior.contains(&"top-1.0".to_string()));
+
+    let summary = run_cached_build(&h, &db, &scan_result)?;
+    let generated = maybe_generate(&db, &prior, &summary)?;
+
+    assert!(generated, "should regenerate on recovery after interrupt");
+    assert!(
+        pkg_summary_gz_mtime(&h).expect("should exist") > mtime_before,
+        "pkg_summary.gz should be newer after recovery"
+    );
+
+    let current = db.get_successful_packages()?;
+    assert!(
+        current.contains(&"top-1.0".to_string()),
+        "top-1.0 should be back in successful set"
+    );
 
     Ok(())
 }

@@ -353,10 +353,6 @@ impl BuildRunner {
             return Err(Interrupted.into());
         }
 
-        if summary.counts().success > 0 {
-            self.generate_pkg_summary();
-        }
-
         Ok(summary)
     }
 
@@ -405,8 +401,21 @@ impl BuildRunner {
         Ok(summary)
     }
 
-    /// Generate pkg_summary.gz and pkg_summary.zst for all successful packages.
-    fn generate_pkg_summary(&self) {
+    /**
+     * Regenerate pkg_summary if the set of successful packages changed
+     * or any packages were rebuilt (their metadata may have changed).
+     *
+     * `prior` is the list of successful package names captured before any
+     * database mutations (build results stored, cache cleared, etc.).
+     */
+    fn update_pkg_summary(&self, prior: &[String], summary: &build::BuildSummary) {
+        let changed = match self.db.get_successful_packages() {
+            Ok(current) => prior != current || summary.counts().success > 0,
+            Err(_) => true,
+        };
+        if !changed {
+            return;
+        }
         print!("Generating pkg_summary...");
         if std::io::Write::flush(&mut std::io::stdout()).is_err() {
             return;
@@ -640,8 +649,10 @@ fn run() -> Result<()> {
             let mut scope = SandboxScope::new(sandbox, runner.state.clone());
             runner.run_scan_phase(&mut scan, &mut scope)?;
             let scan_result = scan.resolve_with_report(&runner.db, runner.config.strict_scan())?;
+            let prior = runner.db.get_successful_packages().unwrap_or_default();
             runner.check_up_to_date(&scan_result)?;
-            runner.run_build_with(scan_result, scope)?;
+            let summary = runner.run_build_with(scan_result, scope)?;
+            runner.update_pkg_summary(&prior, &summary);
         }
         Cmd::Rebuild {
             all,
@@ -649,6 +660,7 @@ fn run() -> Result<()> {
             packages,
         } => {
             let runner = BuildRunner::new(args.config.as_deref())?;
+            let prior = runner.db.get_successful_packages().unwrap_or_default();
             let buildable = cmd::rebuild::prepare(
                 &runner.db,
                 cmd::rebuild::RebuildArgs {
@@ -659,7 +671,8 @@ fn run() -> Result<()> {
             )?;
             let sandbox = Sandbox::new(&runner.config);
             let scope = SandboxScope::new(sandbox, runner.state.clone());
-            runner.run_build(buildable, scope)?;
+            let summary = runner.run_build(buildable, scope)?;
+            runner.update_pkg_summary(&prior, &summary);
         }
         Cmd::Report => {
             let config = Config::load(args.config.as_deref())?;
