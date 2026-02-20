@@ -321,8 +321,7 @@ fn print_build_tree(
             .collect();
 
         if matches.is_empty() {
-            println!("No packages match '{}'", pattern);
-            return Ok(());
+            bail!("No packages match '{}'", pattern);
         }
 
         let mut required: HashSet<&str> = HashSet::new();
@@ -638,7 +637,9 @@ fn print_build_status(
     }
 
     if rows.is_empty() {
-        println!("No packages match the criteria");
+        if !statuses.is_empty() || !pkg_filters.is_empty() {
+            bail!("No packages match the criteria");
+        }
         return Ok(());
     }
 
@@ -751,7 +752,7 @@ fn print_history(
 
     if records.is_empty() {
         if package.is_some() {
-            println!("No history matches the pattern");
+            bail!("No history matches the pattern");
         } else {
             println!("No build history recorded");
         }

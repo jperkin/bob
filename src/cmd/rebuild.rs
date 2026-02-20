@@ -94,7 +94,7 @@ fn collect_targets(db: &Database, args: &RebuildArgs) -> Result<Vec<String>> {
         }
         let failed = db.get_failed_packages()?;
         if failed.is_empty() {
-            println!("No failed packages to rebuild");
+            println!("All packages up-to-date");
             std::process::exit(0);
         }
         println!("Found {} failed package(s) to rebuild", failed.len());
