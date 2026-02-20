@@ -274,7 +274,7 @@ pub fn format_duration(d: Duration) -> String {
 }
 
 /// Format the progress/status bar line for a given width.
-fn format_status_line(state: &ProgressState, msg: &str, width: usize) -> Line<'static> {
+fn format_status_line(state: &ProgressState, msg: (&str, &str), width: usize) -> Line<'static> {
     let ratio = state.progress_ratio();
     let elapsed_str = format_duration_short(state.elapsed());
     let counts = format!(
@@ -283,13 +283,15 @@ fn format_status_line(state: &ProgressState, msg: &str, width: usize) -> Line<'s
         state.total
     );
 
-    let bar_chrome = " [".len() + "] ".len();
-    let msg_width = if msg.is_empty() {
-        0
+    let (msg_bold, msg_rest) = msg;
+    let has_msg = !msg_bold.is_empty() || !msg_rest.is_empty();
+    let msg_total_len = if has_msg {
+        " (".len() + msg_bold.len() + msg_rest.len() + ") ".len()
     } else {
-        " ".len() + msg.len() + " ".len()
+        0
     };
-    let fixed = STATUS_WIDTH + bar_chrome + counts.len() + 1 + elapsed_str.len() + msg_width;
+    let bar_chrome = " [".len() + "] ".len();
+    let fixed = STATUS_WIDTH + bar_chrome + counts.len() + 1 + elapsed_str.len() + msg_total_len;
     let bar_width = width.saturating_sub(fixed).clamp(1, 30);
     let padding = width.saturating_sub(fixed + bar_width);
 
@@ -305,34 +307,38 @@ fn format_status_line(state: &ProgressState, msg: &str, width: usize) -> Line<'s
 
     let bold = Style::new().add_modifier(Modifier::BOLD);
     let title = Span::styled(format!("{:>tw$}", state.title, tw = STATUS_WIDTH), bold);
-    if msg.is_empty() {
+    if !has_msg {
         Line::from(vec![
             title,
             Span::raw(format!(" [{}] {} {}", bar, counts, elapsed_str)),
         ])
     } else {
-        Line::from(vec![
+        let mut spans = vec![
             title,
             Span::raw(format!(
-                " [{}] {} {}{:pad$} {} ",
+                " [{}] {} {}{:pad$} (",
                 bar,
                 counts,
                 elapsed_str,
                 "",
-                msg,
                 pad = padding
             )),
-        ])
+        ];
+        if !msg_bold.is_empty() {
+            spans.push(Span::styled(msg_bold.to_string(), bold));
+        }
+        spans.push(Span::raw(format!("{}) ", msg_rest)));
+        Line::from(spans)
     }
 }
 
-fn status_msg(interrupt_announced: bool, title: &str) -> &'static str {
+fn status_msg(interrupt_announced: bool, title: &str) -> (&'static str, &'static str) {
     if interrupt_announced {
-        "(stopping, ^C to force quit)"
+        ("stopping", ", ^C to force quit")
     } else if title == "Building" {
-        "(press 'v' to toggle full-screen)"
+        ("", "press 'v' to toggle full-screen")
     } else {
-        ""
+        ("", "")
     }
 }
 
