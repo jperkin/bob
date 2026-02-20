@@ -629,7 +629,13 @@ impl Config {
          * Load user-supplied configuration file, or the default location.
          */
         let filename = if let Some(path) = config_path {
-            path.to_path_buf()
+            if path.is_relative() {
+                std::env::current_dir()
+                    .context("Unable to determine current directory")?
+                    .join(path)
+            } else {
+                path.to_path_buf()
+            }
         } else {
             std::env::current_dir()
                 .context("Unable to determine current directory")?
