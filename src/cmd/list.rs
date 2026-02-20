@@ -177,10 +177,21 @@ Examples:
         #[arg(short, long)]
         path: bool,
     },
+    /// View build history
+    History {
+        /// Hide column headers
+        #[arg(short = 'H')]
+        no_header: bool,
+        /// Columns to display (comma-separated: timestamp,pkgpath,pkgname,outcome,stage,jobs,build,total)
+        #[arg(short = 'o', value_delimiter = ',')]
+        columns: Option<Vec<String>>,
+        /// Filter by pkgpath or pkgname (regex)
+        package: Option<String>,
+    },
 }
 
 pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
-    if db.count_packages()? == 0 {
+    if !matches!(cmd, ListCmd::History { .. }) && db.count_packages()? == 0 {
         bail!("No packages in database. Run 'bob scan' first.");
     }
 
@@ -221,6 +232,13 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
                     break;
                 }
             }
+        }
+        ListCmd::History {
+            no_header,
+            columns,
+            package,
+        } => {
+            print_history(db, columns.as_deref(), no_header, package.as_deref())?;
         }
     }
 
@@ -642,6 +660,156 @@ fn print_build_status(
             let header_len = col.len();
             let max_data = rows.iter().map(|r| r[idx].len()).max().unwrap_or(0);
             header_len.max(max_data).min(max_width(col))
+        })
+        .collect();
+
+    if !no_header {
+        let header: Vec<String> = cols
+            .iter()
+            .zip(&widths)
+            .map(|(&col, &w)| format!("{:<width$}", col.to_uppercase(), width = w))
+            .collect();
+        if !try_println(header.join("  ").trim_end()) {
+            return Ok(());
+        }
+    }
+
+    for row in &rows {
+        let values: Vec<String> = cols
+            .iter()
+            .zip(&widths)
+            .map(|(&col, &w)| format!("{:<width$}", row[col_idx(col)], width = w))
+            .collect();
+        if !try_println(values.join("  ").trim_end()) {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+fn format_duration_ms(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{}ms", ms)
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else if ms < 3_600_000 {
+        let mins = ms / 60_000;
+        let secs = (ms % 60_000) / 1000;
+        format!("{}m{:02}s", mins, secs)
+    } else {
+        let hours = ms / 3_600_000;
+        let mins = (ms % 3_600_000) / 60_000;
+        format!("{}h{:02}m", hours, mins)
+    }
+}
+
+fn print_history(
+    db: &Database,
+    columns: Option<&[String]>,
+    no_header: bool,
+    package: Option<&str>,
+) -> Result<()> {
+    let all_cols = [
+        "timestamp",
+        "pkgpath",
+        "pkgname",
+        "outcome",
+        "stage",
+        "jobs",
+        "build",
+        "total",
+    ];
+    let default_cols = [
+        "timestamp",
+        "pkgname",
+        "outcome",
+        "stage",
+        "jobs",
+        "build",
+        "total",
+    ];
+    let cols: Vec<&str> = columns
+        .map(|c| c.iter().map(|s| s.as_str()).collect())
+        .unwrap_or_else(|| default_cols.to_vec());
+
+    for col in &cols {
+        if !all_cols.contains(col) {
+            bail!(
+                "Unknown column '{}'. Valid columns: {}",
+                col,
+                all_cols.join(", ")
+            );
+        }
+    }
+
+    let pattern = package
+        .map(|p| Regex::new(p).map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", p, e)))
+        .transpose()?;
+
+    let records = db.query_history(pattern.as_ref())?;
+
+    if records.is_empty() {
+        if package.is_some() {
+            println!("No history matches the pattern");
+        } else {
+            println!("No build history recorded");
+        }
+        return Ok(());
+    }
+
+    let col_idx = |name: &str| -> usize {
+        match name {
+            "timestamp" => 0,
+            "pkgpath" => 1,
+            "pkgname" => 2,
+            "outcome" => 3,
+            "stage" => 4,
+            "jobs" => 5,
+            "build" => 6,
+            "total" => 7,
+            _ => 0,
+        }
+    };
+
+    let mut rows: Vec<[String; 8]> = Vec::new();
+    for rec in &records {
+        let stage = if rec.outcome == OutcomeType::Success {
+            "-".to_string()
+        } else {
+            rec.stage
+                .map(|s| s.as_str().to_string())
+                .unwrap_or_else(|| "-".to_string())
+        };
+        let jobs = if rec.make_jobs == 0 {
+            "-".to_string()
+        } else {
+            rec.make_jobs.to_string()
+        };
+        let build = rec
+            .build_duration
+            .map(|d| format_duration_ms(d.as_millis() as u64))
+            .unwrap_or_else(|| "-".to_string());
+        let total = format_duration_ms(rec.total_duration.as_millis() as u64);
+        rows.push([
+            rec.timestamp.clone(),
+            rec.pkgpath.clone(),
+            rec.pkgname.clone(),
+            rec.outcome.as_str().to_string(),
+            stage,
+            jobs,
+            build,
+            total,
+        ]);
+    }
+
+    let widths: Vec<usize> = cols
+        .iter()
+        .map(|&col| {
+            let idx = col_idx(col);
+            let header_len = col.len();
+            let max_data = rows.iter().map(|r| r[idx].len()).max().unwrap_or(0);
+            header_len.max(max_data)
         })
         .collect();
 

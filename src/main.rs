@@ -266,11 +266,6 @@ enum Cmd {
         #[command(subcommand)]
         cmd: UtilCmd,
     },
-    /// View build history
-    History {
-        /// Filter by pkgpath or pkgname (regex)
-        package: Option<String>,
-    },
     /// Run SQL commands against the database
     Db {
         /// SQL command to execute (omit for interactive mode)
@@ -451,11 +446,6 @@ fn run() -> Result<()> {
             let report_path = config.logdir().join("report.html");
             report::write_html_report(&db, config.logdir(), &report_path)?;
             println!("HTML report written to: {}", report_path.display());
-        }
-        Cmd::History { package } => {
-            let config = Config::load(args.config.as_deref())?;
-            let db = Database::open(config.dbdir())?;
-            cmd::history::run(&db, package.as_deref())?;
         }
         Cmd::Clean { logs_only } => {
             let config = Config::load(args.config.as_deref())?;
