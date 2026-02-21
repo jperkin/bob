@@ -43,7 +43,7 @@
 //! - `clean` - Clean up build artifacts
 
 use crate::config::PkgsrcEnv;
-use crate::jobs::{JobAllocator, MakeJobs, MakeJobsResponder, SpeedModel, WorkerModel};
+use crate::jobs::{JobAllocator, MakeJobs, MakeJobsResponder, SpeedModel};
 use crate::sandbox::{SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
 use crate::scan::{ResolvedPackage, SkipReason, SkippedCounts};
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
@@ -2195,32 +2195,38 @@ impl BuildJobs {
     }
 
     /**
-     * Speed model parameters for job allocation: Amdahl's law
-     * t1_ms and serial_fraction from history (or defaults), plus
-     * critical-path remaining depth.
+     * Total estimated single-job build time for all remaining
+     * transitive dependents of a package.  Captures fan-out: a
+     * package gating 10,000 dependents scores much higher than one
+     * gating 4, even at the same dependency depth.
      */
-    fn worker_model(&self, pkg: &PkgName) -> WorkerModel {
-        let model = self.scanpkgs.get(pkg).and_then(|p| {
-            let pkgpath = p.pkgpath.as_path().display().to_string();
-            self.estimates.get(&pkgpath)
-        });
-        let (t1, sf) = match model {
-            Some(m) => (m.t1_ms, m.serial_fraction),
-            None => {
-                let t1 = self
-                    .scanpkgs
-                    .get(pkg)
-                    .and_then(|p| p.pbulk_weight())
-                    .and_then(|w| w.parse::<f64>().ok())
-                    .unwrap_or(100.0);
-                (t1, SpeedModel::default().serial_fraction)
+    fn total_dependent_work(&self, pkgname: &PkgName) -> usize {
+        let mut visited = HashSet::new();
+        let mut stack = vec![pkgname];
+        let mut total = 0usize;
+        while let Some(pkg) = stack.pop() {
+            if let Some(rdeps) = self.reverse_deps.get(pkg) {
+                for r in rdeps {
+                    if !self.done.contains(r) && !self.failed.contains(r) && visited.insert(r) {
+                        total = total.saturating_add(self.t1_ms(r));
+                        stack.push(r);
+                    }
+                }
             }
-        };
-        WorkerModel {
-            t1_ms: t1,
-            serial_fraction: sf,
-            remaining_depth: self.remaining_depth(pkg) as f64,
         }
+        total
+    }
+
+    /**
+     * Scheduling weight for a package: the maximum of its
+     * critical-path depth and its total dependent work divided by
+     * the number of workers.  This captures both serial bottlenecks
+     * (depth) and fan-out (breadth).
+     */
+    fn weight(&self, pkg: &PkgName, num_workers: usize) -> usize {
+        let rd = self.remaining_depth(pkg);
+        let tdw = self.total_dependent_work(pkg);
+        rd.max(tdw / num_workers.max(1))
     }
 
     /**
@@ -2874,27 +2880,23 @@ impl Build {
                     ChannelCommand::BuildPhaseEntry(sid, responder) => {
                         build_phase_workers.insert(sid);
                         let jobs_val = if let Some(ref mut budget) = make_jobs_budget {
-                            let all_dispatched: Vec<(usize, WorkerModel)> = thread_packages
+                            let num_workers = clients.len();
+                            let all_dispatched: Vec<(usize, usize)> = thread_packages
                                 .iter()
-                                .map(|(&tid, pkg)| (tid, jobs.worker_model(pkg)))
+                                .map(|(&tid, pkg)| (tid, jobs.weight(pkg, num_workers)))
                                 .collect();
 
                             let sole_builder = jobs.running.len() == 1
                                 && !jobs.incoming.values().any(|deps| deps.is_empty());
 
-                            let idle_slots =
-                                clients.len().saturating_sub(build_phase_workers.len());
-                            let mut upcoming: Vec<WorkerModel> = jobs
+                            let idle_slots = num_workers.saturating_sub(build_phase_workers.len());
+                            let mut upcoming: Vec<usize> = jobs
                                 .incoming
                                 .iter()
                                 .filter(|(_, deps)| deps.is_empty())
-                                .map(|(pkg, _)| jobs.worker_model(pkg))
+                                .map(|(pkg, _)| jobs.weight(pkg, num_workers))
                                 .collect();
-                            upcoming.sort_unstable_by(|a, b| {
-                                let ca = a.t1_ms + a.remaining_depth;
-                                let cb = b.t1_ms + b.remaining_depth;
-                                cb.partial_cmp(&ca).unwrap_or(std::cmp::Ordering::Equal)
-                            });
+                            upcoming.sort_unstable_by(|a, b| b.cmp(a));
                             upcoming.truncate(idle_slots);
 
                             let allocated =

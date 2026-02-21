@@ -80,7 +80,8 @@ const DEFAULT_SERIAL_FRACTION: f64 = 0.5;
 #[derive(Clone, Debug)]
 pub struct SpeedModel {
     pub(crate) t1_ms: f64,
-    pub(crate) serial_fraction: f64,
+    #[allow(dead_code)]
+    serial_fraction: f64,
 }
 
 impl SpeedModel {
@@ -156,46 +157,20 @@ impl std::fmt::Debug for MakeJobsResponder {
 }
 
 /**
- * Amdahl's law parameters and critical-path depth for a worker,
- * used by the allocator to estimate build cost at different job
- * counts: `T(j) = t1_ms * (sf + (1-sf)/j) + remaining_depth`.
- */
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct WorkerModel {
-    pub(crate) t1_ms: f64,
-    pub(crate) serial_fraction: f64,
-    pub(crate) remaining_depth: f64,
-}
-
-impl WorkerModel {
-    /**
-     * Estimated wall-clock cost at `jobs` cores: Amdahl's T(j)
-     * plus the critical-path cost of packages that depend on this
-     * one. Minimizing the max of this across workers minimizes
-     * overall makespan.
-     */
-    fn cost(&self, jobs: usize) -> f64 {
-        let j = jobs.max(1) as f64;
-        self.t1_ms * (self.serial_fraction + (1.0 - self.serial_fraction) / j)
-            + self.remaining_depth
-    }
-}
-
-/**
  * Tracks MAKE_JOBS budget allocation across concurrent builds.
  *
- * The total CPU budget (`max_jobs`) is divided into a minimum
- * reservation (1 per dispatched worker) and an extra pool distributed
- * via minimax allocation using Amdahl's law speed models.
+ * The total CPU budget (`max_jobs`) is divided into a base allocation
+ * (1 per dispatched worker) and an extra pool distributed
+ * proportionally by weight using Hamilton's method.
  *
- * Each extra core goes to whichever worker currently has the highest
- * estimated cost `T(j) + remaining_depth`, equalizing finish times
- * across the critical path. This minimizes makespan: packages that
- * either take a long time themselves or sit on the critical path
- * get more cores.
+ * Weight reflects a package's impact on overall build time: the
+ * maximum of its critical-path depth (longest chain of remaining
+ * dependents) and its total dependent work divided by the number of
+ * workers. This captures both depth (serial bottlenecks) and
+ * breadth (fan-out gating many packages).
  *
  * Ready packages that idle workers will pick up soon participate as
- * virtual entries, reserving budget so that high-cost upcoming
+ * virtual entries, reserving budget so that high-impact upcoming
  * packages get adequate allocation when they start.
  *
  * When exactly one worker is running and nothing else is ready to
@@ -220,18 +195,18 @@ impl JobAllocator {
      * `sole_builder` should be true only when this is the sole running
      * worker AND no packages are ready to dispatch.
      *
-     * `all_dispatched` lists `(sandbox_id, model)` for every worker
+     * `all_dispatched` lists `(sandbox_id, weight)` for every worker
      * that currently has a package assigned.
      *
-     * `upcoming` are models for ready-to-dispatch packages that idle
+     * `upcoming` are weights for ready-to-dispatch packages that idle
      * workers will pick up soon, truncated to idle worker slots.
      */
     pub(crate) fn allocate(
         &self,
         sandbox_id: usize,
-        all_dispatched: &[(usize, WorkerModel)],
+        all_dispatched: &[(usize, usize)],
         sole_builder: bool,
-        upcoming: &[WorkerModel],
+        upcoming: &[usize],
     ) -> usize {
         if sole_builder {
             return self.max_jobs;
@@ -248,47 +223,59 @@ impl JobAllocator {
 
         /*
          * Collect unlocked dispatched workers and upcoming virtual
-         * entries. Each starts at 1 job (the base allocation).
-         * Distribute remaining_extra via minimax: each core goes to
-         * whichever entry has the highest T(j) + remaining_depth,
-         * equalizing estimated finish times.
+         * entries, then distribute extras proportionally by weight
+         * using Hamilton's method (largest-remainder apportionment).
          */
-        let mut extras: Vec<(usize, WorkerModel, usize)> = all_dispatched
+        let mut entries: Vec<(usize, usize)> = all_dispatched
             .iter()
             .filter(|(sid, _)| !self.locked.contains_key(sid))
-            .map(|&(sid, model)| (sid, model, 0))
+            .copied()
             .collect();
-        for (i, &model) in upcoming.iter().enumerate() {
-            extras.push((usize::MAX - i, model, 0));
+        for (i, &weight) in upcoming.iter().enumerate() {
+            entries.push((usize::MAX - i, weight));
         }
 
-        if extras.is_empty() {
+        if entries.is_empty() {
             return 1;
         }
 
-        for _ in 0..remaining_extra {
-            if let Some(best) = (0..extras.len()).max_by(|&a, &b| {
-                let ca = extras[a].1.cost(1 + extras[a].2);
-                let cb = extras[b].1.cost(1 + extras[b].2);
-                ca.partial_cmp(&cb)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| {
-                        extras[a]
-                            .1
-                            .remaining_depth
-                            .partial_cmp(&extras[b].1.remaining_depth)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-            }) {
-                extras[best].2 += 1;
-            }
-        }
+        let total_weight: usize = entries.iter().map(|(_, w)| *w).sum();
 
-        let my_extra = extras
-            .iter()
-            .find(|(sid, _, _)| *sid == sandbox_id)
-            .map(|(_, _, e)| *e)
-            .unwrap_or(0);
+        let my_extra = if total_weight == 0 {
+            let per = remaining_extra / entries.len();
+            let leftover = remaining_extra % entries.len();
+            let idx = entries.iter().position(|(sid, _)| *sid == sandbox_id);
+            per + if idx.is_some_and(|i| i < leftover) {
+                1
+            } else {
+                0
+            }
+        } else {
+            let mut allocs: Vec<(usize, usize, f64)> = entries
+                .iter()
+                .map(|&(sid, w)| {
+                    let exact = w as f64 / total_weight as f64 * remaining_extra as f64;
+                    (sid, exact as usize, exact.fract())
+                })
+                .collect();
+            let floor_total: usize = allocs.iter().map(|(_, f, _)| *f).sum();
+            let leftover = remaining_extra - floor_total;
+            let mut idx: Vec<usize> = (0..allocs.len()).collect();
+            idx.sort_unstable_by(|&a, &b| {
+                allocs[b]
+                    .2
+                    .partial_cmp(&allocs[a].2)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for &i in idx.iter().take(leftover) {
+                allocs[i].1 += 1;
+            }
+            allocs
+                .iter()
+                .find(|(sid, _, _)| *sid == sandbox_id)
+                .map(|(_, e, _)| *e)
+                .unwrap_or(0)
+        };
 
         1 + my_extra
     }
