@@ -23,7 +23,7 @@ use crossterm::terminal;
 use regex::Regex;
 use serde_json;
 
-use bob::build::{BuildOutcome, OutcomeType};
+use bob::build::{BuildOutcome, OutcomeType, Stage};
 use bob::db::{Database, PackageStatusRow};
 use bob::scan::SkipReason;
 use bob::try_println;
@@ -182,7 +182,7 @@ Examples:
         /// Hide column headers
         #[arg(short = 'H')]
         no_header: bool,
-        /// Columns to display (comma-separated: timestamp,pkgpath,pkgname,outcome,stage,jobs,build,total)
+        /// Columns to display (comma-separated; add per-stage durations with pre-clean,depends,checksum,configure,install,package,deinstall,clean)
         #[arg(short = 'o', value_delimiter = ',')]
         columns: Option<Vec<String>>,
         /// Filter by pkgpath or pkgname (regex)
@@ -720,8 +720,16 @@ fn print_history(
         "jobs",
         "build",
         "total",
+        "pre-clean",
+        "depends",
+        "checksum",
+        "configure",
+        "install",
+        "package",
+        "deinstall",
+        "clean",
     ];
-    let default_cols = [
+    let default_cols: Vec<&str> = vec![
         "timestamp",
         "pkgname",
         "outcome",
@@ -732,7 +740,7 @@ fn print_history(
     ];
     let cols: Vec<&str> = columns
         .map(|c| c.iter().map(|s| s.as_str()).collect())
-        .unwrap_or_else(|| default_cols.to_vec());
+        .unwrap_or(default_cols);
 
     for col in &cols {
         if !all_cols.contains(col) {
@@ -743,6 +751,17 @@ fn print_history(
             );
         }
     }
+
+    let stage_cols: &[(&str, Stage)] = &[
+        ("pre-clean", Stage::PreClean),
+        ("depends", Stage::Depends),
+        ("checksum", Stage::Checksum),
+        ("configure", Stage::Configure),
+        ("install", Stage::Install),
+        ("package", Stage::Package),
+        ("deinstall", Stage::Deinstall),
+        ("clean", Stage::Clean),
+    ];
 
     let pattern = package
         .map(|p| Regex::new(p).map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", p, e)))
@@ -769,11 +788,18 @@ fn print_history(
             "jobs" => 5,
             "build" => 6,
             "total" => 7,
-            _ => 0,
+            _ => {
+                for (i, &(sc, _)) in stage_cols.iter().enumerate() {
+                    if sc == name {
+                        return 8 + i;
+                    }
+                }
+                0
+            }
         }
     };
 
-    let mut rows: Vec<[String; 8]> = Vec::new();
+    let mut rows: Vec<Vec<String>> = Vec::new();
     for rec in &records {
         let stage = if rec.outcome == OutcomeType::Success {
             "-".to_string()
@@ -792,7 +818,8 @@ fn print_history(
             .map(|d| format_duration_ms(d.as_millis() as u64))
             .unwrap_or_else(|| "-".to_string());
         let total = format_duration_ms(rec.total_duration.as_millis() as u64);
-        rows.push([
+
+        let mut row = vec![
             rec.timestamp.clone(),
             rec.pkgpath.clone(),
             rec.pkgname.clone(),
@@ -801,7 +828,19 @@ fn print_history(
             jobs,
             build,
             total,
-        ]);
+        ];
+
+        for &(_, stage_val) in stage_cols {
+            let dur = rec
+                .stage_durations
+                .iter()
+                .find(|(s, _)| *s == stage_val)
+                .map(|(_, d)| format_duration_ms(d.as_millis() as u64))
+                .unwrap_or_else(|| "-".to_string());
+            row.push(dur);
+        }
+
+        rows.push(row);
     }
 
     let widths: Vec<usize> = cols

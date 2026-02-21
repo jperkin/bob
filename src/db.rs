@@ -54,7 +54,7 @@ const SCHEMA_VERSION: i32 = 8;
 /**
  * Schema version for history.db - update when history schema changes.
  */
-const HISTORY_SCHEMA_VERSION: i32 = 3;
+const HISTORY_SCHEMA_VERSION: i32 = 4;
 
 /**
  * Lightweight package row without full scan data.
@@ -132,6 +132,8 @@ pub struct HistoryInput {
     pub stage: Option<Stage>,
     /// Duration of the build (compilation) phase only, None if never reached.
     pub build_duration: Option<Duration>,
+    /// Per-stage durations.
+    pub stage_durations: Vec<(Stage, Duration)>,
     /// Wall-clock duration for the entire build.
     pub total_duration: Duration,
     /// Unix epoch when the build started.
@@ -148,6 +150,8 @@ pub struct HistoryRecord {
     pub make_jobs: usize,
     pub stage: Option<Stage>,
     pub build_duration: Option<Duration>,
+    /// Per-stage durations.
+    pub stage_durations: Vec<(Stage, Duration)>,
     pub total_duration: Duration,
     /// Pre-formatted local timestamp from SQLite's `datetime()`.
     pub timestamp: String,
@@ -1608,6 +1612,21 @@ impl Database {
                 rec.timestamp,
             ],
         )?;
+        if !rec.stage_durations.is_empty() {
+            let history_id = conn.last_insert_rowid();
+            let mut stmt = conn.prepare_cached(
+                "INSERT INTO build_stage_durations \
+                     (history_id, stage, duration_ms) \
+                 VALUES (?1, ?2, ?3)",
+            )?;
+            for &(stage, duration) in &rec.stage_durations {
+                stmt.execute(params![
+                    history_id,
+                    stage as i32,
+                    duration.as_millis() as i64,
+                ])?;
+            }
+        }
         Ok(())
     }
 
@@ -1618,31 +1637,34 @@ impl Database {
     pub fn query_history(&self, pattern: Option<&regex::Regex>) -> Result<Vec<HistoryRecord>> {
         let conn = self.history_conn()?;
         let mut stmt = conn.prepare(
-            "SELECT pkgpath, pkgname, outcome, make_jobs, stage, \
+            "SELECT id, pkgpath, pkgname, outcome, make_jobs, stage, \
                     build_duration_ms, total_duration_ms, \
                     datetime(timestamp, 'unixepoch', 'localtime') \
              FROM build_history ORDER BY timestamp DESC, id DESC",
         )?;
         let rows = stmt.query_map([], |row| {
-            let build_ms: Option<i64> = row.get(5)?;
-            let total_ms: i64 = row.get(6)?;
-            let outcome_id: i32 = row.get(2)?;
-            let stage_id: Option<i32> = row.get(4)?;
+            let build_ms: Option<i64> = row.get(6)?;
+            let total_ms: i64 = row.get(7)?;
+            let outcome_id: i32 = row.get(3)?;
+            let stage_id: Option<i32> = row.get(5)?;
             Ok((
-                row.get::<_, String>(0)?,
+                row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
                 outcome_id,
-                row.get::<_, i64>(3)? as usize,
+                row.get::<_, i64>(4)? as usize,
                 stage_id,
                 build_ms,
                 total_ms,
-                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
             ))
         })?;
 
         let mut results = Vec::new();
+        let mut history_ids = Vec::new();
         for row in rows {
-            let (pkgpath, pkgname, outcome_id, make_jobs, stage_id, build_ms, total_ms, ts) = row?;
+            let (id, pkgpath, pkgname, outcome_id, make_jobs, stage_id, build_ms, total_ms, ts) =
+                row?;
             if let Some(re) = pattern {
                 if !re.is_match(&pkgpath) && !re.is_match(&pkgname) {
                     continue;
@@ -1650,6 +1672,7 @@ impl Database {
             }
             let outcome = OutcomeType::try_from(outcome_id)?;
             let stage = stage_id.map(Stage::try_from).transpose()?;
+            history_ids.push(id);
             results.push(HistoryRecord {
                 pkgpath,
                 pkgname,
@@ -1657,10 +1680,48 @@ impl Database {
                 make_jobs,
                 stage,
                 build_duration: build_ms.map(|ms| Duration::from_millis(ms as u64)),
+                stage_durations: Vec::new(),
                 total_duration: Duration::from_millis(total_ms as u64),
                 timestamp: ts,
             });
         }
+
+        if !history_ids.is_empty() {
+            let id_to_idx: HashMap<i64, usize> = history_ids
+                .iter()
+                .enumerate()
+                .map(|(i, &id)| (id, i))
+                .collect();
+            let placeholders: String = history_ids
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT history_id, stage, duration_ms \
+                 FROM build_stage_durations \
+                 WHERE history_id IN ({})",
+                placeholders
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(history_ids.iter()), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i32>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (history_id, stage_id, duration_ms) = row?;
+                if let Some(&idx) = id_to_idx.get(&history_id) {
+                    let stage = Stage::try_from(stage_id)?;
+                    results[idx]
+                        .stage_durations
+                        .push((stage, Duration::from_millis(duration_ms as u64)));
+                }
+            }
+        }
+
         Ok(results)
     }
 
@@ -1743,7 +1804,14 @@ fn open_history_conn(dbdir: &Path) -> Result<Connection> {
              CREATE INDEX idx_history_pkgpath
                  ON build_history(pkgpath);
              CREATE INDEX idx_history_timestamp
-                 ON build_history(timestamp);",
+                 ON build_history(timestamp);
+
+             CREATE TABLE build_stage_durations (
+                 history_id INTEGER NOT NULL REFERENCES build_history(id),
+                 stage INTEGER NOT NULL REFERENCES stage_types(id),
+                 duration_ms INTEGER NOT NULL,
+                 PRIMARY KEY (history_id, stage)
+             );",
             HISTORY_SCHEMA_VERSION
         ))?;
     } else {

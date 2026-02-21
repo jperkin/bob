@@ -538,6 +538,8 @@ pub struct PkgBuildStats {
     pub stage: Option<Stage>,
     /// Duration of the build (compilation) phase, if reached.
     pub build_duration: Option<Duration>,
+    /// Per-stage durations for completed stages.
+    pub stage_durations: Vec<(Stage, Duration)>,
     /// Wall-clock duration for the entire build.
     pub total_duration: Duration,
     /// Unix epoch when the build started.
@@ -655,31 +657,50 @@ impl<'a> PkgBuilder<'a> {
         let pkgdir = self.session.config.pkgsrc().join(pkgpath.as_path());
 
         // Pre-clean
+        let stage_start = Instant::now();
         stats.stage = Some(Stage::PreClean);
         callback.stage(Stage::PreClean.as_str());
         self.run_make_stage(Stage::PreClean, &pkgdir, &["clean"], RunAs::Root, false)?;
+        stats
+            .stage_durations
+            .push((Stage::PreClean, stage_start.elapsed()));
 
         // Install dependencies
         if !self.pkginfo.depends().is_empty() {
+            let stage_start = Instant::now();
             stats.stage = Some(Stage::Depends);
             callback.stage(Stage::Depends.as_str());
             let _ = self.write_stage(Stage::Depends);
             if !self.install_dependencies()? {
+                stats
+                    .stage_durations
+                    .push((Stage::Depends, stage_start.elapsed()));
                 return Ok(PkgBuildResult::Failed(stats));
             }
+            stats
+                .stage_durations
+                .push((Stage::Depends, stage_start.elapsed()));
         }
 
         // Checksum
+        let stage_start = Instant::now();
         stats.stage = Some(Stage::Checksum);
         callback.stage(Stage::Checksum.as_str());
         if !self.run_make_stage(Stage::Checksum, &pkgdir, &["checksum"], RunAs::Root, true)? {
+            stats
+                .stage_durations
+                .push((Stage::Checksum, stage_start.elapsed()));
             return Ok(PkgBuildResult::Failed(stats));
         }
+        stats
+            .stage_durations
+            .push((Stage::Checksum, stage_start.elapsed()));
 
         /*
-         * Configure — request MAKE_JOBS budget, release after configure
+         * Configure -- request MAKE_JOBS budget, release after configure
          * so the build phase can re-request with updated weights.
          */
+        let stage_start = Instant::now();
         let conf_jobs = self.request_make_jobs();
         let conf_arg = conf_jobs.map(|j| format!("MAKE_JOBS={}", j));
         let conf_flag: Vec<&str> = conf_arg.iter().map(|s| s.as_str()).collect();
@@ -690,6 +711,9 @@ impl<'a> PkgBuilder<'a> {
         let configure_log = self.logdir.join("configure.log");
         if !self.run_usergroup_if_needed(Stage::Configure, &pkgdir, &configure_log)? {
             self.release_make_jobs();
+            stats
+                .stage_durations
+                .push((Stage::Configure, stage_start.elapsed()));
             return Ok(PkgBuildResult::Failed(stats));
         }
         if !self.run_make_stage_with_flags(
@@ -701,9 +725,15 @@ impl<'a> PkgBuilder<'a> {
             &conf_flag,
         )? {
             self.release_make_jobs();
+            stats
+                .stage_durations
+                .push((Stage::Configure, stage_start.elapsed()));
             return Ok(PkgBuildResult::Failed(stats));
         }
         self.release_make_jobs();
+        stats
+            .stage_durations
+            .push((Stage::Configure, stage_start.elapsed()));
 
         // Build — re-request MAKE_JOBS with current remaining weights.
         let build_phase_start = Instant::now();
@@ -719,7 +749,9 @@ impl<'a> PkgBuilder<'a> {
         callback.stage(&format!("{}{}", Stage::Build.as_str(), build_suffix));
         let build_log = self.logdir.join("build.log");
         if !self.run_usergroup_if_needed(Stage::Build, &pkgdir, &build_log)? {
-            stats.build_duration = Some(build_phase_start.elapsed());
+            let elapsed = build_phase_start.elapsed();
+            stats.build_duration = Some(elapsed);
+            stats.stage_durations.push((Stage::Build, elapsed));
             self.release_make_jobs();
             return Ok(PkgBuildResult::Failed(stats));
         }
@@ -731,17 +763,23 @@ impl<'a> PkgBuilder<'a> {
             true,
             &build_flag,
         )?;
-        stats.build_duration = Some(build_phase_start.elapsed());
+        let build_elapsed = build_phase_start.elapsed();
+        stats.build_duration = Some(build_elapsed);
+        stats.stage_durations.push((Stage::Build, build_elapsed));
         self.release_make_jobs();
         if !build_ok {
             return Ok(PkgBuildResult::Failed(stats));
         }
 
         // Install
+        let stage_start = Instant::now();
         stats.stage = Some(Stage::Install);
         callback.stage(Stage::Install.as_str());
         let install_log = self.logdir.join("install.log");
         if !self.run_usergroup_if_needed(Stage::Install, &pkgdir, &install_log)? {
+            stats
+                .stage_durations
+                .push((Stage::Install, stage_start.elapsed()));
             return Ok(PkgBuildResult::Failed(stats));
         }
         if !self.run_make_stage(
@@ -751,10 +789,17 @@ impl<'a> PkgBuilder<'a> {
             self.build_run_as(),
             true,
         )? {
+            stats
+                .stage_durations
+                .push((Stage::Install, stage_start.elapsed()));
             return Ok(PkgBuildResult::Failed(stats));
         }
+        stats
+            .stage_durations
+            .push((Stage::Install, stage_start.elapsed()));
 
         // Package
+        let stage_start = Instant::now();
         stats.stage = Some(Stage::Package);
         callback.stage(Stage::Package.as_str());
         if !self.run_make_stage(
@@ -764,8 +809,14 @@ impl<'a> PkgBuilder<'a> {
             RunAs::Root,
             true,
         )? {
+            stats
+                .stage_durations
+                .push((Stage::Package, stage_start.elapsed()));
             return Ok(PkgBuildResult::Failed(stats));
         }
+        stats
+            .stage_durations
+            .push((Stage::Package, stage_start.elapsed()));
 
         // Get the package file path
         let pkgfile = self.get_make_var(&pkgdir, "STAGE_PKGFILE")?;
@@ -778,12 +829,19 @@ impl<'a> PkgBuilder<'a> {
             }
 
             // Test package deinstall
+            let stage_start = Instant::now();
             stats.stage = Some(Stage::Deinstall);
             callback.stage(Stage::Deinstall.as_str());
             let _ = self.write_stage(Stage::Deinstall);
             if !self.pkg_delete(pkgname_str)? {
+                stats
+                    .stage_durations
+                    .push((Stage::Deinstall, stage_start.elapsed()));
                 return Ok(PkgBuildResult::Failed(stats));
             }
+            stats
+                .stage_durations
+                .push((Stage::Deinstall, stage_start.elapsed()));
         }
 
         // Save package to packages directory
@@ -806,9 +864,13 @@ impl<'a> PkgBuilder<'a> {
         fs::copy(&host_pkgfile, &dest)?;
 
         // Clean
+        let stage_start = Instant::now();
         stats.stage = Some(Stage::Clean);
         callback.stage(Stage::Clean.as_str());
         let _ = self.run_make_stage(Stage::Clean, &pkgdir, &["clean"], RunAs::Root, false);
+        stats
+            .stage_durations
+            .push((Stage::Clean, stage_start.elapsed()));
 
         // Remove log directory on success
         let _ = fs::remove_dir_all(&self.logdir);
@@ -1573,6 +1635,7 @@ impl BuildResult {
             make_jobs: self.build_stats.make_jobs.count(),
             stage: self.build_stats.stage,
             build_duration: self.build_stats.build_duration,
+            stage_durations: self.build_stats.stage_durations.clone(),
             total_duration: self.build_stats.total_duration,
             timestamp: self.build_stats.timestamp,
         })
