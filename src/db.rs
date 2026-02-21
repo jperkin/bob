@@ -1726,6 +1726,34 @@ impl Database {
     }
 
     /**
+     * Query all successful builds with non-null total_duration_ms,
+     * grouped by pkgpath, returning (make_jobs, total_duration_ms) pairs
+     * for speed model fitting.
+     */
+    pub fn build_time_profiles(&self) -> Result<HashMap<String, Vec<(usize, f64)>>> {
+        let conn = self.history_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT pkgpath, make_jobs, total_duration_ms \
+             FROM build_history \
+             WHERE outcome = ?1 AND total_duration_ms IS NOT NULL AND make_jobs > 0 \
+             ORDER BY pkgpath",
+        )?;
+        let rows = stmt.query_map(params![OutcomeType::Success as i32], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? as usize,
+                row.get::<_, i64>(2)? as f64,
+            ))
+        })?;
+        let mut profiles: HashMap<String, Vec<(usize, f64)>> = HashMap::new();
+        for row in rows {
+            let (pkgpath, jobs, ms) = row?;
+            profiles.entry(pkgpath).or_default().push((jobs, ms));
+        }
+        Ok(profiles)
+    }
+
+    /**
      * Return the average build-phase duration for a package, based on
      * successful builds only.
      */

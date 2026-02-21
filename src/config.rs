@@ -483,27 +483,14 @@ pub struct Options {
     pub build_threads: Option<usize>,
     /// Directory for bob state files (database, tracing log).
     pub dbdir: Option<PathBuf>,
-    /// Dynamic MAKE_JOBS allocation settings.
-    pub dynamic_jobs: Option<DynamicJobs>,
+    /// Dynamic MAKE_JOBS total CPU budget.
+    pub dynamic_jobs: Option<usize>,
     /// Number of parallel scan processes.
     pub scan_threads: Option<usize>,
     /// If true, abort on scan errors. If false, continue and report failures.
     pub strict_scan: Option<bool>,
     /// Log level: "trace", "debug", "info", "warn", or "error".
     pub log_level: Option<String>,
-}
-
-/// Dynamic MAKE_JOBS configuration.
-///
-/// Controls how MAKE_JOBS is distributed across concurrent builds based
-/// on package weight. The `max` field is the total CPU budget, and `min`
-/// is reserved per build thread to guarantee a minimum allocation.
-#[derive(Clone, Debug)]
-pub struct DynamicJobs {
-    /// Total CPU budget to distribute.
-    pub max: usize,
-    /// Minimum MAKE_JOBS reserved per build thread.
-    pub min: usize,
 }
 
 /// pkgsrc-related configuration from the `pkgsrc` section.
@@ -751,11 +738,8 @@ impl Config {
         }
     }
 
-    pub fn dynamic_jobs(&self) -> Option<&DynamicJobs> {
-        self.file
-            .options
-            .as_ref()
-            .and_then(|o| o.dynamic_jobs.as_ref())
+    pub fn dynamic_jobs(&self) -> Option<usize> {
+        self.file.options.as_ref().and_then(|o| o.dynamic_jobs)
     }
 
     pub fn script(&self, key: &str) -> Option<&PathBuf> {
@@ -957,16 +941,8 @@ impl Config {
             if opts.build_threads == Some(0) {
                 errors.push("build_threads must be at least 1".to_string());
             }
-            if let Some(ref dj) = opts.dynamic_jobs {
-                if dj.max < 1 {
-                    errors.push("dynamic_jobs.max must be at least 1".to_string());
-                }
-                if dj.min < 1 {
-                    errors.push("dynamic_jobs.min must be at least 1".to_string());
-                }
-                if dj.min > dj.max {
-                    errors.push("dynamic_jobs.min must not exceed dynamic_jobs.max".to_string());
-                }
+            if opts.dynamic_jobs == Some(0) {
+                errors.push("dynamic_jobs must be at least 1".to_string());
             }
             if opts.scan_threads == Some(0) {
                 errors.push("scan_threads must be at least 1".to_string());
@@ -1077,19 +1053,11 @@ fn parse_options(globals: &Table) -> LuaResult<Option<Options>> {
     warn_unknown_keys(table, "options", KNOWN_KEYS);
 
     let dynamic_jobs = match table.get::<Value>("dynamic_jobs")? {
-        Value::Table(t) => {
-            let max: usize = t
-                .get("max")
-                .map_err(|_| mlua::Error::runtime("dynamic_jobs.max is required"))?;
-            let min: usize = t
-                .get("min")
-                .map_err(|_| mlua::Error::runtime("dynamic_jobs.min is required"))?;
-            Some(DynamicJobs { max, min })
-        }
+        Value::Integer(n) => Some(n as usize),
         Value::Nil => None,
         _ => {
             return Err(mlua::Error::runtime(
-                "dynamic_jobs must be a table with 'max' and 'min'",
+                "dynamic_jobs must be an integer (total CPU budget)",
             ));
         }
     };

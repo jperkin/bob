@@ -43,6 +43,7 @@
 //! - `clean` - Clean up build artifacts
 
 use crate::config::PkgsrcEnv;
+use crate::jobs::{JobAllocator, MakeJobs, MakeJobsResponder, SpeedModel};
 use crate::sandbox::{SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
 use crate::scan::{ResolvedPackage, SkipReason, SkippedCounts};
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
@@ -479,51 +480,6 @@ impl TryFrom<i32> for OutcomeType {
             10 => Ok(Self::IndirectFailed),
             _ => anyhow::bail!("Unknown outcome type id: {}", v),
         }
-    }
-}
-
-/**
- * MAKE_JOBS configuration for a package build.
- */
-#[derive(Clone, Copy, Debug, Default)]
-pub enum MakeJobs {
-    /**
-     * Package has MAKE_JOBS_SAFE=no; parallel make not supported.
-     */
-    #[default]
-    NotSafe,
-    /**
-     * Parallel make with this many jobs.
-     */
-    Jobs(usize),
-}
-
-impl MakeJobs {
-    fn is_safe(&self) -> bool {
-        matches!(self, Self::Jobs(_))
-    }
-
-    /**
-     * Integer representation for storage (0 = not safe).
-     */
-    pub fn count(&self) -> usize {
-        match self {
-            Self::NotSafe => 0,
-            Self::Jobs(n) => *n,
-        }
-    }
-}
-
-impl serde::Serialize for MakeJobs {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_u64(self.count() as u64)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for MakeJobs {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let n = u64::deserialize(d)? as usize;
-        Ok(if n == 0 { Self::NotSafe } else { Self::Jobs(n) })
     }
 }
 
@@ -1353,149 +1309,6 @@ impl<'a> PkgBuilder<'a> {
     }
 }
 
-/**
- * One-shot channel for returning MAKE_JOBS from the manager to a worker.
- */
-struct MakeJobsResponder(Sender<usize>);
-
-impl std::fmt::Debug for MakeJobsResponder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("MakeJobsResponder")
-    }
-}
-
-/**
- * Tracks MAKE_JOBS budget allocation across concurrent builds.
- *
- * Dispatched workers are "pending" until they enter the build phase,
- * at which point they become "locked" at their computed MAKE_JOBS.
- * Pending allocations are recomputed whenever the set changes.
- */
-struct MakeJobsBudget {
-    max_jobs: usize,
-    min_per_worker: usize,
-    build_threads: usize,
-    /// Pending workers: sandbox_id -> (make_jobs, effective_weight).
-    pending: HashMap<usize, (usize, usize)>,
-    /// Locked workers (in build phase): sandbox_id -> make_jobs.
-    locked: HashMap<usize, usize>,
-}
-
-impl MakeJobsBudget {
-    fn new(max_jobs: usize, min_per_worker: usize, build_threads: usize) -> Self {
-        Self {
-            max_jobs,
-            min_per_worker,
-            build_threads,
-            pending: HashMap::new(),
-            locked: HashMap::new(),
-        }
-    }
-
-    /**
-     * Register a newly dispatched worker and recompute pending allocations.
-     */
-    fn dispatch(&mut self, sandbox_id: usize, weight: usize) {
-        self.pending
-            .insert(sandbox_id, (self.min_per_worker, weight));
-        self.recompute_pending();
-    }
-
-    /**
-     * Lock a worker's allocation as it enters the build phase.
-     *
-     * If this is the only dispatched worker, it gets the full budget
-     * since every other build is blocked waiting for it.
-     */
-    fn lock(&mut self, sandbox_id: usize) -> usize {
-        let jobs = if let Some((jobs, _)) = self.pending.remove(&sandbox_id) {
-            if self.locked.is_empty() && self.pending.is_empty() {
-                self.max_jobs
-            } else {
-                jobs
-            }
-        } else {
-            self.min_per_worker
-        };
-        self.locked.insert(sandbox_id, jobs);
-        self.recompute_pending();
-        jobs
-    }
-
-    /**
-     * Release a worker's allocation and recompute pending.
-     */
-    fn release(&mut self, sandbox_id: usize) {
-        self.locked.remove(&sandbox_id);
-        self.pending.remove(&sandbox_id);
-        self.recompute_pending();
-    }
-
-    /**
-     * Recompute MAKE_JOBS for all pending (unlocked) workers.
-     *
-     * The budget reserves `min_per_worker` for each of `build_threads`
-     * workers.  The remaining "extra" is distributed proportionally
-     * by effective weight using the largest-remainder method.
-     */
-    fn recompute_pending(&mut self) {
-        if self.pending.is_empty() {
-            return;
-        }
-        let extra = self
-            .max_jobs
-            .saturating_sub(self.build_threads * self.min_per_worker);
-        let locked_extra: usize = self
-            .locked
-            .values()
-            .map(|j| j.saturating_sub(self.min_per_worker))
-            .sum();
-        let remaining_extra = extra.saturating_sub(locked_extra);
-        let total_weight: usize = self.pending.values().map(|(_, w)| *w).sum();
-
-        if total_weight == 0 || remaining_extra == 0 {
-            for (_, (jobs, _)) in self.pending.iter_mut() {
-                *jobs = self.min_per_worker;
-            }
-            return;
-        }
-
-        /*
-         * Largest-remainder method: take the floor of each proportional
-         * share, then hand out the leftover one at a time to whichever
-         * entries have the biggest fractional parts.
-         */
-        let mut entries: Vec<(usize, usize, f64)> = self
-            .pending
-            .iter()
-            .map(|(&sid, &(_, weight))| {
-                let exact = remaining_extra as f64 * weight as f64 / total_weight as f64;
-                let floor = exact as usize;
-                let remainder = exact - floor as f64;
-                (sid, floor, remainder)
-            })
-            .collect();
-
-        let floor_sum: usize = entries.iter().map(|(_, f, _)| f).sum();
-        let mut leftover = remaining_extra.saturating_sub(floor_sum);
-
-        entries.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-        for entry in &mut entries {
-            if leftover == 0 {
-                break;
-            }
-            entry.1 += 1;
-            leftover -= 1;
-        }
-
-        for (sid, extra_share, _) in entries {
-            if let Some((jobs, _)) = self.pending.get_mut(&sid) {
-                *jobs = self.min_per_worker + extra_share;
-            }
-        }
-    }
-}
-
 /// Callback adapter that sends build updates through a channel.
 struct ChannelCallback<'a> {
     sandbox_id: usize,
@@ -2233,6 +2046,8 @@ struct BuildJobs {
     /// Reverse dependency map: package -> packages that depend on it.
     /// Precomputed for O(1) lookup in mark_failure instead of O(n) scan.
     reverse_deps: HashMap<PkgName, HashSet<PkgName>>,
+    /// Speed models for historical build time estimation, keyed by pkgpath.
+    estimates: HashMap<String, SpeedModel>,
     /// Packages in build priority order, precomputed for scheduling.
     build_order: Vec<PkgName>,
     running: HashSet<PkgName>,
@@ -2317,24 +2132,35 @@ impl BuildJobs {
     }
 
     /**
+     * Estimated single-job build time for a package in milliseconds.
+     *
+     * Uses the historical speed model when available, falling back to
+     * PBULK_WEIGHT (treating it as a relative millisecond proxy).
+     */
+    fn t1_ms(&self, pkg: &PkgName) -> f64 {
+        if let Some(p) = self.scanpkgs.get(pkg) {
+            let pkgpath = p.pkgpath.as_path().display().to_string();
+            if let Some(model) = self.estimates.get(&pkgpath) {
+                return model.t1_ms;
+            }
+        }
+        self.scanpkgs
+            .get(pkg)
+            .and_then(|p| p.pbulk_weight())
+            .and_then(|w| w.parse::<f64>().ok())
+            .unwrap_or(100.0)
+    }
+
+    /**
      * Compute the critical path cost for a package: the heaviest chain
      * of remaining (not done/failed) packages that depend on it,
-     * weighted by each dependent's PBULK_WEIGHT.
+     * weighted by estimated single-job build time.
      *
-     * This is the Critical Path Method with PBULK_WEIGHT as the
-     * estimated build time.  Serial chains through heavy packages
-     * produce higher cost than fan-out, so packages on the critical
-     * path get more MAKE_JOBS.
+     * Uses historical speed model t1_ms when available, falling back
+     * to PBULK_WEIGHT. Packages on the critical path get more MAKE_JOBS.
      */
-    fn remaining_depth(&self, pkgname: &PkgName) -> usize {
-        let pkg_weight = |pkg: &PkgName| -> usize {
-            self.scanpkgs
-                .get(pkg)
-                .and_then(|p| p.pbulk_weight())
-                .and_then(|w| w.parse().ok())
-                .unwrap_or(100)
-        };
-        let mut depths: HashMap<&PkgName, usize> = HashMap::new();
+    fn remaining_depth(&self, pkgname: &PkgName) -> f64 {
+        let mut depths: HashMap<&PkgName, f64> = HashMap::new();
         let mut stack: Vec<(&PkgName, bool)> = vec![(pkgname, false)];
         while let Some((pkg, children_done)) = stack.pop() {
             if children_done {
@@ -2345,11 +2171,11 @@ impl BuildJobs {
                         rdeps
                             .iter()
                             .filter(|r| !self.done.contains(*r) && !self.failed.contains(*r))
-                            .filter_map(|r| depths.get(r).map(|d| pkg_weight(r) + d))
-                            .max()
-                            .unwrap_or(0)
+                            .filter_map(|r| depths.get(r).map(|d| self.t1_ms(r) + d))
+                            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                            .unwrap_or(0.0)
                     })
-                    .unwrap_or(0);
+                    .unwrap_or(0.0);
                 depths.insert(pkg, depth);
             } else if !depths.contains_key(pkg) {
                 stack.push((pkg, true));
@@ -2365,7 +2191,7 @@ impl BuildJobs {
                 }
             }
         }
-        depths.get(pkgname).copied().unwrap_or(0)
+        depths.get(pkgname).copied().unwrap_or(0.0)
     }
 
     /**
@@ -2572,12 +2398,41 @@ impl Build {
         self.scope.ensure(self.config.build_threads())?;
 
         /*
-         * Compute effective weights for build ordering.  The effective weight
-         * is the package's own PBULK_WEIGHT plus the sum of weights of all
-         * packages that transitively depend on it.  This prioritises building
-         * packages that unblock the most downstream work.
+         * Load speed models from build history. These provide Amdahl's
+         * law estimates for each package, enabling history-based build
+         * ordering and optimal MAKE_JOBS allocation.
+         */
+        let estimates: HashMap<String, SpeedModel> = match db.build_time_profiles() {
+            Ok(profiles) => {
+                let count = profiles.len();
+                let models: HashMap<String, SpeedModel> = profiles
+                    .iter()
+                    .map(|(pkgpath, data)| (pkgpath.clone(), SpeedModel::from_samples(data)))
+                    .collect();
+                if count > 0 {
+                    info!(profiles = count, "Loaded speed models from build history");
+                }
+                models
+            }
+            Err(e) => {
+                debug!(error = %e, "No build history available, using PBULK_WEIGHT");
+                HashMap::new()
+            }
+        };
+
+        /*
+         * Compute effective weights for build ordering.  Uses historical
+         * t1_ms (estimated single-job duration) when available, falling
+         * back to PBULK_WEIGHT. Packages with longer estimated builds
+         * and more downstream dependents are scheduled first.
          */
         let get_weight = |pkg: &PkgName| -> usize {
+            if let Some(p) = self.scanpkgs.get(pkg) {
+                let pkgpath = p.pkgpath.as_path().display().to_string();
+                if let Some(model) = estimates.get(&pkgpath) {
+                    return model.t1_ms as usize;
+                }
+            }
             self.scanpkgs
                 .get(pkg)
                 .and_then(|idx| idx.pbulk_weight())
@@ -2597,6 +2452,7 @@ impl Build {
             scanpkgs: self.scanpkgs.clone(),
             incoming,
             reverse_deps,
+            estimates: estimates.clone(),
             build_order,
             running,
             done,
@@ -2801,12 +2657,13 @@ impl Build {
 
             // Track which thread is building which package
             let mut thread_packages: HashMap<usize, PkgName> = HashMap::new();
+            // Track workers currently in a CPU-intensive phase (configure/build)
+            let mut build_phase_workers: HashSet<usize> = HashSet::new();
 
-            let build_threads = session.config.build_threads();
             let mut make_jobs_budget = session
                 .config
                 .dynamic_jobs()
-                .map(|dj| MakeJobsBudget::new(dj.max, dj.min, build_threads));
+                .map(|max_jobs| JobAllocator::new(max_jobs, estimates));
 
             loop {
                 if state_for_manager.is_shutdown() {
@@ -2874,8 +2731,10 @@ impl Build {
                                 }
 
                                 if let Some(ref mut budget) = make_jobs_budget {
-                                    let rw = jobs.remaining_depth(&pkg).max(1);
-                                    budget.dispatch(c, rw);
+                                    let pkgpath_str =
+                                        pkginfo.pkgpath.as_path().display().to_string();
+                                    let urgency = jobs.remaining_depth(&pkg).max(1.0);
+                                    budget.dispatch(c, &pkgpath_str, urgency);
                                 }
                                 let _ =
                                     client.send(ChannelCommand::JobData(Box::new(PackageBuild {
@@ -2993,19 +2852,55 @@ impl Build {
                         }
                     }
                     ChannelCommand::BuildPhaseEntry(sid, responder) => {
+                        build_phase_workers.insert(sid);
                         let jobs_val = if let Some(ref mut budget) = make_jobs_budget {
-                            let rw = thread_packages
+                            let idle_slots =
+                                clients.len().saturating_sub(build_phase_workers.len());
+                            let mut upcoming: Vec<f64> = jobs
+                                .incoming
+                                .iter()
+                                .filter(|(_, deps)| deps.is_empty())
+                                .map(|(pkg, _)| jobs.remaining_depth(pkg).max(1.0))
+                                .collect();
+                            upcoming.sort_unstable_by(|a, b| {
+                                b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            upcoming.truncate(idle_slots);
+                            if let Some(pkg) = thread_packages.get(&sid) {
+                                let pkgpath_str = jobs
+                                    .scanpkgs
+                                    .get(pkg)
+                                    .map(|p| p.pkgpath.as_path().display().to_string())
+                                    .unwrap_or_default();
+                                let urgency = jobs.remaining_depth(pkg).max(1.0);
+                                budget.dispatch(sid, &pkgpath_str, urgency);
+                            }
+                            budget.set_upcoming(&upcoming);
+                            let allocated = budget.lock(sid);
+                            let pkg_name = thread_packages
                                 .get(&sid)
-                                .map(|pkg| jobs.remaining_depth(pkg).max(1))
-                                .unwrap_or(1);
-                            budget.dispatch(sid, rw);
-                            budget.lock(sid)
+                                .map(|p| p.pkgname())
+                                .unwrap_or("?");
+                            let ready = jobs.incoming.values().filter(|d| d.is_empty()).count();
+                            debug!(
+                                sid,
+                                pkgname = pkg_name,
+                                allocated,
+                                budget_state = budget.debug_state(),
+                                build_phase = build_phase_workers.len(),
+                                running = jobs.running.len(),
+                                ready,
+                                incoming = jobs.incoming.len(),
+                                "MAKE_JOBS allocate"
+                            );
+                            allocated
                         } else {
                             1
                         };
                         let _ = responder.0.send(jobs_val);
                     }
                     ChannelCommand::BuildPhaseExit(sid) => {
+                        build_phase_workers.remove(&sid);
                         if let Some(ref mut budget) = make_jobs_budget {
                             budget.release(sid);
                         }

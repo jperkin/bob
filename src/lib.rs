@@ -20,6 +20,7 @@ pub mod action;
 pub mod build;
 pub mod config;
 pub mod db;
+pub mod jobs;
 pub mod report;
 pub mod sandbox;
 pub mod scan;
@@ -118,12 +119,13 @@ impl std::error::Error for Interrupted {}
 
 pub use action::{Action, ActionType, FSType};
 pub use build::{
-    Build, BuildCounts, BuildOutcome, BuildReason, BuildResult, BuildSummary, MakeJobs,
-    OutcomeType, PkgBuildStats, Stage, pkg_up_to_date,
+    Build, BuildCounts, BuildOutcome, BuildReason, BuildResult, BuildSummary, OutcomeType,
+    PkgBuildStats, Stage, pkg_up_to_date,
 };
-pub use config::{Config, DynamicJobs, Options, Pkgsrc, PkgsrcEnv, Sandboxes};
+pub use config::{Config, Options, Pkgsrc, PkgsrcEnv, Sandboxes};
 pub use db::Database;
 pub use init::Init;
+pub use jobs::{MakeJobs, SpeedModel};
 pub use report::write_html_report;
 pub use sandbox::Sandbox;
 pub use scan::{ResolvedPackage, Scan, ScanResult, ScanSummary, SkipReason, SkippedCounts};
