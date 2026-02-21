@@ -43,7 +43,7 @@
 //! - `clean` - Clean up build artifacts
 
 use crate::config::PkgsrcEnv;
-use crate::jobs::{JobAllocator, MakeJobs, MakeJobsResponder, SpeedModel};
+use crate::jobs::{JobAllocator, MakeJobs, MakeJobsResponder, SpeedModel, WorkerModel};
 use crate::sandbox::{SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
 use crate::scan::{ResolvedPackage, SkipReason, SkippedCounts};
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
@@ -2046,6 +2046,8 @@ struct BuildJobs {
     /// Reverse dependency map: package -> packages that depend on it.
     /// Precomputed for O(1) lookup in mark_failure instead of O(n) scan.
     reverse_deps: HashMap<PkgName, HashSet<PkgName>>,
+    /// Speed models for historical build time estimation, keyed by pkgpath.
+    estimates: HashMap<String, SpeedModel>,
     /// Packages in build priority order, precomputed for scheduling.
     build_order: Vec<PkgName>,
     running: HashSet<PkgName>,
@@ -2127,6 +2129,98 @@ impl BuildJobs {
             });
         }
         trace!(pkgname = %pkgname.pkgname(), total_results = self.results.len(), elapsed_ms = start.elapsed().as_millis(), "mark_failure completed");
+    }
+
+    /**
+     * Estimated single-job build time for a package in milliseconds.
+     *
+     * Uses the historical speed model when available, falling back to
+     * PBULK_WEIGHT (treating it as a relative millisecond proxy).
+     */
+    fn t1_ms(&self, pkg: &PkgName) -> usize {
+        if let Some(p) = self.scanpkgs.get(pkg) {
+            let pkgpath = p.pkgpath.as_path().display().to_string();
+            if let Some(model) = self.estimates.get(&pkgpath) {
+                return model.t1_ms as usize;
+            }
+        }
+        self.scanpkgs
+            .get(pkg)
+            .and_then(|p| p.pbulk_weight())
+            .and_then(|w| w.parse().ok())
+            .unwrap_or(100)
+    }
+
+    /**
+     * Critical path cost for a package: the heaviest chain of
+     * remaining (not done/failed) packages that depend on it,
+     * weighted by estimated single-job build time.
+     *
+     * Uses historical t1_ms when available, falling back to
+     * PBULK_WEIGHT. Packages on the critical path get more MAKE_JOBS.
+     */
+    fn remaining_depth(&self, pkgname: &PkgName) -> usize {
+        let mut depths: HashMap<&PkgName, usize> = HashMap::new();
+        let mut stack: Vec<(&PkgName, bool)> = vec![(pkgname, false)];
+        while let Some((pkg, children_done)) = stack.pop() {
+            if children_done {
+                let depth = self
+                    .reverse_deps
+                    .get(pkg)
+                    .map(|rdeps| {
+                        rdeps
+                            .iter()
+                            .filter(|r| !self.done.contains(*r) && !self.failed.contains(*r))
+                            .filter_map(|r| depths.get(r).map(|d| self.t1_ms(r) + d))
+                            .max()
+                            .unwrap_or(0)
+                    })
+                    .unwrap_or(0);
+                depths.insert(pkg, depth);
+            } else if !depths.contains_key(pkg) {
+                stack.push((pkg, true));
+                if let Some(rdeps) = self.reverse_deps.get(pkg) {
+                    for rdep in rdeps {
+                        if !self.done.contains(rdep)
+                            && !self.failed.contains(rdep)
+                            && !depths.contains_key(rdep)
+                        {
+                            stack.push((rdep, false));
+                        }
+                    }
+                }
+            }
+        }
+        depths.get(pkgname).copied().unwrap_or(0)
+    }
+
+    /**
+     * Speed model parameters for job allocation: Amdahl's law
+     * t1_ms and serial_fraction from history (or defaults), plus
+     * critical-path remaining depth.
+     */
+    fn worker_model(&self, pkg: &PkgName) -> WorkerModel {
+        let model = self.scanpkgs.get(pkg).and_then(|p| {
+            let pkgpath = p.pkgpath.as_path().display().to_string();
+            self.estimates.get(&pkgpath)
+        });
+        let (t1, sf) = match model {
+            Some(m) => (m.t1_ms, m.serial_fraction),
+            None => {
+                let t1 = self
+                    .scanpkgs
+                    .get(pkg)
+                    .and_then(|p| p.pbulk_weight())
+                    .and_then(|w| w.parse::<f64>().ok())
+                    .unwrap_or(100.0);
+                (t1, SpeedModel::default().serial_fraction)
+            }
+        };
+        WorkerModel {
+            t1_ms: t1,
+            serial_fraction: sf,
+            remaining_depth: self.remaining_depth(pkg) as f64,
+        }
     }
 
     /**
@@ -2387,6 +2481,7 @@ impl Build {
             scanpkgs: self.scanpkgs.clone(),
             incoming,
             reverse_deps,
+            estimates: estimates.clone(),
             build_order,
             running,
             done,
@@ -2594,10 +2689,7 @@ impl Build {
             // Track workers currently in a CPU-intensive phase (configure/build)
             let mut build_phase_workers: HashSet<usize> = HashSet::new();
 
-            let mut make_jobs_budget = session
-                .config
-                .dynamic_jobs()
-                .map(|max_jobs| JobAllocator::new(max_jobs, estimates));
+            let mut make_jobs_budget = session.config.dynamic_jobs().map(JobAllocator::new);
 
             loop {
                 if state_for_manager.is_shutdown() {
@@ -2664,11 +2756,6 @@ impl Build {
                                     let _ = p.render();
                                 }
 
-                                if let Some(ref mut budget) = make_jobs_budget {
-                                    let pkgpath_str =
-                                        pkginfo.pkgpath.as_path().display().to_string();
-                                    budget.dispatch(c, &pkgpath_str);
-                                }
                                 let _ =
                                     client.send(ChannelCommand::JobData(Box::new(PackageBuild {
                                         session: Arc::clone(&session),
@@ -2787,15 +2874,32 @@ impl Build {
                     ChannelCommand::BuildPhaseEntry(sid, responder) => {
                         build_phase_workers.insert(sid);
                         let jobs_val = if let Some(ref mut budget) = make_jobs_budget {
-                            if let Some(pkg) = thread_packages.get(&sid) {
-                                let pkgpath_str = jobs
-                                    .scanpkgs
-                                    .get(pkg)
-                                    .map(|p| p.pkgpath.as_path().display().to_string())
-                                    .unwrap_or_default();
-                                budget.dispatch(sid, &pkgpath_str);
-                            }
-                            let allocated = budget.lock(sid);
+                            let all_dispatched: Vec<(usize, WorkerModel)> = thread_packages
+                                .iter()
+                                .map(|(&tid, pkg)| (tid, jobs.worker_model(pkg)))
+                                .collect();
+
+                            let sole_builder = jobs.running.len() == 1
+                                && !jobs.incoming.values().any(|deps| deps.is_empty());
+
+                            let idle_slots =
+                                clients.len().saturating_sub(build_phase_workers.len());
+                            let mut upcoming: Vec<WorkerModel> = jobs
+                                .incoming
+                                .iter()
+                                .filter(|(_, deps)| deps.is_empty())
+                                .map(|(pkg, _)| jobs.worker_model(pkg))
+                                .collect();
+                            upcoming.sort_unstable_by(|a, b| {
+                                let ca = a.t1_ms + a.remaining_depth;
+                                let cb = b.t1_ms + b.remaining_depth;
+                                cb.partial_cmp(&ca).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            upcoming.truncate(idle_slots);
+
+                            let allocated =
+                                budget.allocate(sid, &all_dispatched, sole_builder, &upcoming);
+                            budget.lock(sid, allocated);
                             let pkg_name = thread_packages
                                 .get(&sid)
                                 .map(|p| p.pkgname())

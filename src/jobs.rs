@@ -22,7 +22,6 @@
 
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
-use tracing::trace;
 
 /**
  * MAKE_JOBS configuration for a package build.
@@ -81,7 +80,7 @@ const DEFAULT_SERIAL_FRACTION: f64 = 0.5;
 #[derive(Clone, Debug)]
 pub struct SpeedModel {
     pub(crate) t1_ms: f64,
-    serial_fraction: f64,
+    pub(crate) serial_fraction: f64,
 }
 
 impl SpeedModel {
@@ -134,13 +133,6 @@ impl SpeedModel {
             serial_fraction: sf,
         }
     }
-
-    fn estimated_ms(&self, jobs: usize) -> f64 {
-        let j = jobs.max(1) as f64;
-        let p = self.t1_ms * self.serial_fraction;
-        let q = self.t1_ms * (1.0 - self.serial_fraction);
-        p + q / j
-    }
 }
 
 impl Default for SpeedModel {
@@ -164,80 +156,155 @@ impl std::fmt::Debug for MakeJobsResponder {
 }
 
 /**
- * Pending worker awaiting job allocation.
+ * Amdahl's law parameters and critical-path depth for a worker,
+ * used by the allocator to estimate build cost at different job
+ * counts: `T(j) = t1_ms * (sf + (1-sf)/j) + remaining_depth`.
  */
-struct PendingWorker {
-    pkgpath: String,
-    jobs: usize,
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WorkerModel {
+    pub(crate) t1_ms: f64,
+    pub(crate) serial_fraction: f64,
+    pub(crate) remaining_depth: f64,
+}
+
+impl WorkerModel {
+    /**
+     * Estimated wall-clock cost at `jobs` cores: Amdahl's T(j)
+     * plus the critical-path cost of packages that depend on this
+     * one. Minimizing the max of this across workers minimizes
+     * overall makespan.
+     */
+    fn cost(&self, jobs: usize) -> f64 {
+        let j = jobs.max(1) as f64;
+        self.t1_ms * (self.serial_fraction + (1.0 - self.serial_fraction) / j)
+            + self.remaining_depth
+    }
 }
 
 /**
  * Tracks MAKE_JOBS budget allocation across concurrent builds.
  *
- * Uses minimax allocation based on Amdahl's law speed models. Each
- * extra job goes to whichever pending worker has the longest estimated
- * build time, equalizing finish times to minimize makespan.
+ * The total CPU budget (`max_jobs`) is divided into a minimum
+ * reservation (1 per dispatched worker) and an extra pool distributed
+ * via minimax allocation using Amdahl's law speed models.
+ *
+ * Each extra core goes to whichever worker currently has the highest
+ * estimated cost `T(j) + remaining_depth`, equalizing finish times
+ * across the critical path. This minimizes makespan: packages that
+ * either take a long time themselves or sit on the critical path
+ * get more cores.
+ *
+ * Ready packages that idle workers will pick up soon participate as
+ * virtual entries, reserving budget so that high-cost upcoming
+ * packages get adequate allocation when they start.
+ *
+ * When exactly one worker is running and nothing else is ready to
+ * dispatch, the worker gets the full budget.
  */
 pub(crate) struct JobAllocator {
     max_jobs: usize,
-    estimates: HashMap<String, SpeedModel>,
-    pending: HashMap<usize, PendingWorker>,
     locked: HashMap<usize, usize>,
 }
 
 impl JobAllocator {
-    pub(crate) fn new(max_jobs: usize, estimates: HashMap<String, SpeedModel>) -> Self {
+    pub(crate) fn new(max_jobs: usize) -> Self {
         Self {
             max_jobs,
-            estimates,
-            pending: HashMap::new(),
             locked: HashMap::new(),
         }
     }
 
     /**
-     * Register a newly dispatched worker and recompute pending allocations.
+     * Allocate MAKE_JOBS for a worker entering a CPU phase.
+     *
+     * `sole_builder` should be true only when this is the sole running
+     * worker AND no packages are ready to dispatch.
+     *
+     * `all_dispatched` lists `(sandbox_id, model)` for every worker
+     * that currently has a package assigned.
+     *
+     * `upcoming` are models for ready-to-dispatch packages that idle
+     * workers will pick up soon, truncated to idle worker slots.
      */
-    pub(crate) fn dispatch(&mut self, sandbox_id: usize, pkgpath: &str) {
-        self.pending.insert(
-            sandbox_id,
-            PendingWorker {
-                pkgpath: pkgpath.to_string(),
-                jobs: 1,
-            },
-        );
-        self.recompute();
+    pub(crate) fn allocate(
+        &self,
+        sandbox_id: usize,
+        all_dispatched: &[(usize, WorkerModel)],
+        sole_builder: bool,
+        upcoming: &[WorkerModel],
+    ) -> usize {
+        if sole_builder {
+            return self.max_jobs;
+        }
+
+        let active = all_dispatched.len().max(1);
+        let extra_pool = self.max_jobs.saturating_sub(active);
+        let locked_extra: usize = self.locked.values().map(|j| j.saturating_sub(1)).sum();
+        let remaining_extra = extra_pool.saturating_sub(locked_extra);
+
+        if remaining_extra == 0 {
+            return 1;
+        }
+
+        /*
+         * Collect unlocked dispatched workers and upcoming virtual
+         * entries. Each starts at 1 job (the base allocation).
+         * Distribute remaining_extra via minimax: each core goes to
+         * whichever entry has the highest T(j) + remaining_depth,
+         * equalizing estimated finish times.
+         */
+        let mut extras: Vec<(usize, WorkerModel, usize)> = all_dispatched
+            .iter()
+            .filter(|(sid, _)| !self.locked.contains_key(sid))
+            .map(|&(sid, model)| (sid, model, 0))
+            .collect();
+        for (i, &model) in upcoming.iter().enumerate() {
+            extras.push((usize::MAX - i, model, 0));
+        }
+
+        if extras.is_empty() {
+            return 1;
+        }
+
+        for _ in 0..remaining_extra {
+            if let Some(best) = (0..extras.len()).max_by(|&a, &b| {
+                let ca = extras[a].1.cost(1 + extras[a].2);
+                let cb = extras[b].1.cost(1 + extras[b].2);
+                ca.partial_cmp(&cb)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        extras[a]
+                            .1
+                            .remaining_depth
+                            .partial_cmp(&extras[b].1.remaining_depth)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            }) {
+                extras[best].2 += 1;
+            }
+        }
+
+        let my_extra = extras
+            .iter()
+            .find(|(sid, _, _)| *sid == sandbox_id)
+            .map(|(_, _, e)| *e)
+            .unwrap_or(0);
+
+        1 + my_extra
     }
 
     /**
-     * Lock a worker's allocation as it enters the build phase.
+     * Record that a worker has locked an allocation.
      */
-    pub(crate) fn lock(&mut self, sandbox_id: usize) -> usize {
-        let (jobs, pkgpath) = if let Some(w) = self.pending.remove(&sandbox_id) {
-            (w.jobs, w.pkgpath)
-        } else {
-            (1, String::new())
-        };
-        let model = self.estimates.get(&pkgpath).cloned().unwrap_or_default();
+    pub(crate) fn lock(&mut self, sandbox_id: usize, jobs: usize) {
         self.locked.insert(sandbox_id, jobs);
-        trace!(
-            sandbox_id,
-            jobs,
-            estimated_ms = model.estimated_ms(jobs),
-            pkgpath = %pkgpath,
-            "JobAllocator locked"
-        );
-        self.recompute();
-        jobs
     }
 
     /**
-     * Release a worker's allocation and recompute pending.
+     * Release a worker's CPU lock.
      */
     pub(crate) fn release(&mut self, sandbox_id: usize) {
         self.locked.remove(&sandbox_id);
-        self.pending.remove(&sandbox_id);
-        self.recompute();
     }
 
     /**
@@ -254,55 +321,5 @@ impl JobAllocator {
             used,
             self.max_jobs
         )
-    }
-
-    /**
-     * Minimax distribution of MAKE_JOBS.
-     *
-     * Each pending worker starts at 1 job. Remaining budget is handed
-     * out one at a time to whichever worker has the longest estimated
-     * build time, equalizing finish times to minimize makespan.
-     */
-    fn recompute(&mut self) {
-        if self.pending.is_empty() {
-            return;
-        }
-        let locked_sum: usize = self.locked.values().sum();
-        let available = self.max_jobs.saturating_sub(locked_sum);
-        let n = self.pending.len();
-        if available <= n {
-            for w in self.pending.values_mut() {
-                w.jobs = 1;
-            }
-            return;
-        }
-        for w in self.pending.values_mut() {
-            w.jobs = 1;
-        }
-
-        let pending_sids: Vec<usize> = self.pending.keys().copied().collect();
-        let mut remaining = available - n;
-
-        while remaining > 0 {
-            let mut best_sid = None;
-            let mut best_est = -1.0_f64;
-
-            for &sid in &pending_sids {
-                if let Some(w) = self.pending.get(&sid) {
-                    let model = self.estimates.get(&w.pkgpath).cloned().unwrap_or_default();
-                    let est = model.estimated_ms(w.jobs);
-                    if est > best_est {
-                        best_est = est;
-                        best_sid = Some(sid);
-                    }
-                }
-            }
-
-            let Some(winner) = best_sid else { break };
-            if let Some(w) = self.pending.get_mut(&winner) {
-                w.jobs += 1;
-            }
-            remaining -= 1;
-        }
     }
 }
