@@ -222,15 +222,20 @@ impl JobAllocator {
         }
 
         /*
-         * Collect unlocked dispatched workers and upcoming virtual
-         * entries, then distribute extras proportionally by weight
-         * using Hamilton's method (largest-remainder apportionment).
+         * Compute ideal allocation across ALL dispatched workers
+         * (locked and unlocked) plus upcoming virtual entries,
+         * distributed proportionally over the full extra pool.
+         *
+         * This prevents a small package from grabbing all available
+         * cores just because it happens to be the last to enter a
+         * build phase. Each worker gets its proportional share of
+         * the total budget regardless of entry order.
+         *
+         * The result is capped by remaining_extra so that locked
+         * over-allocations from earlier rounds don't cause budget
+         * overflow.
          */
-        let mut entries: Vec<(usize, usize)> = all_dispatched
-            .iter()
-            .filter(|(sid, _)| !self.locked.contains_key(sid))
-            .copied()
-            .collect();
+        let mut entries: Vec<(usize, usize)> = all_dispatched.to_vec();
         for (i, &weight) in upcoming.iter().enumerate() {
             entries.push((usize::MAX - i, weight));
         }
@@ -241,9 +246,9 @@ impl JobAllocator {
 
         let total_weight: usize = entries.iter().map(|(_, w)| *w).sum();
 
-        let my_extra = if total_weight == 0 {
-            let per = remaining_extra / entries.len();
-            let leftover = remaining_extra % entries.len();
+        let my_ideal = if total_weight == 0 {
+            let per = extra_pool / entries.len();
+            let leftover = extra_pool % entries.len();
             let idx = entries.iter().position(|(sid, _)| *sid == sandbox_id);
             per + if idx.is_some_and(|i| i < leftover) {
                 1
@@ -254,12 +259,12 @@ impl JobAllocator {
             let mut allocs: Vec<(usize, usize, f64)> = entries
                 .iter()
                 .map(|&(sid, w)| {
-                    let exact = w as f64 / total_weight as f64 * remaining_extra as f64;
+                    let exact = w as f64 / total_weight as f64 * extra_pool as f64;
                     (sid, exact as usize, exact.fract())
                 })
                 .collect();
             let floor_total: usize = allocs.iter().map(|(_, f, _)| *f).sum();
-            let leftover = remaining_extra - floor_total;
+            let leftover = extra_pool - floor_total;
             let mut idx: Vec<usize> = (0..allocs.len()).collect();
             idx.sort_unstable_by(|&a, &b| {
                 allocs[b]
@@ -277,7 +282,7 @@ impl JobAllocator {
                 .unwrap_or(0)
         };
 
-        1 + my_extra
+        1 + my_ideal.min(remaining_extra)
     }
 
     /**
