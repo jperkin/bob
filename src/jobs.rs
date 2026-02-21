@@ -141,12 +141,6 @@ impl SpeedModel {
         let q = self.t1_ms * (1.0 - self.serial_fraction);
         p + q / j
     }
-
-    fn marginal_saving_ms(&self, jobs: usize) -> f64 {
-        let j = jobs.max(1) as f64;
-        let q = self.t1_ms * (1.0 - self.serial_fraction);
-        q / (j * (j + 1.0))
-    }
 }
 
 impl Default for SpeedModel {
@@ -174,37 +168,21 @@ impl std::fmt::Debug for MakeJobsResponder {
  */
 struct PendingWorker {
     pkgpath: String,
-    urgency: f64,
     jobs: usize,
 }
 
 /**
- * Multiplier applied to upcoming package urgencies before they enter
- * the greedy allocation. Higher values cause the allocator to hold
- * back more budget from current workers, reserving it for high-depth
- * packages that are about to start.
- */
-const UPCOMING_WEIGHT_FACTOR: f64 = 2.0;
-
-/**
  * Tracks MAKE_JOBS budget allocation across concurrent builds.
  *
- * Uses greedy marginal-value allocation based on Amdahl's law speed
- * models. Each extra job goes to the worker where it saves the most
- * wall-clock time, weighted by critical-path urgency.
- *
- * Upcoming weights from ready-to-dispatch packages participate as
- * virtual entries during allocation, holding back budget from shallow
- * current work so that deep upcoming packages get a larger share when
- * they enter their build phase.
+ * Uses minimax allocation based on Amdahl's law speed models. Each
+ * extra job goes to whichever pending worker has the longest estimated
+ * build time, equalizing finish times to minimize makespan.
  */
 pub(crate) struct JobAllocator {
     max_jobs: usize,
     estimates: HashMap<String, SpeedModel>,
     pending: HashMap<usize, PendingWorker>,
     locked: HashMap<usize, usize>,
-    /// Urgencies of ready packages that will start soon (look-ahead).
-    upcoming: Vec<f64>,
 }
 
 impl JobAllocator {
@@ -214,19 +192,17 @@ impl JobAllocator {
             estimates,
             pending: HashMap::new(),
             locked: HashMap::new(),
-            upcoming: Vec::new(),
         }
     }
 
     /**
      * Register a newly dispatched worker and recompute pending allocations.
      */
-    pub(crate) fn dispatch(&mut self, sandbox_id: usize, pkgpath: &str, urgency: f64) {
+    pub(crate) fn dispatch(&mut self, sandbox_id: usize, pkgpath: &str) {
         self.pending.insert(
             sandbox_id,
             PendingWorker {
                 pkgpath: pkgpath.to_string(),
-                urgency,
                 jobs: 1,
             },
         );
@@ -234,25 +210,11 @@ impl JobAllocator {
     }
 
     /**
-     * Set upcoming package urgencies for look-ahead allocation.
-     */
-    pub(crate) fn set_upcoming(&mut self, upcoming: &[f64]) {
-        self.upcoming = upcoming.to_vec();
-    }
-
-    /**
      * Lock a worker's allocation as it enters the build phase.
-     *
-     * If this is the only active worker, it gets the full budget.
      */
     pub(crate) fn lock(&mut self, sandbox_id: usize) -> usize {
         let (jobs, pkgpath) = if let Some(w) = self.pending.remove(&sandbox_id) {
-            let j = if self.locked.is_empty() && self.pending.is_empty() {
-                self.max_jobs
-            } else {
-                w.jobs
-            };
-            (j, w.pkgpath)
+            (w.jobs, w.pkgpath)
         } else {
             (1, String::new())
         };
@@ -295,13 +257,11 @@ impl JobAllocator {
     }
 
     /**
-     * Greedy marginal-value distribution of MAKE_JOBS.
+     * Minimax distribution of MAKE_JOBS.
      *
      * Each pending worker starts at 1 job. Remaining budget is handed
-     * out one at a time to the worker with the highest marginal value
-     * (time saved * urgency). Upcoming packages participate as virtual
-     * entries with amplified urgency, absorbing budget that holds it
-     * back for when those packages actually enter their build phase.
+     * out one at a time to whichever worker has the longest estimated
+     * build time, equalizing finish times to minimize makespan.
      */
     fn recompute(&mut self) {
         if self.pending.is_empty() {
@@ -320,55 +280,27 @@ impl JobAllocator {
             w.jobs = 1;
         }
 
-        /*
-         * Build virtual entries for upcoming packages. These use the
-         * default speed model (no pkgpath-specific estimate) and
-         * amplified urgency. They absorb proportional budget during
-         * allocation but nobody locks it, effectively reserving cores
-         * for high-depth packages that are about to start.
-         */
-        let mut virtual_jobs: Vec<usize> = self.upcoming.iter().map(|_| 1_usize).collect();
+        let pending_sids: Vec<usize> = self.pending.keys().copied().collect();
         let mut remaining = available - n;
 
-        let pending_sids: Vec<usize> = self.pending.keys().copied().collect();
-
         while remaining > 0 {
-            let mut best_idx: Option<usize> = None;
-            let mut best_value = -1.0_f64;
+            let mut best_sid = None;
+            let mut best_est = -1.0_f64;
 
-            for (idx, &sid) in pending_sids.iter().enumerate() {
+            for &sid in &pending_sids {
                 if let Some(w) = self.pending.get(&sid) {
                     let model = self.estimates.get(&w.pkgpath).cloned().unwrap_or_default();
-                    let saving = model.marginal_saving_ms(w.jobs);
-                    let value = saving * w.urgency;
-                    if value > best_value {
-                        best_value = value;
-                        best_idx = Some(idx);
+                    let est = model.estimated_ms(w.jobs);
+                    if est > best_est {
+                        best_est = est;
+                        best_sid = Some(sid);
                     }
                 }
             }
 
-            for (i, &urgency) in self.upcoming.iter().enumerate() {
-                let model = SpeedModel::default();
-                let saving = model.marginal_saving_ms(virtual_jobs.get(i).copied().unwrap_or(1));
-                let value = saving * urgency * UPCOMING_WEIGHT_FACTOR;
-                if value > best_value {
-                    best_value = value;
-                    best_idx = Some(pending_sids.len() + i);
-                }
-            }
-
-            let Some(winner) = best_idx else { break };
-            if winner < pending_sids.len() {
-                let sid = pending_sids[winner];
-                if let Some(w) = self.pending.get_mut(&sid) {
-                    w.jobs += 1;
-                }
-            } else {
-                let vi = winner - pending_sids.len();
-                if let Some(vj) = virtual_jobs.get_mut(vi) {
-                    *vj += 1;
-                }
+            let Some(winner) = best_sid else { break };
+            if let Some(w) = self.pending.get_mut(&winner) {
+                w.jobs += 1;
             }
             remaining -= 1;
         }

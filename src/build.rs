@@ -2046,8 +2046,6 @@ struct BuildJobs {
     /// Reverse dependency map: package -> packages that depend on it.
     /// Precomputed for O(1) lookup in mark_failure instead of O(n) scan.
     reverse_deps: HashMap<PkgName, HashSet<PkgName>>,
-    /// Speed models for historical build time estimation, keyed by pkgpath.
-    estimates: HashMap<String, SpeedModel>,
     /// Packages in build priority order, precomputed for scheduling.
     build_order: Vec<PkgName>,
     running: HashSet<PkgName>,
@@ -2129,69 +2127,6 @@ impl BuildJobs {
             });
         }
         trace!(pkgname = %pkgname.pkgname(), total_results = self.results.len(), elapsed_ms = start.elapsed().as_millis(), "mark_failure completed");
-    }
-
-    /**
-     * Estimated single-job build time for a package in milliseconds.
-     *
-     * Uses the historical speed model when available, falling back to
-     * PBULK_WEIGHT (treating it as a relative millisecond proxy).
-     */
-    fn t1_ms(&self, pkg: &PkgName) -> f64 {
-        if let Some(p) = self.scanpkgs.get(pkg) {
-            let pkgpath = p.pkgpath.as_path().display().to_string();
-            if let Some(model) = self.estimates.get(&pkgpath) {
-                return model.t1_ms;
-            }
-        }
-        self.scanpkgs
-            .get(pkg)
-            .and_then(|p| p.pbulk_weight())
-            .and_then(|w| w.parse::<f64>().ok())
-            .unwrap_or(100.0)
-    }
-
-    /**
-     * Compute the critical path cost for a package: the heaviest chain
-     * of remaining (not done/failed) packages that depend on it,
-     * weighted by estimated single-job build time.
-     *
-     * Uses historical speed model t1_ms when available, falling back
-     * to PBULK_WEIGHT. Packages on the critical path get more MAKE_JOBS.
-     */
-    fn remaining_depth(&self, pkgname: &PkgName) -> f64 {
-        let mut depths: HashMap<&PkgName, f64> = HashMap::new();
-        let mut stack: Vec<(&PkgName, bool)> = vec![(pkgname, false)];
-        while let Some((pkg, children_done)) = stack.pop() {
-            if children_done {
-                let depth = self
-                    .reverse_deps
-                    .get(pkg)
-                    .map(|rdeps| {
-                        rdeps
-                            .iter()
-                            .filter(|r| !self.done.contains(*r) && !self.failed.contains(*r))
-                            .filter_map(|r| depths.get(r).map(|d| self.t1_ms(r) + d))
-                            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                            .unwrap_or(0.0)
-                    })
-                    .unwrap_or(0.0);
-                depths.insert(pkg, depth);
-            } else if !depths.contains_key(pkg) {
-                stack.push((pkg, true));
-                if let Some(rdeps) = self.reverse_deps.get(pkg) {
-                    for rdep in rdeps {
-                        if !self.done.contains(rdep)
-                            && !self.failed.contains(rdep)
-                            && !depths.contains_key(rdep)
-                        {
-                            stack.push((rdep, false));
-                        }
-                    }
-                }
-            }
-        }
-        depths.get(pkgname).copied().unwrap_or(0.0)
     }
 
     /**
@@ -2452,7 +2387,6 @@ impl Build {
             scanpkgs: self.scanpkgs.clone(),
             incoming,
             reverse_deps,
-            estimates: estimates.clone(),
             build_order,
             running,
             done,
@@ -2733,8 +2667,7 @@ impl Build {
                                 if let Some(ref mut budget) = make_jobs_budget {
                                     let pkgpath_str =
                                         pkginfo.pkgpath.as_path().display().to_string();
-                                    let urgency = jobs.remaining_depth(&pkg).max(1.0);
-                                    budget.dispatch(c, &pkgpath_str, urgency);
+                                    budget.dispatch(c, &pkgpath_str);
                                 }
                                 let _ =
                                     client.send(ChannelCommand::JobData(Box::new(PackageBuild {
@@ -2854,28 +2787,14 @@ impl Build {
                     ChannelCommand::BuildPhaseEntry(sid, responder) => {
                         build_phase_workers.insert(sid);
                         let jobs_val = if let Some(ref mut budget) = make_jobs_budget {
-                            let idle_slots =
-                                clients.len().saturating_sub(build_phase_workers.len());
-                            let mut upcoming: Vec<f64> = jobs
-                                .incoming
-                                .iter()
-                                .filter(|(_, deps)| deps.is_empty())
-                                .map(|(pkg, _)| jobs.remaining_depth(pkg).max(1.0))
-                                .collect();
-                            upcoming.sort_unstable_by(|a, b| {
-                                b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
-                            });
-                            upcoming.truncate(idle_slots);
                             if let Some(pkg) = thread_packages.get(&sid) {
                                 let pkgpath_str = jobs
                                     .scanpkgs
                                     .get(pkg)
                                     .map(|p| p.pkgpath.as_path().display().to_string())
                                     .unwrap_or_default();
-                                let urgency = jobs.remaining_depth(pkg).max(1.0);
-                                budget.dispatch(sid, &pkgpath_str, urgency);
+                                budget.dispatch(sid, &pkgpath_str);
                             }
-                            budget.set_upcoming(&upcoming);
                             let allocated = budget.lock(sid);
                             let pkg_name = thread_packages
                                 .get(&sid)
