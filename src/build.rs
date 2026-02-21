@@ -2195,38 +2195,77 @@ impl BuildJobs {
     }
 
     /**
-     * Total estimated single-job build time for all remaining
-     * transitive dependents of a package.  Captures fan-out: a
-     * package gating 10,000 dependents scores much higher than one
-     * gating 4, even at the same dependency depth.
+     * Count and total estimated build time for all remaining
+     * transitive dependents of a package.
      */
-    fn total_dependent_work(&self, pkgname: &PkgName) -> usize {
+    fn dependent_stats(&self, pkgname: &PkgName) -> (usize, usize) {
         let mut visited = HashSet::new();
         let mut stack = vec![pkgname];
+        let mut count = 0usize;
         let mut total = 0usize;
         while let Some(pkg) = stack.pop() {
             if let Some(rdeps) = self.reverse_deps.get(pkg) {
                 for r in rdeps {
                     if !self.done.contains(r) && !self.failed.contains(r) && visited.insert(r) {
+                        count += 1;
                         total = total.saturating_add(self.t1_ms(r));
                         stack.push(r);
                     }
                 }
             }
         }
-        total
+        (count, total)
     }
 
     /**
-     * Scheduling weight for a package: the maximum of its
-     * critical-path depth and its total dependent work divided by
-     * the number of workers.  This captures both serial bottlenecks
-     * (depth) and fan-out (breadth).
+     * Total estimated single-job build time for all remaining
+     * transitive dependents of a package.  Captures fan-out: a
+     * package gating 10,000 dependents scores much higher than one
+     * gating 4, even at the same dependency depth.
+     */
+    fn total_dependent_work(&self, pkgname: &PkgName) -> usize {
+        self.dependent_stats(pkgname).1
+    }
+
+    /**
+     * Whether the t1_ms estimate for a package came from build
+     * history, PBULK_WEIGHT, or the default fallback.
+     */
+    fn t1_ms_source(&self, pkg: &PkgName) -> &str {
+        if let Some(p) = self.scanpkgs.get(pkg) {
+            let pkgpath = p.pkgpath.as_path().display().to_string();
+            if self.estimates.contains_key(&pkgpath) {
+                return "history";
+            }
+        }
+        if self
+            .scanpkgs
+            .get(pkg)
+            .and_then(|p| p.pbulk_weight())
+            .and_then(|w| w.parse::<usize>().ok())
+            .is_some()
+        {
+            return "pbulk_weight";
+        }
+        "default"
+    }
+
+    /**
+     * Scheduling weight for a package: its own estimated build time
+     * plus the maximum of its critical-path depth and its total
+     * dependent work divided by the number of workers.
+     *
+     * The package's own t1_ms acts as a base: a 9-minute package
+     * benefits far more from extra cores than a 15-second package,
+     * regardless of downstream graph structure. The downstream
+     * component adds priority for packages that are also on the
+     * critical path or gate many dependents.
      */
     fn weight(&self, pkg: &PkgName, num_workers: usize) -> usize {
+        let t1 = self.t1_ms(pkg);
         let rd = self.remaining_depth(pkg);
         let tdw = self.total_dependent_work(pkg);
-        rd.max(tdw / num_workers.max(1))
+        t1 + rd.max(tdw / num_workers.max(1))
     }
 
     /**
@@ -2902,22 +2941,41 @@ impl Build {
                             let allocated =
                                 budget.allocate(sid, &all_dispatched, sole_builder, &upcoming);
                             budget.lock(sid, allocated);
-                            let pkg_name = thread_packages
-                                .get(&sid)
-                                .map(|p| p.pkgname())
-                                .unwrap_or("?");
-                            let ready = jobs.incoming.values().filter(|d| d.is_empty()).count();
-                            debug!(
-                                sid,
-                                pkgname = pkg_name,
-                                allocated,
-                                budget_state = budget.debug_state(),
-                                build_phase = build_phase_workers.len(),
-                                running = jobs.running.len(),
-                                ready,
-                                incoming = jobs.incoming.len(),
-                                "MAKE_JOBS allocate"
-                            );
+
+                            if let Some(pkg) = thread_packages.get(&sid) {
+                                let t1 = jobs.t1_ms(pkg);
+                                let t1_src = jobs.t1_ms_source(pkg);
+                                let rd = jobs.remaining_depth(pkg);
+                                let (dc, tdw) = jobs.dependent_stats(pkg);
+                                let w = t1 + rd.max(tdw / num_workers.max(1));
+                                let mut peers: Vec<String> = thread_packages
+                                    .iter()
+                                    .filter(|(tid, _)| **tid != sid)
+                                    .map(|(tid, p)| {
+                                        let pw = all_dispatched
+                                            .iter()
+                                            .find(|(t, _)| t == tid)
+                                            .map(|(_, wt)| *wt)
+                                            .unwrap_or(0);
+                                        format!("{}:{}", p.pkgname(), pw)
+                                    })
+                                    .collect();
+                                peers.sort();
+                                debug!(
+                                    sid,
+                                    pkg = pkg.pkgname(),
+                                    t1_ms = t1,
+                                    t1_src,
+                                    deps = dc,
+                                    depth = rd,
+                                    dep_work = tdw,
+                                    weight = w,
+                                    allocated,
+                                    peers = peers.join(" "),
+                                    budget = budget.debug_state(),
+                                    "MAKE_JOBS allocate"
+                                );
+                            }
                             allocated
                         } else {
                             1
