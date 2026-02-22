@@ -2102,9 +2102,14 @@ struct BuildJobs {
     /// Reverse dependency map: package -> packages that depend on it.
     /// Precomputed for O(1) lookup in mark_failure instead of O(n) scan.
     reverse_deps: HashMap<PkgName, HashSet<PkgName>>,
+    /// Effective scheduling weight: own PBULK_WEIGHT + sum of transitive
+    /// dependents' weights.  Precomputed once via `build_order()` and used
+    /// by `get_next_build()` to always dispatch the package that unblocks
+    /// the most downstream work.
+    effective_weights: HashMap<PkgName, usize>,
     /// Historical average build durations keyed by pkgpath string.
     /// Used as a tiebreaker when multiple ready packages have the same
-    /// remaining_depth: prefer starting the historically slower build first.
+    /// effective weight: prefer starting the historically slower build first.
     history: HashMap<String, Duration>,
     running: HashSet<PkgName>,
     done: HashSet<PkgName>,
@@ -2284,15 +2289,15 @@ impl BuildJobs {
     /**
      * Get next package status.
      *
-     * Picks the ready package with the highest remaining critical path
-     * depth, so that packages starting deep serial chains are always
-     * dispatched before shallow leaves.
+     * Picks the ready package with the highest effective weight,
+     * so that packages unblocking the most downstream work are
+     * always dispatched first.  The effective weight is precomputed
+     * as own PBULK_WEIGHT + sum of transitive dependents' weights.
      *
-     * When multiple ready packages have the same depth, ties are broken
-     * by historical average build duration (longest first).  Starting
-     * slow builds earlier gives more time for them to complete while
-     * other work proceeds in parallel.  Packages with no history are
-     * treated equally among themselves.
+     * When multiple ready packages have the same weight, ties are
+     * broken by historical average build duration (longest first).
+     * Starting slow builds earlier gives more time for them to
+     * complete while other work proceeds in parallel.
      */
     fn get_next_build(&self) -> BuildStatus {
         if self.incoming.is_empty() {
@@ -2303,15 +2308,15 @@ impl BuildJobs {
             if !deps.is_empty() {
                 continue;
             }
-            let depth = self.remaining_depth(pkg);
+            let weight = self.effective_weights.get(pkg).copied().unwrap_or(0);
             let hist = self
                 .scanpkgs
                 .get(pkg)
                 .and_then(|sp| self.history.get(&sp.pkgpath.to_string()))
                 .copied()
                 .unwrap_or(Duration::ZERO);
-            if best.is_none_or(|(_, d, h)| depth > d || (depth == d && hist > h)) {
-                best = Some((pkg, depth, hist));
+            if best.is_none_or(|(_, w, h)| weight > w || (weight == w && hist > h)) {
+                best = Some((pkg, weight, hist));
             }
         }
         match best {
@@ -2507,8 +2512,28 @@ impl Build {
         self.scope.ensure(self.config.build_threads())?;
 
         /*
+         * Compute effective weights for build ordering.  The effective
+         * weight is the package's own PBULK_WEIGHT plus the sum of
+         * weights of all packages that transitively depend on it.
+         * This prioritises building packages that unblock the most
+         * downstream work.
+         */
+        let get_weight = |pkg: &PkgName| -> usize {
+            self.scanpkgs
+                .get(pkg)
+                .and_then(|idx| idx.pbulk_weight())
+                .and_then(|w| w.parse().ok())
+                .unwrap_or(100)
+        };
+        let forward: HashMap<PkgName, Vec<PkgName>> = incoming
+            .iter()
+            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+            .collect();
+        let (_, effective_weights) = crate::build_order(&forward, get_weight);
+
+        /*
          * Load historical average build durations for tiebreaking.
-         * When multiple ready packages have the same remaining_depth,
+         * When multiple ready packages have the same effective weight,
          * we prefer starting the historically slower build first.
          * This is best-effort: missing history is fine (treated as zero).
          */
@@ -2533,6 +2558,7 @@ impl Build {
             scanpkgs: self.scanpkgs.clone(),
             incoming,
             reverse_deps,
+            effective_weights,
             history,
             running,
             done,
@@ -2866,7 +2892,8 @@ impl Build {
                                 }
 
                                 if make_jobs_budget.is_some() {
-                                    let weight = jobs.remaining_depth(&pkg).max(1);
+                                    let weight = jobs.effective_weights
+                                        .get(&pkg).copied().unwrap_or(0);
                                     let ready =
                                         jobs.incoming.values().filter(|d| d.is_empty()).count();
                                     debug!(
