@@ -37,6 +37,12 @@
  * there is no mid-phase rebalancing: once a worker locks N cores for
  * a build phase, it holds them until the phase completes.
  *
+ * Only workers currently in a CPU phase participate in allocation
+ * decisions.  Workers in non-CPU phases (depends, install, package,
+ * clean) do not appear in `all_dispatched` and do not absorb any
+ * budget.  This prevents a worker finishing a long install from
+ * starving CPU-intensive workers that are actively building.
+ *
  * # Weights
  *
  * Each package's weight combines two factors:

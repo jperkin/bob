@@ -3036,7 +3036,10 @@ impl Build {
 
                             let all_dispatched: Vec<(usize, usize)> = thread_packages
                                 .iter()
-                                .filter(|(_, pkg)| jobs.running.contains(*pkg))
+                                .filter(|(sid, pkg)| {
+                                    jobs.running.contains(*pkg)
+                                        && build_phase_workers.contains(sid)
+                                })
                                 .map(|(&s, pkg)| (s, jobs.build_weight(pkg)))
                                 .collect();
 
