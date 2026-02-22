@@ -2233,6 +2233,55 @@ impl BuildJobs {
     }
 
     /**
+     * Compute a MAKE_JOBS allocation weight for a package.
+     *
+     * This combines `remaining_depth` (critical path position) with
+     * historical average build duration to produce a weight that
+     * reflects both how important and how expensive a package is to
+     * build.
+     *
+     * Packages with long historical build times get a proportionally
+     * larger share of MAKE_JOBS because additional cores have more
+     * impact on a 1000-second build than on a 10-second one.  The
+     * build duration is converted to a multiplicative boost using a
+     * log scale to prevent extreme builds from dominating:
+     *
+     *   weight = remaining_depth * bit_length(build_secs + 1)
+     *
+     * Example values (depth=8):
+     *   no history  -> 8 * 1 = 8    (unchanged from pure depth)
+     *   10s build   -> 8 * 4 = 32
+     *   60s build   -> 8 * 6 = 48
+     *   300s build  -> 8 * 9 = 72
+     *   1000s build -> 8 * 10 = 80
+     *
+     * The log scale ensures diminishing returns: going from 100s to
+     * 1000s only doubles the boost, not 10x.  This keeps short builds
+     * from being starved while still meaningfully accelerating heavy
+     * packages like cmake or gnutls.
+     *
+     * Packages with no historical data fall back to pure
+     * `remaining_depth`, which is correct for first builds and
+     * degrades gracefully.
+     */
+    fn build_weight(&self, pkgname: &PkgName) -> usize {
+        let depth = self.remaining_depth(pkgname).max(1);
+        let boost = self
+            .scanpkgs
+            .get(pkgname)
+            .and_then(|sp| self.history.get(&sp.pkgpath.to_string()))
+            .map(|dur| {
+                let secs = dur.as_secs().max(1);
+                // bit_length(secs + 1) gives a smooth 2..~11 range
+                // for builds from 1s to 1000s+
+                (usize::BITS - (secs as usize + 1).leading_zeros()) as usize
+            })
+            .unwrap_or(1)
+            .max(1);
+        depth * boost
+    }
+
+    /**
      * Get next package status.
      *
      * Picks the ready package with the highest remaining critical path
@@ -2982,13 +3031,13 @@ impl Build {
                                 .unwrap_or("?");
                             let my_weight = thread_packages
                                 .get(&sid)
-                                .map(|pkg| jobs.remaining_depth(pkg).max(1))
+                                .map(|pkg| jobs.build_weight(pkg))
                                 .unwrap_or(1);
 
                             let all_dispatched: Vec<(usize, usize)> = thread_packages
                                 .iter()
                                 .filter(|(_, pkg)| jobs.running.contains(*pkg))
-                                .map(|(&s, pkg)| (s, jobs.remaining_depth(pkg).max(1)))
+                                .map(|(&s, pkg)| (s, jobs.build_weight(pkg)))
                                 .collect();
 
                             let idle_slots =
@@ -2997,7 +3046,7 @@ impl Build {
                                 .incoming
                                 .iter()
                                 .filter(|(_, deps)| deps.is_empty())
-                                .map(|(pkg, _)| jobs.remaining_depth(pkg).max(1))
+                                .map(|(pkg, _)| jobs.build_weight(pkg))
                                 .collect();
                             upcoming_weights.sort_unstable_by(|a, b| b.cmp(a));
                             upcoming_weights.truncate(idle_slots);

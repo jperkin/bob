@@ -39,12 +39,22 @@
  *
  * # Weights
  *
- * Each package's weight is its `remaining_depth`: the longest chain
- * of not-yet-built packages that depend on it (by hop count).
- * A package with high remaining depth is on or near the critical
- * path — building it faster directly reduces wall-clock time.
- * A package with low remaining depth is a leaf or near-leaf whose
- * build time has slack.
+ * Each package's weight combines two factors:
+ *
+ *   1. **`remaining_depth`**: the longest chain of not-yet-built
+ *      packages that depend on it (by hop count).  A package with
+ *      high remaining depth is on or near the critical path.
+ *
+ *   2. **Historical build duration**: a log-scaled boost from
+ *      `avg_build_duration` so that known-heavy packages (cmake,
+ *      gnutls, etc.) get more cores.  The formula is
+ *      `depth * bit_length(build_secs + 1)`.
+ *
+ * The combined weight reflects both critical path position and
+ * actual build cost.  A package with high depth AND long build
+ * time gets the largest allocation, because giving it more cores
+ * has the highest impact on total wall-clock time.  Packages with
+ * no history fall back to pure depth.
  *
  * # Sole builder
  *
@@ -98,20 +108,17 @@ use std::collections::HashMap;
  * back more budget from current workers, reserving it for high-depth
  * packages that are about to start.
  *
- * At 1, upcoming weights compete equally with real workers — the
- * effect is subtle and mostly noticeable when weight ratios are large.
- * At 2, a ready package with weight 800 competes as 1600, absorbing
- * roughly twice as much of the extra budget and pushing current
- * workers noticeably below the flat split.  At 3+, the effect
- * becomes aggressive and may starve current workers below useful
- * parallelism (e.g. -j2 on a package that benefits from -j4).
+ * At 1, upcoming weights compete equally with real workers.  Combined
+ * with history-aware weights (which already widen the gap between heavy
+ * and light packages), this provides sufficient look-ahead without
+ * starving active builders.
  *
- * The optimal value depends on the ratio of max_jobs to
- * build_threads and the depth variance of the package set.  Start
- * with 2 and adjust based on debug logs (`MAKE_JOBS allocate`
- * messages show the actual allocations and upcoming weights).
+ * At 2+, the effect becomes aggressive and can starve long-running
+ * builds (e.g. cmake getting -j3 when -j7 is available) because the
+ * allocator over-reserves for packages that haven't entered their
+ * build phase yet.
  */
-const UPCOMING_WEIGHT_FACTOR: usize = 2;
+const UPCOMING_WEIGHT_FACTOR: usize = 1;
 
 /**
  * Context passed to the allocator for each MAKE_JOBS decision.
