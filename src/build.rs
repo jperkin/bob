@@ -2148,7 +2148,7 @@ impl BuildJobs {
             .get(pkg)
             .and_then(|p| p.pbulk_weight())
             .and_then(|w| w.parse().ok())
-            .unwrap_or(100)
+            .unwrap_or(0)
     }
 
     /**

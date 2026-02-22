@@ -90,8 +90,9 @@ impl SpeedModel {
             return Self::default();
         }
         if data.len() == 1 {
+            let (_, ms) = data[0];
             return Self {
-                t1_ms: data[0].1,
+                t1_ms: ms.max(1.0),
                 serial_fraction: DEFAULT_SERIAL_FRACTION,
             };
         }
