@@ -20,6 +20,7 @@ pub mod action;
 pub mod build;
 pub mod config;
 pub mod db;
+pub mod jobs;
 pub mod report;
 pub mod sandbox;
 pub mod scan;
@@ -121,7 +122,7 @@ pub use build::{
     Build, BuildCounts, BuildOutcome, BuildReason, BuildResult, BuildSummary, MakeJobs,
     OutcomeType, PkgBuildStats, Stage, pkg_up_to_date,
 };
-pub use config::{Config, DynamicJobs, Options, Pkgsrc, PkgsrcEnv, Sandboxes};
+pub use config::{Config, DynamicJobs, JobAlgorithm, Options, Pkgsrc, PkgsrcEnv, Sandboxes};
 pub use db::Database;
 pub use init::Init;
 pub use report::write_html_report;
