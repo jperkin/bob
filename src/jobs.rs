@@ -45,22 +45,18 @@
  *
  * # Weights
  *
- * Each package's weight combines two factors:
+ * Each package's weight is derived from its **time-weighted critical
+ * path** (`remaining_time`): the sum of historical build durations
+ * along the longest remaining chain of packages that depend on it,
+ * plus the package's own build duration.
  *
- *   1. **`remaining_depth`**: the longest chain of not-yet-built
- *      packages that depend on it (by hop count).  A package with
- *      high remaining depth is on or near the critical path.
+ * This correctly prioritises packages that block expensive downstream
+ * work.  For example, glib blocking a 3-hop chain of 200 s builds
+ * (weight ≈ 600) will receive far more cores than p5-URI blocking a
+ * 10-hop chain of 20 s builds (weight ≈ 200).
  *
- *   2. **Historical build duration**: a log-scaled boost from
- *      `avg_build_duration` so that known-heavy packages (cmake,
- *      gnutls, etc.) get more cores.  The formula is
- *      `depth * bit_length(build_secs + 1)`.
- *
- * The combined weight reflects both critical path position and
- * actual build cost.  A package with high depth AND long build
- * time gets the largest allocation, because giving it more cores
- * has the highest impact on total wall-clock time.  Packages with
- * no history fall back to pure depth.
+ * Packages without history contribute 1 s per hop, so the metric
+ * degrades gracefully to hop count on first builds.
  *
  * # Sole builder
  *

@@ -2103,8 +2103,8 @@ struct BuildJobs {
     /// Precomputed for O(1) lookup in mark_failure instead of O(n) scan.
     reverse_deps: HashMap<PkgName, HashSet<PkgName>>,
     /// Historical average build durations keyed by pkgpath string.
-    /// Used as a tiebreaker when multiple ready packages have the same
-    /// remaining_depth: prefer starting the historically slower build first.
+    /// Used to compute the time-weighted critical path for scheduling
+    /// and MAKE_JOBS allocation.
     history: HashMap<String, Duration>,
     running: HashSet<PkgName>,
     done: HashSet<PkgName>,
@@ -2188,40 +2188,62 @@ impl BuildJobs {
     }
 
     /**
-     * Compute the critical path depth for a package: the longest chain
-     * of remaining (not done/failed) packages that depend on it.
+     * Look up the historical average build duration for a package.
      *
-     * Each package counts as 1 hop.  This is a purely structural
-     * measure — it counts how many sequential builds must complete
-     * before all dependents of this package are unblocked.  Packages
-     * with high remaining depth are on or near the critical path and
-     * should be prioritised for building and given more MAKE_JOBS.
+     * Returns `Duration::ZERO` when no history is available.
      */
-    fn remaining_depth(&self, pkgname: &PkgName) -> usize {
-        let mut depths: HashMap<&PkgName, usize> = HashMap::new();
+    fn pkg_build_duration(&self, pkgname: &PkgName) -> Duration {
+        self.scanpkgs
+            .get(pkgname)
+            .and_then(|sp| self.history.get(&sp.pkgpath.to_string()))
+            .copied()
+            .unwrap_or(Duration::ZERO)
+    }
+
+    /**
+     * Compute the time-weighted critical path for a package: the sum
+     * of historical build durations along the longest remaining chain
+     * of packages that depend on it.
+     *
+     * Unlike a simple hop count, this correctly prioritises packages
+     * that block expensive downstream work.  A package blocking a
+     * 3-hop chain of 200 s builds (600 s) will score higher than one
+     * blocking a 10-hop chain of 20 s builds (200 s).
+     *
+     * Packages without history contribute 1 s per hop so that depth
+     * still matters when no timing data is available (e.g. first
+     * build).
+     */
+    fn remaining_time(&self, pkgname: &PkgName) -> u64 {
+        let mut times: HashMap<&PkgName, u64> = HashMap::new();
         let mut stack: Vec<(&PkgName, bool)> = vec![(pkgname, false)];
         while let Some((pkg, children_done)) = stack.pop() {
             if children_done {
-                let depth = self
+                let time = self
                     .reverse_deps
                     .get(pkg)
                     .map(|rdeps| {
                         rdeps
                             .iter()
                             .filter(|r| !self.done.contains(*r) && !self.failed.contains(*r))
-                            .filter_map(|r| depths.get(r).map(|d| 1 + d))
+                            .filter_map(|r| {
+                                times.get(r).map(|&t| {
+                                    let secs = self.pkg_build_duration(r).as_secs().max(1);
+                                    secs + t
+                                })
+                            })
                             .max()
                             .unwrap_or(0)
                     })
                     .unwrap_or(0);
-                depths.insert(pkg, depth);
-            } else if !depths.contains_key(pkg) {
+                times.insert(pkg, time);
+            } else if !times.contains_key(pkg) {
                 stack.push((pkg, true));
                 if let Some(rdeps) = self.reverse_deps.get(pkg) {
                     for rdep in rdeps {
                         if !self.done.contains(rdep)
                             && !self.failed.contains(rdep)
-                            && !depths.contains_key(rdep)
+                            && !times.contains_key(rdep)
                         {
                             stack.push((rdep, false));
                         }
@@ -2229,89 +2251,58 @@ impl BuildJobs {
                 }
             }
         }
-        depths.get(pkgname).copied().unwrap_or(0)
+        times.get(pkgname).copied().unwrap_or(0)
     }
 
     /**
      * Compute a MAKE_JOBS allocation weight for a package.
      *
-     * This combines `remaining_depth` (critical path position) with
-     * historical average build duration to produce a weight that
-     * reflects both how important and how expensive a package is to
-     * build.
+     * Uses the time-weighted critical path (`remaining_time`) plus the
+     * package's own historical build duration to determine how many
+     * MAKE_JOBS cores should be allocated proportionally.
      *
-     * Packages with long historical build times get a proportionally
-     * larger share of MAKE_JOBS because additional cores have more
-     * impact on a 1000-second build than on a 10-second one.  The
-     * build duration is converted to a multiplicative boost using a
-     * log scale to prevent extreme builds from dominating:
+     * Packages that block long chains of heavy downstream work get
+     * a larger weight, and packages that are themselves expensive to
+     * build also score higher (giving parallelism where it helps the
+     * most).
      *
-     *   weight = remaining_depth * bit_length(build_secs + 1)
-     *
-     * Example values (depth=8):
-     *   no history  -> 8 * 1 = 8    (unchanged from pure depth)
-     *   10s build   -> 8 * 4 = 32
-     *   60s build   -> 8 * 6 = 48
-     *   300s build  -> 8 * 9 = 72
-     *   1000s build -> 8 * 10 = 80
-     *
-     * The log scale ensures diminishing returns: going from 100s to
-     * 1000s only doubles the boost, not 10x.  This keeps short builds
-     * from being starved while still meaningfully accelerating heavy
-     * packages like cmake or gnutls.
-     *
-     * Packages with no historical data fall back to pure
-     * `remaining_depth`, which is correct for first builds and
-     * degrades gracefully.
+     * The floor of 1 ensures every running package gets at least the
+     * minimum allocation.
      */
     fn build_weight(&self, pkgname: &PkgName) -> usize {
-        let depth = self.remaining_depth(pkgname).max(1);
-        let boost = self
-            .scanpkgs
-            .get(pkgname)
-            .and_then(|sp| self.history.get(&sp.pkgpath.to_string()))
-            .map(|dur| {
-                let secs = dur.as_secs().max(1);
-                // bit_length(secs + 1) gives a smooth 2..~11 range
-                // for builds from 1s to 1000s+
-                (usize::BITS - (secs as usize + 1).leading_zeros()) as usize
-            })
-            .unwrap_or(1)
-            .max(1);
-        depth * boost
+        let critical = self.remaining_time(pkgname);
+        let own_secs = self.pkg_build_duration(pkgname).as_secs();
+        (critical + own_secs).max(1) as usize
     }
 
     /**
      * Get next package status.
      *
-     * Picks the ready package with the highest remaining critical path
-     * depth, so that packages starting deep serial chains are always
-     * dispatched before shallow leaves.
+     * Picks the ready package with the highest time-weighted critical
+     * path (`remaining_time`), so that packages blocking expensive
+     * downstream work are always dispatched before shallow leaves.
      *
-     * When multiple ready packages have the same depth, ties are broken
-     * by historical average build duration (longest first).  Starting
-     * slow builds earlier gives more time for them to complete while
-     * other work proceeds in parallel.  Packages with no history are
-     * treated equally among themselves.
+     * This correctly prioritises e.g. glib (3-hop chain of 200 s
+     * builds = 600 s) over p5-URI (10-hop chain of 20 s builds =
+     * 200 s), even though p5-URI has more hops.
+     *
+     * Ties are broken by the package's own historical build duration
+     * (longest first), so that among equally-critical packages the
+     * slowest build starts earliest.
      */
     fn get_next_build(&self) -> BuildStatus {
         if self.incoming.is_empty() {
             return BuildStatus::Done;
         }
-        let mut best: Option<(&PkgName, usize, Duration)> = None;
+        let mut best: Option<(&PkgName, u64, Duration)> = None;
         for (pkg, deps) in &self.incoming {
             if !deps.is_empty() {
                 continue;
             }
-            let depth = self.remaining_depth(pkg);
-            let hist = self
-                .scanpkgs
-                .get(pkg)
-                .and_then(|sp| self.history.get(&sp.pkgpath.to_string()))
-                .copied()
-                .unwrap_or(Duration::ZERO);
-            if best.is_none_or(|(_, d, h)| depth > d || (depth == d && hist > h)) {
-                best = Some((pkg, depth, hist));
+            let crit = self.remaining_time(pkg);
+            let own = self.pkg_build_duration(pkg);
+            if best.is_none_or(|(_, c, o)| crit > c || (crit == c && own > o)) {
+                best = Some((pkg, crit, own));
             }
         }
         match best {
@@ -2507,10 +2498,10 @@ impl Build {
         self.scope.ensure(self.config.build_threads())?;
 
         /*
-         * Load historical average build durations for tiebreaking.
-         * When multiple ready packages have the same remaining_depth,
-         * we prefer starting the historically slower build first.
-         * This is best-effort: missing history is fine (treated as zero).
+         * Load historical average build durations for time-weighted
+         * critical path scheduling.  Packages that block expensive
+         * downstream chains are dispatched first, and allocated more
+         * MAKE_JOBS.  Missing history is fine (1 s default per hop).
          */
         let mut history: HashMap<String, Duration> = HashMap::new();
         for sp in self.scanpkgs.values() {
@@ -2866,7 +2857,7 @@ impl Build {
                                 }
 
                                 if make_jobs_budget.is_some() {
-                                    let weight = jobs.remaining_depth(&pkg).max(1);
+                                    let weight = jobs.remaining_time(&pkg);
                                     let ready =
                                         jobs.incoming.values().filter(|d| d.is_empty()).count();
                                     debug!(
