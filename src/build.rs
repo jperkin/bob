@@ -2306,6 +2306,7 @@ impl BuildJobs {
         if self.incoming.is_empty() {
             return BuildStatus::Done;
         }
+        let ready_count = self.incoming.values().filter(|d| d.is_empty()).count();
         let mut best: Option<(&PkgName, usize, Duration)> = None;
         for (pkg, deps) in &self.incoming {
             if !deps.is_empty() {
@@ -2323,7 +2324,18 @@ impl BuildJobs {
             }
         }
         match best {
-            Some((pkg, _, _)) => BuildStatus::Available(pkg.clone()),
+            Some((pkg, w, _)) => {
+                debug!(
+                    pkgname = %pkg.pkgname(),
+                    weight = w,
+                    ready = ready_count,
+                    incoming = self.incoming.len(),
+                    running = self.running.len(),
+                    done = self.done.len(),
+                    "get_next_build selected"
+                );
+                BuildStatus::Available(pkg.clone())
+            }
             None => BuildStatus::NoneAvailable,
         }
     }
@@ -2430,7 +2442,7 @@ impl Build {
                     .or_default()
                     .insert(pkgname.clone());
             }
-            trace!(pkgname = %pkgname.pkgname(),
+            debug!(pkgname = %pkgname.pkgname(),
                 deps_count = deps.len(),
                 deps = ?deps.iter().map(|d| d.pkgname()).collect::<Vec<_>>(),
                 "Adding package to incoming build queue"
@@ -2447,6 +2459,11 @@ impl Build {
         let mut cached_count = 0usize;
 
         for (pkgname, result) in &self.cached {
+            debug!(
+                pkgname = %pkgname.pkgname(),
+                outcome = ?result.outcome,
+                "Processing cached build result"
+            );
             match result.outcome {
                 BuildOutcome::Success | BuildOutcome::UpToDate => {
                     // Completed package - remove from incoming, add to done
