@@ -2423,24 +2423,29 @@ impl Build {
          * Populate BuildJobs.
          */
         debug!("Populating BuildJobs from scanpkgs");
+        let packages_all = self.pkgsrc_env.packages.join("All");
         let mut incoming: HashMap<PkgName, HashSet<PkgName>> = HashMap::new();
         let mut reverse_deps: HashMap<PkgName, HashSet<PkgName>> = HashMap::new();
+        let mut missing_deps: HashMap<PkgName, PkgName> = HashMap::new();
         for (pkgname, index) in &self.scanpkgs {
             let mut deps: HashSet<PkgName> = HashSet::new();
             for dep in index.depends() {
-                // Only track dependencies that are in our build queue.
-                // Dependencies outside scanpkgs are assumed to already be
-                // installed (from a previous build) or will cause the build
-                // to fail at runtime.
-                if !self.scanpkgs.contains_key(dep) {
-                    continue;
+                if self.scanpkgs.contains_key(dep) {
+                    deps.insert(dep.clone());
+                    // Build reverse dependency map: dep -> packages that depend on it
+                    reverse_deps
+                        .entry(dep.clone())
+                        .or_default()
+                        .insert(pkgname.clone());
+                } else {
+                    // Dependency is not in our build queue.  Verify its
+                    // binary package exists; if not, this package cannot
+                    // be built.
+                    let pkgfile = packages_all.join(format!("{}.tgz", dep.pkgname()));
+                    if !pkgfile.exists() {
+                        missing_deps.insert(pkgname.clone(), dep.clone());
+                    }
                 }
-                deps.insert(dep.clone());
-                // Build reverse dependency map: dep -> packages that depend on it
-                reverse_deps
-                    .entry(dep.clone())
-                    .or_default()
-                    .insert(pkgname.clone());
             }
             debug!(pkgname = %pkgname.pkgname(),
                 deps_count = deps.len(),
@@ -2455,7 +2460,7 @@ impl Build {
          */
         let mut done: HashSet<PkgName> = HashSet::new();
         let mut failed: HashSet<PkgName> = HashSet::new();
-        let results: Vec<BuildResult> = Vec::new();
+        let mut results: Vec<BuildResult> = Vec::new();
         let mut cached_count = 0usize;
 
         for (pkgname, result) in &self.cached {
@@ -2487,7 +2492,38 @@ impl Build {
         }
 
         /*
-         * Propagate cached failures: any package in incoming that depends on
+         * Fail packages that depend on a binary package that doesn't
+         * exist and isn't going to be built.  This catches the case
+         * where `bob rebuild` includes a package but not all of its
+         * forward dependencies.
+         */
+        for (pkgname, dep) in &missing_deps {
+            if !incoming.contains_key(pkgname) {
+                continue;
+            }
+            warn!(
+                pkgname = %pkgname.pkgname(),
+                missing_dep = %dep.pkgname(),
+                "dependency binary package not found and not in build queue"
+            );
+            let scanpkg = self.scanpkgs.get(pkgname);
+            let log_dir = Some(self.config.logdir().join(pkgname.pkgname()));
+            incoming.remove(pkgname);
+            failed.insert(pkgname.clone());
+            results.push(BuildResult {
+                pkgname: pkgname.clone(),
+                pkgpath: scanpkg.map(|s| s.pkgpath.clone()),
+                outcome: BuildOutcome::Skipped(SkipReason::IndirectFailed(format!(
+                    "dependency {} not available",
+                    dep.pkgname()
+                ))),
+                log_dir,
+                build_stats: PkgBuildStats::default(),
+            });
+        }
+
+        /*
+         * Propagate failures: any package in incoming that depends on
          * a failed package must also be marked as failed.
          */
         loop {
