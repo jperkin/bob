@@ -2880,6 +2880,35 @@ impl Build {
                         match jobs.get_next_build() {
                             BuildStatus::Available(pkg) => {
                                 let pkginfo = jobs.scanpkgs.get(&pkg).unwrap();
+
+                                // Safety check: verify ALL dependencies
+                                // are actually done before dispatching.
+                                for dep in pkginfo.depends() {
+                                    if !jobs.done.contains(dep)
+                                        && !jobs.failed.contains(dep)
+                                        && jobs.scanpkgs.contains_key(dep)
+                                    {
+                                        let state = if jobs.running.contains(dep) {
+                                            "running"
+                                        } else if jobs.incoming.contains_key(dep) {
+                                            "incoming"
+                                        } else {
+                                            "unknown"
+                                        };
+                                        panic!(
+                                            "BUG: dispatching {} but dependency {} is still {} \
+                                             (done={}, failed={}, running={}, incoming={})",
+                                            pkg.pkgname(),
+                                            dep.pkgname(),
+                                            state,
+                                            jobs.done.len(),
+                                            jobs.failed.len(),
+                                            jobs.running.len(),
+                                            jobs.incoming.len(),
+                                        );
+                                    }
+                                }
+
                                 jobs.incoming.remove(&pkg);
                                 jobs.running.insert(pkg.clone());
 
