@@ -229,6 +229,16 @@ pub fn check_up_to_date(
         db.store_build_reason(pkgname, &reason.to_string())?;
     }
 
+    /*
+     * Clear stale build results for packages that need rebuilding.
+     * Without this, load_cached_from_db() would find the old Success
+     * entry and treat the package as done, causing dependents to be
+     * dispatched before the dependency has actually been rebuilt.
+     */
+    for &pkgname in &needs_rebuild {
+        db.delete_build_by_name(pkgname)?;
+    }
+
     println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
 
     Ok(up_to_date_count)
