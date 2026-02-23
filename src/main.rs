@@ -318,6 +318,22 @@ enum UtilCmd {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Simulate a parallel build and show scheduling efficiency
+    ///
+    /// Reads a dependency graph file (one "dep -> dependent" edge per line)
+    /// and simulates a build with the given number of workers.  Without
+    /// --timings each package takes one time unit; with --timings packages
+    /// take the duration specified in the file.
+    SimulateBuild {
+        /// Dependency graph file (use "-" for stdin)
+        file: PathBuf,
+        /// Number of workers
+        #[arg(short, long, default_value = "4")]
+        workers: usize,
+        /// Per-package timings file ("pkgname duration" per line)
+        #[arg(short, long)]
+        timings: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -514,6 +530,16 @@ fn run() -> Result<()> {
             } else {
                 print!("{}", out);
             }
+        }
+        Cmd::Util {
+            cmd:
+                UtilCmd::SimulateBuild {
+                    file,
+                    workers,
+                    timings,
+                },
+        } => {
+            cmd::simulate::run(&file, workers, timings.as_deref())?;
         }
         Cmd::Util {
             cmd: UtilCmd::PrintPresolve { output },
