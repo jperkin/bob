@@ -2193,40 +2193,42 @@ impl BuildJobs {
     }
 
     /**
-     * Compute the critical path depth for a package: the longest chain
-     * of remaining (not done/failed) packages that depend on it.
+     * Compute the remaining downstream weight for a package: the total
+     * number of remaining (not done/failed) packages in its transitive
+     * reverse dependency subtree.
      *
-     * Each package counts as 1 hop.  This is a purely structural
-     * measure — it counts how many sequential builds must complete
-     * before all dependents of this package are unblocked.  Packages
-     * with high remaining depth are on or near the critical path and
-     * should be prioritised for building and given more MAKE_JOBS.
+     * Unlike a pure critical-path depth (which takes the max over
+     * children), this sums across all branches.  A package that fans
+     * out to many parallel dependents scores higher than one that
+     * feeds a single deep chain of the same length, because finishing
+     * it sooner unlocks more parallel work.
+     *
+     * Used by `build_weight()` to drive MAKE_JOBS allocation.
      */
-    fn remaining_depth(&self, pkgname: &PkgName) -> usize {
-        let mut depths: HashMap<&PkgName, usize> = HashMap::new();
+    fn remaining_weight(&self, pkgname: &PkgName) -> usize {
+        let mut weights: HashMap<&PkgName, usize> = HashMap::new();
         let mut stack: Vec<(&PkgName, bool)> = vec![(pkgname, false)];
         while let Some((pkg, children_done)) = stack.pop() {
             if children_done {
-                let depth = self
+                let weight = self
                     .reverse_deps
                     .get(pkg)
                     .map(|rdeps| {
                         rdeps
                             .iter()
                             .filter(|r| !self.done.contains(*r) && !self.failed.contains(*r))
-                            .filter_map(|r| depths.get(r).map(|d| 1 + d))
-                            .max()
-                            .unwrap_or(0)
+                            .filter_map(|r| weights.get(r).map(|w| 1 + w))
+                            .sum()
                     })
                     .unwrap_or(0);
-                depths.insert(pkg, depth);
-            } else if !depths.contains_key(pkg) {
+                weights.insert(pkg, weight);
+            } else if !weights.contains_key(pkg) {
                 stack.push((pkg, true));
                 if let Some(rdeps) = self.reverse_deps.get(pkg) {
                     for rdep in rdeps {
                         if !self.done.contains(rdep)
                             && !self.failed.contains(rdep)
-                            && !depths.contains_key(rdep)
+                            && !weights.contains_key(rdep)
                         {
                             stack.push((rdep, false));
                         }
@@ -2234,16 +2236,22 @@ impl BuildJobs {
                 }
             }
         }
-        depths.get(pkgname).copied().unwrap_or(0)
+        weights.get(pkgname).copied().unwrap_or(0)
     }
 
     /**
      * Compute a MAKE_JOBS allocation weight for a package.
      *
-     * This combines `remaining_depth` (critical path position) with
+     * This combines `remaining_weight` (downstream subtree size) with
      * historical average build duration to produce a weight that
-     * reflects both how important and how expensive a package is to
-     * build.
+     * reflects both how much work a package unblocks and how expensive
+     * it is to build.
+     *
+     * `remaining_weight` sums across the full reverse-dependency
+     * subtree, so packages that fan out to many parallel dependents
+     * score higher than those feeding a single serial chain.  This
+     * ensures packages like glib (blocking 50+ builds) get more cores
+     * than p5-URI (blocking a chain of 3).
      *
      * Packages with long historical build times get a proportionally
      * larger share of MAKE_JOBS because additional cores have more
@@ -2251,26 +2259,21 @@ impl BuildJobs {
      * build duration is converted to a multiplicative boost using a
      * log scale to prevent extreme builds from dominating:
      *
-     *   weight = remaining_depth * bit_length(build_secs + 1)
+     *   weight = remaining_weight * bit_length(build_secs + 1)
      *
-     * Example values (depth=8):
-     *   no history  -> 8 * 1 = 8    (unchanged from pure depth)
+     * Example values (remaining_weight=8):
+     *   no history  -> 8 * 1 = 8    (unchanged from pure weight)
      *   10s build   -> 8 * 4 = 32
      *   60s build   -> 8 * 6 = 48
      *   300s build  -> 8 * 9 = 72
      *   1000s build -> 8 * 10 = 80
      *
-     * The log scale ensures diminishing returns: going from 100s to
-     * 1000s only doubles the boost, not 10x.  This keeps short builds
-     * from being starved while still meaningfully accelerating heavy
-     * packages like cmake or gnutls.
-     *
      * Packages with no historical data fall back to pure
-     * `remaining_depth`, which is correct for first builds and
+     * `remaining_weight`, which is correct for first builds and
      * degrades gracefully.
      */
     fn build_weight(&self, pkgname: &PkgName) -> usize {
-        let depth = self.remaining_depth(pkgname).max(1);
+        let weight = self.remaining_weight(pkgname).max(1);
         let boost = self
             .scanpkgs
             .get(pkgname)
@@ -2283,7 +2286,7 @@ impl BuildJobs {
             })
             .unwrap_or(1)
             .max(1);
-        depth * boost
+        weight * boost
     }
 
     /**

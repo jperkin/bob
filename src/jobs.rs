@@ -47,20 +47,22 @@
  *
  * Each package's weight combines two factors:
  *
- *   1. **`remaining_depth`**: the longest chain of not-yet-built
- *      packages that depend on it (by hop count).  A package with
- *      high remaining depth is on or near the critical path.
+ *   1. **`remaining_weight`**: the total size of the remaining
+ *      reverse-dependency subtree (sum, not max).  A package that
+ *      fans out to many parallel dependents scores higher than one
+ *      feeding a single serial chain, because finishing it sooner
+ *      unlocks more parallel work.
  *
  *   2. **Historical build duration**: a log-scaled boost from
  *      `avg_build_duration` so that known-heavy packages (cmake,
  *      gnutls, etc.) get more cores.  The formula is
- *      `depth * bit_length(build_secs + 1)`.
+ *      `remaining_weight * bit_length(build_secs + 1)`.
  *
- * The combined weight reflects both critical path position and
- * actual build cost.  A package with high depth AND long build
+ * The combined weight reflects both downstream impact and actual
+ * build cost.  A package with high remaining weight AND long build
  * time gets the largest allocation, because giving it more cores
  * has the highest impact on total wall-clock time.  Packages with
- * no history fall back to pure depth.
+ * no history fall back to pure remaining_weight.
  *
  * # Sole builder
  *
