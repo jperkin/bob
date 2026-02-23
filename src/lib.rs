@@ -23,6 +23,7 @@ pub mod db;
 pub mod report;
 pub mod sandbox;
 pub mod scan;
+pub mod scheduler;
 pub mod state;
 pub mod summary;
 
@@ -127,5 +128,6 @@ pub use init::Init;
 pub use report::write_html_report;
 pub use sandbox::Sandbox;
 pub use scan::{ResolvedPackage, Scan, ScanResult, ScanSummary, SkipReason, SkippedCounts};
+pub use scheduler::Scheduler;
 pub use state::RunState;
 pub use summary::generate_pkg_summary;

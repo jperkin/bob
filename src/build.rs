@@ -45,6 +45,7 @@
 use crate::config::PkgsrcEnv;
 use crate::sandbox::{SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
 use crate::scan::{ResolvedPackage, SkipReason, SkippedCounts};
+use crate::scheduler::Scheduler;
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, RunState, Sandbox};
 use anyhow::{Context, bail};
@@ -61,6 +62,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc, mpsc::Sender};
+use std::task::Poll;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, info_span, trace, warn};
 
@@ -2206,38 +2208,9 @@ enum ChannelCommand {
     BuildPhaseExit(usize),
 }
 
-/**
- * Return the current build job status.
- */
-#[derive(Debug)]
-enum BuildStatus {
-    /**
-     * The next package ordered by priority is available for building.
-     */
-    Available(PkgName),
-    /**
-     * No packages are currently available for building, i.e. all remaining
-     * packages have at least one dependency that is still unavailable.
-     */
-    NoneAvailable,
-    /**
-     * All package builds have been completed.
-     */
-    Done,
-}
-
-#[derive(Clone, Debug)]
 struct BuildJobs {
     scanpkgs: IndexMap<PkgName, ResolvedPackage>,
-    incoming: HashMap<PkgName, HashSet<PkgName>>,
-    /// Reverse dependency map: package -> packages that depend on it.
-    /// Precomputed for O(1) lookup in mark_failure instead of O(n) scan.
-    reverse_deps: HashMap<PkgName, HashSet<PkgName>>,
-    /// Packages in build priority order, precomputed for scheduling.
-    build_order: Vec<PkgName>,
-    running: HashSet<PkgName>,
-    done: HashSet<PkgName>,
-    failed: HashSet<PkgName>,
+    scheduler: Scheduler<PkgName>,
     results: Vec<BuildResult>,
     logdir: PathBuf,
 }
@@ -2247,10 +2220,7 @@ impl BuildJobs {
      * Mark a package as successful and remove it from pending dependencies.
      */
     fn mark_success(&mut self, result: BuildResult) {
-        for dep in self.incoming.values_mut() {
-            dep.remove(&result.pkgname);
-        }
-        self.done.insert(result.pkgname.clone());
+        self.scheduler.mark_success(&result.pkgname);
         self.results.push(result);
     }
 
@@ -2261,45 +2231,14 @@ impl BuildJobs {
         let pkgname = &result.pkgname;
         trace!(pkgname = %pkgname.pkgname(), "mark_failure called");
         let start = std::time::Instant::now();
-        let mut broken: HashSet<PkgName> = HashSet::new();
-        let mut to_check: Vec<PkgName> = vec![];
-        /*
-         * Starting with the original failed package, recursively loop through
-         * adding any packages that depend on it, adding them to broken.
-         * Uses precomputed reverse_deps for O(1) lookup instead of O(n) scan.
-         */
-        if let Some(dependents) = self.reverse_deps.get(pkgname) {
-            for pkg in dependents {
-                to_check.push(pkg.clone());
-            }
-        }
-        loop {
-            let Some(badpkg) = to_check.pop() else {
-                break;
-            };
-            if broken.contains(&badpkg) {
-                continue;
-            }
-            if let Some(dependents) = self.reverse_deps.get(&badpkg) {
-                for pkg in dependents {
-                    to_check.push(pkg.clone());
-                }
-            }
-            broken.insert(badpkg);
-        }
-        trace!(pkgname = %pkgname.pkgname(), broken_count = broken.len() + 1, elapsed_ms = start.elapsed().as_millis(), "mark_failure found broken packages");
 
-        // Record the original failure
-        self.incoming.remove(pkgname);
-        self.failed.insert(pkgname.clone());
+        let indirect = self.scheduler.mark_failure(pkgname);
+        trace!(pkgname = %pkgname.pkgname(), broken_count = indirect.len() + 1, elapsed_ms = start.elapsed().as_millis(), "mark_failure found broken packages");
+
         let pkgname = result.pkgname.clone();
         self.results.push(result);
 
-        // Record indirect failures for all dependents
-        for pkg in broken {
-            self.incoming.remove(&pkg);
-            self.failed.insert(pkg.clone());
-
+        for pkg in indirect {
             let scanpkg = self.scanpkgs.get(&pkg);
             let log_dir = Some(self.logdir.join(pkg.pkgname()));
             self.results.push(BuildResult {
@@ -2314,75 +2253,6 @@ impl BuildJobs {
             });
         }
         trace!(pkgname = %pkgname.pkgname(), total_results = self.results.len(), elapsed_ms = start.elapsed().as_millis(), "mark_failure completed");
-    }
-
-    /**
-     * Compute the critical path cost for a package: the heaviest chain
-     * of remaining (not done/failed) packages that depend on it,
-     * weighted by each dependent's PBULK_WEIGHT.
-     *
-     * This is the Critical Path Method with PBULK_WEIGHT as the
-     * estimated build time.  Serial chains through heavy packages
-     * produce higher cost than fan-out, so packages on the critical
-     * path get more MAKE_JOBS.
-     */
-    fn remaining_depth(&self, pkgname: &PkgName) -> usize {
-        let pkg_weight = |pkg: &PkgName| -> usize {
-            self.scanpkgs
-                .get(pkg)
-                .and_then(|p| p.pbulk_weight())
-                .and_then(|w| w.parse().ok())
-                .unwrap_or(100)
-        };
-        let mut depths: HashMap<&PkgName, usize> = HashMap::new();
-        let mut stack: Vec<(&PkgName, bool)> = vec![(pkgname, false)];
-        while let Some((pkg, children_done)) = stack.pop() {
-            if children_done {
-                let depth = self
-                    .reverse_deps
-                    .get(pkg)
-                    .map(|rdeps| {
-                        rdeps
-                            .iter()
-                            .filter(|r| !self.done.contains(*r) && !self.failed.contains(*r))
-                            .filter_map(|r| depths.get(r).map(|d| pkg_weight(r) + d))
-                            .max()
-                            .unwrap_or(0)
-                    })
-                    .unwrap_or(0);
-                depths.insert(pkg, depth);
-            } else if !depths.contains_key(pkg) {
-                stack.push((pkg, true));
-                if let Some(rdeps) = self.reverse_deps.get(pkg) {
-                    for rdep in rdeps {
-                        if !self.done.contains(rdep)
-                            && !self.failed.contains(rdep)
-                            && !depths.contains_key(rdep)
-                        {
-                            stack.push((rdep, false));
-                        }
-                    }
-                }
-            }
-        }
-        depths.get(pkgname).copied().unwrap_or(0)
-    }
-
-    /**
-     * Get next package status.
-     */
-    fn get_next_build(&self) -> BuildStatus {
-        if self.incoming.is_empty() {
-            return BuildStatus::Done;
-        }
-        for pkg in &self.build_order {
-            if let Some(deps) = self.incoming.get(pkg) {
-                if deps.is_empty() {
-                    return BuildStatus::Available(pkg.clone());
-                }
-            }
-        }
-        BuildStatus::NoneAvailable
     }
 }
 
@@ -2572,35 +2442,27 @@ impl Build {
         self.scope.ensure(self.config.build_threads())?;
 
         /*
-         * Compute effective weights for build ordering.  The effective weight
-         * is the package's own PBULK_WEIGHT plus the sum of weights of all
-         * packages that transitively depend on it.  This prioritises building
-         * packages that unblock the most downstream work.
+         * Build per-package weight map for critical-path scheduling.
          */
-        let get_weight = |pkg: &PkgName| -> usize {
-            self.scanpkgs
-                .get(pkg)
-                .and_then(|idx| idx.pbulk_weight())
-                .and_then(|w| w.parse().ok())
-                .unwrap_or(100)
-        };
-
-        let forward: HashMap<PkgName, Vec<PkgName>> = incoming
-            .iter()
-            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+        let weights: HashMap<PkgName, usize> = incoming
+            .keys()
+            .map(|pkg| {
+                let w = self
+                    .scanpkgs
+                    .get(pkg)
+                    .and_then(|idx| idx.pbulk_weight())
+                    .and_then(|w| w.parse().ok())
+                    .unwrap_or(100);
+                (pkg.clone(), w)
+            })
             .collect();
-        let (build_order, _) = crate::build_order(&forward, get_weight);
 
-        let running: HashSet<PkgName> = HashSet::new();
+        let scheduler = Scheduler::new(incoming, reverse_deps, weights, done, failed);
+
         let logdir = self.config.logdir().clone();
         let jobs = BuildJobs {
             scanpkgs: self.scanpkgs.clone(),
-            incoming,
-            reverse_deps,
-            build_order,
-            running,
-            done,
-            failed,
+            scheduler,
             results,
             logdir,
         };
@@ -2796,7 +2658,7 @@ impl Build {
         let (completed_tx, completed_rx) = mpsc::channel::<BuildResult>();
         let manager = std::thread::spawn(move || {
             let mut clients = clients.clone();
-            let mut jobs = jobs.clone();
+            let mut jobs = jobs;
             let mut announced_interrupt = false;
 
             // Track which thread is building which package
@@ -2855,12 +2717,10 @@ impl Build {
                         }
                     }
                     ChannelCommand::ClientReady(c) => {
-                        let client = clients.get(&c).unwrap();
-                        match jobs.get_next_build() {
-                            BuildStatus::Available(pkg) => {
-                                let pkginfo = jobs.scanpkgs.get(&pkg).unwrap();
-                                jobs.incoming.remove(&pkg);
-                                jobs.running.insert(pkg.clone());
+                        let client = clients.get(&c).expect("client not in map");
+                        match jobs.scheduler.poll() {
+                            Poll::Ready(Some(pkg)) => {
+                                let pkginfo = jobs.scanpkgs.get(&pkg).expect("pkg not in scanpkgs");
 
                                 // Update thread progress
                                 thread_packages.insert(c, pkg.clone());
@@ -2874,7 +2734,7 @@ impl Build {
                                 }
 
                                 if let Some(ref mut budget) = make_jobs_budget {
-                                    let rw = jobs.remaining_depth(&pkg).max(1);
+                                    let rw = jobs.scheduler.remaining_depth(&pkg).max(1);
                                     budget.dispatch(c, rw);
                                 }
                                 let _ =
@@ -2884,15 +2744,7 @@ impl Build {
                                         pkginfo: pkginfo.clone(),
                                     })));
                             }
-                            BuildStatus::NoneAvailable => {
-                                if let Ok(mut p) = progress_clone.lock() {
-                                    p.clear_output_buffer(c);
-                                    p.state_mut().set_worker_idle(c);
-                                    let _ = p.render();
-                                }
-                                let _ = client.send(ChannelCommand::ComeBackLater);
-                            }
-                            BuildStatus::Done => {
+                            Poll::Ready(None) => {
                                 if let Ok(mut p) = progress_clone.lock() {
                                     p.clear_output_buffer(c);
                                     p.state_mut().set_worker_idle(c);
@@ -2904,13 +2756,20 @@ impl Build {
                                     break;
                                 }
                             }
-                        };
+                            Poll::Pending => {
+                                if let Ok(mut p) = progress_clone.lock() {
+                                    p.clear_output_buffer(c);
+                                    p.state_mut().set_worker_idle(c);
+                                    let _ = p.render();
+                                }
+                                let _ = client.send(ChannelCommand::ComeBackLater);
+                            }
+                        }
                     }
                     ChannelCommand::JobSuccess(result) => {
                         let pkgname = result.pkgname.clone();
                         let duration = result.build_stats.total_duration;
                         jobs.mark_success(result);
-                        jobs.running.remove(&pkgname);
                         if let Some(ref mut budget) = make_jobs_budget {
                             if let Some(&sid) = thread_packages
                                 .iter()
@@ -2946,7 +2805,6 @@ impl Build {
                         let duration = result.build_stats.total_duration;
                         let results_before = jobs.results.len();
                         jobs.mark_failure(result);
-                        jobs.running.remove(&pkgname);
                         if let Some(ref mut budget) = make_jobs_budget {
                             if let Some(&sid) = thread_packages
                                 .iter()
@@ -2996,7 +2854,7 @@ impl Build {
                         let jobs_val = if let Some(ref mut budget) = make_jobs_budget {
                             let rw = thread_packages
                                 .get(&sid)
-                                .map(|pkg| jobs.remaining_depth(pkg).max(1))
+                                .map(|pkg| jobs.scheduler.remaining_depth(pkg).max(1))
                                 .unwrap_or(1);
                             budget.dispatch(sid, rw);
                             budget.lock(sid)
