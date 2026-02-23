@@ -720,6 +720,8 @@ fn print_history(
         "jobs",
         "build",
         "total",
+        "cpu-configure",
+        "cpu-build",
         "pre-clean",
         "depends",
         "checksum",
@@ -788,10 +790,12 @@ fn print_history(
             "jobs" => 5,
             "build" => 6,
             "total" => 7,
+            "cpu-configure" => 8,
+            "cpu-build" => 9,
             _ => {
                 for (i, &(sc, _)) in stage_cols.iter().enumerate() {
                     if sc == name {
-                        return 8 + i;
+                        return 10 + i;
                     }
                 }
                 0
@@ -819,6 +823,15 @@ fn print_history(
             .unwrap_or_else(|| "-".to_string());
         let total = format_duration_ms(rec.total_duration.as_millis() as u64);
 
+        let cpu_configure = rec
+            .configure_cpu_time
+            .map(|d| format_duration_ms(d.as_millis() as u64))
+            .unwrap_or_else(|| "-".to_string());
+        let cpu_build = rec
+            .build_cpu_time
+            .map(|d| format_duration_ms(d.as_millis() as u64))
+            .unwrap_or_else(|| "-".to_string());
+
         let mut row = vec![
             rec.timestamp.clone(),
             rec.pkgpath.clone(),
@@ -828,6 +841,8 @@ fn print_history(
             jobs,
             build,
             total,
+            cpu_configure,
+            cpu_build,
         ];
 
         for &(_, stage_val) in stage_cols {

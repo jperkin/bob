@@ -54,7 +54,7 @@ const SCHEMA_VERSION: i32 = 8;
 /**
  * Schema version for history.db - update when history schema changes.
  */
-const HISTORY_SCHEMA_VERSION: i32 = 4;
+const HISTORY_SCHEMA_VERSION: i32 = 5;
 
 /**
  * Lightweight package row without full scan data.
@@ -132,6 +132,10 @@ pub struct HistoryInput {
     pub stage: Option<Stage>,
     /// Duration of the build (compilation) phase only, None if never reached.
     pub build_duration: Option<Duration>,
+    /// CPU time (user+sys) for the configure phase, if reached.
+    pub configure_cpu_time: Option<Duration>,
+    /// CPU time (user+sys) for the build phase, if reached.
+    pub build_cpu_time: Option<Duration>,
     /// Per-stage durations.
     pub stage_durations: Vec<(Stage, Duration)>,
     /// Wall-clock duration for the entire build.
@@ -150,6 +154,10 @@ pub struct HistoryRecord {
     pub make_jobs: usize,
     pub stage: Option<Stage>,
     pub build_duration: Option<Duration>,
+    /// CPU time (user+sys) for the configure phase, if reached.
+    pub configure_cpu_time: Option<Duration>,
+    /// CPU time (user+sys) for the build phase, if reached.
+    pub build_cpu_time: Option<Duration>,
     /// Per-stage durations.
     pub stage_durations: Vec<(Stage, Duration)>,
     pub total_duration: Duration,
@@ -1594,13 +1602,16 @@ impl Database {
     pub fn record_history(&self, rec: &HistoryInput) -> Result<()> {
         let conn = self.history_conn()?;
         let build_ms = rec.build_duration.map(|d| d.as_millis() as i64);
+        let configure_cpu_ms = rec.configure_cpu_time.map(|d| d.as_millis() as i64);
+        let build_cpu_ms = rec.build_cpu_time.map(|d| d.as_millis() as i64);
         let total_ms = rec.total_duration.as_millis() as i64;
         let stage = rec.stage.map(|s| s as i32);
         conn.execute(
             "INSERT INTO build_history \
                  (pkgpath, pkgname, outcome, make_jobs, stage, \
-                  build_duration_ms, total_duration_ms, timestamp) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  build_duration_ms, configure_cpu_time_ms, \
+                  build_cpu_time_ms, total_duration_ms, timestamp) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 rec.pkgpath,
                 rec.pkgname,
@@ -1608,6 +1619,8 @@ impl Database {
                 rec.make_jobs as i64,
                 stage,
                 build_ms,
+                configure_cpu_ms,
+                build_cpu_ms,
                 total_ms,
                 rec.timestamp,
             ],
@@ -1638,13 +1651,16 @@ impl Database {
         let conn = self.history_conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, pkgpath, pkgname, outcome, make_jobs, stage, \
-                    build_duration_ms, total_duration_ms, \
+                    build_duration_ms, configure_cpu_time_ms, \
+                    build_cpu_time_ms, total_duration_ms, \
                     datetime(timestamp, 'unixepoch', 'localtime') \
              FROM build_history ORDER BY timestamp DESC, id DESC",
         )?;
         let rows = stmt.query_map([], |row| {
             let build_ms: Option<i64> = row.get(6)?;
-            let total_ms: i64 = row.get(7)?;
+            let configure_cpu_ms: Option<i64> = row.get(7)?;
+            let build_cpu_ms: Option<i64> = row.get(8)?;
+            let total_ms: i64 = row.get(9)?;
             let outcome_id: i32 = row.get(3)?;
             let stage_id: Option<i32> = row.get(5)?;
             Ok((
@@ -1655,16 +1671,29 @@ impl Database {
                 row.get::<_, i64>(4)? as usize,
                 stage_id,
                 build_ms,
+                configure_cpu_ms,
+                build_cpu_ms,
                 total_ms,
-                row.get::<_, String>(8)?,
+                row.get::<_, String>(10)?,
             ))
         })?;
 
         let mut results = Vec::new();
         let mut history_ids = Vec::new();
         for row in rows {
-            let (id, pkgpath, pkgname, outcome_id, make_jobs, stage_id, build_ms, total_ms, ts) =
-                row?;
+            let (
+                id,
+                pkgpath,
+                pkgname,
+                outcome_id,
+                make_jobs,
+                stage_id,
+                build_ms,
+                configure_cpu_ms,
+                build_cpu_ms,
+                total_ms,
+                ts,
+            ) = row?;
             if let Some(re) = pattern {
                 if !re.is_match(&pkgpath) && !re.is_match(&pkgname) {
                     continue;
@@ -1680,6 +1709,8 @@ impl Database {
                 make_jobs,
                 stage,
                 build_duration: build_ms.map(|ms| Duration::from_millis(ms as u64)),
+                configure_cpu_time: configure_cpu_ms.map(|ms| Duration::from_millis(ms as u64)),
+                build_cpu_time: build_cpu_ms.map(|ms| Duration::from_millis(ms as u64)),
                 stage_durations: Vec::new(),
                 total_duration: Duration::from_millis(total_ms as u64),
                 timestamp: ts,
@@ -1797,6 +1828,8 @@ fn open_history_conn(dbdir: &Path) -> Result<Connection> {
                  make_jobs INTEGER NOT NULL,
                  stage INTEGER REFERENCES stage_types(id),
                  build_duration_ms INTEGER,
+                 configure_cpu_time_ms INTEGER,
+                 build_cpu_time_ms INTEGER,
                  total_duration_ms INTEGER NOT NULL,
                  timestamp INTEGER NOT NULL
              );

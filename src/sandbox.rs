@@ -81,11 +81,26 @@ use rayon::prelude::*;
 use std::fs;
 use std::io::Write;
 use std::os::unix::process::CommandExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, info_span, warn};
+
+/*
+ * The libc crate does not expose wait4() on illumos, but it is available
+ * in libc as a wrapper around waitid().  Declare it here.
+ */
+#[cfg(target_os = "illumos")]
+unsafe extern "C" {
+    fn wait4(
+        pid: libc::pid_t,
+        status: *mut libc::c_int,
+        options: libc::c_int,
+        rusage: *mut libc::rusage,
+    ) -> libc::pid_t;
+}
 
 /// How often to check the shutdown flag while waiting for something else.
 /// This determines the maximum latency between Ctrl+C and response.
@@ -147,18 +162,41 @@ pub(crate) fn format_process_info(pids: &[&str]) -> String {
  * Poll for child process exit while checking a run state flag.  If
  * shutdown is requested, kill the child and return an error.  During
  * stop the child is allowed to continue running.
+ *
+ * Uses wait4() instead of try_wait() to collect resource usage from the
+ * child process.  Returns the exit status and CPU time (user + system).
  */
-pub fn wait_with_shutdown(child: &mut Child, state: &RunState) -> Result<ExitStatus> {
+pub fn wait_with_shutdown(child: &mut Child, state: &RunState) -> Result<(ExitStatus, Duration)> {
+    let pid = child.id() as libc::pid_t;
     loop {
         if state.is_shutdown() {
             let _ = child.kill();
             let _ = child.wait();
             bail!("Interrupted by shutdown");
         }
-        match child.try_wait()? {
-            Some(status) => return Ok(status),
-            None => std::thread::sleep(SHUTDOWN_POLL_INTERVAL),
+        let mut status: libc::c_int = 0;
+        let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
+        #[cfg(target_os = "illumos")]
+        let ret = unsafe { wait4(pid, &mut status, libc::WNOHANG, &mut rusage) };
+        #[cfg(not(target_os = "illumos"))]
+        let ret = unsafe { libc::wait4(pid, &mut status, libc::WNOHANG, &mut rusage) };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            bail!("wait4 failed for pid {}: {}", pid, err);
         }
+        if ret == 0 {
+            std::thread::sleep(SHUTDOWN_POLL_INTERVAL);
+            continue;
+        }
+        let utime = Duration::new(
+            rusage.ru_utime.tv_sec as u64,
+            rusage.ru_utime.tv_usec as u32 * 1000,
+        );
+        let stime = Duration::new(
+            rusage.ru_stime.tv_sec as u64,
+            rusage.ru_stime.tv_usec as u32 * 1000,
+        );
+        return Ok((ExitStatus::from_raw(status), utime + stime));
     }
 }
 
