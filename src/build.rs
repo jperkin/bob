@@ -2668,7 +2668,7 @@ impl Build {
         let progress_clone = Arc::clone(&progress);
         let state_for_manager = state_flag.clone();
         let (results_tx, results_rx) = mpsc::channel::<Vec<BuildResult>>();
-        // Channel for completed results to save immediately
+        // Channel for saving results to database as builds complete
         let (completed_tx, completed_rx) = mpsc::channel::<BuildResult>();
         let manager = std::thread::spawn(move || {
             let mut clients = clients.clone();
@@ -2894,26 +2894,14 @@ impl Build {
         });
 
         threads.push(manager);
-        debug!("Waiting for worker threads to complete");
-        let join_start = Instant::now();
-        for thread in threads {
-            if let Err(e) = thread.join() {
-                warn!("Worker thread panicked: {:?}", e);
-            }
-        }
-        debug!(
-            elapsed_ms = join_start.elapsed().as_millis(),
-            "Worker threads completed"
-        );
 
-        // Save all completed results to database and history.
-        // Important: We save results even on interrupt - these are builds that
-        // COMPLETED before the interrupt, and should be preserved. Only builds
-        // that were in-progress when interrupted are excluded (they never sent
-        // a result to the channel).
+        // Save completed results to database as they arrive.  The
+        // completed_tx sender is owned by the manager thread; when it
+        // exits (after all workers finish), the channel disconnects
+        // and recv() returns Err, ending this loop.
         let mut saved_count = 0;
         let mut db_error: Option<anyhow::Error> = None;
-        while let Ok(result) = completed_rx.try_recv() {
+        while let Ok(result) = completed_rx.recv() {
             if let Err(e) = db.store_build_by_name(&result) {
                 warn!(
                     pkgname = %result.pkgname.pkgname(),
@@ -2940,6 +2928,18 @@ impl Build {
         if saved_count > 0 {
             debug!(saved_count, "Saved build results to database");
         }
+
+        debug!("Joining worker threads");
+        let join_start = Instant::now();
+        for thread in threads {
+            if let Err(e) = thread.join() {
+                warn!("Worker thread panicked: {:?}", e);
+            }
+        }
+        debug!(
+            elapsed_ms = join_start.elapsed().as_millis(),
+            "Worker threads completed"
+        );
 
         // Stop the refresh thread
         stop_refresh.store(true, Ordering::Relaxed);
