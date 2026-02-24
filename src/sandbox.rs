@@ -301,6 +301,12 @@ impl Sandbox {
             Command::new(cmd)
         };
         self.apply_environment(&mut c);
+        unsafe {
+            c.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
         c
     }
 
@@ -500,10 +506,6 @@ impl Sandbox {
     /**
      * Execute a script file with supplied environment variables and optional
      * stdin data.
-     *
-     * If protected is true, the process is placed in its own process group
-     * to isolate it from terminal signals (Ctrl+C). Use this for cleanup
-     * scripts that must complete even during shutdown.
      */
     pub fn execute(
         &self,
@@ -511,7 +513,6 @@ impl Sandbox {
         script: &Path,
         envs: Vec<(String, String)>,
         stdin_data: Option<&str>,
-        protected: bool,
     ) -> Result<Child> {
         use std::io::Write;
 
@@ -527,10 +528,6 @@ impl Sandbox {
         }
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-        if protected {
-            cmd.process_group(0);
-        }
 
         let mut child = cmd.spawn()?;
 
@@ -614,7 +611,7 @@ impl Sandbox {
     ) -> Result<bool> {
         if let Some(script) = config.script("pre-build") {
             info!(script = %script.display(), "Running pre-build script");
-            let child = self.execute(id, script, envs, None, false)?;
+            let child = self.execute(id, script, envs, None)?;
             let output = child.wait_with_output()?;
             if output.status.success() {
                 info!(script = %script.display(), result = "success", "Finished running pre-build script");
@@ -638,9 +635,6 @@ impl Sandbox {
      * Run the post-build script if configured.
      * Returns Ok(true) if script ran successfully or wasn't configured,
      * Ok(false) if script failed.
-     *
-     * Post-build scripts run with signal protection (process_group(0)) to
-     * ensure cleanup completes even during shutdown from Ctrl+C.
      */
     pub fn run_post_build(
         &self,
@@ -650,8 +644,7 @@ impl Sandbox {
     ) -> Result<bool> {
         if let Some(script) = config.script("post-build") {
             info!(script = %script.display(), "Running post-build script");
-            // Use protected=true to ensure cleanup completes during shutdown
-            let child = self.execute(id, script, envs, None, true)?;
+            let child = self.execute(id, script, envs, None)?;
             let output = child.wait_with_output()?;
             if output.status.success() {
                 info!(script = %script.display(), result = "success", "Finished running post-build script");
