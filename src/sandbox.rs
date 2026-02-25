@@ -1077,6 +1077,9 @@ impl Sandbox {
         let output = if chroot {
             let mut c = Command::new("/usr/sbin/chroot");
             self.apply_environment(&mut c);
+            for (key, val) in self.config.script_env(None) {
+                c.env(key, val);
+            }
             c.arg(&sandbox_path)
                 .arg("/bin/sh")
                 .arg("-c")
@@ -1089,6 +1092,9 @@ impl Sandbox {
         } else {
             let mut c = Command::new("/bin/sh");
             self.apply_environment(&mut c);
+            for (key, val) in self.config.script_env(None) {
+                c.env(key, val);
+            }
             c.arg("-c")
                 .arg(cmd)
                 .env("bob_sandbox_path", &sandbox_path)
