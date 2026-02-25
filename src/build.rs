@@ -2453,7 +2453,19 @@ impl Build {
         }
 
         // Only create sandboxes when there's actual work to do
-        self.scope.ensure(self.config.build_threads())?;
+        let n = self.config.build_threads();
+        if self.scope.enabled() && n > self.scope.count() {
+            let to_create = n - self.scope.count();
+            if to_create == 1 {
+                print!("Creating sandbox...");
+            } else {
+                print!("Creating {} sandboxes...", to_create);
+            }
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            let start = std::time::Instant::now();
+            self.scope.ensure(n)?;
+            println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
+        }
 
         /*
          * Build per-package weight map for critical-path scheduling.

@@ -280,6 +280,8 @@ enum SandboxCmd {
     Create,
     /// Destroy all sandboxes
     Destroy,
+    /// Create a sandbox and start an interactive shell
+    Exec,
     /// List currently created sandboxes
     List,
 }
@@ -714,6 +716,15 @@ fn run() -> Result<()> {
                 bail!("No sandboxes configured");
             }
             sandbox.list_all()?;
+        }
+        Cmd::Util {
+            cmd: UtilCmd::Sandbox {
+                cmd: SandboxCmd::Exec,
+            },
+        } => {
+            let config = Config::load(args.config.as_deref())?;
+            logging::init(config.dbdir(), config.log_level())?;
+            cmd::sandbox::exec(&config)?;
         }
     };
 

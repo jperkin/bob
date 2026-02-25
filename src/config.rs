@@ -199,7 +199,7 @@ impl PkgsrcEnv {
     ///
     /// This must be called after sandbox 0 is created if sandboxes are enabled,
     /// since bmake may only exist inside the sandbox.
-    pub fn fetch(config: &Config, sandbox: &Sandbox) -> Result<Self> {
+    pub fn fetch(config: &Config, sandbox: &Sandbox, id: usize) -> Result<Self> {
         const REQUIRED_VARS: &[&str] = &[
             "PACKAGES",
             "PKG_DBDIR",
@@ -222,7 +222,7 @@ impl PkgsrcEnv {
             varnames_arg
         );
 
-        let child = sandbox.execute_script(0, &script, vec![])?;
+        let child = sandbox.execute_script(id, &script, vec![])?;
         let output = child
             .wait_with_output()
             .context("Failed to execute bmake show-vars")?;

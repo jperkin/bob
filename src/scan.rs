@@ -48,9 +48,10 @@ use petgraph::graphmap::DiGraphMap;
 use pkgsrc::{Depend, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::io::BufReader;
+use std::io::{BufReader, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tracing::{debug, error, info, info_span, trace, warn};
 
 /// Reason why a package was skipped (not built).
@@ -733,22 +734,26 @@ impl Scan {
          *
          * Ensure sandbox 0 exists. The caller manages overall lifecycle.
          */
-        scope.ensure(1)?;
-
         if scope.enabled() {
-            // Run pre-build script if defined
+            print!("Creating sandbox...");
+            let _ = std::io::stdout().flush();
+            let start = Instant::now();
+            scope.ensure(1)?;
             if !self
                 .sandbox
                 .run_pre_build(0, &self.config, self.config.script_env(None))?
             {
                 warn!("pre-build script failed");
             }
+            println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
+        } else {
+            scope.ensure(1)?;
         }
 
         let env = match db.load_pkgsrc_env() {
             Ok(env) => env,
             Err(_) => {
-                let env = PkgsrcEnv::fetch(&self.config, &self.sandbox)?;
+                let env = PkgsrcEnv::fetch(&self.config, &self.sandbox, 0)?;
                 db.store_pkgsrc_env(&env)?;
                 env
             }
