@@ -60,12 +60,12 @@ fn stage_values() -> String {
 /**
  * Schema version for bob.db - update when schema changes.
  */
-const SCHEMA_VERSION: i32 = 9;
+const SCHEMA_VERSION: i32 = 20260226;
 
 /**
  * Schema version for history.db - update when history schema changes.
  */
-const HISTORY_SCHEMA_VERSION: i32 = 7;
+const HISTORY_SCHEMA_VERSION: i32 = 20260226;
 
 /**
  * Lightweight package row without full scan data.
@@ -302,6 +302,8 @@ impl Database {
                 );
             }
         }
+
+        check_history_schema(&self.dbdir)?;
 
         Ok(())
     }
@@ -1813,6 +1815,41 @@ impl Database {
 }
 
 /**
+ * Check the history.db schema version if the file exists.
+ *
+ * This runs eagerly at Database::open() time so that a version mismatch
+ * is reported immediately rather than hours into a bulk build.
+ */
+fn check_history_schema(dbdir: &Path) -> Result<()> {
+    let path = dbdir.join("history.db");
+    if !path.exists() {
+        return Ok(());
+    }
+    let conn = Connection::open(&path).context("Failed to open history database")?;
+    let has_schema: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master \
+         WHERE type='table' AND name='schema_version'",
+        [],
+        |row| row.get::<_, i32>(0).map(|c| c > 0),
+    )?;
+    if has_schema {
+        let version: i32 =
+            conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+                row.get(0)
+            })?;
+        if version != HISTORY_SCHEMA_VERSION {
+            anyhow::bail!(
+                "History schema mismatch: found v{}, expected v{}. \
+                 Remove history.db to reset.",
+                version,
+                HISTORY_SCHEMA_VERSION
+            );
+        }
+    }
+    Ok(())
+}
+
+/**
  * Open and initialize the history database connection.
  */
 fn open_history_conn(dbdir: &Path) -> Result<Connection> {
@@ -1881,20 +1918,6 @@ fn open_history_conn(dbdir: &Path) -> Result<Connection> {
             outcome_types = PackageState::db_values(),
             stages = stage_values(),
         ))?;
-    } else {
-        let version: i32 =
-            conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
-                row.get(0)
-            })?;
-
-        if version != HISTORY_SCHEMA_VERSION {
-            anyhow::bail!(
-                "History schema mismatch: found v{}, expected v{}. \
-                 Remove history.db to reset.",
-                version,
-                HISTORY_SCHEMA_VERSION
-            );
-        }
     }
 
     Ok(conn)
