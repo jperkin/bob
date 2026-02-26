@@ -22,9 +22,7 @@ use clap::Subcommand;
 use crossterm::terminal;
 use regex::Regex;
 use serde_json;
-use strum::VariantArray;
 
-use bob::build::Stage;
 use bob::db::{Database, PackageStatusRow};
 use bob::try_println;
 use bob::{PackageState, PackageStateKind};
@@ -127,11 +125,12 @@ Examples:
         path: bool,
     },
     /// View build history
+    #[command(after_long_help = bob::HistoryKind::after_help())]
     History {
         /// Hide column headers
         #[arg(short = 'H')]
         no_header: bool,
-        /// Columns to display (comma-separated; add per-stage durations with pre-clean,depends,checksum,configure,install,package,deinstall,clean)
+        /// Columns to display (comma-separated, see --help for full list)
         #[arg(short = 'o', value_delimiter = ',')]
         columns: Option<Vec<String>>,
         /// Filter by pkgpath or pkgname (regex)
@@ -640,76 +639,20 @@ fn print_build_status(
     Ok(())
 }
 
-fn format_duration_ms(ms: u64) -> String {
-    if ms < 1000 {
-        format!("{}ms", ms)
-    } else if ms < 60_000 {
-        format!("{:.1}s", ms as f64 / 1000.0)
-    } else if ms < 3_600_000 {
-        let mins = ms / 60_000;
-        let secs = (ms % 60_000) / 1000;
-        format!("{}m{:02}s", mins, secs)
-    } else {
-        let hours = ms / 3_600_000;
-        let mins = (ms % 3_600_000) / 60_000;
-        format!("{}h{:02}m", hours, mins)
-    }
-}
-
-fn format_size(bytes: u64) -> String {
-    const K: u64 = 1024;
-    const M: u64 = 1024 * 1024;
-    const G: u64 = 1024 * 1024 * 1024;
-    if bytes >= G {
-        format!("{:.1}G", bytes as f64 / G as f64)
-    } else if bytes >= M {
-        format!("{:.1}M", bytes as f64 / M as f64)
-    } else if bytes >= K {
-        format!("{:.1}K", bytes as f64 / K as f64)
-    } else {
-        format!("{}B", bytes)
-    }
-}
-
 fn print_history(
     db: &Database,
     columns: Option<&[String]>,
     no_header: bool,
     package: Option<&str>,
 ) -> Result<()> {
-    let fixed_cols: &[&str] = &[
-        "timestamp",
-        "pkgpath",
-        "pkgname",
-        "outcome",
-        "stage",
-        "jobs",
-        "build",
-        "total",
-        "cpu-configure",
-        "cpu-build",
-        "wrkdir",
-    ];
-    let all_cols: Vec<&str> = fixed_cols
-        .iter()
-        .copied()
-        .chain(Stage::VARIANTS.iter().map(|s| s.into_str()))
-        .collect();
-    let default_cols: Vec<&str> = vec![
-        "timestamp",
-        "pkgname",
-        "outcome",
-        "stage",
-        "jobs",
-        "build",
-        "total",
-    ];
+    let all_cols = bob::HistoryKind::all_names();
+    let default_cols = bob::HistoryKind::default_names();
     let cols: Vec<&str> = columns
         .map(|c| c.iter().map(|s| s.as_str()).collect())
         .unwrap_or(default_cols);
 
     for col in &cols {
-        if !all_cols.contains(col) {
+        if !all_cols.iter().any(|c| c == col) {
             bail!(
                 "Unknown column '{}'. Valid columns: {}",
                 col,
@@ -733,74 +676,17 @@ fn print_history(
         return Ok(());
     }
 
-    let col_idx = |name: &str| -> usize { all_cols.iter().position(|&c| c == name).unwrap_or(0) };
-
     let mut rows: Vec<Vec<String>> = Vec::new();
     for rec in &records {
-        let stage = if rec.state == PackageState::Success {
-            "-".to_string()
-        } else {
-            rec.stage
-                .map(|s| s.into_str().to_string())
-                .unwrap_or_else(|| "-".to_string())
-        };
-        let jobs = if rec.make_jobs == 0 {
-            "-".to_string()
-        } else {
-            rec.make_jobs.to_string()
-        };
-        let build = rec
-            .build_duration
-            .map(|d| format_duration_ms(d.as_millis() as u64))
-            .unwrap_or_else(|| "-".to_string());
-        let total = format_duration_ms(rec.total_duration.as_millis() as u64);
-
-        let cpu_configure = rec
-            .configure_cpu_time
-            .map(|d| format_duration_ms(d.as_millis() as u64))
-            .unwrap_or_else(|| "-".to_string());
-        let cpu_build = rec
-            .build_cpu_time
-            .map(|d| format_duration_ms(d.as_millis() as u64))
-            .unwrap_or_else(|| "-".to_string());
-        let wrkdir = rec
-            .wrkdir_size
-            .map(format_size)
-            .unwrap_or_else(|| "-".to_string());
-
-        let mut row = vec![
-            rec.timestamp.clone(),
-            rec.pkgpath.clone(),
-            rec.pkgname.clone(),
-            rec.state.status().to_string(),
-            stage,
-            jobs,
-            build,
-            total,
-            cpu_configure,
-            cpu_build,
-            wrkdir,
-        ];
-
-        for &s in Stage::VARIANTS {
-            let dur = rec
-                .stage_durations
-                .iter()
-                .find(|(st, _)| *st == s)
-                .map(|(_, d)| format_duration_ms(d.as_millis() as u64))
-                .unwrap_or_else(|| "-".to_string());
-            row.push(dur);
-        }
-
-        rows.push(row);
+        rows.push(cols.iter().map(|&col| rec.format_col(col)).collect());
     }
 
     let widths: Vec<usize> = cols
         .iter()
-        .map(|&col| {
-            let idx = col_idx(col);
+        .enumerate()
+        .map(|(i, col)| {
             let header_len = col.len();
-            let max_data = rows.iter().map(|r| r[idx].len()).max().unwrap_or(0);
+            let max_data = rows.iter().map(|r| r[i].len()).max().unwrap_or(0);
             header_len.max(max_data)
         })
         .collect();
@@ -817,10 +703,10 @@ fn print_history(
     }
 
     for row in &rows {
-        let values: Vec<String> = cols
+        let values: Vec<String> = row
             .iter()
             .zip(&widths)
-            .map(|(&col, &w)| format!("{:<width$}", row[col_idx(col)], width = w))
+            .map(|(val, &w)| format!("{:<width$}", val, width = w))
             .collect();
         if !try_println(values.join("  ").trim_end()) {
             break;

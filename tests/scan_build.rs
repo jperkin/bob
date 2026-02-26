@@ -1818,7 +1818,7 @@ fn test_build_durations() -> Result<()> {
                 // (though very fast builds might be sub-millisecond)
                 // Just verify it's a valid Duration
                 assert!(
-                    r.build_stats.total_duration.as_nanos() > 0,
+                    r.build_stats.duration.as_nanos() > 0,
                     "{} should have non-zero duration",
                     r.pkgname.pkgname()
                 );
@@ -1826,7 +1826,7 @@ fn test_build_durations() -> Result<()> {
             PackageState::IndirectFailed(_) => {
                 // Indirect failures have zero duration (never attempted)
                 assert_eq!(
-                    r.build_stats.total_duration,
+                    r.build_stats.duration,
                     std::time::Duration::ZERO,
                     "{} indirect failure should have zero duration",
                     r.pkgname.pkgname()

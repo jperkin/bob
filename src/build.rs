@@ -456,18 +456,14 @@ pub struct PkgBuildStats {
     pub make_jobs: MakeJobs,
     /// Last build stage attempted.
     pub stage: Option<Stage>,
-    /// Duration of the build (compilation) phase, if reached.
-    pub build_duration: Option<Duration>,
-    /// CPU time (user+sys) for the configure phase, if reached.
-    pub configure_cpu_time: Option<Duration>,
-    /// CPU time (user+sys) for the build phase, if reached.
-    pub build_cpu_time: Option<Duration>,
-    /// Per-stage durations for completed stages.
+    /// Per-stage wall-clock durations.
     pub stage_durations: Vec<(Stage, Duration)>,
-    /// WRKDIR size in bytes at end of build, before clean.
-    pub wrkdir_size: Option<u64>,
+    /// Per-stage CPU time (user+sys from wait4).
+    pub stage_cpu_times: Vec<(Stage, Duration)>,
+    /// WRKDIR size in bytes, measured before clean.
+    pub disk_usage: Option<u64>,
     /// Wall-clock duration for the entire build.
-    pub total_duration: Duration,
+    pub duration: Duration,
     /// Unix epoch when the build started.
     pub timestamp: i64,
 }
@@ -589,10 +585,12 @@ impl<'a> PkgBuilder<'a> {
         let stage_start = Instant::now();
         stats.stage = Some(Stage::PreClean);
         callback.stage(Stage::PreClean.into_str());
-        let _ = self.run_make_stage(Stage::PreClean, &pkgdir, &["clean"], RunAs::Root, false)?;
+        let (_, cpu_time) =
+            self.run_make_stage(Stage::PreClean, &pkgdir, &["clean"], RunAs::Root, false)?;
         stats
             .stage_durations
             .push((Stage::PreClean, stage_start.elapsed()));
+        stats.stage_cpu_times.push((Stage::PreClean, cpu_time));
 
         // Install dependencies
         if !self.pkginfo.depends().is_empty() {
@@ -615,17 +613,15 @@ impl<'a> PkgBuilder<'a> {
         let stage_start = Instant::now();
         stats.stage = Some(Stage::Checksum);
         callback.stage(Stage::Checksum.into_str());
-        let (ok, _) =
+        let (ok, cpu_time) =
             self.run_make_stage(Stage::Checksum, &pkgdir, &["checksum"], RunAs::Root, true)?;
-        if !ok {
-            stats
-                .stage_durations
-                .push((Stage::Checksum, stage_start.elapsed()));
-            return Ok(PkgBuildResult::Failed(stats));
-        }
         stats
             .stage_durations
             .push((Stage::Checksum, stage_start.elapsed()));
+        stats.stage_cpu_times.push((Stage::Checksum, cpu_time));
+        if !ok {
+            return Ok(PkgBuildResult::Failed(stats));
+        }
 
         /*
          * Configure -- request MAKE_JOBS budget, release after configure
@@ -655,18 +651,14 @@ impl<'a> PkgBuilder<'a> {
             true,
             &conf_flag,
         )?;
-        stats.configure_cpu_time = Some(cpu_time);
-        if !ok {
-            self.release_make_jobs();
-            stats
-                .stage_durations
-                .push((Stage::Configure, stage_start.elapsed()));
-            return Ok(PkgBuildResult::Failed(stats));
-        }
-        self.release_make_jobs();
         stats
             .stage_durations
             .push((Stage::Configure, stage_start.elapsed()));
+        stats.stage_cpu_times.push((Stage::Configure, cpu_time));
+        self.release_make_jobs();
+        if !ok {
+            return Ok(PkgBuildResult::Failed(stats));
+        }
 
         // Build — re-request MAKE_JOBS with current remaining weights.
         let build_phase_start = Instant::now();
@@ -682,9 +674,9 @@ impl<'a> PkgBuilder<'a> {
         callback.stage(&format!("{}{}", Stage::Build.into_str(), build_suffix));
         let build_log = self.logdir.join("build.log");
         if !self.run_usergroup_if_needed(Stage::Build, &pkgdir, &build_log)? {
-            let elapsed = build_phase_start.elapsed();
-            stats.build_duration = Some(elapsed);
-            stats.stage_durations.push((Stage::Build, elapsed));
+            stats
+                .stage_durations
+                .push((Stage::Build, build_phase_start.elapsed()));
             self.release_make_jobs();
             return Ok(PkgBuildResult::Failed(stats));
         }
@@ -696,10 +688,10 @@ impl<'a> PkgBuilder<'a> {
             true,
             &build_flag,
         )?;
-        stats.build_cpu_time = Some(cpu_time);
-        let build_elapsed = build_phase_start.elapsed();
-        stats.build_duration = Some(build_elapsed);
-        stats.stage_durations.push((Stage::Build, build_elapsed));
+        stats
+            .stage_durations
+            .push((Stage::Build, build_phase_start.elapsed()));
+        stats.stage_cpu_times.push((Stage::Build, cpu_time));
         self.release_make_jobs();
         if !build_ok {
             return Ok(PkgBuildResult::Failed(stats));
@@ -716,43 +708,39 @@ impl<'a> PkgBuilder<'a> {
                 .push((Stage::Install, stage_start.elapsed()));
             return Ok(PkgBuildResult::Failed(stats));
         }
-        let (ok, _) = self.run_make_stage(
+        let (ok, cpu_time) = self.run_make_stage(
             Stage::Install,
             &pkgdir,
             &["stage-install"],
             self.build_run_as(),
             true,
         )?;
-        if !ok {
-            stats
-                .stage_durations
-                .push((Stage::Install, stage_start.elapsed()));
-            return Ok(PkgBuildResult::Failed(stats));
-        }
         stats
             .stage_durations
             .push((Stage::Install, stage_start.elapsed()));
+        stats.stage_cpu_times.push((Stage::Install, cpu_time));
+        if !ok {
+            return Ok(PkgBuildResult::Failed(stats));
+        }
 
         // Package
         let stage_start = Instant::now();
         stats.stage = Some(Stage::Package);
         callback.stage(Stage::Package.into_str());
-        let (ok, _) = self.run_make_stage(
+        let (ok, cpu_time) = self.run_make_stage(
             Stage::Package,
             &pkgdir,
             &["stage-package-create"],
             RunAs::Root,
             true,
         )?;
-        if !ok {
-            stats
-                .stage_durations
-                .push((Stage::Package, stage_start.elapsed()));
-            return Ok(PkgBuildResult::Failed(stats));
-        }
         stats
             .stage_durations
             .push((Stage::Package, stage_start.elapsed()));
+        stats.stage_cpu_times.push((Stage::Package, cpu_time));
+        if !ok {
+            return Ok(PkgBuildResult::Failed(stats));
+        }
 
         // Get the package file path
         let pkgfile = self.get_make_var(&pkgdir, "STAGE_PKGFILE")?;
@@ -799,11 +787,11 @@ impl<'a> PkgBuilder<'a> {
         };
         fs::copy(&host_pkgfile, &dest)?;
 
-        // Measure WRKDIR size before clean destroys it
+        // Measure disk usage before clean destroys WRKDIR
         if let Some(ref wrkdir) = self.wrkdir {
             match fs_extra::dir::get_size(wrkdir) {
-                Ok(size) => stats.wrkdir_size = Some(size),
-                Err(e) => debug!(error = %e, "Failed to measure WRKDIR size"),
+                Ok(size) => stats.disk_usage = Some(size),
+                Err(e) => debug!(error = %e, "Failed to measure disk usage"),
             }
         }
 
@@ -811,10 +799,12 @@ impl<'a> PkgBuilder<'a> {
         let stage_start = Instant::now();
         stats.stage = Some(Stage::Clean);
         callback.stage(Stage::Clean.into_str());
-        let _ = self.run_make_stage(Stage::Clean, &pkgdir, &["clean"], RunAs::Root, false)?;
+        let (_, cpu_time) =
+            self.run_make_stage(Stage::Clean, &pkgdir, &["clean"], RunAs::Root, false)?;
         stats
             .stage_durations
             .push((Stage::Clean, stage_start.elapsed()));
+        stats.stage_cpu_times.push((Stage::Clean, cpu_time));
 
         // Remove log directory on success
         let _ = fs::remove_dir_all(&self.logdir);
@@ -1491,24 +1481,22 @@ impl BuildResult {
      * Build a history input record for actual builds (success/failed).
      * Returns None for skipped, up-to-date, or indirect outcomes.
      */
-    pub fn history_input(&self) -> Option<crate::db::HistoryInput> {
+    pub fn history_input(&self) -> Option<crate::History> {
         match &self.state {
             PackageState::Success | PackageState::Failed(_) => {}
             _ => return None,
         }
-        Some(crate::db::HistoryInput {
+        Some(crate::History {
+            timestamp: self.build_stats.timestamp,
             pkgpath: self.pkgpath.as_ref()?.to_string(),
             pkgname: self.pkgname.pkgname().to_string(),
-            state: self.state.clone(),
-            make_jobs: self.build_stats.make_jobs.count(),
+            outcome: self.state.clone(),
             stage: self.build_stats.stage,
-            build_duration: self.build_stats.build_duration,
-            configure_cpu_time: self.build_stats.configure_cpu_time,
-            build_cpu_time: self.build_stats.build_cpu_time,
+            make_jobs: self.build_stats.make_jobs.count(),
+            duration: self.build_stats.duration,
+            disk_usage: self.build_stats.disk_usage,
             stage_durations: self.build_stats.stage_durations.clone(),
-            wrkdir_size: self.build_stats.wrkdir_size,
-            total_duration: self.build_stats.total_duration,
-            timestamp: self.build_stats.timestamp,
+            stage_cpu_times: self.build_stats.stage_cpu_times.clone(),
         })
     }
 }
@@ -1797,7 +1785,7 @@ impl PackageBuild {
             }
             Ok(PkgBuildResult::Failed(mut stats)) => {
                 error!("Package build failed");
-                stats.wrkdir_size = measure_wrkdir();
+                stats.disk_usage = measure_wrkdir();
                 self.cleanup_after_failure(
                     status_tx, pkgname, pkgpath, logdir, patterns, &pkg_env, &envs,
                 );
@@ -1805,13 +1793,13 @@ impl PackageBuild {
             }
             Err(e) => {
                 error!(error = %e, "Package build error");
-                let wrkdir_size = measure_wrkdir();
+                let disk_usage = measure_wrkdir();
                 self.cleanup_after_failure(
                     status_tx, pkgname, pkgpath, logdir, patterns, &pkg_env, &envs,
                 );
                 PkgBuildResult::Failed(PkgBuildStats {
                     make_jobs,
-                    wrkdir_size,
+                    disk_usage,
                     ..PkgBuildStats::default()
                 })
             }
@@ -2469,9 +2457,9 @@ impl Build {
                             let timestamp = epoch_secs();
                             let build_start = Instant::now();
                             let result = pkg.build(&manager_tx);
-                            let total_duration = build_start.elapsed();
+                            let duration = build_start.elapsed();
                             trace!(
-                                elapsed_ms = total_duration.as_millis(),
+                                elapsed_ms = duration.as_millis(),
                                 result = %result.as_ref().map_or("error".to_string(), |r| r.to_string()),
                                 "Build finished"
                             );
@@ -2482,7 +2470,7 @@ impl Build {
                                 }
                                 Err(_) => PkgBuildStats::default(),
                             };
-                            build_stats.total_duration = total_duration;
+                            build_stats.duration = duration;
                             build_stats.timestamp = timestamp;
 
                             match result {
@@ -2668,7 +2656,7 @@ impl Build {
                     }
                     ChannelCommand::JobSuccess(result) => {
                         let pkgname = result.pkgname.clone();
-                        let duration = result.build_stats.total_duration;
+                        let duration = result.build_stats.duration;
                         jobs.mark_success(result);
                         if let Some(ref mut budget) = make_jobs_budget {
                             if let Some(&sid) = thread_packages
@@ -2702,7 +2690,7 @@ impl Build {
                     }
                     ChannelCommand::JobFailed(result) => {
                         let pkgname = result.pkgname.clone();
-                        let duration = result.build_stats.total_duration;
+                        let duration = result.build_stats.duration;
                         let results_before = jobs.results.len();
                         jobs.mark_failure(result);
                         if let Some(ref mut budget) = make_jobs_budget {

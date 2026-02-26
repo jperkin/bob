@@ -47,7 +47,7 @@ use strum::VariantArray;
 use crate::build::{BuildResult, PkgBuildStats, Stage};
 use crate::config::PkgsrcEnv;
 use crate::try_println;
-use crate::{PackageState, PackageStateKind};
+use crate::{HistoryKind, PackageState, PackageStateKind};
 
 fn stage_values() -> String {
     Stage::VARIANTS
@@ -55,6 +55,33 @@ fn stage_values() -> String {
         .map(|v| format!("({}, '{}')", *v as i32, v.into_str()))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/**
+ * Generate `build_history` column definitions from [`HistoryKind`].
+ *
+ * SQL types and foreign key constraints live here because they are
+ * properties of the database schema, not of the history types.
+ */
+fn history_schema() -> String {
+    use strum::VariantArray;
+    HistoryKind::VARIANTS
+        .iter()
+        .map(|v| {
+            let name: &str = v.into();
+            let sql = match v {
+                HistoryKind::Pkgpath | HistoryKind::Pkgname => "TEXT NOT NULL",
+                HistoryKind::Outcome => "INTEGER NOT NULL REFERENCES outcome_types(id)",
+                HistoryKind::Stage => "INTEGER REFERENCES stage_types(id)",
+                HistoryKind::MakeJobs | HistoryKind::Duration | HistoryKind::Timestamp => {
+                    "INTEGER NOT NULL"
+                }
+                HistoryKind::DiskUsage => "INTEGER",
+            };
+            format!("{name} {sql}")
+        })
+        .collect::<Vec<_>>()
+        .join(",\n                 ")
 }
 
 /**
@@ -128,56 +155,6 @@ impl PackageRow {
             multi_version: row.get(7)?,
         })
     }
-}
-
-/**
- * Input for recording a build to the history database.
- */
-pub struct HistoryInput {
-    pub pkgpath: String,
-    pub pkgname: String,
-    pub state: PackageState,
-    /// MAKE_JOBS used: 0 means MAKE_JOBS_SAFE=no (parallel make not supported).
-    pub make_jobs: usize,
-    /// Last build stage attempted, if any.
-    pub stage: Option<Stage>,
-    /// Duration of the build (compilation) phase only, None if never reached.
-    pub build_duration: Option<Duration>,
-    /// CPU time (user+sys) for the configure phase, if reached.
-    pub configure_cpu_time: Option<Duration>,
-    /// CPU time (user+sys) for the build phase, if reached.
-    pub build_cpu_time: Option<Duration>,
-    /// Per-stage durations.
-    pub stage_durations: Vec<(Stage, Duration)>,
-    /// WRKDIR size in bytes at end of build, before clean.
-    pub wrkdir_size: Option<u64>,
-    /// Wall-clock duration for the entire build.
-    pub total_duration: Duration,
-    /// Unix epoch when the build started.
-    pub timestamp: i64,
-}
-
-/**
- * A build history record read from the database.
- */
-pub struct HistoryRecord {
-    pub pkgpath: String,
-    pub pkgname: String,
-    pub state: PackageState,
-    pub make_jobs: usize,
-    pub stage: Option<Stage>,
-    pub build_duration: Option<Duration>,
-    /// CPU time (user+sys) for the configure phase, if reached.
-    pub configure_cpu_time: Option<Duration>,
-    /// CPU time (user+sys) for the build phase, if reached.
-    pub build_cpu_time: Option<Duration>,
-    /// Per-stage durations.
-    pub stage_durations: Vec<(Stage, Duration)>,
-    /// WRKDIR size in bytes at end of build, before clean.
-    pub wrkdir_size: Option<u64>,
-    pub total_duration: Duration,
-    /// Pre-formatted local timestamp from SQLite's `datetime()`.
-    pub timestamp: String,
 }
 
 /**
@@ -954,7 +931,7 @@ impl Database {
         let outcome = result.state.db_id();
         let detail = result.state.detail().map(String::from);
         let stage = result.build_stats.stage.map(|s| s as i32);
-        let duration_ms = result.build_stats.total_duration.as_millis() as i64;
+        let duration_ms = result.build_stats.duration.as_millis() as i64;
         let log_dir = result.log_dir.as_ref().map(|p| p.display().to_string());
 
         self.conn.execute(
@@ -1032,7 +1009,7 @@ impl Database {
                     log_dir: log_dir.map(std::path::PathBuf::from),
                     build_stats: PkgBuildStats {
                         stage,
-                        total_duration: Duration::from_millis(duration_ms as u64),
+                        duration: Duration::from_millis(duration_ms as u64),
                         ..PkgBuildStats::default()
                     },
                 }))
@@ -1117,7 +1094,7 @@ impl Database {
                 log_dir: log_dir.map(std::path::PathBuf::from),
                 build_stats: PkgBuildStats {
                     stage,
-                    total_duration: Duration::from_millis(duration_ms as u64),
+                    duration: Duration::from_millis(duration_ms as u64),
                     ..PkgBuildStats::default()
                 },
             });
@@ -1626,48 +1603,51 @@ impl Database {
     /**
      * Record a build in the history database.
      */
-    pub fn record_history(&self, rec: &HistoryInput) -> Result<()> {
+    pub fn record_history(&self, rec: &crate::History) -> Result<()> {
         let conn = self.history_conn()?;
-        let build_ms = rec.build_duration.map(|d| d.as_millis() as i64);
-        let configure_cpu_ms = rec.configure_cpu_time.map(|d| d.as_millis() as i64);
-        let build_cpu_ms = rec.build_cpu_time.map(|d| d.as_millis() as i64);
-        let wrkdir_size = rec.wrkdir_size.map(|s| s as i64);
-        let total_ms = rec.total_duration.as_millis() as i64;
-        let stage = rec.stage.map(|s| s as i32);
+        let cols: Vec<&str> = HistoryKind::VARIANTS.iter().map(<&str>::from).collect();
+        let placeholders: String = (1..=cols.len())
+            .map(|i| format!("?{}", i))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT INTO build_history ({}) VALUES ({})",
+            cols.join(", "),
+            placeholders,
+        );
+        let dur_ms = |d: Duration| d.as_millis() as i64;
         conn.execute(
-            "INSERT INTO build_history \
-                 (pkgpath, pkgname, outcome, make_jobs, stage, \
-                  build_duration_ms, configure_cpu_time_ms, \
-                  build_cpu_time_ms, wrkdir_size_bytes, \
-                  total_duration_ms, timestamp) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            &sql,
             params![
+                rec.timestamp,
                 rec.pkgpath,
                 rec.pkgname,
-                rec.state.db_id(),
+                rec.outcome.db_id(),
+                rec.stage.map(|s| s as i32),
                 rec.make_jobs as i64,
-                stage,
-                build_ms,
-                configure_cpu_ms,
-                build_cpu_ms,
-                wrkdir_size,
-                total_ms,
-                rec.timestamp,
+                dur_ms(rec.duration),
+                rec.disk_usage.map(|s| s as i64),
             ],
         )?;
+        let history_id = conn.last_insert_rowid();
         if !rec.stage_durations.is_empty() {
-            let history_id = conn.last_insert_rowid();
             let mut stmt = conn.prepare_cached(
-                "INSERT INTO build_stage_durations \
-                     (history_id, stage, duration_ms) \
+                "INSERT INTO wall_times \
+                     (history_id, stage, duration) \
                  VALUES (?1, ?2, ?3)",
             )?;
             for &(stage, duration) in &rec.stage_durations {
-                stmt.execute(params![
-                    history_id,
-                    stage as i32,
-                    duration.as_millis() as i64,
-                ])?;
+                stmt.execute(params![history_id, stage as i32, dur_ms(duration)])?;
+            }
+        }
+        if !rec.stage_cpu_times.is_empty() {
+            let mut stmt = conn.prepare_cached(
+                "INSERT INTO cpu_times \
+                     (history_id, stage, duration) \
+                 VALUES (?1, ?2, ?3)",
+            )?;
+            for &(stage, duration) in &rec.stage_cpu_times {
+                stmt.execute(params![history_id, stage as i32, dur_ms(duration)])?;
             }
         }
         Ok(())
@@ -1677,37 +1657,25 @@ impl Database {
      * Query build history, optionally filtering by regex on pkgpath
      * or pkgname. Results are returned most recent first.
      */
-    pub fn query_history(&self, pattern: Option<&regex::Regex>) -> Result<Vec<HistoryRecord>> {
+    pub fn query_history(&self, pattern: Option<&regex::Regex>) -> Result<Vec<crate::History>> {
         let conn = self.history_conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, pkgpath, pkgname, outcome, make_jobs, stage, \
-                    build_duration_ms, configure_cpu_time_ms, \
-                    build_cpu_time_ms, wrkdir_size_bytes, \
-                    total_duration_ms, \
-                    datetime(timestamp, 'unixepoch', 'localtime') \
-             FROM build_history ORDER BY timestamp DESC, id DESC",
-        )?;
+        let cols: Vec<&str> = HistoryKind::VARIANTS.iter().map(<&str>::from).collect();
+        let sql = format!(
+            "SELECT id, {} FROM build_history ORDER BY timestamp DESC, id DESC",
+            cols.join(", "),
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| {
-            let build_ms: Option<i64> = row.get(6)?;
-            let configure_cpu_ms: Option<i64> = row.get(7)?;
-            let build_cpu_ms: Option<i64> = row.get(8)?;
-            let wrkdir_size: Option<i64> = row.get(9)?;
-            let total_ms: i64 = row.get(10)?;
-            let outcome_id: i32 = row.get(3)?;
-            let stage_id: Option<i32> = row.get(5)?;
             Ok((
                 row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
+                row.get::<_, i64>(1)?,
                 row.get::<_, String>(2)?,
-                outcome_id,
-                row.get::<_, i64>(4)? as usize,
-                stage_id,
-                build_ms,
-                configure_cpu_ms,
-                build_cpu_ms,
-                wrkdir_size,
-                total_ms,
-                row.get::<_, String>(11)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i32>(4)?,
+                row.get::<_, Option<i32>>(5)?,
+                row.get::<_, i64>(6)? as usize,
+                row.get::<_, i64>(7)?,
+                row.get::<_, Option<i64>>(8)?,
             ))
         })?;
 
@@ -1716,17 +1684,14 @@ impl Database {
         for row in rows {
             let (
                 id,
+                timestamp,
                 pkgpath,
                 pkgname,
                 outcome_id,
-                make_jobs,
                 stage_id,
-                build_ms,
-                configure_cpu_ms,
-                build_cpu_ms,
-                wrkdir_size,
-                total_ms,
-                ts,
+                make_jobs,
+                duration,
+                disk_usage,
             ) = row?;
             if let Some(re) = pattern {
                 if !re.is_match(&pkgpath) && !re.is_match(&pkgname) {
@@ -1741,19 +1706,17 @@ impl Database {
                 })
                 .transpose()?;
             history_ids.push(id);
-            results.push(HistoryRecord {
+            results.push(crate::History {
+                timestamp,
                 pkgpath,
                 pkgname,
-                state: outcome,
-                make_jobs,
+                outcome,
                 stage,
-                build_duration: build_ms.map(|ms| Duration::from_millis(ms as u64)),
-                configure_cpu_time: configure_cpu_ms.map(|ms| Duration::from_millis(ms as u64)),
-                build_cpu_time: build_cpu_ms.map(|ms| Duration::from_millis(ms as u64)),
+                make_jobs,
+                duration: Duration::from_millis(duration as u64),
+                disk_usage: disk_usage.map(|s| s as u64),
                 stage_durations: Vec::new(),
-                wrkdir_size: wrkdir_size.map(|s| s as u64),
-                total_duration: Duration::from_millis(total_ms as u64),
-                timestamp: ts,
+                stage_cpu_times: Vec::new(),
             });
         }
 
@@ -1768,28 +1731,35 @@ impl Database {
                 .map(|_| "?")
                 .collect::<Vec<_>>()
                 .join(",");
-            let sql = format!(
-                "SELECT history_id, stage, duration_ms \
-                 FROM build_stage_durations \
-                 WHERE history_id IN ({})",
-                placeholders
-            );
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(history_ids.iter()), |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i32>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })?;
-            for row in rows {
-                let (history_id, stage_id, duration_ms) = row?;
-                if let Some(&idx) = id_to_idx.get(&history_id) {
-                    let stage = Stage::from_repr(stage_id)
-                        .ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", stage_id))?;
-                    results[idx]
-                        .stage_durations
-                        .push((stage, Duration::from_millis(duration_ms as u64)));
+            for (table, field) in [
+                ("wall_times", "stage_durations"),
+                ("cpu_times", "stage_cpu_times"),
+            ] {
+                let sql = format!(
+                    "SELECT history_id, stage, duration \
+                     FROM {table} \
+                     WHERE history_id IN ({placeholders})",
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows =
+                    stmt.query_map(rusqlite::params_from_iter(history_ids.iter()), |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i32>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    })?;
+                for row in rows {
+                    let (history_id, stage_id, duration_ms) = row?;
+                    if let Some(&idx) = id_to_idx.get(&history_id) {
+                        let stage = Stage::from_repr(stage_id)
+                            .ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", stage_id))?;
+                        let entry = (stage, Duration::from_millis(duration_ms as u64));
+                        match field {
+                            "stage_durations" => results[idx].stage_durations.push(entry),
+                            _ => results[idx].stage_cpu_times.push(entry),
+                        }
+                    }
                 }
             }
         }
@@ -1803,11 +1773,21 @@ impl Database {
      */
     pub fn avg_build_duration(&self, pkgpath: &str) -> Result<Option<Duration>> {
         let conn = self.history_conn()?;
+        let out: &str = HistoryKind::Outcome.into();
+        let sql = format!(
+            "SELECT AVG(sd.duration) \
+             FROM wall_times sd \
+             JOIN build_history h ON h.id = sd.history_id \
+             WHERE h.pkgpath = ?1 AND h.{out} = ?2 \
+               AND sd.stage = ?3",
+        );
         let result: Option<f64> = conn.query_row(
-            "SELECT AVG(build_duration_ms) FROM build_history \
-             WHERE pkgpath = ?1 AND outcome = ?2 \
-               AND build_duration_ms IS NOT NULL",
-            params![pkgpath, PackageStateKind::Success as i32],
+            &sql,
+            params![
+                pkgpath,
+                PackageStateKind::Success as i32,
+                Stage::Build as i32,
+            ],
             |row| row.get(0),
         )?;
         Ok(result.map(|ms| Duration::from_millis(ms as u64)))
@@ -1890,17 +1870,7 @@ fn open_history_conn(dbdir: &Path) -> Result<Connection> {
 
              CREATE TABLE build_history (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 pkgpath TEXT NOT NULL,
-                 pkgname TEXT NOT NULL,
-                 outcome INTEGER NOT NULL REFERENCES outcome_types(id),
-                 make_jobs INTEGER NOT NULL,
-                 stage INTEGER REFERENCES stage_types(id),
-                 build_duration_ms INTEGER,
-                 configure_cpu_time_ms INTEGER,
-                 build_cpu_time_ms INTEGER,
-                 wrkdir_size_bytes INTEGER,
-                 total_duration_ms INTEGER NOT NULL,
-                 timestamp INTEGER NOT NULL
+                 {history_columns}
              );
 
              CREATE INDEX idx_history_pkgpath
@@ -1908,15 +1878,23 @@ fn open_history_conn(dbdir: &Path) -> Result<Connection> {
              CREATE INDEX idx_history_timestamp
                  ON build_history(timestamp);
 
-             CREATE TABLE build_stage_durations (
+             CREATE TABLE wall_times (
                  history_id INTEGER NOT NULL REFERENCES build_history(id),
                  stage INTEGER NOT NULL REFERENCES stage_types(id),
-                 duration_ms INTEGER NOT NULL,
+                 duration INTEGER NOT NULL,
+                 PRIMARY KEY (history_id, stage)
+             );
+
+             CREATE TABLE cpu_times (
+                 history_id INTEGER NOT NULL REFERENCES build_history(id),
+                 stage INTEGER NOT NULL REFERENCES stage_types(id),
+                 duration INTEGER NOT NULL,
                  PRIMARY KEY (history_id, stage)
              );",
             HISTORY_SCHEMA_VERSION,
             outcome_types = PackageState::db_values(),
             stages = stage_values(),
+            history_columns = history_schema(),
         ))?;
     }
 
