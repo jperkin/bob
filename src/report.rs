@@ -430,26 +430,27 @@ fn write_summary_stats(file: &mut fs::File, summary: &BuildSummary) -> Result<()
         format!("{}s", seconds)
     };
 
+    use crate::PackageStateKind::*;
     let c = summary.counts();
-    let s = &c.skipped;
-    let skipped_count = c.up_to_date
-        + s.pre_skipped
-        + s.pre_failed
-        + s.unresolved
-        + s.indirect_pre_skipped
-        + s.indirect_pre_failed
-        + s.indirect_unresolved
-        + s.indirect_failed;
+    let s = &c.states;
+    let skipped_count = s[UpToDate]
+        + s[PreSkipped]
+        + s[PreFailed]
+        + s[Unresolved]
+        + s[IndirectPreSkipped]
+        + s[IndirectPreFailed]
+        + s[IndirectUnresolved]
+        + s[IndirectFailed];
     writeln!(file, "<div class=\"summary\">")?;
     writeln!(
         file,
         "  <div class=\"stat success\"><h2>Succeeded</h2><div class=\"value\">{}</div></div>",
-        c.success
+        s[Success]
     )?;
     writeln!(
         file,
         "  <div class=\"stat failed\"><h2>Failed</h2><div class=\"value\">{}</div></div>",
-        c.failed
+        s[Failed]
     )?;
     writeln!(
         file,

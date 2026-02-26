@@ -42,13 +42,13 @@
 //! - `deinstall` - Test package removal (non-bootstrap only)
 //! - `clean` - Clean up build artifacts
 
-use crate::PackageState;
 use crate::config::PkgsrcEnv;
 use crate::sandbox::{SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
-use crate::scan::{ResolvedPackage, SkippedCounts};
+use crate::scan::ResolvedPackage;
 use crate::scheduler::Scheduler;
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, RunState, Sandbox};
+use crate::{PackageCounts, PackageState};
 use anyhow::{Context, bail};
 use crossterm::event;
 use glob::Pattern;
@@ -1499,17 +1499,11 @@ impl BuildResult {
     }
 }
 
-/// Counts of build results by outcome category.
+/// Counts of build results by state, plus scanfail total.
 #[derive(Clone, Debug, Default)]
 pub struct BuildCounts {
-    /// Packages that built successfully.
-    pub success: usize,
-    /// Packages that failed to build.
-    pub failed: usize,
-    /// Packages already up-to-date (binary package exists).
-    pub up_to_date: usize,
-    /// Packages that were skipped.
-    pub skipped: SkippedCounts,
+    /// Counts by [`PackageState`] variant.
+    pub states: PackageCounts,
     /// Packages that failed to scan.
     pub scanfail: usize,
 }
@@ -1526,26 +1520,14 @@ pub struct BuildSummary {
 }
 
 impl BuildSummary {
-    /// Compute all outcome counts in a single pass.
+    /// Compute all counts in a single pass.
     pub fn counts(&self) -> BuildCounts {
         let mut c = BuildCounts {
             scanfail: self.scanfail.len(),
             ..Default::default()
         };
         for r in &self.results {
-            match &r.state {
-                PackageState::PreSkipped(_) => c.skipped.pre_skipped += 1,
-                PackageState::PreFailed(_) => c.skipped.pre_failed += 1,
-                PackageState::Unresolved(_) => c.skipped.unresolved += 1,
-                PackageState::IndirectPreSkipped(_) => c.skipped.indirect_pre_skipped += 1,
-                PackageState::IndirectPreFailed(_) => c.skipped.indirect_pre_failed += 1,
-                PackageState::IndirectUnresolved(_) => c.skipped.indirect_unresolved += 1,
-                PackageState::Pending => {}
-                PackageState::UpToDate => c.up_to_date += 1,
-                PackageState::Success => c.success += 1,
-                PackageState::Failed(_) => c.failed += 1,
-                PackageState::IndirectFailed(_) => c.skipped.indirect_failed += 1,
-            }
+            c.states.add(&r.state);
         }
         c
     }

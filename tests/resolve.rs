@@ -1,6 +1,7 @@
 //! Integration tests for dependency resolution using real pkgsrc scan data.
 
 use anyhow::Result;
+use bob::PackageStateKind::*;
 use bob::Scan;
 use bob::scan::ScanSummary;
 use pkgsrc::ScanIndex;
@@ -45,11 +46,11 @@ fn resolve_full_tree() -> Result<()> {
     // Verify counts match expected values from this dataset
     let c = result.counts();
     assert_eq!(c.buildable, 27370);
-    assert_eq!(c.skipped.pre_skipped, 1148);
-    assert_eq!(c.skipped.pre_failed, 175);
-    assert_eq!(c.skipped.indirect_pre_skipped, 277);
-    assert_eq!(c.skipped.indirect_pre_failed, 40);
-    assert_eq!(c.skipped.unresolved, 6);
+    assert_eq!(c.states[PreSkipped], 1148);
+    assert_eq!(c.states[PreFailed], 175);
+    assert_eq!(c.states[IndirectPreSkipped], 277);
+    assert_eq!(c.states[IndirectPreFailed], 40);
+    assert_eq!(c.states[Unresolved], 6);
 
     // Total should match imported count
     assert_eq!(result.packages.len(), *imported);

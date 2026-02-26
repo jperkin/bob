@@ -17,6 +17,7 @@
 use anyhow::{Context, Result, bail};
 use bob::Init;
 use bob::Interrupted;
+use bob::PackageStateKind;
 use bob::RunState;
 use bob::build::{self, Build};
 use bob::config::Config;
@@ -161,7 +162,9 @@ impl BuildRunner {
      */
     fn update_pkg_summary(&self, prior: &[String], summary: &build::BuildSummary) {
         let changed = match self.db.get_successful_packages() {
-            Ok(current) => prior != current || summary.counts().success > 0,
+            Ok(current) => {
+                prior != current || summary.counts().states[PackageStateKind::Success] > 0
+            }
             Err(_) => true,
         };
         if !changed {
@@ -576,8 +579,9 @@ fn run() -> Result<()> {
             if let Some(path) = output {
                 std::fs::write(&path, &out)?;
                 let c = result.counts();
-                let s = &c.skipped;
-                let skipped = s.pre_skipped + s.pre_failed + s.unresolved;
+                let s = &c.states;
+                use bob::PackageStateKind::*;
+                let skipped = s[PreSkipped] + s[PreFailed] + s[Unresolved];
                 println!(
                     "Wrote {} buildable, {} skipped to {}",
                     c.buildable,

@@ -125,10 +125,10 @@ pub use build::{
 pub use config::{Config, DynamicJobs, Options, Pkgsrc, PkgsrcEnv, Sandboxes};
 pub use db::Database;
 pub use init::Init;
-pub use pkgstate::{PackageState, PackageStateKind};
+pub use pkgstate::{PackageCounts, PackageState, PackageStateKind};
 pub use report::write_html_report;
 pub use sandbox::Sandbox;
-pub use scan::{ResolvedPackage, Scan, ScanResult, ScanSummary, SkippedCounts};
+pub use scan::{ResolvedPackage, Scan, ScanResult, ScanSummary};
 pub use scheduler::Scheduler;
 pub use state::RunState;
 pub use summary::generate_pkg_summary;

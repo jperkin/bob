@@ -9,6 +9,7 @@
  */
 
 use anyhow::{Context, Result};
+use bob::PackageStateKind::*;
 use bob::{
     Build, Config, Database, PackageState, RunState, Sandbox, Scan, ScanSummary, config::PkgsrcEnv,
     sandbox::SandboxScope,
@@ -469,25 +470,25 @@ fn test_full_tree_scan() -> Result<()> {
     );
 
     // 1 pkg_skip: skip-me
-    assert_eq!(c.skipped.pre_skipped, 1, "expected 1 pkg_skip");
+    assert_eq!(c.states[PreSkipped], 1, "expected 1 pkg_skip");
 
     // 1 pkg_fail: fail-me
-    assert_eq!(c.skipped.pre_failed, 1, "expected 1 pkg_fail");
+    assert_eq!(c.states[PreFailed], 1, "expected 1 pkg_fail");
 
     // 1 indirect_preskip: dep-skip (depends on skip-me)
     assert_eq!(
-        c.skipped.indirect_pre_skipped, 1,
+        c.states[IndirectPreSkipped], 1,
         "expected 1 indirect_preskip"
     );
 
     // 1 indirect_prefail: dep-fail (depends on fail-me)
     assert_eq!(
-        c.skipped.indirect_pre_failed, 1,
+        c.states[IndirectPreFailed], 1,
         "expected 1 indirect_prefail"
     );
 
     // 1 unresolved: bad-dep (depends on nonexistent)
-    assert_eq!(c.skipped.unresolved, 1, "expected 1 unresolved");
+    assert_eq!(c.states[Unresolved], 1, "expected 1 unresolved");
 
     // Total should be 20
     assert_eq!(result.packages.len(), 20, "expected 20 total packages");
@@ -585,9 +586,9 @@ fn test_limited_scan() -> Result<()> {
 
     let c = result.counts();
     assert_eq!(c.buildable, 4, "all 4 packages should be buildable");
-    assert_eq!(c.skipped.pre_skipped, 0);
-    assert_eq!(c.skipped.pre_failed, 0);
-    assert_eq!(c.skipped.unresolved, 0);
+    assert_eq!(c.states[PreSkipped], 0);
+    assert_eq!(c.states[PreFailed], 0);
+    assert_eq!(c.states[Unresolved], 0);
 
     // Verify the expected packages are present
     let pkgpaths: Vec<String> = result
@@ -637,17 +638,21 @@ fn test_full_build() -> Result<()> {
 
     // 5 success: base, mid, also-base, top, multi
     assert_eq!(
-        bc.success, 5,
+        bc.states[Success], 5,
         "expected 5 successful builds, got {}",
-        bc.success
+        bc.states[Success]
     );
 
     // 6 failed: build-fail, fail-checksum, fail-at-build, fail-install,
     //   fail-package, chain-d
-    assert_eq!(bc.failed, 6, "expected 6 failed builds, got {}", bc.failed);
+    assert_eq!(
+        bc.states[Failed], 6,
+        "expected 6 failed builds, got {}",
+        bc.states[Failed]
+    );
 
     // 4 skipped: dep-bfail, chain-c, chain-b, chain-a
-    let indirect_failed = bc.skipped.indirect_failed;
+    let indirect_failed = bc.states[IndirectFailed];
     assert_eq!(
         indirect_failed, 4,
         "expected 4 indirect-failed skips, got {}",
@@ -798,7 +803,7 @@ fn test_build_bootstrap_skips_deinstall() -> Result<()> {
     let build_result = build.start(&state, &db)?;
 
     // base should succeed
-    assert_eq!(build_result.counts().success, 1);
+    assert_eq!(build_result.counts().states[Success], 1);
 
     // Verify no deinstall log exists (bootstrap skips deinstall)
     let base_logdir = h.logdir().join("base-1.0");
@@ -1477,11 +1482,15 @@ fn test_limited_build() -> Result<()> {
     // All 4 should succeed
     let bc = build_result.counts();
     assert_eq!(
-        bc.success, 4,
+        bc.states[Success], 4,
         "expected 4 successful builds, got {}",
-        bc.success
+        bc.states[Success]
     );
-    assert_eq!(bc.failed, 0, "expected 0 failures, got {}", bc.failed);
+    assert_eq!(
+        bc.states[Failed], 0,
+        "expected 0 failures, got {}",
+        bc.states[Failed]
+    );
 
     // Verify the expected packages built
     let built: Vec<&str> = build_result
@@ -1533,7 +1542,7 @@ fn test_build_resume_no_new_work() -> Result<()> {
 
     // First full scan + build
     let (_, scan_result, first_build) = run_scan_and_build(&h)?;
-    assert_eq!(first_build.counts().success, 5);
+    assert_eq!(first_build.counts().states[Success], 5);
 
     // Second build with same config - should produce no new results
     let config = h.load_config()?;
@@ -1609,9 +1618,9 @@ pkgsrc = {{
     let build_result = build.start(&state, &db)?;
 
     let bc = build_result.counts();
-    assert_eq!(bc.success, 5, "expected 5 successful builds");
-    assert_eq!(bc.failed, 6, "expected 6 failed builds");
-    assert_eq!(bc.skipped.indirect_failed, 4, "expected 4 indirect-failed");
+    assert_eq!(bc.states[Success], 5, "expected 5 successful builds");
+    assert_eq!(bc.states[Failed], 6, "expected 6 failed builds");
+    assert_eq!(bc.states[IndirectFailed], 4, "expected 4 indirect-failed");
 
     Ok(())
 }
@@ -1623,7 +1632,7 @@ fn test_rebuild_after_clear() -> Result<()> {
 
     // First build
     let (db, scan_result, first) = run_scan_and_build(&h)?;
-    assert_eq!(first.counts().success, 5);
+    assert_eq!(first.counts().states[Success], 5);
 
     // Clear all build results
     let cleared = db.clear_builds()?;
@@ -1646,7 +1655,7 @@ fn test_rebuild_after_clear() -> Result<()> {
 
     let rebuild_result = build.start(&state, &db)?;
     assert_eq!(
-        rebuild_result.counts().success,
+        rebuild_result.counts().states[Success],
         5,
         "rebuild should succeed for same 5 packages"
     );
@@ -1864,7 +1873,7 @@ fn count_pkg_summary_entries(content: &str) -> usize {
 /// Returns true if pkg_summary was regenerated.
 fn maybe_generate(db: &Database, prior: &[String], summary: &bob::BuildSummary) -> Result<bool> {
     let current = db.get_successful_packages()?;
-    if prior != current || summary.counts().success > 0 {
+    if prior != current || summary.counts().states[Success] > 0 {
         bob::generate_pkg_summary(db, 2)?;
         Ok(true)
     } else {
@@ -2130,7 +2139,7 @@ fn test_pkg_summary_regenerated_on_same_name_rebuild() -> Result<()> {
     let current = db.get_successful_packages()?;
     assert_eq!(prior, current, "same set of successful package names");
     assert!(
-        summary.counts().success > 0,
+        summary.counts().states[Success] > 0,
         "but a new build succeeded (metadata may differ)"
     );
 
@@ -2186,8 +2195,8 @@ fn test_pkg_summary_skipped_when_all_fail() -> Result<()> {
     let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
     let summary = build.start(&state, &db)?;
 
-    assert_eq!(summary.counts().success, 0);
-    assert!(summary.counts().failed > 0);
+    assert_eq!(summary.counts().states[Success], 0);
+    assert!(summary.counts().states[Failed] > 0);
 
     let prior: Vec<String> = vec![];
     let generated = maybe_generate(&db, &prior, &summary)?;
@@ -2229,7 +2238,7 @@ fn test_pkg_summary_regenerated_when_new_packages_added() -> Result<()> {
     let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
     let first_summary = build.start(&state, &db)?;
 
-    assert_eq!(first_summary.counts().success, 1);
+    assert_eq!(first_summary.counts().states[Success], 1);
     let prior_first: Vec<String> = vec![];
     let generated = maybe_generate(&db, &prior_first, &first_summary)?;
     assert!(generated);
@@ -2266,7 +2275,7 @@ fn test_pkg_summary_regenerated_when_new_packages_added() -> Result<()> {
     let second_summary = build2.start(&state2, &db)?;
 
     assert!(
-        second_summary.counts().success >= 3,
+        second_summary.counts().states[Success] >= 3,
         "mid, also-base, top should succeed (base cached)"
     );
 
@@ -2383,7 +2392,7 @@ fn test_pkg_summary_skipped_when_interrupted() -> Result<()> {
 
     // Without the interrupt, this WOULD have triggered regeneration
     assert!(
-        prior != current || summary.counts().success > 0,
+        prior != current || summary.counts().states[Success] > 0,
         "condition should be true (would regenerate if not interrupted)"
     );
 

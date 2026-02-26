@@ -37,11 +37,11 @@
 //! - Unresolved dependencies - Required dependency not found
 //! - Circular dependencies - Package has a dependency cycle
 
-use crate::PackageState;
 use crate::config::PkgsrcEnv;
 use crate::sandbox::{SandboxScope, wait_output_with_shutdown};
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, Interrupted, RunState, Sandbox};
+use crate::{PackageCounts, PackageState, PackageStateKind};
 use anyhow::{Context, Result, bail};
 use crossterm::event;
 use indexmap::IndexMap;
@@ -54,25 +54,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tracing::{debug, error, info, info_span, trace, warn};
-
-/// Counts of skipped packages by category.
-#[derive(Clone, Debug, Default)]
-pub struct SkippedCounts {
-    /// Packages with `PKG_SKIP_REASON` set.
-    pub pre_skipped: usize,
-    /// Packages with `PKG_FAIL_REASON` set.
-    pub pre_failed: usize,
-    /// Packages with unresolved dependencies.
-    pub unresolved: usize,
-    /// Packages blocked by a pre-skipped dependency.
-    pub indirect_pre_skipped: usize,
-    /// Packages blocked by a pre-failed dependency.
-    pub indirect_pre_failed: usize,
-    /// Packages blocked by a dependency with unresolved deps.
-    pub indirect_unresolved: usize,
-    /// Packages blocked by a dependency that failed to build.
-    pub indirect_failed: usize,
-}
 
 /// A successfully resolved package that is ready to build.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -237,34 +218,25 @@ pub struct ScanSummary {
     pub packages: Vec<ScanResult>,
 }
 
-/// Counts of packages by outcome category.
+/// Counts of packages by state, plus buildable and scanfail totals.
 #[derive(Clone, Debug, Default)]
 pub struct ScanCounts {
     /// Packages that are buildable.
     pub buildable: usize,
-    /// Packages that were skipped.
-    pub skipped: SkippedCounts,
+    /// Counts by [`PackageState`] variant.
+    pub states: PackageCounts,
     /// Packages that failed to scan.
     pub scanfail: usize,
 }
 
 impl ScanSummary {
-    /// Compute all outcome counts in a single pass.
+    /// Compute all counts in a single pass.
     pub fn counts(&self) -> ScanCounts {
         let mut c = ScanCounts::default();
         for p in &self.packages {
             match p {
                 ScanResult::Buildable(_) => c.buildable += 1,
-                ScanResult::Skipped { state, .. } => match state {
-                    PackageState::PreSkipped(_) => c.skipped.pre_skipped += 1,
-                    PackageState::PreFailed(_) => c.skipped.pre_failed += 1,
-                    PackageState::Unresolved(_) => c.skipped.unresolved += 1,
-                    PackageState::IndirectPreSkipped(_) => c.skipped.indirect_pre_skipped += 1,
-                    PackageState::IndirectPreFailed(_) => c.skipped.indirect_pre_failed += 1,
-                    PackageState::IndirectUnresolved(_) => c.skipped.indirect_unresolved += 1,
-                    PackageState::IndirectFailed(_) => c.skipped.indirect_failed += 1,
-                    _ => {}
-                },
+                ScanResult::Skipped { state, .. } => c.states.add(state),
                 ScanResult::ScanFail { .. } => c.scanfail += 1,
             }
         }
@@ -314,27 +286,28 @@ impl ScanSummary {
      * Otherwise shows "buildable" count.
      */
     pub fn print_counts(&self, up_to_date: Option<usize>) {
+        use crate::PackageStateKind::*;
         let c = self.counts();
-        let s = &c.skipped;
-        let indirect = s.indirect_pre_skipped
-            + s.indirect_pre_failed
-            + s.indirect_unresolved
-            + s.indirect_failed;
+        let s = &c.states;
+        let indirect = s[IndirectPreSkipped]
+            + s[IndirectPreFailed]
+            + s[IndirectUnresolved]
+            + s[IndirectFailed];
         match up_to_date {
             Some(n) => println!(
                 "{} to build, {} up-to-date, {} prefailed, {} blocked, {} unresolved",
                 c.buildable.saturating_sub(n),
                 n,
-                s.pre_skipped + s.pre_failed,
+                s[PreSkipped] + s[PreFailed],
                 indirect,
-                s.unresolved
+                s[Unresolved]
             ),
             None => println!(
                 "{} buildable, {} prefailed, {} blocked, {} unresolved",
                 c.buildable,
-                s.pre_skipped + s.pre_failed,
+                s[PreSkipped] + s[PreFailed],
                 indirect,
-                s.unresolved
+                s[Unresolved]
             ),
         }
     }
@@ -1602,9 +1575,9 @@ impl Scan {
         let c = summary.counts();
         info!(
             buildable = c.buildable,
-            preskip = c.skipped.pre_skipped,
-            prefail = c.skipped.pre_failed,
-            unresolved = c.skipped.unresolved,
+            preskip = c.states[PackageStateKind::PreSkipped],
+            prefail = c.states[PackageStateKind::PreFailed],
+            unresolved = c.states[PackageStateKind::Unresolved],
             "Resolution complete"
         );
 

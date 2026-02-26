@@ -23,6 +23,7 @@
 //! labels, database IDs, and parsing without needing a full instance.
 
 use std::str::FromStr;
+use strum::EnumCount;
 
 /// Plain discriminant for [`PackageState`], ordered by lifecycle phase.
 ///
@@ -35,6 +36,7 @@ use std::str::FromStr;
     Debug,
     PartialEq,
     Eq,
+    strum::EnumCount,
     strum::EnumIter,
     strum::EnumString,
     strum::FromRepr,
@@ -202,6 +204,34 @@ impl PackageState {
             })
             .collect::<Vec<_>>()
             .join(", ")
+    }
+}
+
+/// Counts of packages by [`PackageStateKind`].
+///
+/// Backed by an array indexed by the kind discriminant, so adding a new
+/// variant to [`PackageStateKind`] automatically extends the counts with
+/// no additional code.
+#[derive(Clone, Debug)]
+pub struct PackageCounts([usize; PackageStateKind::COUNT]);
+
+impl Default for PackageCounts {
+    fn default() -> Self {
+        Self([0; PackageStateKind::COUNT])
+    }
+}
+
+impl PackageCounts {
+    /// Increment the counter for this state.
+    pub fn add(&mut self, state: &PackageState) {
+        self.0[state.kind() as usize] += 1;
+    }
+}
+
+impl std::ops::Index<PackageStateKind> for PackageCounts {
+    type Output = usize;
+    fn index(&self, kind: PackageStateKind) -> &usize {
+        &self.0[kind as usize]
     }
 }
 
