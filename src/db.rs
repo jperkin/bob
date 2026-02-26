@@ -42,9 +42,19 @@ use pkgsrc::{PkgName, PkgPath, ScanIndex};
 use rusqlite::{Connection, params};
 use tracing::{debug, warn};
 
+use strum::VariantArray;
+
 use crate::build::{BuildOutcome, BuildResult, OutcomeType, PkgBuildStats, Stage};
 use crate::config::PkgsrcEnv;
 use crate::try_println;
+
+fn stage_values() -> String {
+    Stage::VARIANTS
+        .iter()
+        .map(|v| format!("({}, '{}')", *v as i32, v.into_str()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 /**
  * Schema version for bob.db - update when schema changes.
@@ -314,10 +324,7 @@ impl Database {
                  id INTEGER PRIMARY KEY,
                  name TEXT UNIQUE NOT NULL
              );
-             INSERT INTO stage_types (id, name) VALUES
-                 (1, 'pre-clean'), (2, 'depends'), (3, 'checksum'),
-                 (4, 'configure'), (5, 'build'), (6, 'install'),
-                 (7, 'package'), (8, 'deinstall'), (9, 'clean');
+             INSERT INTO stage_types (id, name) VALUES {stages};
 
              CREATE TABLE packages (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -375,7 +382,8 @@ impl Database {
                  key TEXT PRIMARY KEY,
                  value TEXT NOT NULL
              );",
-            SCHEMA_VERSION
+            SCHEMA_VERSION,
+            stages = stage_values(),
         ))?;
 
         debug!(version = SCHEMA_VERSION, "Created schema");
@@ -1009,7 +1017,12 @@ impl Database {
         match result {
             Ok((pkgname, pkgpath, outcome_id, detail, stage_id, duration_ms, log_dir)) => {
                 let ot = OutcomeType::try_from(outcome_id)?;
-                let stage = stage_id.map(Stage::try_from).transpose()?;
+                let stage = stage_id
+                    .map(|id| {
+                        Stage::from_repr(id)
+                            .ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", id))
+                    })
+                    .transpose()?;
                 Ok(Some(BuildResult {
                     pkgname: PkgName::new(&pkgname),
                     pkgpath: pkgpath.and_then(|p| PkgPath::new(&p).ok()),
@@ -1094,7 +1107,7 @@ impl Database {
             let Ok(ot) = OutcomeType::try_from(outcome_id) else {
                 continue;
             };
-            let stage = stage_id.and_then(|id| Stage::try_from(id).ok());
+            let stage = stage_id.and_then(Stage::from_repr);
             results.push(BuildResult {
                 pkgname: PkgName::new(&pkgname),
                 pkgpath: pkgpath.and_then(|p| PkgPath::new(&p).ok()),
@@ -1700,7 +1713,11 @@ impl Database {
                 }
             }
             let outcome = OutcomeType::try_from(outcome_id)?;
-            let stage = stage_id.map(Stage::try_from).transpose()?;
+            let stage = stage_id
+                .map(|id| {
+                    Stage::from_repr(id).ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", id))
+                })
+                .transpose()?;
             history_ids.push(id);
             results.push(HistoryRecord {
                 pkgpath,
@@ -1745,7 +1762,8 @@ impl Database {
             for row in rows {
                 let (history_id, stage_id, duration_ms) = row?;
                 if let Some(&idx) = id_to_idx.get(&history_id) {
-                    let stage = Stage::try_from(stage_id)?;
+                    let stage = Stage::from_repr(stage_id)
+                        .ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", stage_id))?;
                     results[idx]
                         .stage_durations
                         .push((stage, Duration::from_millis(duration_ms as u64)));
@@ -1815,10 +1833,7 @@ fn open_history_conn(dbdir: &Path) -> Result<Connection> {
                  id INTEGER PRIMARY KEY,
                  name TEXT UNIQUE NOT NULL
              );
-             INSERT INTO stage_types (id, name) VALUES
-                 (1, 'pre-clean'), (2, 'depends'), (3, 'checksum'),
-                 (4, 'configure'), (5, 'build'), (6, 'install'),
-                 (7, 'package'), (8, 'deinstall'), (9, 'clean');
+             INSERT INTO stage_types (id, name) VALUES {stages};
 
              CREATE TABLE build_history (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1845,7 +1860,8 @@ fn open_history_conn(dbdir: &Path) -> Result<Connection> {
                  duration_ms INTEGER NOT NULL,
                  PRIMARY KEY (history_id, stage)
              );",
-            HISTORY_SCHEMA_VERSION
+            HISTORY_SCHEMA_VERSION,
+            stages = stage_values(),
         ))?;
     } else {
         let version: i32 =

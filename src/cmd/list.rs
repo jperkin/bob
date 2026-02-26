@@ -22,6 +22,7 @@ use clap::Subcommand;
 use crossterm::terminal;
 use regex::Regex;
 use serde_json;
+use strum::VariantArray;
 
 use bob::build::{BuildOutcome, OutcomeType, Stage};
 use bob::db::{Database, PackageStatusRow};
@@ -711,7 +712,7 @@ fn print_history(
     no_header: bool,
     package: Option<&str>,
 ) -> Result<()> {
-    let all_cols = [
+    let fixed_cols: &[&str] = &[
         "timestamp",
         "pkgpath",
         "pkgname",
@@ -722,15 +723,12 @@ fn print_history(
         "total",
         "cpu-configure",
         "cpu-build",
-        "pre-clean",
-        "depends",
-        "checksum",
-        "configure",
-        "install",
-        "package",
-        "deinstall",
-        "clean",
     ];
+    let all_cols: Vec<&str> = fixed_cols
+        .iter()
+        .copied()
+        .chain(Stage::VARIANTS.iter().map(|s| s.into_str()))
+        .collect();
     let default_cols: Vec<&str> = vec![
         "timestamp",
         "pkgname",
@@ -754,17 +752,6 @@ fn print_history(
         }
     }
 
-    let stage_cols: &[(&str, Stage)] = &[
-        ("pre-clean", Stage::PreClean),
-        ("depends", Stage::Depends),
-        ("checksum", Stage::Checksum),
-        ("configure", Stage::Configure),
-        ("install", Stage::Install),
-        ("package", Stage::Package),
-        ("deinstall", Stage::Deinstall),
-        ("clean", Stage::Clean),
-    ];
-
     let pattern = package
         .map(|p| Regex::new(p).map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", p, e)))
         .transpose()?;
@@ -780,28 +767,7 @@ fn print_history(
         return Ok(());
     }
 
-    let col_idx = |name: &str| -> usize {
-        match name {
-            "timestamp" => 0,
-            "pkgpath" => 1,
-            "pkgname" => 2,
-            "outcome" => 3,
-            "stage" => 4,
-            "jobs" => 5,
-            "build" => 6,
-            "total" => 7,
-            "cpu-configure" => 8,
-            "cpu-build" => 9,
-            _ => {
-                for (i, &(sc, _)) in stage_cols.iter().enumerate() {
-                    if sc == name {
-                        return 10 + i;
-                    }
-                }
-                0
-            }
-        }
-    };
+    let col_idx = |name: &str| -> usize { all_cols.iter().position(|&c| c == name).unwrap_or(0) };
 
     let mut rows: Vec<Vec<String>> = Vec::new();
     for rec in &records {
@@ -809,7 +775,7 @@ fn print_history(
             "-".to_string()
         } else {
             rec.stage
-                .map(|s| s.as_str().to_string())
+                .map(|s| s.into_str().to_string())
                 .unwrap_or_else(|| "-".to_string())
         };
         let jobs = if rec.make_jobs == 0 {
@@ -845,11 +811,11 @@ fn print_history(
             cpu_build,
         ];
 
-        for &(_, stage_val) in stage_cols {
+        for &s in Stage::VARIANTS {
             let dur = rec
                 .stage_durations
                 .iter()
-                .find(|(s, _)| *s == stage_val)
+                .find(|(st, _)| *st == s)
                 .map(|(_, d)| format_duration_ms(d.as_millis() as u64))
                 .unwrap_or_else(|| "-".to_string());
             row.push(dur);
