@@ -577,7 +577,7 @@ fn run() -> Result<()> {
                 std::fs::write(&path, &out)?;
                 let c = result.counts();
                 let s = &c.skipped;
-                let skipped = s.pkg_skip + s.pkg_fail + s.unresolved;
+                let skipped = s.pre_skipped + s.pre_failed + s.unresolved;
                 println!(
                     "Wrote {} buildable, {} skipped to {}",
                     c.buildable,

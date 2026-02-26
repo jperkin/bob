@@ -41,7 +41,7 @@ use bob::scan::{ScanResult, ScanSummary};
  *
  * Determines whether each package's binary is current with its sources by
  * checking file hashes, CVS IDs, and dependency states. Packages verified
- * as up-to-date are recorded with `BuildOutcome::UpToDate` to skip during
+ * as up-to-date are recorded with `PackageState::UpToDate` to skip during
  * build; others have their rebuild reason stored in the database.
  *
  * Processing uses topological waves to avoid redundant checks. Packages
@@ -203,7 +203,7 @@ pub fn check_up_to_date(
                 let build_result = bob::BuildResult {
                     pkgname: pkg.pkgname().clone(),
                     pkgpath: Some(pkg.pkgpath.clone()),
-                    outcome: bob::BuildOutcome::UpToDate,
+                    state: bob::PackageState::UpToDate,
                     log_dir: None,
                     build_stats: bob::PkgBuildStats::default(),
                 };
@@ -288,7 +288,7 @@ pub fn run_build_with(
         match pkg {
             ScanResult::Skipped {
                 pkgpath,
-                reason,
+                state,
                 index,
                 ..
             } => {
@@ -299,7 +299,7 @@ pub fn run_build_with(
                 summary.results.push(build::BuildResult {
                     pkgname: pkgname.clone(),
                     pkgpath: Some(pkgpath.clone()),
-                    outcome: build::BuildOutcome::Skipped(reason.clone()),
+                    state: state.clone(),
                     log_dir: None,
                     build_stats: build::PkgBuildStats::default(),
                 });

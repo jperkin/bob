@@ -20,6 +20,7 @@ pub mod action;
 pub mod build;
 pub mod config;
 pub mod db;
+pub mod logging;
 pub mod report;
 pub mod sandbox;
 pub mod scan;
@@ -27,9 +28,8 @@ pub mod scheduler;
 pub mod state;
 pub mod summary;
 
-// Internal modules - exposed for binary use but not primary API
 mod init;
-pub mod logging;
+mod pkgstate;
 mod tui;
 
 use std::collections::{HashMap, VecDeque};
@@ -119,15 +119,16 @@ impl std::error::Error for Interrupted {}
 
 pub use action::{Action, ActionType, FSType};
 pub use build::{
-    Build, BuildCounts, BuildOutcome, BuildReason, BuildResult, BuildSummary, MakeJobs,
-    OutcomeType, PkgBuildStats, Stage, pkg_up_to_date,
+    Build, BuildCounts, BuildReason, BuildResult, BuildSummary, MakeJobs, PkgBuildStats, Stage,
+    pkg_up_to_date,
 };
 pub use config::{Config, DynamicJobs, Options, Pkgsrc, PkgsrcEnv, Sandboxes};
 pub use db::Database;
 pub use init::Init;
+pub use pkgstate::{PackageState, PackageStateKind};
 pub use report::write_html_report;
 pub use sandbox::Sandbox;
-pub use scan::{ResolvedPackage, Scan, ScanResult, ScanSummary, SkipReason, SkippedCounts};
+pub use scan::{ResolvedPackage, Scan, ScanResult, ScanSummary, SkippedCounts};
 pub use scheduler::Scheduler;
 pub use state::RunState;
 pub use summary::generate_pkg_summary;

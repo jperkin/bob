@@ -37,6 +37,7 @@
 //! - Unresolved dependencies - Required dependency not found
 //! - Circular dependencies - Package has a dependency cycle
 
+use crate::PackageState;
 use crate::config::PkgsrcEnv;
 use crate::sandbox::{SandboxScope, wait_output_with_shutdown};
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
@@ -54,110 +55,19 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tracing::{debug, error, info, info_span, trace, warn};
 
-/// Reason why a package was skipped (not built).
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum SkipReason {
-    /// Package has `PKG_SKIP_REASON` set.
-    PkgSkip(String),
-    /// Package has `PKG_FAIL_REASON` set.
-    PkgFail(String),
-    /// Package blocked because a dependency is preskipped.
-    IndirectPreskip(String),
-    /// Package blocked because a dependency is prefailed.
-    IndirectPrefail(String),
-    /// Dependency could not be resolved.
-    UnresolvedDep(String),
-    /// Package blocked because a dependency has an unresolved dependency.
-    IndirectUnresolved(String),
-    /// Package blocked because a dependency failed to build.
-    IndirectFailed(String),
-}
-
-impl SkipReason {
-    /// Returns the status label for this skip reason.
-    pub fn status(&self) -> &'static str {
-        match self {
-            SkipReason::PkgSkip(_) => "preskipped",
-            SkipReason::PkgFail(_) => "prefailed",
-            SkipReason::IndirectPreskip(_) => "indirect-preskipped",
-            SkipReason::IndirectPrefail(_) => "indirect-prefailed",
-            SkipReason::UnresolvedDep(_) => "unresolved",
-            SkipReason::IndirectUnresolved(_) => "indirect-unresolved",
-            SkipReason::IndirectFailed(_) => "indirect-failed",
-        }
-    }
-
-    /**
-     * Returns the outcome type for database storage.
-     */
-    pub fn outcome_type(&self) -> crate::build::OutcomeType {
-        use crate::build::OutcomeType;
-        match self {
-            SkipReason::PkgSkip(_) => OutcomeType::PkgSkip,
-            SkipReason::PkgFail(_) => OutcomeType::PkgFail,
-            SkipReason::IndirectPreskip(_) => OutcomeType::IndirectPreskip,
-            SkipReason::IndirectPrefail(_) => OutcomeType::IndirectPrefail,
-            SkipReason::UnresolvedDep(_) => OutcomeType::Unresolved,
-            SkipReason::IndirectUnresolved(_) => OutcomeType::IndirectUnresolved,
-            SkipReason::IndirectFailed(_) => OutcomeType::IndirectFailed,
-        }
-    }
-
-    /**
-     * Creates a SkipReason from outcome type and detail string.
-     */
-    pub fn from_db(ot: crate::build::OutcomeType, detail: String) -> Option<Self> {
-        use crate::build::OutcomeType;
-        match ot {
-            OutcomeType::PkgSkip => Some(SkipReason::PkgSkip(detail)),
-            OutcomeType::PkgFail => Some(SkipReason::PkgFail(detail)),
-            OutcomeType::IndirectPreskip => Some(SkipReason::IndirectPreskip(detail)),
-            OutcomeType::IndirectPrefail => Some(SkipReason::IndirectPrefail(detail)),
-            OutcomeType::Unresolved => Some(SkipReason::UnresolvedDep(detail)),
-            OutcomeType::IndirectUnresolved => Some(SkipReason::IndirectUnresolved(detail)),
-            OutcomeType::IndirectFailed => Some(SkipReason::IndirectFailed(detail)),
-            _ => None,
-        }
-    }
-
-    /// Returns true if this is a direct skip (not inherited from a dependency).
-    pub fn is_direct(&self) -> bool {
-        matches!(
-            self,
-            SkipReason::PkgSkip(_) | SkipReason::PkgFail(_) | SkipReason::UnresolvedDep(_)
-        )
-    }
-}
-
-impl std::fmt::Display for SkipReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SkipReason::PkgSkip(r)
-            | SkipReason::PkgFail(r)
-            | SkipReason::IndirectPreskip(r)
-            | SkipReason::IndirectPrefail(r)
-            | SkipReason::IndirectUnresolved(r)
-            | SkipReason::IndirectFailed(r) => write!(f, "{}", r),
-            SkipReason::UnresolvedDep(p) => {
-                write!(f, "Could not resolve: {}", p)
-            }
-        }
-    }
-}
-
-/// Counts of skipped packages by SkipReason category.
+/// Counts of skipped packages by category.
 #[derive(Clone, Debug, Default)]
 pub struct SkippedCounts {
     /// Packages with `PKG_SKIP_REASON` set.
-    pub pkg_skip: usize,
+    pub pre_skipped: usize,
     /// Packages with `PKG_FAIL_REASON` set.
-    pub pkg_fail: usize,
+    pub pre_failed: usize,
     /// Packages with unresolved dependencies.
     pub unresolved: usize,
-    /// Packages blocked by a preskipped dependency.
-    pub indirect_preskip: usize,
-    /// Packages blocked by a prefailed dependency.
-    pub indirect_prefail: usize,
+    /// Packages blocked by a pre-skipped dependency.
+    pub indirect_pre_skipped: usize,
+    /// Packages blocked by a pre-failed dependency.
+    pub indirect_pre_failed: usize,
     /// Packages blocked by a dependency with unresolved deps.
     pub indirect_unresolved: usize,
     /// Packages blocked by a dependency that failed to build.
@@ -220,8 +130,8 @@ pub enum ScanResult {
     Skipped {
         /// Package path.
         pkgpath: PkgPath,
-        /// Reason for skipping.
-        reason: SkipReason,
+        /// Package state (skip reason).
+        state: PackageState,
         /// Scan index if available (present for most skipped packages).
         index: Option<ScanIndex>,
         /// Resolved dependencies (may be partial for unresolved deps).
@@ -287,14 +197,13 @@ impl std::fmt::Display for ScanResult {
             ScanResult::Skipped {
                 index,
                 pkgpath,
-                reason,
+                state,
                 resolved_depends,
             } => {
                 if let Some(idx) = index {
                     write!(f, "{}", idx)?;
                     // Don't emit DEPENDS for unresolved deps (pbulk compat)
-                    if !matches!(reason, SkipReason::UnresolvedDep(_))
-                        && !resolved_depends.is_empty()
+                    if !matches!(state, PackageState::Unresolved(_)) && !resolved_depends.is_empty()
                     {
                         write!(f, "DEPENDS=")?;
                         for (i, d) in resolved_depends.iter().enumerate() {
@@ -346,34 +255,16 @@ impl ScanSummary {
         for p in &self.packages {
             match p {
                 ScanResult::Buildable(_) => c.buildable += 1,
-                ScanResult::Skipped {
-                    reason: SkipReason::PkgSkip(_),
-                    ..
-                } => c.skipped.pkg_skip += 1,
-                ScanResult::Skipped {
-                    reason: SkipReason::PkgFail(_),
-                    ..
-                } => c.skipped.pkg_fail += 1,
-                ScanResult::Skipped {
-                    reason: SkipReason::IndirectPreskip(_),
-                    ..
-                } => c.skipped.indirect_preskip += 1,
-                ScanResult::Skipped {
-                    reason: SkipReason::IndirectPrefail(_),
-                    ..
-                } => c.skipped.indirect_prefail += 1,
-                ScanResult::Skipped {
-                    reason: SkipReason::UnresolvedDep(_),
-                    ..
-                } => c.skipped.unresolved += 1,
-                ScanResult::Skipped {
-                    reason: SkipReason::IndirectUnresolved(_),
-                    ..
-                } => c.skipped.indirect_unresolved += 1,
-                ScanResult::Skipped {
-                    reason: SkipReason::IndirectFailed(_),
-                    ..
-                } => c.skipped.indirect_failed += 1,
+                ScanResult::Skipped { state, .. } => match state {
+                    PackageState::PreSkipped(_) => c.skipped.pre_skipped += 1,
+                    PackageState::PreFailed(_) => c.skipped.pre_failed += 1,
+                    PackageState::Unresolved(_) => c.skipped.unresolved += 1,
+                    PackageState::IndirectPreSkipped(_) => c.skipped.indirect_pre_skipped += 1,
+                    PackageState::IndirectPreFailed(_) => c.skipped.indirect_pre_failed += 1,
+                    PackageState::IndirectUnresolved(_) => c.skipped.indirect_unresolved += 1,
+                    PackageState::IndirectFailed(_) => c.skipped.indirect_failed += 1,
+                    _ => {}
+                },
                 ScanResult::ScanFail { .. } => c.scanfail += 1,
             }
         }
@@ -400,9 +291,9 @@ impl ScanSummary {
         self.packages.iter().filter_map(|p| match p {
             ScanResult::ScanFail { error, .. } => Some(error.as_str()),
             ScanResult::Skipped {
-                reason: SkipReason::UnresolvedDep(e),
+                state: PackageState::Unresolved(detail),
                 ..
-            } => Some(e.as_str()),
+            } => Some(detail.as_str()),
             _ => None,
         })
     }
@@ -425,21 +316,23 @@ impl ScanSummary {
     pub fn print_counts(&self, up_to_date: Option<usize>) {
         let c = self.counts();
         let s = &c.skipped;
-        let indirect =
-            s.indirect_preskip + s.indirect_prefail + s.indirect_unresolved + s.indirect_failed;
+        let indirect = s.indirect_pre_skipped
+            + s.indirect_pre_failed
+            + s.indirect_unresolved
+            + s.indirect_failed;
         match up_to_date {
             Some(n) => println!(
                 "{} to build, {} up-to-date, {} prefailed, {} blocked, {} unresolved",
                 c.buildable.saturating_sub(n),
                 n,
-                s.pkg_skip + s.pkg_fail,
+                s.pre_skipped + s.pre_failed,
                 indirect,
                 s.unresolved
             ),
             None => println!(
                 "{} buildable, {} prefailed, {} blocked, {} unresolved",
                 c.buildable,
-                s.pkg_skip + s.pkg_fail,
+                s.pre_skipped + s.pre_failed,
                 indirect,
                 s.unresolved
             ),
@@ -1393,43 +1286,33 @@ impl Scan {
      */
     fn propagate_failures(
         depends: &HashMap<PkgName, Vec<PkgName>>,
-        skip_reasons: &mut HashMap<PkgName, SkipReason>,
+        skip_reasons: &mut HashMap<PkgName, PackageState>,
     ) {
         loop {
-            let mut new_skip_reasons: Vec<(PkgName, SkipReason)> = Vec::new();
+            let mut new_skip_reasons: Vec<(PkgName, PackageState)> = Vec::new();
             for (pkgname, pkg_depends) in depends {
                 if skip_reasons.contains_key(pkgname) {
                     continue;
                 }
-                let mut blocking_reason: Option<SkipReason> = None;
+                let mut blocking_reason: Option<PackageState> = None;
                 for dep in pkg_depends {
                     if let Some(dep_reason) = skip_reasons.get(dep) {
                         let msg = format!("dependency {} {}", dep.pkgname(), dep_reason.status());
-                        let indirect = match dep_reason {
-                            SkipReason::PkgSkip(_) | SkipReason::IndirectPreskip(_) => {
-                                SkipReason::IndirectPreskip(msg)
+                        let indirect = dep_reason.indirect(msg);
+                        let dominated = match &blocking_reason {
+                            None => true,
+                            Some(PackageState::IndirectPreSkipped(_)) => true,
+                            Some(PackageState::IndirectUnresolved(_))
+                                if matches!(indirect, PackageState::IndirectPreFailed(_)) =>
+                            {
+                                true
                             }
-                            SkipReason::PkgFail(_) | SkipReason::IndirectPrefail(_) => {
-                                SkipReason::IndirectPrefail(msg)
-                            }
-                            SkipReason::UnresolvedDep(_) | SkipReason::IndirectUnresolved(_) => {
-                                SkipReason::IndirectUnresolved(msg)
-                            }
-                            SkipReason::IndirectFailed(_) => SkipReason::IndirectFailed(msg),
+                            _ => false,
                         };
-                        let dominated = matches!(
-                            (&blocking_reason, &indirect),
-                            (None, _)
-                                | (Some(SkipReason::IndirectPreskip(_)), _)
-                                | (
-                                    Some(SkipReason::IndirectUnresolved(_)),
-                                    SkipReason::IndirectPrefail(_)
-                                )
-                        );
                         if dominated {
                             blocking_reason = Some(indirect);
                         }
-                        if matches!(blocking_reason, Some(SkipReason::IndirectPrefail(_))) {
+                        if matches!(blocking_reason, Some(PackageState::IndirectPreFailed(_))) {
                             break;
                         }
                     }
@@ -1524,7 +1407,7 @@ impl Scan {
             "Starting dependency resolution"
         );
 
-        let mut skip_reasons: HashMap<PkgName, SkipReason> = HashMap::new();
+        let mut skip_reasons: HashMap<PkgName, PackageState> = HashMap::new();
         let mut depends: HashMap<PkgName, Vec<PkgName>> = HashMap::new();
         let mut active: HashSet<PkgName> = HashSet::new();
         let use_active_filter = !self.full_tree && !self.initial_pkgpaths.is_empty();
@@ -1538,7 +1421,10 @@ impl Scan {
             if let Some(reason) = &pkg.pkg_skip_reason {
                 if !reason.is_empty() {
                     info!(pkgname = %pkg.pkgname.pkgname(), %reason, "PKG_SKIP_REASON");
-                    skip_reasons.insert(pkg.pkgname.clone(), SkipReason::PkgSkip(reason.clone()));
+                    skip_reasons.insert(
+                        pkg.pkgname.clone(),
+                        PackageState::PreSkipped(reason.clone()),
+                    );
                 }
             }
 
@@ -1553,7 +1439,8 @@ impl Scan {
             if let Some(reason) = &pkg.pkg_fail_reason {
                 if !reason.is_empty() && !skip_reasons.contains_key(&pkg.pkgname) {
                     info!(pkgname = %pkg.pkgname.pkgname(), %reason, "PKG_FAIL_REASON");
-                    skip_reasons.insert(pkg.pkgname.clone(), SkipReason::PkgFail(reason.clone()));
+                    skip_reasons
+                        .insert(pkg.pkgname.clone(), PackageState::PreFailed(reason.clone()));
                 }
             }
 
@@ -1609,7 +1496,7 @@ impl Scan {
                             );
                             if !skip_reasons.contains_key(&pkg.pkgname) {
                                 skip_reasons
-                                    .insert(pkg.pkgname.clone(), SkipReason::PkgFail(reason));
+                                    .insert(pkg.pkgname.clone(), PackageState::PreFailed(reason));
                             }
                         }
                         Ok(Some(pkgname)) => {
@@ -1635,15 +1522,13 @@ impl Scan {
                                 pkg.pkgname.pkgname()
                             );
                             match skip_reasons.get_mut(&pkg.pkgname) {
-                                Some(SkipReason::UnresolvedDep(existing)) => {
-                                    existing.push('\n');
-                                    existing.push_str(&msg);
+                                Some(PackageState::Unresolved(detail)) => {
+                                    detail.push('\n');
+                                    detail.push_str(&msg);
                                 }
                                 None => {
-                                    skip_reasons.insert(
-                                        pkg.pkgname.clone(),
-                                        SkipReason::UnresolvedDep(msg),
-                                    );
+                                    skip_reasons
+                                        .insert(pkg.pkgname.clone(), PackageState::Unresolved(msg));
                                 }
                                 _ => {}
                             }
@@ -1675,9 +1560,9 @@ impl Scan {
             };
             let resolved_depends = depends.remove(&pkgname).unwrap_or_default();
             let result = match skip_reasons.remove(&pkgname) {
-                Some(reason) => ScanResult::Skipped {
+                Some(state) => ScanResult::Skipped {
                     pkgpath,
-                    reason,
+                    state,
                     index: Some(index),
                     resolved_depends,
                 },
@@ -1717,8 +1602,8 @@ impl Scan {
         let c = summary.counts();
         info!(
             buildable = c.buildable,
-            preskip = c.skipped.pkg_skip,
-            prefail = c.skipped.pkg_fail,
+            preskip = c.skipped.pre_skipped,
+            prefail = c.skipped.pre_failed,
             unresolved = c.skipped.unresolved,
             "Resolution complete"
         );

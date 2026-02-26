@@ -47,9 +47,9 @@
 //!
 //! Shows all successfully built packages with their build duration.
 
-use crate::build::{BuildOutcome, BuildResult, BuildSummary, PkgBuildStats};
+use crate::PackageState;
+use crate::build::{BuildResult, BuildSummary, PkgBuildStats};
 use crate::db::Database;
-use crate::scan::SkipReason;
 use anyhow::Result;
 use pkgsrc::PkgPath;
 use std::collections::HashMap;
@@ -100,7 +100,7 @@ pub fn write_html_report(db: &Database, logdir: &Path, path: &Path) -> Result<()
         results.push(BuildResult {
             pkgname: pkgsrc::PkgName::new(&pkgname),
             pkgpath: pkgpath.and_then(|p| pkgsrc::PkgPath::new(&p).ok()),
-            outcome: BuildOutcome::Skipped(SkipReason::PkgFail(reason)),
+            state: PackageState::PreFailed(reason),
             log_dir: None,
             build_stats: PkgBuildStats::default(),
         });
@@ -111,7 +111,7 @@ pub fn write_html_report(db: &Database, logdir: &Path, path: &Path) -> Result<()
         results.push(BuildResult {
             pkgname: pkgsrc::PkgName::new(&pkgname),
             pkgpath: pkgpath.and_then(|p| pkgsrc::PkgPath::new(&p).ok()),
-            outcome: BuildOutcome::Skipped(SkipReason::IndirectFailed(failed_dep)),
+            state: PackageState::IndirectFailed(failed_dep),
             log_dir: None,
             build_stats: PkgBuildStats::default(),
         });
@@ -144,7 +144,7 @@ fn write_report_impl(
     let mut skipped: Vec<&BuildResult> = summary
         .results
         .iter()
-        .filter(|r| matches!(r.outcome, BuildOutcome::UpToDate | BuildOutcome::Skipped(_)))
+        .filter(|r| matches!(r.state, PackageState::UpToDate) || r.state.is_skip())
         .collect();
 
     // Collect failed packages with additional info
@@ -433,11 +433,11 @@ fn write_summary_stats(file: &mut fs::File, summary: &BuildSummary) -> Result<()
     let c = summary.counts();
     let s = &c.skipped;
     let skipped_count = c.up_to_date
-        + s.pkg_skip
-        + s.pkg_fail
+        + s.pre_skipped
+        + s.pre_failed
         + s.unresolved
-        + s.indirect_preskip
-        + s.indirect_prefail
+        + s.indirect_pre_skipped
+        + s.indirect_pre_failed
         + s.indirect_unresolved
         + s.indirect_failed;
     writeln!(file, "<div class=\"summary\">")?;
@@ -617,10 +617,10 @@ fn write_skipped_section(file: &mut fs::File, skipped: &[&BuildResult]) -> Resul
         writeln!(file, "    <tbody>")?;
 
         for result in skipped {
-            let (status, reason) = match &result.outcome {
-                BuildOutcome::UpToDate => ("up-to-date", String::new()),
-                BuildOutcome::Skipped(r) => (r.status(), r.to_string()),
-                BuildOutcome::Success | BuildOutcome::Failed(_) => continue,
+            let (status, reason) = match &result.state {
+                PackageState::UpToDate => ("up-to-date", String::new()),
+                state if state.is_skip() => (state.status(), state.to_string()),
+                _ => continue,
             };
             let pkgpath = result
                 .pkgpath
