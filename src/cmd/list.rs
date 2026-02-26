@@ -656,6 +656,21 @@ fn format_duration_ms(ms: u64) -> String {
     }
 }
 
+fn format_size(bytes: u64) -> String {
+    const K: u64 = 1024;
+    const M: u64 = 1024 * 1024;
+    const G: u64 = 1024 * 1024 * 1024;
+    if bytes >= G {
+        format!("{:.1}G", bytes as f64 / G as f64)
+    } else if bytes >= M {
+        format!("{:.1}M", bytes as f64 / M as f64)
+    } else if bytes >= K {
+        format!("{:.1}K", bytes as f64 / K as f64)
+    } else {
+        format!("{}B", bytes)
+    }
+}
+
 fn print_history(
     db: &Database,
     columns: Option<&[String]>,
@@ -673,6 +688,7 @@ fn print_history(
         "total",
         "cpu-configure",
         "cpu-build",
+        "wrkdir",
     ];
     let all_cols: Vec<&str> = fixed_cols
         .iter()
@@ -747,6 +763,10 @@ fn print_history(
             .build_cpu_time
             .map(|d| format_duration_ms(d.as_millis() as u64))
             .unwrap_or_else(|| "-".to_string());
+        let wrkdir = rec
+            .wrkdir_size
+            .map(format_size)
+            .unwrap_or_else(|| "-".to_string());
 
         let mut row = vec![
             rec.timestamp.clone(),
@@ -759,6 +779,7 @@ fn print_history(
             total,
             cpu_configure,
             cpu_build,
+            wrkdir,
         ];
 
         for &s in Stage::VARIANTS {

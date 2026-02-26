@@ -464,6 +464,8 @@ pub struct PkgBuildStats {
     pub build_cpu_time: Option<Duration>,
     /// Per-stage durations for completed stages.
     pub stage_durations: Vec<(Stage, Duration)>,
+    /// WRKDIR size in bytes at end of build, before clean.
+    pub wrkdir_size: Option<u64>,
     /// Wall-clock duration for the entire build.
     pub total_duration: Duration,
     /// Unix epoch when the build started.
@@ -517,6 +519,7 @@ struct PkgBuilder<'a> {
     envs: Vec<(String, String)>,
     output_tx: Option<Sender<ChannelCommand>>,
     make_jobs: MakeJobs,
+    wrkdir: Option<PathBuf>,
 }
 
 impl<'a> PkgBuilder<'a> {
@@ -527,6 +530,7 @@ impl<'a> PkgBuilder<'a> {
         envs: Vec<(String, String)>,
         output_tx: Option<Sender<ChannelCommand>>,
         make_jobs: MakeJobs,
+        wrkdir: Option<PathBuf>,
     ) -> Self {
         let logdir = session
             .config
@@ -542,6 +546,7 @@ impl<'a> PkgBuilder<'a> {
             envs,
             output_tx,
             make_jobs,
+            wrkdir,
         }
     }
 
@@ -793,6 +798,14 @@ impl<'a> PkgBuilder<'a> {
             PathBuf::from(&pkgfile)
         };
         fs::copy(&host_pkgfile, &dest)?;
+
+        // Measure WRKDIR size before clean destroys it
+        if let Some(ref wrkdir) = self.wrkdir {
+            match fs_extra::dir::get_size(wrkdir) {
+                Ok(size) => stats.wrkdir_size = Some(size),
+                Err(e) => debug!(error = %e, "Failed to measure WRKDIR size"),
+            }
+        }
 
         // Clean
         let stage_start = Instant::now();
@@ -1493,6 +1506,7 @@ impl BuildResult {
             configure_cpu_time: self.build_stats.configure_cpu_time,
             build_cpu_time: self.build_stats.build_cpu_time,
             stage_durations: self.build_stats.stage_durations.clone(),
+            wrkdir_size: self.build_stats.wrkdir_size,
             total_duration: self.build_stats.total_duration,
             timestamp: self.build_stats.timestamp,
         })
@@ -1640,6 +1654,44 @@ impl<'a> MakeQuery<'a> {
         if value.is_empty() { None } else { Some(value) }
     }
 
+    /// Query multiple bmake variables in a single invocation.
+    fn vars(&self, names: &[&str]) -> HashMap<String, String> {
+        let pkgdir = self.session.config.pkgsrc().join(self.pkgpath.as_path());
+        let varnames_arg = names.join(" ");
+
+        let mut cmd = self
+            .session
+            .sandbox
+            .command(self.sandbox_id, self.session.config.make());
+        cmd.arg("-C")
+            .arg(&pkgdir)
+            .arg("show-vars")
+            .arg(format!("VARNAMES={}", varnames_arg));
+
+        for (key, value) in self.env {
+            cmd.env(key, value);
+        }
+
+        cmd.stderr(Stdio::null());
+
+        let output = match cmd.output() {
+            Ok(o) if o.status.success() => o,
+            _ => return HashMap::new(),
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+
+        let mut result = HashMap::new();
+        for (name, value) in names.iter().zip(&lines) {
+            let value = value.trim();
+            if !value.is_empty() {
+                result.insert(name.to_string(), value.to_string());
+            }
+        }
+        result
+    }
+
     /// Query a bmake variable and return as PathBuf.
     fn var_path(&self, name: &str) -> Option<PathBuf> {
         self.var(name).map(PathBuf::from)
@@ -1692,18 +1744,20 @@ impl PackageBuild {
 
         let patterns = self.session.config.save_wrkdir_patterns();
 
-        // Query MAKE_JOBS_SAFE and _MAKE_JOBS_N for this package
+        // Query MAKE_JOBS_SAFE, _MAKE_JOBS_N, and WRKDIR in one bmake call
         let make = MakeQuery::new(&self.session, self.sandbox_id, pkgpath, &pkg_env);
-        let make_jobs_safe = make
-            .var("MAKE_JOBS_SAFE")
+        let vars = make.vars(&["MAKE_JOBS_SAFE", "_MAKE_JOBS_N", "WRKDIR"]);
+        let make_jobs_safe = vars
+            .get("MAKE_JOBS_SAFE")
             .map(|v| !v.eq_ignore_ascii_case("no"))
             .unwrap_or(true);
         let make_jobs = if make_jobs_safe {
-            let n = make.var("_MAKE_JOBS_N").and_then(|v| v.parse().ok());
+            let n = vars.get("_MAKE_JOBS_N").and_then(|v| v.parse().ok());
             MakeJobs::Jobs(n.unwrap_or(1))
         } else {
             MakeJobs::NotSafe
         };
+        let wrkdir = vars.get("WRKDIR").map(|w| make.resolve_path(Path::new(w)));
 
         // Run pre-build script if defined (always runs)
         if !self.session.sandbox.run_pre_build(
@@ -1722,6 +1776,7 @@ impl PackageBuild {
             envs.clone(),
             Some(status_tx.clone()),
             make_jobs,
+            wrkdir.clone(),
         );
 
         let mut callback = ChannelCallback::new(self.sandbox_id, status_tx);
@@ -1730,25 +1785,33 @@ impl PackageBuild {
         // Clear stage display
         let _ = status_tx.send(ChannelCommand::StageUpdate(self.sandbox_id, None));
 
+        let measure_wrkdir = || -> Option<u64> {
+            let w = wrkdir.as_ref()?;
+            fs_extra::dir::get_size(w).ok()
+        };
+
         let result = match result {
             Ok(r @ PkgBuildResult::Success(_)) => {
                 info!("Package build completed successfully");
                 r
             }
-            Ok(r @ PkgBuildResult::Failed(_)) => {
+            Ok(PkgBuildResult::Failed(mut stats)) => {
                 error!("Package build failed");
+                stats.wrkdir_size = measure_wrkdir();
                 self.cleanup_after_failure(
                     status_tx, pkgname, pkgpath, logdir, patterns, &pkg_env, &envs,
                 );
-                r
+                PkgBuildResult::Failed(stats)
             }
             Err(e) => {
                 error!(error = %e, "Package build error");
+                let wrkdir_size = measure_wrkdir();
                 self.cleanup_after_failure(
                     status_tx, pkgname, pkgpath, logdir, patterns, &pkg_env, &envs,
                 );
                 PkgBuildResult::Failed(PkgBuildStats {
                     make_jobs,
+                    wrkdir_size,
                     ..PkgBuildStats::default()
                 })
             }

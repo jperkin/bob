@@ -65,7 +65,7 @@ const SCHEMA_VERSION: i32 = 9;
 /**
  * Schema version for history.db - update when history schema changes.
  */
-const HISTORY_SCHEMA_VERSION: i32 = 6;
+const HISTORY_SCHEMA_VERSION: i32 = 7;
 
 /**
  * Lightweight package row without full scan data.
@@ -149,6 +149,8 @@ pub struct HistoryInput {
     pub build_cpu_time: Option<Duration>,
     /// Per-stage durations.
     pub stage_durations: Vec<(Stage, Duration)>,
+    /// WRKDIR size in bytes at end of build, before clean.
+    pub wrkdir_size: Option<u64>,
     /// Wall-clock duration for the entire build.
     pub total_duration: Duration,
     /// Unix epoch when the build started.
@@ -171,6 +173,8 @@ pub struct HistoryRecord {
     pub build_cpu_time: Option<Duration>,
     /// Per-stage durations.
     pub stage_durations: Vec<(Stage, Duration)>,
+    /// WRKDIR size in bytes at end of build, before clean.
+    pub wrkdir_size: Option<u64>,
     pub total_duration: Duration,
     /// Pre-formatted local timestamp from SQLite's `datetime()`.
     pub timestamp: String,
@@ -1625,14 +1629,16 @@ impl Database {
         let build_ms = rec.build_duration.map(|d| d.as_millis() as i64);
         let configure_cpu_ms = rec.configure_cpu_time.map(|d| d.as_millis() as i64);
         let build_cpu_ms = rec.build_cpu_time.map(|d| d.as_millis() as i64);
+        let wrkdir_size = rec.wrkdir_size.map(|s| s as i64);
         let total_ms = rec.total_duration.as_millis() as i64;
         let stage = rec.stage.map(|s| s as i32);
         conn.execute(
             "INSERT INTO build_history \
                  (pkgpath, pkgname, outcome, make_jobs, stage, \
                   build_duration_ms, configure_cpu_time_ms, \
-                  build_cpu_time_ms, total_duration_ms, timestamp) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                  build_cpu_time_ms, wrkdir_size_bytes, \
+                  total_duration_ms, timestamp) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 rec.pkgpath,
                 rec.pkgname,
@@ -1642,6 +1648,7 @@ impl Database {
                 build_ms,
                 configure_cpu_ms,
                 build_cpu_ms,
+                wrkdir_size,
                 total_ms,
                 rec.timestamp,
             ],
@@ -1673,7 +1680,8 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, pkgpath, pkgname, outcome, make_jobs, stage, \
                     build_duration_ms, configure_cpu_time_ms, \
-                    build_cpu_time_ms, total_duration_ms, \
+                    build_cpu_time_ms, wrkdir_size_bytes, \
+                    total_duration_ms, \
                     datetime(timestamp, 'unixepoch', 'localtime') \
              FROM build_history ORDER BY timestamp DESC, id DESC",
         )?;
@@ -1681,7 +1689,8 @@ impl Database {
             let build_ms: Option<i64> = row.get(6)?;
             let configure_cpu_ms: Option<i64> = row.get(7)?;
             let build_cpu_ms: Option<i64> = row.get(8)?;
-            let total_ms: i64 = row.get(9)?;
+            let wrkdir_size: Option<i64> = row.get(9)?;
+            let total_ms: i64 = row.get(10)?;
             let outcome_id: i32 = row.get(3)?;
             let stage_id: Option<i32> = row.get(5)?;
             Ok((
@@ -1694,8 +1703,9 @@ impl Database {
                 build_ms,
                 configure_cpu_ms,
                 build_cpu_ms,
+                wrkdir_size,
                 total_ms,
-                row.get::<_, String>(10)?,
+                row.get::<_, String>(11)?,
             ))
         })?;
 
@@ -1712,6 +1722,7 @@ impl Database {
                 build_ms,
                 configure_cpu_ms,
                 build_cpu_ms,
+                wrkdir_size,
                 total_ms,
                 ts,
             ) = row?;
@@ -1738,6 +1749,7 @@ impl Database {
                 configure_cpu_time: configure_cpu_ms.map(|ms| Duration::from_millis(ms as u64)),
                 build_cpu_time: build_cpu_ms.map(|ms| Duration::from_millis(ms as u64)),
                 stage_durations: Vec::new(),
+                wrkdir_size: wrkdir_size.map(|s| s as u64),
                 total_duration: Duration::from_millis(total_ms as u64),
                 timestamp: ts,
             });
@@ -1849,6 +1861,7 @@ fn open_history_conn(dbdir: &Path) -> Result<Connection> {
                  build_duration_ms INTEGER,
                  configure_cpu_time_ms INTEGER,
                  build_cpu_time_ms INTEGER,
+                 wrkdir_size_bytes INTEGER,
                  total_duration_ms INTEGER NOT NULL,
                  timestamp INTEGER NOT NULL
              );
