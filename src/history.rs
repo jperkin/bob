@@ -285,4 +285,65 @@ impl History {
             HistoryKind::DiskUsage => self.disk_usage.map(format_size).unwrap_or_else(dash),
         }
     }
+
+    /**
+     * Format a column value as raw numeric output.
+     *
+     * Durations are output as milliseconds, sizes as bytes, and
+     * timestamps as epoch seconds.  All other columns are identical
+     * to [`format_col`](Self::format_col).
+     */
+    pub fn format_col_raw(&self, name: &str) -> String {
+        let fmt_dur = |d: Duration| d.as_millis().to_string();
+        let dash = || "-".to_string();
+
+        if let Some(stage_name) = name.strip_prefix(CPU_PREFIX) {
+            if let Some(stage) = Stage::VARIANTS.iter().find(|s| s.into_str() == stage_name) {
+                return self
+                    .stage_cpu_times
+                    .iter()
+                    .find(|(st, _)| st == stage)
+                    .map(|(_, d)| fmt_dur(*d))
+                    .unwrap_or_else(dash);
+            }
+        }
+
+        if let Some(stage) = Stage::VARIANTS.iter().find(|s| s.into_str() == name) {
+            return self
+                .stage_durations
+                .iter()
+                .find(|(st, _)| st == stage)
+                .map(|(_, d)| fmt_dur(*d))
+                .unwrap_or_else(dash);
+        }
+
+        let col = HistoryKind::VARIANTS
+            .iter()
+            .find(|c| <&str>::from(*c) == name)
+            .expect("column already validated");
+        match col {
+            HistoryKind::Timestamp => self.timestamp.to_string(),
+            HistoryKind::Pkgpath => self.pkgpath.clone(),
+            HistoryKind::Pkgname => self.pkgname.clone(),
+            HistoryKind::Outcome => self.outcome.status().to_string(),
+            HistoryKind::Stage => {
+                if self.outcome == PackageState::Success {
+                    dash()
+                } else {
+                    self.stage
+                        .map(|s| s.into_str().to_string())
+                        .unwrap_or_else(dash)
+                }
+            }
+            HistoryKind::MakeJobs => {
+                if self.make_jobs == 0 {
+                    dash()
+                } else {
+                    self.make_jobs.to_string()
+                }
+            }
+            HistoryKind::Duration => fmt_dur(self.duration),
+            HistoryKind::DiskUsage => self.disk_usage.map(|b| b.to_string()).unwrap_or_else(dash),
+        }
+    }
 }

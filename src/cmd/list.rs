@@ -46,6 +46,17 @@ pub enum TreeOutput {
     None,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum HistoryFormat {
+    /// Padded columns
+    #[default]
+    Table,
+    /// Comma-separated values
+    Csv,
+    /// JSON array of objects
+    Json,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum ListCmd {
     /// Show comprehensive package build status
@@ -130,6 +141,12 @@ Examples:
         /// Hide column headers
         #[arg(short = 'H')]
         no_header: bool,
+        /// Output raw numeric values (ms for durations, bytes for sizes)
+        #[arg(short = 'r', long)]
+        raw: bool,
+        /// Output format
+        #[arg(short = 'f', long, value_enum, default_value_t = HistoryFormat::Table)]
+        format: HistoryFormat,
         /// Columns to display (comma-separated, see --help for full list)
         #[arg(short = 'o', value_delimiter = ',')]
         columns: Option<Vec<String>>,
@@ -183,10 +200,19 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
         }
         ListCmd::History {
             no_header,
+            raw,
+            format,
             columns,
             package,
         } => {
-            print_history(db, columns.as_deref(), no_header, package.as_deref())?;
+            print_history(
+                db,
+                columns.as_deref(),
+                no_header,
+                raw,
+                format,
+                package.as_deref(),
+            )?;
         }
     }
 
@@ -643,6 +669,8 @@ fn print_history(
     db: &Database,
     columns: Option<&[String]>,
     no_header: bool,
+    raw: bool,
+    format: HistoryFormat,
     package: Option<&str>,
 ) -> Result<()> {
     let all_cols = bob::HistoryKind::all_names();
@@ -676,40 +704,89 @@ fn print_history(
         return Ok(());
     }
 
-    let mut rows: Vec<Vec<String>> = Vec::new();
-    for rec in &records {
-        rows.push(cols.iter().map(|&col| rec.format_col(col)).collect());
-    }
-
-    let widths: Vec<usize> = cols
-        .iter()
-        .enumerate()
-        .map(|(i, col)| {
-            let header_len = col.len();
-            let max_data = rows.iter().map(|r| r[i].len()).max().unwrap_or(0);
-            header_len.max(max_data)
-        })
-        .collect();
-
-    if !no_header {
-        let header: Vec<String> = cols
-            .iter()
-            .zip(&widths)
-            .map(|(&col, &w)| format!("{:<width$}", col.to_uppercase(), width = w))
-            .collect();
-        if !try_println(header.join("  ").trim_end()) {
-            return Ok(());
+    let format_val = |rec: &bob::History, col: &str| -> String {
+        if raw {
+            rec.format_col_raw(col)
+        } else {
+            rec.format_col(col)
         }
-    }
+    };
 
-    for row in &rows {
-        let values: Vec<String> = row
-            .iter()
-            .zip(&widths)
-            .map(|(val, &w)| format!("{:<width$}", val, width = w))
-            .collect();
-        if !try_println(values.join("  ").trim_end()) {
-            break;
+    match format {
+        HistoryFormat::Table => {
+            let rows: Vec<Vec<String>> = records
+                .iter()
+                .map(|rec| cols.iter().map(|&col| format_val(rec, col)).collect())
+                .collect();
+
+            let widths: Vec<usize> = cols
+                .iter()
+                .enumerate()
+                .map(|(i, col)| {
+                    let header_len = col.len();
+                    let max_data = rows.iter().map(|r| r[i].len()).max().unwrap_or(0);
+                    header_len.max(max_data)
+                })
+                .collect();
+
+            if !no_header {
+                let header: Vec<String> = cols
+                    .iter()
+                    .zip(&widths)
+                    .map(|(&col, &w)| format!("{:<width$}", col.to_uppercase(), width = w))
+                    .collect();
+                if !try_println(header.join("  ").trim_end()) {
+                    return Ok(());
+                }
+            }
+
+            for row in &rows {
+                let values: Vec<String> = row
+                    .iter()
+                    .zip(&widths)
+                    .map(|(val, &w)| format!("{:<width$}", val, width = w))
+                    .collect();
+                if !try_println(values.join("  ").trim_end()) {
+                    break;
+                }
+            }
+        }
+        HistoryFormat::Csv => {
+            if !no_header && !try_println(&cols.join(",")) {
+                return Ok(());
+            }
+            for rec in &records {
+                let values: Vec<String> = cols
+                    .iter()
+                    .map(|&col| {
+                        let v = format_val(rec, col);
+                        if v.contains(',') || v.contains('"') {
+                            format!("\"{}\"", v.replace('"', "\"\""))
+                        } else {
+                            v
+                        }
+                    })
+                    .collect();
+                if !try_println(&values.join(",")) {
+                    break;
+                }
+            }
+        }
+        HistoryFormat::Json => {
+            let array: Vec<serde_json::Map<String, serde_json::Value>> = records
+                .iter()
+                .map(|rec| {
+                    cols.iter()
+                        .map(|&col| {
+                            (
+                                col.to_string(),
+                                serde_json::Value::String(format_val(rec, col)),
+                            )
+                        })
+                        .collect()
+                })
+                .collect();
+            try_println(&serde_json::to_string_pretty(&array)?);
         }
     }
 
