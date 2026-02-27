@@ -47,7 +47,7 @@ pub enum TreeOutput {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
-pub enum HistoryFormat {
+pub enum OutputFormat {
     /// Padded columns
     #[default]
     Table,
@@ -91,6 +91,12 @@ Examples:
         /// Hide column headers
         #[arg(short = 'H')]
         no_header: bool,
+        /// Show all columns
+        #[arg(short = 'l', long)]
+        long: bool,
+        /// Output format
+        #[arg(short = 'f', long, value_enum, default_value_t = OutputFormat::Table)]
+        format: OutputFormat,
         /// Columns to display (comma-separated: pkgname,pkgpath,status,reason,multi_version)
         #[arg(short = 'o', value_delimiter = ',')]
         columns: Option<Vec<String>>,
@@ -148,8 +154,8 @@ Examples:
         #[arg(short = 'r', long)]
         raw: bool,
         /// Output format
-        #[arg(short = 'f', long, value_enum, default_value_t = HistoryFormat::Table)]
-        format: HistoryFormat,
+        #[arg(short = 'f', long, value_enum, default_value_t = OutputFormat::Table)]
+        format: OutputFormat,
         /// Columns to display (comma-separated, see --help for full list)
         #[arg(short = 'o', value_delimiter = ',')]
         columns: Option<Vec<String>>,
@@ -166,12 +172,23 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
     match cmd {
         ListCmd::Status {
             all,
+            no_header,
+            long,
+            format,
             statuses,
             columns,
-            no_header,
             packages,
         } => {
-            print_build_status(db, &statuses, columns.as_deref(), no_header, &packages, all)?;
+            print_build_status(
+                db,
+                &statuses,
+                columns.as_deref(),
+                no_header,
+                long,
+                format,
+                &packages,
+                all,
+            )?;
         }
         ListCmd::Tree {
             all,
@@ -499,19 +516,28 @@ fn print_build_tree(
  * most transitive dependents appear first. Supports filtering by status
  * and package name/path regex.
  */
+#[allow(clippy::too_many_arguments)]
 fn print_build_status(
     db: &Database,
     statuses: &[PackageStateKind],
     columns: Option<&[String]>,
     no_header: bool,
+    long: bool,
+    format: OutputFormat,
     pkg_filters: &[String],
     show_all: bool,
 ) -> Result<()> {
     let all_cols = ["pkgname", "pkgpath", "status", "reason", "multi_version"];
     let default_cols = ["pkgname", "status", "reason"];
-    let cols: Vec<&str> = columns
-        .map(|c| c.iter().map(|s| s.as_str()).collect())
-        .unwrap_or_else(|| default_cols.to_vec());
+    let cols: Vec<&str> = if columns.is_some() {
+        columns
+            .map(|c| c.iter().map(|s| s.as_str()).collect())
+            .unwrap_or_default()
+    } else if long {
+        all_cols.to_vec()
+    } else {
+        default_cols.to_vec()
+    };
 
     for col in &cols {
         if !all_cols.contains(col) {
@@ -640,35 +666,76 @@ fn print_build_status(
         }
     };
 
-    let widths: Vec<usize> = cols
-        .iter()
-        .map(|&col| {
-            let idx = col_idx(col);
-            let header_len = col.len();
-            let max_data = rows.iter().map(|r| r[idx].len()).max().unwrap_or(0);
-            header_len.max(max_data).min(max_width(col))
-        })
-        .collect();
+    match format {
+        OutputFormat::Table => {
+            let widths: Vec<usize> = cols
+                .iter()
+                .map(|&col| {
+                    let idx = col_idx(col);
+                    let header_len = col.len();
+                    let max_data = rows.iter().map(|r| r[idx].len()).max().unwrap_or(0);
+                    header_len.max(max_data).min(max_width(col))
+                })
+                .collect();
 
-    if !no_header {
-        let header: Vec<String> = cols
-            .iter()
-            .zip(&widths)
-            .map(|(&col, &w)| format!("{:<width$}", col.to_uppercase(), width = w))
-            .collect();
-        if !try_println(header.join("  ").trim_end()) {
-            return Ok(());
+            if !no_header {
+                let header: Vec<String> = cols
+                    .iter()
+                    .zip(&widths)
+                    .map(|(&col, &w)| format!("{:<width$}", col.to_uppercase(), width = w))
+                    .collect();
+                if !try_println(header.join("  ").trim_end()) {
+                    return Ok(());
+                }
+            }
+
+            for row in &rows {
+                let values: Vec<String> = cols
+                    .iter()
+                    .zip(&widths)
+                    .map(|(&col, &w)| format!("{:<width$}", row[col_idx(col)], width = w))
+                    .collect();
+                if !try_println(values.join("  ").trim_end()) {
+                    break;
+                }
+            }
         }
-    }
-
-    for row in &rows {
-        let values: Vec<String> = cols
-            .iter()
-            .zip(&widths)
-            .map(|(&col, &w)| format!("{:<width$}", row[col_idx(col)], width = w))
-            .collect();
-        if !try_println(values.join("  ").trim_end()) {
-            break;
+        OutputFormat::Csv => {
+            if !no_header && !try_println(&cols.join(",")) {
+                return Ok(());
+            }
+            for row in &rows {
+                let values: Vec<String> = cols
+                    .iter()
+                    .map(|&col| {
+                        let v = &row[col_idx(col)];
+                        if v.contains(',') || v.contains('"') {
+                            format!("\"{}\"", v.replace('"', "\"\""))
+                        } else {
+                            v.clone()
+                        }
+                    })
+                    .collect();
+                if !try_println(&values.join(",")) {
+                    break;
+                }
+            }
+        }
+        OutputFormat::Json => {
+            let array: Vec<serde_json::Map<String, serde_json::Value>> = rows
+                .iter()
+                .map(|row| {
+                    cols.iter()
+                        .map(|&col| {
+                            (
+                                col.to_string(),
+                                serde_json::Value::String(row[col_idx(col)].clone()),
+                            )
+                        })
+                        .collect()
+                })
+                .collect();
+            try_println(&serde_json::to_string_pretty(&array)?);
         }
     }
 
@@ -681,7 +748,7 @@ fn print_history(
     no_header: bool,
     long: bool,
     raw: bool,
-    format: HistoryFormat,
+    format: OutputFormat,
     package: Option<&str>,
 ) -> Result<()> {
     let all_cols = bob::HistoryKind::all_names();
@@ -730,7 +797,7 @@ fn print_history(
     };
 
     match format {
-        HistoryFormat::Table => {
+        OutputFormat::Table => {
             let rows: Vec<Vec<String>> = records
                 .iter()
                 .map(|rec| cols.iter().map(|&col| format_val(rec, col)).collect())
@@ -768,7 +835,7 @@ fn print_history(
                 }
             }
         }
-        HistoryFormat::Csv => {
+        OutputFormat::Csv => {
             if !no_header && !try_println(&cols.join(",")) {
                 return Ok(());
             }
@@ -789,7 +856,7 @@ fn print_history(
                 }
             }
         }
-        HistoryFormat::Json => {
+        OutputFormat::Json => {
             let array: Vec<serde_json::Map<String, serde_json::Value>> = records
                 .iter()
                 .map(|rec| {
