@@ -20,7 +20,6 @@ pub mod action;
 pub mod build;
 pub mod config;
 pub mod db;
-mod history;
 pub mod logging;
 pub mod report;
 pub mod sandbox;
@@ -29,6 +28,7 @@ pub mod scheduler;
 pub mod state;
 pub mod summary;
 
+mod history;
 mod init;
 mod pkgstate;
 mod tui;
@@ -123,7 +123,7 @@ pub use build::{
     Build, BuildCounts, BuildReason, BuildResult, BuildSummary, MakeJobs, PkgBuildStats, Stage,
     pkg_up_to_date,
 };
-pub use config::{Config, DynamicJobs, Options, Pkgsrc, PkgsrcEnv, Sandboxes};
+pub use config::{Config, Options, Pkgsrc, PkgsrcEnv, Sandboxes};
 pub use db::Database;
 pub use history::{History, HistoryKind};
 pub use init::Init;

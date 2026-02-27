@@ -47,7 +47,19 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::hash::Hash;
+use std::sync::mpsc::Sender;
 use std::task::Poll;
+
+/**
+ * One-shot channel for returning MAKE_JOBS from the manager to a worker.
+ */
+pub(crate) struct MakeJobsResponder(pub Sender<usize>);
+
+impl std::fmt::Debug for MakeJobsResponder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MakeJobsResponder")
+    }
+}
 
 /**
  * Sort key for ready packages: highest critical-path score first,
@@ -78,6 +90,23 @@ pub struct Scheduler<K: Ord> {
     done: HashSet<K>,
     failed: HashSet<K>,
     weights: HashMap<K, usize>,
+    budget: Option<Budget<K>>,
+}
+
+/**
+ * MAKE_JOBS budget tracking for the scheduler.
+ *
+ * Distributes a fixed CPU budget across concurrent builds using
+ * weight-proportional allocation with per-package history caps.
+ */
+struct Budget<K> {
+    max_jobs: usize,
+    build_threads: usize,
+    caps: HashMap<K, usize>,
+    budget_weights: HashMap<K, usize>,
+    locked: HashMap<K, usize>,
+    excluded: HashSet<K>,
+    reserved: usize,
 }
 
 impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
@@ -123,6 +152,7 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
             done,
             failed,
             weights,
+            budget: None,
         }
     }
 
@@ -267,6 +297,17 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
         self.weights.get(pkg).copied().unwrap_or(100)
     }
 
+    /**
+     * Peek at the ready set without consuming.
+     *
+     * Returns up to `n` packages from the ready set in priority order
+     * (highest critical-path score first).  Used by the MAKE_JOBS
+     * allocator to reserve cores for upcoming dispatches.
+     */
+    pub fn peek_ready(&self, n: usize) -> Vec<&K> {
+        self.ready.iter().take(n).map(|key| &key.pkg).collect()
+    }
+
     /** Number of packages waiting to be dispatched. */
     pub fn incoming_count(&self) -> usize {
         self.incoming.len()
@@ -285,6 +326,198 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
     /** Number of failed packages (direct and indirect). */
     pub fn failed_count(&self) -> usize {
         self.failed.len()
+    }
+
+    /**
+     * Initialize the MAKE_JOBS budget.
+     *
+     * `caps` maps packages to their historical parallelism cap
+     * (ceil(cpu_time / wall_time)).  Packages not in `caps` are
+     * uncapped (effective cap = max_jobs).
+     */
+    pub fn init_budget(&mut self, max_jobs: usize, build_threads: usize, caps: HashMap<K, usize>) {
+        self.budget = Some(Budget {
+            max_jobs,
+            build_threads,
+            caps,
+            budget_weights: HashMap::new(),
+            locked: HashMap::new(),
+            excluded: HashSet::new(),
+            reserved: 0,
+        });
+    }
+
+    /**
+     * Mark a running package as excluded from the MAKE_JOBS budget.
+     *
+     * Packages that are not MAKE_JOBS_SAFE always get -j1 and never
+     * call [`request_make_jobs`](Self::request_make_jobs).  Marking
+     * them as excluded prevents the budget from reserving a share
+     * for a worker that will never claim it.
+     */
+    pub fn exclude_from_budget(&mut self, pkg: &K) {
+        if let Some(ref mut budget) = self.budget {
+            budget.excluded.insert(pkg.clone());
+        }
+    }
+
+    /**
+     * Compute MAKE_JOBS allocation for a package entering a build phase.
+     *
+     * Returns `None` if the budget is not initialized.  The allocation
+     * uses weight-proportional distribution with imputation for workers
+     * not yet in the budget.
+     */
+    pub fn request_make_jobs(&mut self, pkg: &K) -> Option<usize> {
+        self.budget.as_ref()?;
+
+        let sole = self.is_sole_buildable(pkg);
+        let my_weight = self.remaining_depth(pkg).max(1);
+        let excluded_running = self
+            .budget
+            .as_ref()
+            .map(|b| {
+                self.running
+                    .iter()
+                    .filter(|p| b.excluded.contains(*p))
+                    .count()
+            })
+            .unwrap_or(0);
+        let running_plus_ready =
+            self.running.len().saturating_sub(excluded_running) + self.ready.len();
+
+        /*
+         * Look ahead at packages that are one completion away from
+         * being dispatched: their deps are all running or done.
+         * These will compete for budget soon, so include their weight
+         * in the denominator to prevent current workers from grabbing
+         * too much.  Exclude packages that depend on the requester
+         * (they are its dependents, not competitors).
+         */
+        let pending_weight: usize = self
+            .incoming
+            .iter()
+            .filter(|(p, deps)| {
+                !deps.is_empty()
+                    && !self.running.contains(*p)
+                    && !deps.contains(pkg)
+                    && deps
+                        .iter()
+                        .all(|d| self.running.contains(d) || self.done.contains(d))
+            })
+            .map(|(p, _)| self.remaining_depth(p).max(1))
+            .sum();
+
+        let budget = self.budget.as_mut()?;
+        let concurrent = running_plus_ready.min(budget.build_threads).max(1);
+
+        if sole {
+            let cap = budget
+                .caps
+                .get(pkg)
+                .copied()
+                .unwrap_or(budget.max_jobs)
+                .max(1);
+            let jobs = budget.max_jobs.min(cap);
+            budget.budget_weights.insert(pkg.clone(), 1);
+            budget.locked.insert(pkg.clone(), jobs);
+            return Some(jobs);
+        }
+
+        budget.budget_weights.insert(pkg.clone(), my_weight);
+
+        let total_known: usize = budget.budget_weights.values().sum();
+        let known_count = budget.budget_weights.len();
+
+        let estimated_total = if known_count > 0 {
+            total_known * concurrent / known_count
+        } else {
+            concurrent
+        };
+        let estimated_total = (estimated_total + pending_weight).max(1);
+
+        let excluded = budget.excluded.len();
+        let available = budget.max_jobs.saturating_sub(excluded);
+        let share = (available * my_weight).div_ceil(estimated_total);
+
+        let cap = budget
+            .caps
+            .get(pkg)
+            .copied()
+            .unwrap_or(budget.max_jobs)
+            .max(1);
+        let target = share.min(cap);
+
+        let active_threads = budget.build_threads.saturating_sub(excluded);
+        let extra = available.saturating_sub(active_threads);
+        let locked_extra: usize = budget.locked.values().map(|j| j.saturating_sub(1)).sum();
+        let extra_avail = extra
+            .saturating_sub(locked_extra)
+            .saturating_sub(budget.reserved);
+
+        /*
+         * Redistribute surplus from capped packages.  For each locked
+         * worker, compute how much of its proportional share it left
+         * on the table due to its cap.  Spread that surplus across
+         * uncapped (or higher-capped) workers proportionally.
+         */
+        let locked_waste: usize = budget
+            .locked
+            .keys()
+            .map(|k| {
+                let k_cap = budget
+                    .caps
+                    .get(k)
+                    .copied()
+                    .unwrap_or(budget.max_jobs)
+                    .max(1);
+                let k_weight = budget.budget_weights.get(k).copied().unwrap_or(1);
+                let k_share = (available * k_weight).div_ceil(estimated_total);
+                k_share.saturating_sub(k_cap)
+            })
+            .sum();
+        let headroom = cap.saturating_sub(target);
+        let absorb = locked_waste.min(headroom);
+        let jobs = 1 + extra_avail.min(target.saturating_sub(1) + absorb);
+
+        budget.locked.insert(pkg.clone(), jobs);
+        Some(jobs)
+    }
+
+    /**
+     * Release a package's MAKE_JOBS allocation.
+     */
+    pub fn release_make_jobs(&mut self, pkg: &K) {
+        if let Some(ref mut budget) = self.budget {
+            budget.locked.remove(pkg);
+            budget.budget_weights.remove(pkg);
+        }
+    }
+
+    /**
+     * Set the number of cores reserved for upcoming dispatches.
+     */
+    pub fn set_reserved(&mut self, reserved: usize) {
+        if let Some(ref mut budget) = self.budget {
+            budget.reserved = reserved;
+        }
+    }
+
+    /**
+     * Fair share estimate: max_jobs divided by running count.
+     *
+     * Used for reservation estimates when a package has no history.
+     */
+    pub fn fair_share(&self) -> usize {
+        let running = self.running.len().max(1);
+        match &self.budget {
+            Some(budget) => budget.max_jobs / running,
+            None => 1,
+        }
+    }
+
+    fn is_sole_buildable(&self, _pkg: &K) -> bool {
+        self.running.len() <= 1 && self.ready.is_empty()
     }
 }
 
@@ -785,5 +1018,428 @@ mod tests {
             0,
             "b is a leaf, score 0"
         );
+    }
+
+    /**
+     * Helper: build a scheduler with `n` independent packages (no deps).
+     * Optionally give each package a different weight.
+     */
+    fn independent_sched(names: &[&str], weight_vals: &[usize]) -> Scheduler<String> {
+        let mut incoming: HashMap<String, HashSet<String>> = HashMap::new();
+        let reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut weights: HashMap<String, usize> = HashMap::new();
+        for (i, &name) in names.iter().enumerate() {
+            incoming.insert(pkg(name), HashSet::new());
+            let w = weight_vals.get(i).copied().unwrap_or(100);
+            weights.insert(pkg(name), w);
+        }
+        Scheduler::new(
+            incoming,
+            reverse_deps,
+            weights,
+            HashSet::new(),
+            HashSet::new(),
+        )
+    }
+
+    /**
+     * Single build, nothing else pending: gets max_jobs.
+     *
+     * a -> b (b blocked on a).  Only a is ready.  After dispatching
+     * a, ready is empty and incoming has only the blocked b, so a is
+     * the sole buildable package.
+     */
+    #[test]
+    fn jobs_sole_buildable_gets_max() {
+        let edges = vec![("a", "b")];
+        let mut incoming: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut weights: HashMap<String, usize> = HashMap::new();
+        for &(dep, dependent) in &edges {
+            incoming.entry(pkg(dependent)).or_default().insert(pkg(dep));
+            incoming.entry(pkg(dep)).or_default();
+            reverse_deps
+                .entry(pkg(dep))
+                .or_default()
+                .insert(pkg(dependent));
+            reverse_deps.entry(pkg(dependent)).or_default();
+        }
+        weights.insert(pkg("a"), 100);
+        weights.insert(pkg("b"), 100);
+
+        let mut sched = Scheduler::new(
+            incoming,
+            reverse_deps,
+            weights,
+            HashSet::new(),
+            HashSet::new(),
+        );
+        sched.init_budget(16, 4, HashMap::new());
+
+        let Poll::Ready(Some(a)) = sched.poll() else {
+            panic!("a should be ready");
+        };
+        assert_eq!(sched.request_make_jobs(&a), Some(16));
+    }
+
+    /**
+     * Single build starts but others are pending in the ready set.
+     *
+     * Workers arrive one at a time (poll, request, poll, request).
+     * The first must not grab the whole budget -- it should get
+     * approximately max_jobs / build_threads even though it is the
+     * only one with a locked allocation at that point.
+     */
+    #[test]
+    fn jobs_staggered_arrival() {
+        let names = ["p0", "p1", "p2", "p3"];
+        let mut sched = independent_sched(&names, &[100, 100, 100, 100]);
+        sched.init_budget(16, 4, HashMap::new());
+
+        let mut allocs = Vec::new();
+        for _ in 0..4 {
+            let Poll::Ready(Some(p)) = sched.poll() else {
+                panic!("should be ready");
+            };
+            let j = sched.request_make_jobs(&p).expect("budget initialized");
+            allocs.push((p, j));
+        }
+
+        let fair = 16 / 4;
+        assert_eq!(allocs[0].1, fair, "first arrival should get fair share");
+
+        let total: usize = allocs.iter().map(|(_, j)| j).sum();
+        assert!(total <= 16, "sum {} exceeds max_jobs 16", total);
+
+        for (p, j) in &allocs {
+            assert!(*j >= 1, "allocation {} starves {}", j, p);
+        }
+    }
+
+    /**
+     * No history, equal weights: every package gets the same
+     * allocation and the total equals max_jobs exactly.
+     */
+    #[test]
+    fn jobs_equal_weight_equal_share() {
+        let names = ["p0", "p1", "p2", "p3"];
+        let mut sched = independent_sched(&names, &[100, 100, 100, 100]);
+        sched.init_budget(16, 4, HashMap::new());
+
+        let mut pkgs = Vec::new();
+        for _ in 0..4 {
+            let Poll::Ready(Some(p)) = sched.poll() else {
+                panic!("should be ready");
+            };
+            pkgs.push(p);
+        }
+
+        let mut allocs = Vec::new();
+        for p in &pkgs {
+            allocs.push(sched.request_make_jobs(p).expect("budget initialized"));
+        }
+
+        let expected = 16 / 4;
+        for (i, &j) in allocs.iter().enumerate() {
+            assert_eq!(
+                j, expected,
+                "package {} got {} (expected {})",
+                i, j, expected
+            );
+        }
+        assert_eq!(allocs.iter().sum::<usize>(), 16);
+    }
+
+    /**
+     * No history, different remaining depths: the package that
+     * unblocks the deepest chain of dependents gets strictly more
+     * cores than a leaf with nothing below it.
+     *
+     * Graph:
+     *   root -> d1 -> d2 -> d3   (remaining_depth(root) = 300)
+     *   leaf1, leaf2, leaf3       (remaining_depth = 0)
+     *
+     * All four are dispatched concurrently.  root should get the
+     * majority of the budget because building it faster unblocks
+     * the critical chain.
+     */
+    #[test]
+    fn jobs_weighted_allocation() {
+        let chain: Vec<(&str, &str)> = vec![("root", "d1"), ("d1", "d2"), ("d2", "d3")];
+        let mut incoming: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut weights: HashMap<String, usize> = HashMap::new();
+
+        for &(dep, dependent) in &chain {
+            incoming.entry(pkg(dependent)).or_default().insert(pkg(dep));
+            incoming.entry(pkg(dep)).or_default();
+            reverse_deps
+                .entry(pkg(dep))
+                .or_default()
+                .insert(pkg(dependent));
+            reverse_deps.entry(pkg(dependent)).or_default();
+            weights.insert(pkg(dep), 100);
+            weights.insert(pkg(dependent), 100);
+        }
+
+        for name in ["leaf1", "leaf2", "leaf3"] {
+            incoming.insert(pkg(name), HashSet::new());
+            weights.insert(pkg(name), 100);
+        }
+
+        let mut sched = Scheduler::new(
+            incoming,
+            reverse_deps,
+            weights,
+            HashSet::new(),
+            HashSet::new(),
+        );
+        sched.init_budget(16, 4, HashMap::new());
+
+        let mut dispatched = Vec::new();
+        for _ in 0..4 {
+            let Poll::Ready(Some(p)) = sched.poll() else {
+                panic!("should be ready");
+            };
+            dispatched.push(p);
+        }
+        assert!(dispatched.contains(&pkg("root")));
+
+        let mut allocs: HashMap<String, usize> = HashMap::new();
+        for p in &dispatched {
+            let j = sched.request_make_jobs(p).expect("budget initialized");
+            allocs.insert(p.clone(), j);
+        }
+
+        let root_jobs = allocs[&pkg("root")];
+        for name in ["leaf1", "leaf2", "leaf3"] {
+            if let Some(&leaf_jobs) = allocs.get(&pkg(name)) {
+                assert!(
+                    root_jobs > leaf_jobs,
+                    "root ({}) must be strictly > {} ({})",
+                    root_jobs,
+                    name,
+                    leaf_jobs
+                );
+            }
+        }
+        assert!(allocs.values().sum::<usize>() <= 16);
+    }
+
+    /**
+     * History caps: a package with cap=2 gets exactly 2 and its
+     * surplus is redistributed to the uncapped package.
+     *
+     * 2 packages, equal weight, max_jobs=16, build_threads=2.
+     * Without history both get 8.  With cap=2 on one: it gets 2,
+     * the other absorbs the surplus and gets 14.  Total = 16.
+     */
+    #[test]
+    fn jobs_history_redistributes_surplus() {
+        let names = ["capped", "uncapped"];
+        let mut sched = independent_sched(&names, &[100, 100]);
+        let mut caps = HashMap::new();
+        caps.insert(pkg("capped"), 2);
+        sched.init_budget(16, 2, caps);
+
+        let mut pkgs = Vec::new();
+        for _ in 0..2 {
+            let Poll::Ready(Some(p)) = sched.poll() else {
+                panic!("should be ready");
+            };
+            pkgs.push(p);
+        }
+
+        let mut allocs: HashMap<String, usize> = HashMap::new();
+        for p in &pkgs {
+            let j = sched.request_make_jobs(p).expect("budget initialized");
+            allocs.insert(p.clone(), j);
+        }
+
+        assert_eq!(allocs[&pkg("capped")], 2, "capped must not exceed cap");
+        assert_eq!(
+            allocs[&pkg("uncapped")],
+            14,
+            "uncapped should absorb surplus"
+        );
+        assert_eq!(allocs.values().sum::<usize>(), 16);
+    }
+
+    /**
+     * A critical package must not be starved by leaves.
+     *
+     * gate is MAKE_JOBS_SAFE=no so it never participates in the
+     * budget (no request/release).  3 leaves are independent and
+     * do request jobs.  critical is blocked on gate and has a deep
+     * chain of dependents (c1 -> c2 -> c3).
+     *
+     *   gate -----> critical -> c1 -> c2 -> c3
+     *   leaf1, leaf2, leaf3  (independent, no dependents)
+     *
+     * With build_threads=4 and max_jobs=16, the look-ahead sees
+     * that critical (remaining_depth=300) is one completion away
+     * from being dispatched.  This inflates the weight denominator,
+     * giving each leaf only 1 core instead of 4.  When gate
+     * finishes and critical takes its slot, the leaves are still
+     * building but critical gets the lion's share of the budget.
+     */
+    #[test]
+    fn jobs_reservation_for_critical_package() {
+        let edges: Vec<(&str, &str)> = vec![
+            ("gate", "critical"),
+            ("critical", "c1"),
+            ("c1", "c2"),
+            ("c2", "c3"),
+        ];
+        let mut incoming: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut weights: HashMap<String, usize> = HashMap::new();
+
+        for &(dep, dependent) in &edges {
+            incoming.entry(pkg(dependent)).or_default().insert(pkg(dep));
+            incoming.entry(pkg(dep)).or_default();
+            reverse_deps
+                .entry(pkg(dep))
+                .or_default()
+                .insert(pkg(dependent));
+            reverse_deps.entry(pkg(dependent)).or_default();
+        }
+        for name in ["gate", "critical", "c1", "c2", "c3"] {
+            weights.insert(pkg(name), 100);
+        }
+
+        for name in ["leaf1", "leaf2", "leaf3"] {
+            incoming.insert(pkg(name), HashSet::new());
+            weights.insert(pkg(name), 100);
+        }
+
+        let mut sched = Scheduler::new(
+            incoming,
+            reverse_deps,
+            weights,
+            HashSet::new(),
+            HashSet::new(),
+        );
+        sched.init_budget(16, 4, HashMap::new());
+
+        /*
+         * Dispatch gate + 3 leaves (all ready).
+         * critical is blocked waiting on gate.
+         */
+        let mut dispatched = Vec::new();
+        for _ in 0..4 {
+            let Poll::Ready(Some(p)) = sched.poll() else {
+                panic!("should be ready");
+            };
+            dispatched.push(p);
+        }
+        assert!(dispatched.contains(&pkg("gate")));
+
+        /*
+         * gate is MAKE_JOBS_SAFE=no: it never calls request_make_jobs.
+         * The 3 leaves request.  The look-ahead sees critical
+         * (remaining_depth=300) blocked only on gate (running), so
+         * pending_weight=300 inflates the denominator.  Each leaf
+         * gets 1 core: ceil(16 * 1 / 304) = 1.
+         */
+        let leaves: Vec<String> = dispatched
+            .iter()
+            .filter(|p| p.starts_with("leaf"))
+            .cloned()
+            .collect();
+        assert_eq!(leaves.len(), 3);
+
+        let mut leaf_allocs: Vec<usize> = Vec::new();
+        for p in &leaves {
+            let j = sched.request_make_jobs(p).expect("budget initialized");
+            assert_eq!(
+                j, 1,
+                "{} should get 1 core (look-ahead reserves for critical)",
+                p
+            );
+            leaf_allocs.push(j);
+        }
+        let leaf_total: usize = leaf_allocs.iter().sum();
+
+        /*
+         * gate completes, critical becomes ready and is dispatched.
+         * The 3 leaves are still building with their locked
+         * allocations -- they do NOT release.
+         */
+        sched.mark_success(&pkg("gate"));
+
+        let Poll::Ready(Some(crit)) = sched.poll() else {
+            panic!("critical should be ready after gate succeeds");
+        };
+        assert_eq!(crit, pkg("critical"));
+
+        /*
+         * critical requests.  Its pending dependents (c1..c3) all
+         * depend on critical itself, so they are excluded from the
+         * look-ahead.  pending_weight=0.  With weight 300 vs leaves
+         * at 1 each, critical gets almost the entire remaining budget.
+         */
+        let crit_jobs = sched.request_make_jobs(&crit).expect("budget initialized");
+        assert!(
+            crit_jobs > leaf_total,
+            "critical ({}) must get more than all leaves combined ({})",
+            crit_jobs,
+            leaf_total
+        );
+        assert_eq!(
+            leaf_total + crit_jobs,
+            16,
+            "leaves ({}) + critical ({}) should fill the budget exactly",
+            leaf_total,
+            crit_jobs
+        );
+    }
+
+    /**
+     * Excluded (unsafe) worker does not waste budget.
+     *
+     * 4 independent packages: 1 unsafe (MAKE_JOBS_SAFE=no) + 3 leaves.
+     * No other packages in the graph.  The unsafe worker gets -j1
+     * outside the budget.  The 3 leaves should split the remaining
+     * 15 cores equally (5 each) rather than getting only 4 each
+     * because the budget reserved a share for the unsafe worker.
+     */
+    #[test]
+    fn jobs_excluded_worker_frees_budget() {
+        let names = ["unsafe", "leaf1", "leaf2", "leaf3"];
+        let mut sched = independent_sched(&names, &[100, 100, 100, 100]);
+        sched.init_budget(16, 4, HashMap::new());
+
+        let mut dispatched = Vec::new();
+        for _ in 0..4 {
+            let Poll::Ready(Some(p)) = sched.poll() else {
+                panic!("should be ready");
+            };
+            dispatched.push(p);
+        }
+
+        sched.exclude_from_budget(&pkg("unsafe"));
+
+        let leaves: Vec<String> = dispatched
+            .iter()
+            .filter(|p| p.starts_with("leaf"))
+            .cloned()
+            .collect();
+        assert_eq!(leaves.len(), 3);
+
+        let mut allocs: Vec<usize> = Vec::new();
+        for p in &leaves {
+            let j = sched.request_make_jobs(p).expect("budget initialized");
+            allocs.push(j);
+        }
+
+        for (i, &j) in allocs.iter().enumerate() {
+            assert_eq!(
+                j, 5,
+                "leaf {} got {} (expected 5 = 15 available / 3 workers)",
+                i, j
+            );
+        }
+        assert_eq!(allocs.iter().sum::<usize>(), 15);
     }
 }

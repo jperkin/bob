@@ -1792,6 +1792,99 @@ impl Database {
         )?;
         Ok(result.map(|ms| Duration::from_millis(ms as u64)))
     }
+
+    /**
+     * Query MAKE_JOBS caps for packages from build history.
+     *
+     * Examines the last 5 successful builds per pkgpath.  For each
+     * build, computes `ratio = cpu_time / wall_time` and checks
+     * whether the package had headroom (ratio < 80% of its
+     * allocation).  A cap is applied only when at least 2 headroom
+     * observations are found and they are consistent (max/min <= 2).
+     * The cap is `ceil(max_ratio)`, clamped to at least 1.
+     *
+     * Returns pkgpath to cap.  Absent entries mean uncapped.
+     * Returns an empty map if the history database is unavailable.
+     */
+    pub fn effective_jobs(&self, pkgpaths: &[&str]) -> Result<HashMap<String, usize>> {
+        let conn = match self.history_conn() {
+            Ok(c) => c,
+            Err(_) => return Ok(HashMap::new()),
+        };
+
+        if pkgpaths.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let build_stage = Stage::Build as i32;
+        let success_outcome = PackageStateKind::Success as i32;
+        let out: &str = HistoryKind::Outcome.into();
+        let mj: &str = HistoryKind::MakeJobs.into();
+
+        let placeholders: String = (1..=pkgpaths.len())
+            .map(|i| format!("?{}", i))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let sql = format!(
+            "WITH recent AS ( \
+                 SELECT h.pkgpath, ct.duration AS cpu_ms, \
+                        wt.duration AS wall_ms, h.{mj} AS make_jobs, \
+                        ROW_NUMBER() OVER ( \
+                            PARTITION BY h.pkgpath ORDER BY h.id DESC \
+                        ) AS rn \
+                 FROM build_history h \
+                 JOIN cpu_times ct ON ct.history_id = h.id \
+                      AND ct.stage = {build_stage} \
+                 JOIN wall_times wt ON wt.history_id = h.id \
+                      AND wt.stage = {build_stage} \
+                 WHERE h.pkgpath IN ({placeholders}) \
+                   AND h.{out} = {success_outcome} \
+             ) \
+             SELECT pkgpath, cpu_ms, wall_ms, make_jobs \
+             FROM recent WHERE rn <= 5",
+        );
+
+        let params: Vec<Box<dyn rusqlite::ToSql>> = pkgpaths
+            .iter()
+            .map(|p| Box::new(p.to_string()) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| &**p).collect();
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, i64>(3)? as usize,
+            ))
+        })?;
+
+        let mut headroom: HashMap<String, Vec<f64>> = HashMap::new();
+        for row in rows {
+            let (pkgpath, cpu_ms, wall_ms, make_jobs) = row?;
+            if wall_ms > 0.0 {
+                let ratio = cpu_ms / wall_ms;
+                if ratio < make_jobs as f64 * 0.8 {
+                    headroom.entry(pkgpath).or_default().push(ratio);
+                }
+            }
+        }
+
+        let mut result = HashMap::new();
+        for (pkgpath, ratios) in &headroom {
+            if ratios.len() >= 2 {
+                let min = ratios.iter().copied().fold(f64::INFINITY, f64::min);
+                let max = ratios.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                if min > 0.0 && max / min <= 2.0 {
+                    result.insert(pkgpath.clone(), (max.ceil() as usize).max(1));
+                }
+            }
+        }
+
+        Ok(result)
+    }
 }
 
 /**
