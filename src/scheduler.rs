@@ -49,6 +49,7 @@ use std::fmt;
 use std::hash::Hash;
 use std::sync::mpsc::Sender;
 use std::task::Poll;
+use tracing::debug;
 
 /**
  * One-shot channel for returning MAKE_JOBS from the manager to a worker.
@@ -419,6 +420,11 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
                 .unwrap_or(budget.max_jobs)
                 .max(1);
             let jobs = budget.max_jobs.min(cap);
+            debug!(
+                %pkg, jobs, cap,
+                max_jobs = budget.max_jobs,
+                "make_jobs: sole buildable"
+            );
             budget.budget_weights.insert(pkg.clone(), 1);
             budget.locked.insert(pkg.clone(), jobs);
             return Some(jobs);
@@ -479,6 +485,20 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
         let headroom = cap.saturating_sub(target);
         let absorb = locked_waste.min(headroom);
         let jobs = 1 + extra_avail.min(target.saturating_sub(1) + absorb);
+
+        let locked_summary: Vec<String> = budget
+            .locked
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+        debug!(
+            %pkg, jobs, my_weight, concurrent, pending_weight,
+            estimated_total, share, cap, target,
+            available, extra, locked_extra, extra_avail,
+            locked_waste, absorb,
+            locked = %locked_summary.join(" "),
+            "make_jobs: allocated"
+        );
 
         budget.locked.insert(pkg.clone(), jobs);
         Some(jobs)
