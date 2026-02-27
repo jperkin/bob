@@ -495,6 +495,10 @@ struct SimConfig<'a> {
     /// regardless of the budget system.  Models the real-world
     /// "fixed MAKE_JOBS=N" behaviour.
     fixed_jobs: Option<usize>,
+    /// Packages whose configure phase benefits from parallelism.
+    /// Packages not in this set skip the MAKE_JOBS budget during
+    /// configure (assumed serial).
+    configure_parallel: HashSet<String>,
 }
 
 struct SimResult {
@@ -510,6 +514,9 @@ fn run_make_jobs_sim(
     unsafe_pkgs: &HashSet<String>,
     timings: Option<&HashMap<String, PkgTiming>>,
 ) -> SimResult {
+    let conf_par = timings
+        .map(|t| configure_parallel_from_history(t))
+        .unwrap_or_default();
     run_sim(&SimConfig {
         build_threads,
         max_jobs,
@@ -521,6 +528,7 @@ fn run_make_jobs_sim(
         verbose: graph.is_some(),
         min_utilization: 40.0,
         fixed_jobs: None,
+        configure_parallel: conf_par,
     })
 }
 
@@ -549,6 +557,7 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
     let build_threads = cfg.build_threads;
     let verbose = cfg.verbose;
     let fixed_jobs = cfg.fixed_jobs;
+    let configure_parallel = &cfg.configure_parallel;
 
     let phase_count = if timings.is_some() {
         PHASE_COUNT_TIMED
@@ -643,6 +652,13 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
      -> (usize, bool) {
         let dominated = unsafe_pkgs.contains(pkg);
         if is_parallel_phase(phase) && !dominated {
+            if timings.is_some()
+                && phase == PHASE_CONFIGURE
+                && fixed_jobs.is_none()
+                && !configure_parallel.contains(pkg)
+            {
+                return (1, false);
+            }
             if let Some(fj) = fixed_jobs {
                 (fj, false)
             } else {
@@ -902,6 +918,21 @@ fn caps_from_history(timings: &HashMap<String, PkgTiming>) -> HashMap<String, us
         .collect()
 }
 
+/**
+ * Identify packages whose configure phase is parallel from history.
+ * A package qualifies if `cpu_configure / configure > 1.5` and
+ * `history_jobs > 1` (was not budget-starved to -j1).
+ */
+fn configure_parallel_from_history(timings: &HashMap<String, PkgTiming>) -> HashSet<String> {
+    timings
+        .iter()
+        .filter(|(_, v)| {
+            v.configure_ms > 0 && v.history_jobs > 1 && v.cpu_configure_ms > v.configure_ms * 3 / 2
+        })
+        .map(|(k, _)| k.clone())
+        .collect()
+}
+
 fn fmt_time(ticks: u64) -> String {
     format!("{}m{:02}s", ticks / 60, ticks % 60)
 }
@@ -911,6 +942,7 @@ fn depgraph_make_jobs_mutt_verbose() {
     let g = load_depgraph_zst(MUTT_DEPGRAPH);
     let history = load_history(MUTT_HISTORY);
     let weights = weights_from_history(&history.timings);
+    let conf_par = configure_parallel_from_history(&history.timings);
     run_sim(&SimConfig {
         build_threads: 4,
         max_jobs: 16,
@@ -922,6 +954,7 @@ fn depgraph_make_jobs_mutt_verbose() {
         verbose: true,
         min_utilization: 0.0,
         fixed_jobs: None,
+        configure_parallel: conf_par,
     });
 }
 
@@ -935,6 +968,7 @@ fn depgraph_make_jobs_mutt_experiments() {
     let history = load_history(MUTT_HISTORY);
     let weights = weights_from_history(&history.timings);
     let caps = caps_from_history(&history.timings);
+    let conf_par = configure_parallel_from_history(&history.timings);
 
     eprintln!(
         "\n=== mutt build experiments ({} packages) ===",
@@ -1094,6 +1128,7 @@ fn depgraph_make_jobs_mutt_experiments() {
             verbose: false,
             min_utilization: 0.0,
             fixed_jobs: exp.fixed_jobs,
+            configure_parallel: conf_par.clone(),
         });
         if baseline_ticks == 0 {
             baseline_ticks = result.ticks;

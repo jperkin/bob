@@ -1888,6 +1888,105 @@ impl Database {
     }
 
     /**
+     * Identify packages whose configure phase benefits from parallelism.
+     *
+     * Queries cpu/wall time ratios for [`Stage::Configure`] from recent
+     * successful builds.  Only records where `make_jobs > 1` are
+     * considered -- a package allocated `-j1` under budget pressure will
+     * show a ~1.0 ratio regardless of whether configure is parallel.
+     *
+     * A package is deemed parallel if at least 2 qualifying records
+     * show `cpu / wall > 1.5`.  Packages not in the returned set are
+     * assumed serial and should skip the MAKE_JOBS budget during
+     * configure to free cores for other workers.
+     *
+     * Returns an empty set on error or if no history exists.
+     */
+    pub fn configure_parallel(&self, pkgs: &[(&str, &str)]) -> Result<HashSet<String>> {
+        let conn = match self.history_conn() {
+            Ok(c) => c,
+            Err(_) => return Ok(HashSet::new()),
+        };
+
+        if pkgs.is_empty() {
+            return Ok(HashSet::new());
+        }
+
+        let configure_stage = Stage::Configure as i32;
+        let success_outcome = PackageStateKind::Success as i32;
+        let out: &str = HistoryKind::Outcome.into();
+        let mj: &str = HistoryKind::MakeJobs.into();
+        let pkgname_col: &str = HistoryKind::Pkgname.into();
+
+        let mut conditions = Vec::with_capacity(pkgs.len());
+        for i in 0..pkgs.len() {
+            let p = i * 2 + 1;
+            conditions.push(format!(
+                "(h.pkgpath = ?{} AND h.{pkgname_col} LIKE ?{} || '-%')",
+                p,
+                p + 1
+            ));
+        }
+        let where_clause = conditions.join(" OR ");
+
+        let sql = format!(
+            "WITH recent AS ( \
+                 SELECT h.{pkgname_col}, ct.duration AS cpu_ms, \
+                        wt.duration AS wall_ms, \
+                        ROW_NUMBER() OVER ( \
+                            PARTITION BY h.pkgpath, h.{pkgname_col} \
+                            ORDER BY h.id DESC \
+                        ) AS rn \
+                 FROM build_history h \
+                 JOIN cpu_times ct ON ct.history_id = h.id \
+                      AND ct.stage = {configure_stage} \
+                 JOIN wall_times wt ON wt.history_id = h.id \
+                      AND wt.stage = {configure_stage} \
+                 WHERE ({where_clause}) \
+                   AND h.{out} = {success_outcome} \
+                   AND h.{mj} > 1 \
+             ) \
+             SELECT {pkgname_col}, cpu_ms, wall_ms \
+             FROM recent WHERE rn <= 5",
+        );
+
+        let params: Vec<Box<dyn rusqlite::ToSql>> = pkgs
+            .iter()
+            .flat_map(|(pkgpath, pkgbase)| {
+                vec![
+                    Box::new(pkgpath.to_string()) as Box<dyn rusqlite::ToSql>,
+                    Box::new(pkgbase.to_string()) as Box<dyn rusqlite::ToSql>,
+                ]
+            })
+            .collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| &**p).collect();
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+            ))
+        })?;
+
+        let mut parallel_hits: HashMap<String, usize> = HashMap::new();
+        for row in rows {
+            let (pkgname, cpu_ms, wall_ms) = row?;
+            if wall_ms > 0.0 && cpu_ms / wall_ms > 1.5 {
+                let pkgbase = PkgName::new(&pkgname).pkgbase().to_string();
+                *parallel_hits.entry(pkgbase).or_default() += 1;
+            }
+        }
+
+        Ok(parallel_hits
+            .into_iter()
+            .filter(|(_, count)| *count >= 2)
+            .map(|(pkgbase, _)| pkgbase)
+            .collect())
+    }
+
+    /**
      * Query the most recent successful build duration per package.
      *
      * Accepts `(pkgpath, pkgbase)` pairs to correctly handle
