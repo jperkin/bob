@@ -12,16 +12,24 @@ options = {
     log_level = "info",
 }
 
+--
 -- Scheduler settings for dynamic resource allocation.  The scheduler uses
--- build history to make informed decisions about CPU and disk allocation.
--- scheduler = {
---     jobs = 24,
---     wrkobjdir = {
---         tmpfs = "/tmp/build",
---         disk = "/home/build",
---         threshold = "2G",
---     },
--- }
+-- statistics from the history database, knowledge of upcoming builds, and
+-- package weight to make informed choices for what MAKE_JOBS and WRKOBJDIR
+-- should be set to for each package build.
+--
+-- On first builds with no history, conservative values are used.
+--
+--[[
+scheduler = {
+    jobs = 24,
+    wrkobjdir = {
+        tmpfs = "/tmp/build",
+        disk = "/home/build",
+        threshold = "2G",
+    },
+}
+]]
 
 -- Variables that configure pkgsrc, where it is, what packages to build, etc.
 pkgsrc = {
@@ -61,10 +69,6 @@ pkgsrc = {
     -- perform powerful matching against data from the scan to set variables
     -- on a per-package basis.  Ensure you set variables in mk.conf using ?=
     -- to allow these overrides to take effect.
-    --
-    -- WRKOBJDIR can be managed automatically via the scheduler.wrkobjdir
-    -- section above.  Setting WRKOBJDIR here overrides the scheduler for
-    -- that specific package.
     env = function(pkg)
         local env = {}
         return env
