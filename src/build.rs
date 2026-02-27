@@ -503,6 +503,7 @@ struct BuildSession {
     pkgsrc_env: PkgsrcEnv,
     sandbox: Sandbox,
     state: RunState,
+    wrkobjdir_map: HashMap<PkgName, PathBuf>,
 }
 
 /// Package builder that executes build stages.
@@ -1598,6 +1599,14 @@ impl PackageBuild {
             .config
             .script_env(Some(&self.session.pkgsrc_env));
 
+        // Inject scheduler-computed WRKOBJDIR unless the user's env
+        // function already set it (user overrides win).
+        if !pkg_env.contains_key("WRKOBJDIR") {
+            if let Some(wrkobjdir) = self.session.wrkobjdir_map.get(&self.pkginfo.index.pkgname) {
+                envs.push(("WRKOBJDIR".to_string(), wrkobjdir.display().to_string()));
+            }
+        }
+
         for (key, value) in &pkg_env {
             envs.push((key.clone(), value.clone()));
         }
@@ -2262,7 +2271,55 @@ impl Build {
             scheduler.init_budget(max_jobs, self.config.build_threads());
         }
 
-        let _wrkobjdir_map: HashMap<PkgName, PathBuf> = HashMap::new();
+        /*
+         * Build wrkobjdir map from historical disk usage.
+         *
+         * If scheduler.wrkobjdir is configured, look up each package's
+         * most recent disk usage and route large builds to disk.
+         * Packages with no history default to disk (safe choice
+         * since tmpfs is bounded and we cannot yet restart).
+         */
+        let wrkobjdir_map: HashMap<PkgName, PathBuf> = if let Some(w) = self.config.wrkobjdir() {
+            let usage = db.disk_usage_by_pkg(&pkg_refs);
+            debug!(
+                total_packages = pkg_pairs.len(),
+                history_entries = usage.len(),
+                threshold = w.threshold,
+                "WRKOBJDIR disk usage query results"
+            );
+            let mut map = HashMap::new();
+            let mut tmpfs_count = 0usize;
+            let mut disk_count = 0usize;
+            for (pkgname, idx) in &self.scanpkgs {
+                let pkgpath = idx.pkgpath.to_string();
+                let dir = match usage.get(pkgname.pkgbase()) {
+                    Some(&size) if size <= w.threshold => {
+                        debug!(%pkgname, %pkgpath, size, "wrkobjdir: tmpfs (under threshold)");
+                        tmpfs_count += 1;
+                        &w.tmpfs
+                    }
+                    Some(&size) => {
+                        debug!(%pkgname, %pkgpath, size, "wrkobjdir: disk (over threshold)");
+                        disk_count += 1;
+                        &w.disk
+                    }
+                    None => {
+                        debug!(%pkgname, %pkgpath, "wrkobjdir: disk (no history)");
+                        disk_count += 1;
+                        &w.disk
+                    }
+                };
+                map.insert(pkgname.clone(), dir.clone());
+            }
+            info!(
+                tmpfs = tmpfs_count,
+                disk = disk_count,
+                "WRKOBJDIR routing from build history"
+            );
+            map
+        } else {
+            HashMap::new()
+        };
 
         let logdir = self.config.logdir().clone();
         let jobs = BuildJobs {
@@ -2453,6 +2510,7 @@ impl Build {
             pkgsrc_env: self.pkgsrc_env.clone(),
             sandbox: self.scope.sandbox().clone(),
             state: state_flag.clone(),
+            wrkobjdir_map,
         });
         let progress_clone = Arc::clone(&progress);
         let state_for_manager = state_flag.clone();

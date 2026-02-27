@@ -14,14 +14,19 @@ options = {
 --
 -- Scheduler settings for dynamic resource allocation.  The scheduler uses
 -- statistics from the history database, knowledge of upcoming builds, and
--- package weight to make informed choices for what MAKE_JOBS should be set
--- to for each package build.
+-- package weight to make informed choices for what MAKE_JOBS and WRKOBJDIR
+-- should be set to for each package build.
 --
 -- On first builds with no history, conservative values are used.
 --
 --[[
 scheduler = {
     jobs = 24,
+    wrkobjdir = {
+        tmpfs = "/tmp/build",
+        disk = "/data/build",
+        threshold = "2G",
+    },
 }
 ]]
 
@@ -75,12 +80,6 @@ pkgsrc = {
     -- to allow these overrides to take effect.
     env = function(pkg)
         local env = {}
-        -- As an example, let's say your default WRKOBJDIR is tmpfs.  This will
-        -- override that to use a disk-backed location for any package written
-        -- in Go, as they often have much larger space requirements.
-        -- if pkg.scan_depends:match("/lang/go/") then
-        --     env.WRKOBJDIR = "/home/builder/build-disk"
-        -- end
         return env
     end,
 }
