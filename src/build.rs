@@ -807,7 +807,9 @@ impl<'a> PkgBuilder<'a> {
                     debug!(wrkdir = %wrkdir.display(), size, "Measured WRKDIR disk usage");
                     stats.disk_usage = Some(size);
                 }
-                Err(e) => debug!(wrkdir = %wrkdir.display(), error = %e, "Failed to measure disk usage"),
+                Err(e) => {
+                    debug!(wrkdir = %wrkdir.display(), error = %e, "Failed to measure disk usage")
+                }
             },
             None => debug!("No WRKDIR available for disk usage measurement"),
         }
