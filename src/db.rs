@@ -92,7 +92,7 @@ const SCHEMA_VERSION: i32 = 20260226;
 /**
  * Schema version for history.db - update when history schema changes.
  */
-const HISTORY_SCHEMA_VERSION: i32 = 20260226;
+const HISTORY_SCHEMA_VERSION: i32 = 20260227;
 
 /**
  * Lightweight package row without full scan data.
@@ -1771,28 +1771,6 @@ impl Database {
      * Return the average build-phase duration for a package, based on
      * successful builds only.
      */
-    pub fn avg_build_duration(&self, pkgpath: &str) -> Result<Option<Duration>> {
-        let conn = self.history_conn()?;
-        let out: &str = HistoryKind::Outcome.into();
-        let sql = format!(
-            "SELECT AVG(sd.duration) \
-             FROM wall_times sd \
-             JOIN build_history h ON h.id = sd.history_id \
-             WHERE h.pkgpath = ?1 AND h.{out} = ?2 \
-               AND sd.stage = ?3",
-        );
-        let result: Option<f64> = conn.query_row(
-            &sql,
-            params![
-                pkgpath,
-                PackageStateKind::Success as i32,
-                Stage::Build as i32,
-            ],
-            |row| row.get(0),
-        )?;
-        Ok(result.map(|ms| Duration::from_millis(ms as u64)))
-    }
-
     /**
      * Query MAKE_JOBS caps for packages from build history.
      *
@@ -2030,18 +2008,22 @@ fn open_history_conn(dbdir: &Path) -> Result<Connection> {
 
              CREATE INDEX idx_history_pkgpath
                  ON build_history(pkgpath);
+             CREATE INDEX idx_history_pkgpath_outcome
+                 ON build_history(pkgpath, outcome);
              CREATE INDEX idx_history_timestamp
                  ON build_history(timestamp);
 
              CREATE TABLE wall_times (
-                 history_id INTEGER NOT NULL REFERENCES build_history(id),
+                 history_id INTEGER NOT NULL
+                     REFERENCES build_history(id) ON DELETE CASCADE,
                  stage INTEGER NOT NULL REFERENCES stage_types(id),
                  duration INTEGER NOT NULL,
                  PRIMARY KEY (history_id, stage)
              );
 
              CREATE TABLE cpu_times (
-                 history_id INTEGER NOT NULL REFERENCES build_history(id),
+                 history_id INTEGER NOT NULL
+                     REFERENCES build_history(id) ON DELETE CASCADE,
                  stage INTEGER NOT NULL REFERENCES stage_types(id),
                  duration INTEGER NOT NULL,
                  PRIMARY KEY (history_id, stage)
