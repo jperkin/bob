@@ -123,7 +123,7 @@ pub use build::{
     Build, BuildCounts, BuildReason, BuildResult, BuildSummary, MakeJobs, PkgBuildStats, Stage,
     pkg_up_to_date,
 };
-pub use config::{Config, Options, Pkgsrc, PkgsrcEnv, Sandboxes};
+pub use config::{Config, Options, Pkgsrc, PkgsrcEnv, Sandboxes, SchedulerConfig, WrkObjDir};
 pub use db::Database;
 pub use history::{History, HistoryKind};
 pub use init::Init;

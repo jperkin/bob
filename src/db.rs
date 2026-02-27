@@ -1885,6 +1885,68 @@ impl Database {
 
         Ok(result)
     }
+
+    /// Query the most recent successful build's disk usage per pkgpath.
+    ///
+    /// Returns a map of pkgpath to disk usage in bytes.  Packages with
+    /// no recorded disk usage are omitted.  Returns an empty map on error.
+    pub fn disk_usage_by_pkgpath(&self, pkgpaths: &[&str]) -> HashMap<String, u64> {
+        let conn = match self.history_conn() {
+            Ok(c) => c,
+            Err(_) => return HashMap::new(),
+        };
+
+        if pkgpaths.is_empty() {
+            return HashMap::new();
+        }
+
+        let du: &str = HistoryKind::DiskUsage.into();
+        let out: &str = HistoryKind::Outcome.into();
+        let success_outcome = PackageStateKind::Success as i32;
+
+        let placeholders: String = (1..=pkgpaths.len())
+            .map(|i| format!("?{}", i))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let sql = format!(
+            "SELECT h.pkgpath, h.{du} \
+             FROM build_history h \
+             WHERE h.pkgpath IN ({placeholders}) \
+               AND h.{out} = {success_outcome} \
+               AND h.{du} IS NOT NULL \
+               AND h.id = ( \
+                   SELECT MAX(h2.id) FROM build_history h2 \
+                   WHERE h2.pkgpath = h.pkgpath \
+                     AND h2.{out} = {success_outcome} \
+                     AND h2.{du} IS NOT NULL \
+               )",
+        );
+
+        let params: Vec<Box<dyn rusqlite::ToSql>> = pkgpaths
+            .iter()
+            .map(|p| Box::new(p.to_string()) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| &**p).collect();
+
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => return HashMap::new(),
+        };
+        let rows = match stmt.query_map(param_refs.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        }) {
+            Ok(r) => r,
+            Err(_) => return HashMap::new(),
+        };
+
+        let mut result = HashMap::new();
+        for row in rows.flatten() {
+            let (pkgpath, size) = row;
+            result.insert(pkgpath, size as u64);
+        }
+        result
+    }
 }
 
 /**
