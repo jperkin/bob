@@ -1861,26 +1861,19 @@ impl Database {
             ))
         })?;
 
-        let mut headroom: HashMap<String, Vec<f64>> = HashMap::new();
+        let mut result = HashMap::new();
         for row in rows {
             let (pkgname, cpu_ms, wall_ms, make_jobs) = row?;
-            let pkgbase = PkgName::new(&pkgname).pkgbase().to_string();
-            if wall_ms > 0.0 {
-                let ratio = cpu_ms / wall_ms;
-                if ratio < make_jobs as f64 * 0.8 {
-                    headroom.entry(pkgbase).or_default().push(ratio);
-                }
+            if make_jobs <= 1 || wall_ms <= 0.0 {
+                continue;
             }
-        }
-
-        let mut result = HashMap::new();
-        for (pkgbase, ratios) in &headroom {
-            if ratios.len() >= 2 {
-                let min = ratios.iter().copied().fold(f64::INFINITY, f64::min);
-                let max = ratios.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                if min > 0.0 && max / min <= 2.0 {
-                    result.insert(pkgbase.clone(), (max.ceil() as usize).max(1));
-                }
+            let pkgbase = PkgName::new(&pkgname).pkgbase().to_string();
+            if result.contains_key(&pkgbase) {
+                continue;
+            }
+            let ratio = cpu_ms / wall_ms;
+            if ratio < make_jobs as f64 * 0.8 {
+                result.insert(pkgbase, (ratio.ceil() as usize).max(1));
             }
         }
 
@@ -1970,20 +1963,20 @@ impl Database {
             ))
         })?;
 
-        let mut parallel_hits: HashMap<String, usize> = HashMap::new();
+        let mut result = HashSet::new();
+        let mut seen = HashSet::new();
         for row in rows {
             let (pkgname, cpu_ms, wall_ms) = row?;
+            let pkgbase = PkgName::new(&pkgname).pkgbase().to_string();
+            if !seen.insert(pkgbase.clone()) {
+                continue;
+            }
             if wall_ms > 0.0 && cpu_ms / wall_ms > 1.5 {
-                let pkgbase = PkgName::new(&pkgname).pkgbase().to_string();
-                *parallel_hits.entry(pkgbase).or_default() += 1;
+                result.insert(pkgbase);
             }
         }
 
-        Ok(parallel_hits
-            .into_iter()
-            .filter(|(_, count)| *count >= 2)
-            .map(|(pkgbase, _)| pkgbase)
-            .collect())
+        Ok(result)
     }
 
     /**

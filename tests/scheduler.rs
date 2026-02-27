@@ -900,17 +900,21 @@ fn weights_from_history(timings: &HashMap<String, PkgTiming>) -> HashMap<String,
 
 /**
  * Derive per-package parallelism caps from CPU/wall ratio during
- * the build phase.  A package whose build uses 2x CPU vs wall
- * time is capped at 2 -- giving it more cores would be waste.
- * Minimum cap is 1.
+ * the build phase.  Only packages that demonstrably underutilize
+ * their allocated cores (ratio < 80% of make_jobs) get capped.
+ * Packages that scale well are left uncapped.
  */
 fn caps_from_history(timings: &HashMap<String, PkgTiming>) -> HashMap<String, usize> {
     timings
         .iter()
         .filter_map(|(k, v)| {
-            if v.build_ms > 0 {
-                let ratio = v.cpu_build_ms.div_ceil(v.build_ms).max(1) as usize;
-                Some((k.clone(), ratio))
+            if v.build_ms > 0 && v.history_jobs > 1 {
+                let ratio = v.cpu_build_ms as f64 / v.build_ms as f64;
+                if ratio < v.history_jobs as f64 * 0.8 {
+                    Some((k.clone(), (ratio.ceil() as usize).max(1)))
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -942,6 +946,7 @@ fn depgraph_make_jobs_mutt_verbose() {
     let g = load_depgraph_zst(MUTT_DEPGRAPH);
     let history = load_history(MUTT_HISTORY);
     let weights = weights_from_history(&history.timings);
+    let caps = caps_from_history(&history.timings);
     let conf_par = configure_parallel_from_history(&history.timings);
     run_sim(&SimConfig {
         build_threads: 4,
@@ -950,7 +955,7 @@ fn depgraph_make_jobs_mutt_verbose() {
         unsafe_pkgs: &history.unsafe_pkgs,
         timings: Some(&history.timings),
         weights,
-        caps: HashMap::new(),
+        caps,
         verbose: true,
         min_utilization: 0.0,
         fixed_jobs: None,
@@ -1015,14 +1020,14 @@ fn depgraph_make_jobs_mutt_experiments() {
             label: "dynamic 4 threads",
             threads: 4,
             use_weights: false,
-            use_caps: false,
+            use_caps: true,
             fixed_jobs: None,
         },
         Experiment {
             label: "dynamic 4 threads + weights",
             threads: 4,
             use_weights: true,
-            use_caps: false,
+            use_caps: true,
             fixed_jobs: None,
         },
     ];

@@ -370,21 +370,16 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
      * not yet in the budget.
      */
     pub fn request_make_jobs(&mut self, pkg: &K) -> Option<usize> {
-        self.budget.as_ref()?;
-
+        let budget = self.budget.as_ref()?;
         let sole = self.is_sole_buildable(pkg);
         let excluded_running = self
-            .budget
-            .as_ref()
-            .map(|b| {
-                self.running
-                    .iter()
-                    .filter(|p| b.excluded.contains(*p))
-                    .count()
-            })
-            .unwrap_or(0);
-        let running_plus_ready =
-            self.running.len().saturating_sub(excluded_running) + self.ready.len();
+            .running
+            .iter()
+            .filter(|p| budget.excluded.contains(*p))
+            .count();
+        let potential = self.running.len().saturating_sub(excluded_running);
+        let in_budget = budget.locked.len() + 1;
+        let running_plus_ready = potential.max(in_budget) + self.ready.len();
 
         /*
          * Look ahead at packages one completion away from dispatch:
@@ -425,15 +420,9 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
         let concurrent = running_plus_ready.min(budget.build_threads).max(1);
 
         if sole {
-            let cap = budget
-                .caps
-                .get(pkg)
-                .copied()
-                .unwrap_or(budget.max_jobs)
-                .max(1);
-            let jobs = budget.max_jobs.min(cap);
+            let jobs = budget.max_jobs;
             debug!(
-                %pkg, jobs, cap,
+                %pkg, jobs,
                 max_jobs = budget.max_jobs,
                 "make_jobs: sole buildable"
             );
