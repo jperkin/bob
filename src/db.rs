@@ -1784,13 +1784,22 @@ impl Database {
      * Returns pkgpath to cap.  Absent entries mean uncapped.
      * Returns an empty map if the history database is unavailable.
      */
-    pub fn effective_jobs(&self, pkgpaths: &[&str]) -> Result<HashMap<String, usize>> {
+    /**
+     * Query effective MAKE_JOBS caps from build history.
+     *
+     * Accepts `(pkgpath, pkgbase)` pairs to correctly handle
+     * MULTI_VERSION packages.  See [`duration_by_pkg`] for details.
+     *
+     * Returns pkgbase to cap.  Absent entries mean uncapped.
+     * Returns an empty map if the history database is unavailable.
+     */
+    pub fn effective_jobs(&self, pkgs: &[(&str, &str)]) -> Result<HashMap<String, usize>> {
         let conn = match self.history_conn() {
             Ok(c) => c,
             Err(_) => return Ok(HashMap::new()),
         };
 
-        if pkgpaths.is_empty() {
+        if pkgs.is_empty() {
             return Ok(HashMap::new());
         }
 
@@ -1798,34 +1807,47 @@ impl Database {
         let success_outcome = PackageStateKind::Success as i32;
         let out: &str = HistoryKind::Outcome.into();
         let mj: &str = HistoryKind::MakeJobs.into();
+        let pkgname_col: &str = HistoryKind::Pkgname.into();
 
-        let placeholders: String = (1..=pkgpaths.len())
-            .map(|i| format!("?{}", i))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let mut conditions = Vec::with_capacity(pkgs.len());
+        for i in 0..pkgs.len() {
+            let p = i * 2 + 1;
+            conditions.push(format!(
+                "(h.pkgpath = ?{} AND h.{pkgname_col} LIKE ?{} || '-%')",
+                p,
+                p + 1
+            ));
+        }
+        let where_clause = conditions.join(" OR ");
 
         let sql = format!(
             "WITH recent AS ( \
-                 SELECT h.pkgpath, ct.duration AS cpu_ms, \
+                 SELECT h.{pkgname_col}, ct.duration AS cpu_ms, \
                         wt.duration AS wall_ms, h.{mj} AS make_jobs, \
                         ROW_NUMBER() OVER ( \
-                            PARTITION BY h.pkgpath ORDER BY h.id DESC \
+                            PARTITION BY h.pkgpath, h.{pkgname_col} \
+                            ORDER BY h.id DESC \
                         ) AS rn \
                  FROM build_history h \
                  JOIN cpu_times ct ON ct.history_id = h.id \
                       AND ct.stage = {build_stage} \
                  JOIN wall_times wt ON wt.history_id = h.id \
                       AND wt.stage = {build_stage} \
-                 WHERE h.pkgpath IN ({placeholders}) \
+                 WHERE ({where_clause}) \
                    AND h.{out} = {success_outcome} \
              ) \
-             SELECT pkgpath, cpu_ms, wall_ms, make_jobs \
+             SELECT {pkgname_col}, cpu_ms, wall_ms, make_jobs \
              FROM recent WHERE rn <= 5",
         );
 
-        let params: Vec<Box<dyn rusqlite::ToSql>> = pkgpaths
+        let params: Vec<Box<dyn rusqlite::ToSql>> = pkgs
             .iter()
-            .map(|p| Box::new(p.to_string()) as Box<dyn rusqlite::ToSql>)
+            .flat_map(|(pkgpath, pkgbase)| {
+                vec![
+                    Box::new(pkgpath.to_string()) as Box<dyn rusqlite::ToSql>,
+                    Box::new(pkgbase.to_string()) as Box<dyn rusqlite::ToSql>,
+                ]
+            })
             .collect();
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| &**p).collect();
 
@@ -1841,22 +1863,23 @@ impl Database {
 
         let mut headroom: HashMap<String, Vec<f64>> = HashMap::new();
         for row in rows {
-            let (pkgpath, cpu_ms, wall_ms, make_jobs) = row?;
+            let (pkgname, cpu_ms, wall_ms, make_jobs) = row?;
+            let pkgbase = PkgName::new(&pkgname).pkgbase().to_string();
             if wall_ms > 0.0 {
                 let ratio = cpu_ms / wall_ms;
                 if ratio < make_jobs as f64 * 0.8 {
-                    headroom.entry(pkgpath).or_default().push(ratio);
+                    headroom.entry(pkgbase).or_default().push(ratio);
                 }
             }
         }
 
         let mut result = HashMap::new();
-        for (pkgpath, ratios) in &headroom {
+        for (pkgbase, ratios) in &headroom {
             if ratios.len() >= 2 {
                 let min = ratios.iter().copied().fold(f64::INFINITY, f64::min);
                 let max = ratios.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 if min > 0.0 && max / min <= 2.0 {
-                    result.insert(pkgpath.clone(), (max.ceil() as usize).max(1));
+                    result.insert(pkgbase.clone(), (max.ceil() as usize).max(1));
                 }
             }
         }
@@ -1864,56 +1887,174 @@ impl Database {
         Ok(result)
     }
 
-    /// Query the most recent successful build's disk usage per pkgpath.
-    ///
-    /// Returns a map of pkgpath to disk usage in bytes.  Packages with
-    /// no recorded disk usage are omitted.  Returns an empty map on error.
-    pub fn disk_usage_by_pkgpath(&self, pkgpaths: &[&str]) -> HashMap<String, u64> {
+    /**
+     * Query the most recent successful build duration per package.
+     *
+     * Accepts `(pkgpath, pkgbase)` pairs to correctly handle
+     * MULTI_VERSION packages where a single pkgpath produces multiple
+     * packages (e.g., py312-foo and py313-foo from devel/py-foo).
+     * Matching on pkgbase rather than full pkgname means version
+     * bumps still match (py313-foo-1.2 data used for py313-foo-1.3).
+     *
+     * Returns a map of pkgbase to duration in milliseconds.  Used as
+     * weights for critical-path scheduling: packages with longer
+     * build times get higher priority to start early.
+     *
+     * Returns an empty map on error or if no history exists.
+     */
+    pub fn duration_by_pkg(&self, pkgs: &[(&str, &str)]) -> HashMap<String, u64> {
         let conn = match self.history_conn() {
             Ok(c) => c,
             Err(e) => {
-                warn!(error = %e, "disk_usage_by_pkgpath: failed to open history db");
+                warn!(error = %e, "duration_by_pkg: failed to open history db");
                 return HashMap::new();
             }
         };
 
-        if pkgpaths.is_empty() {
+        if pkgs.is_empty() {
             return HashMap::new();
         }
 
-        let du: &str = HistoryKind::DiskUsage.into();
+        let dur: &str = HistoryKind::Duration.into();
         let out: &str = HistoryKind::Outcome.into();
+        let pkgname_col: &str = HistoryKind::Pkgname.into();
         let success_outcome = PackageStateKind::Success as i32;
 
-        let placeholders: String = (1..=pkgpaths.len())
-            .map(|i| format!("?{}", i))
-            .collect::<Vec<_>>()
-            .join(", ");
+        /*
+         * Each (pkgpath, pkgbase) pair needs two parameters: the
+         * pkgpath for exact match and the pkgbase as a LIKE prefix.
+         * We use LIKE pkgbase || '-%' to match any version.
+         */
+        let mut conditions = Vec::with_capacity(pkgs.len());
+        for i in 0..pkgs.len() {
+            let p = i * 2 + 1;
+            conditions.push(format!(
+                "(h.pkgpath = ?{} AND h.{pkgname_col} LIKE ?{} || '-%')",
+                p,
+                p + 1
+            ));
+        }
+        let where_clause = conditions.join(" OR ");
 
         let sql = format!(
-            "SELECT h.pkgpath, h.{du} \
-             FROM build_history h \
-             WHERE h.pkgpath IN ({placeholders}) \
-               AND h.{out} = {success_outcome} \
-               AND h.{du} IS NOT NULL \
-               AND h.id = ( \
-                   SELECT MAX(h2.id) FROM build_history h2 \
-                   WHERE h2.pkgpath = h.pkgpath \
-                     AND h2.{out} = {success_outcome} \
-                     AND h2.{du} IS NOT NULL \
-               )",
+            "WITH matched AS ( \
+                 SELECT h.pkgpath, h.{pkgname_col}, h.{dur}, \
+                        ROW_NUMBER() OVER ( \
+                            PARTITION BY h.pkgpath, h.{pkgname_col} \
+                            ORDER BY h.id DESC \
+                        ) AS rn \
+                 FROM build_history h \
+                 WHERE ({where_clause}) \
+                   AND h.{out} = {success_outcome} \
+             ) \
+             SELECT pkgpath, {pkgname_col}, {dur} FROM matched WHERE rn = 1",
         );
 
-        let params: Vec<Box<dyn rusqlite::ToSql>> = pkgpaths
+        let params: Vec<Box<dyn rusqlite::ToSql>> = pkgs
             .iter()
-            .map(|p| Box::new(p.to_string()) as Box<dyn rusqlite::ToSql>)
+            .flat_map(|(pkgpath, pkgbase)| {
+                vec![
+                    Box::new(pkgpath.to_string()) as Box<dyn rusqlite::ToSql>,
+                    Box::new(pkgbase.to_string()) as Box<dyn rusqlite::ToSql>,
+                ]
+            })
             .collect();
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| &**p).collect();
 
         let mut stmt = match conn.prepare(&sql) {
             Ok(s) => s,
             Err(e) => {
-                warn!(error = %e, "disk_usage_by_pkgpath: failed to prepare query");
+                warn!(error = %e, "duration_by_pkg: failed to prepare query");
+                return HashMap::new();
+            }
+        };
+        let rows = match stmt.query_map(param_refs.as_slice(), |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, "duration_by_pkg: query failed");
+                return HashMap::new();
+            }
+        };
+
+        let mut result = HashMap::new();
+        for row in rows.flatten() {
+            let (pkgname, ms) = row;
+            let pkgbase = PkgName::new(&pkgname).pkgbase().to_string();
+            result.insert(pkgbase, ms as u64);
+        }
+        result
+    }
+
+    /**
+     * Query the most recent successful build's disk usage per package.
+     *
+     * Accepts `(pkgpath, pkgbase)` pairs to correctly handle
+     * MULTI_VERSION packages.  See [`duration_by_pkg`] for details.
+     *
+     * Returns a map of pkgbase to disk usage in bytes.  Packages with
+     * no recorded disk usage are omitted.  Returns an empty map on error.
+     */
+    pub fn disk_usage_by_pkg(&self, pkgs: &[(&str, &str)]) -> HashMap<String, u64> {
+        let conn = match self.history_conn() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "disk_usage_by_pkg: failed to open history db");
+                return HashMap::new();
+            }
+        };
+
+        if pkgs.is_empty() {
+            return HashMap::new();
+        }
+
+        let du: &str = HistoryKind::DiskUsage.into();
+        let out: &str = HistoryKind::Outcome.into();
+        let pkgname_col: &str = HistoryKind::Pkgname.into();
+        let success_outcome = PackageStateKind::Success as i32;
+
+        let mut conditions = Vec::with_capacity(pkgs.len());
+        for i in 0..pkgs.len() {
+            let p = i * 2 + 1;
+            conditions.push(format!(
+                "(h.pkgpath = ?{} AND h.{pkgname_col} LIKE ?{} || '-%')",
+                p,
+                p + 1
+            ));
+        }
+        let where_clause = conditions.join(" OR ");
+
+        let sql = format!(
+            "WITH matched AS ( \
+                 SELECT h.{pkgname_col}, h.{du}, \
+                        ROW_NUMBER() OVER ( \
+                            PARTITION BY h.pkgpath, h.{pkgname_col} \
+                            ORDER BY h.id DESC \
+                        ) AS rn \
+                 FROM build_history h \
+                 WHERE ({where_clause}) \
+                   AND h.{out} = {success_outcome} \
+                   AND h.{du} IS NOT NULL \
+             ) \
+             SELECT {pkgname_col}, {du} FROM matched WHERE rn = 1",
+        );
+
+        let params: Vec<Box<dyn rusqlite::ToSql>> = pkgs
+            .iter()
+            .flat_map(|(pkgpath, pkgbase)| {
+                vec![
+                    Box::new(pkgpath.to_string()) as Box<dyn rusqlite::ToSql>,
+                    Box::new(pkgbase.to_string()) as Box<dyn rusqlite::ToSql>,
+                ]
+            })
+            .collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| &**p).collect();
+
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "disk_usage_by_pkg: failed to prepare query");
                 return HashMap::new();
             }
         };
@@ -1922,15 +2063,16 @@ impl Database {
         }) {
             Ok(r) => r,
             Err(e) => {
-                warn!(error = %e, "disk_usage_by_pkgpath: query failed");
+                warn!(error = %e, "disk_usage_by_pkg: query failed");
                 return HashMap::new();
             }
         };
 
         let mut result = HashMap::new();
         for row in rows.flatten() {
-            let (pkgpath, size) = row;
-            result.insert(pkgpath, size as u64);
+            let (pkgname, size) = row;
+            let pkgbase = PkgName::new(&pkgname).pkgbase().to_string();
+            result.insert(pkgbase, size as u64);
         }
         result
     }

@@ -2217,34 +2217,65 @@ impl Build {
         }
 
         /*
-         * Build per-package weight map for critical-path scheduling.
+         * Build (pkgpath, pkgbase) pairs for history queries.
+         *
+         * We key on both pkgpath and pkgbase to correctly handle
+         * MULTI_VERSION packages where a single pkgpath produces
+         * multiple packages (e.g., py312-foo and py313-foo from
+         * devel/py-foo).  Matching on pkgbase (not full pkgname)
+         * allows version bumps to still hit cached history data.
          */
+        let pkg_pairs: Vec<(String, String)> = self
+            .scanpkgs
+            .iter()
+            .map(|(pkgname, idx)| (idx.pkgpath.to_string(), pkgname.pkgbase().to_string()))
+            .collect();
+        let pkg_refs: Vec<(&str, &str)> = pkg_pairs
+            .iter()
+            .map(|(p, b)| (p.as_str(), b.as_str()))
+            .collect();
+
+        /*
+         * Build per-package weight map for critical-path scheduling.
+         *
+         * Historical build duration (in seconds) is the best predictor
+         * of how long a package will take, so prefer it over the static
+         * PBULK_WEIGHT.  Packages without history fall back to
+         * PBULK_WEIGHT, then to the default of 100.
+         */
+        let hist_durations = db.duration_by_pkg(&pkg_refs);
+
         let weights: HashMap<PkgName, usize> = incoming
             .keys()
             .map(|pkg| {
-                let w = self
-                    .scanpkgs
-                    .get(pkg)
-                    .and_then(|idx| idx.pbulk_weight())
-                    .and_then(|w| w.parse().ok())
+                let w = hist_durations
+                    .get(pkg.pkgbase())
+                    .map(|&ms| (ms / 1000).max(1) as usize)
+                    .or_else(|| {
+                        self.scanpkgs
+                            .get(pkg)
+                            .and_then(|idx| idx.pbulk_weight())
+                            .and_then(|w| w.parse().ok())
+                    })
                     .unwrap_or(100);
                 (pkg.clone(), w)
             })
             .collect();
+        if !hist_durations.is_empty() {
+            info!(
+                packages_with_history = hist_durations.len(),
+                total_packages = incoming.len(),
+                "Loaded build duration weights from history"
+            );
+        }
 
         let mut scheduler = Scheduler::new(incoming, reverse_deps, weights, done, failed);
 
         if let Some(max_jobs) = self.config.jobs() {
-            let pkgpath_strs: Vec<String> = self
-                .scanpkgs
-                .values()
-                .map(|idx| idx.pkgpath.to_string())
-                .collect();
-            let pkgpath_refs: Vec<&str> = pkgpath_strs.iter().map(|s| s.as_str()).collect();
-            let eff = db.effective_jobs(&pkgpath_refs).unwrap_or_default();
+            let eff = db.effective_jobs(&pkg_refs).unwrap_or_default();
             let mut caps = HashMap::new();
-            for (pkgname, idx) in &self.scanpkgs {
-                if let Some(&cap) = eff.get(&idx.pkgpath.to_string()) {
+            for (pkgname, _idx) in &self.scanpkgs {
+                if let Some(&cap) = eff.get(pkgname.pkgbase()) {
                     caps.insert(pkgname.clone(), cap);
                 }
             }
@@ -2266,15 +2297,9 @@ impl Build {
          * since tmpfs is bounded and we cannot yet restart).
          */
         let wrkobjdir_map: HashMap<PkgName, PathBuf> = if let Some(w) = self.config.wrkobjdir() {
-            let pkgpath_strs: Vec<String> = self
-                .scanpkgs
-                .values()
-                .map(|idx| idx.pkgpath.to_string())
-                .collect();
-            let pkgpath_refs: Vec<&str> = pkgpath_strs.iter().map(|s| s.as_str()).collect();
-            let usage = db.disk_usage_by_pkgpath(&pkgpath_refs);
+            let usage = db.disk_usage_by_pkg(&pkg_refs);
             debug!(
-                total_packages = pkgpath_strs.len(),
+                total_packages = pkg_pairs.len(),
                 history_entries = usage.len(),
                 threshold = w.threshold,
                 "WRKOBJDIR disk usage query results"
@@ -2284,7 +2309,7 @@ impl Build {
             let mut disk_count = 0usize;
             for (pkgname, idx) in &self.scanpkgs {
                 let pkgpath = idx.pkgpath.to_string();
-                let dir = match usage.get(&pkgpath) {
+                let dir = match usage.get(pkgname.pkgbase()) {
                     Some(&size) if size <= w.threshold => {
                         debug!(%pkgname, %pkgpath, size, "wrkobjdir: tmpfs (under threshold)");
                         tmpfs_count += 1;

@@ -373,7 +373,6 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
         self.budget.as_ref()?;
 
         let sole = self.is_sole_buildable(pkg);
-        let my_weight = self.remaining_depth(pkg).max(1);
         let excluded_running = self
             .budget
             .as_ref()
@@ -415,7 +414,7 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
                     .all(|d| self.running.contains(d) || self.done.contains(d))
             {
                 pending_count += 1;
-                let w = self.remaining_depth(p).max(1);
+                let w = self.weights.get(p).copied().unwrap_or(100);
                 if w > pending_weight {
                     pending_weight = w;
                 }
@@ -443,6 +442,14 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
             return Some(jobs);
         }
 
+        /*
+         * Use the package's own build weight (duration in seconds)
+         * for proportional budget allocation.  A package expected to
+         * build for 400s benefits proportionally more from extra
+         * cores than one that builds for 30s, because those cores
+         * are utilized for longer.
+         */
+        let my_weight = self.weights.get(pkg).copied().unwrap_or(100);
         budget.budget_weights.insert(pkg.clone(), my_weight);
 
         let total_known: usize = budget.budget_weights.values().sum();
@@ -453,14 +460,6 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
         } else {
             concurrent
         };
-        /*
-         * Only reserve for the pending package to the extent that it
-         * is more important than this one.  A critical-path package
-         * whose weight matches or exceeds the pending weight sees no
-         * reservation at all, so it gets a full proportional share.
-         * A leaf (weight 1) against a heavy pending package is
-         * strongly suppressed.
-         */
         let effective_pending = pending_weight.saturating_sub(my_weight);
         let estimated_total = (estimated_total + effective_pending).max(1);
 
@@ -474,12 +473,6 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
             .copied()
             .unwrap_or(budget.max_jobs)
             .max(1);
-        /*
-         * Guarantee a minimum allocation so that low-weight packages
-         * aren't starved to -j1 while cores sit idle.  When a
-         * package much more important than this one is about to
-         * arrive, the floor is halved to reserve budget for it.
-         */
         let fair_share = available / concurrent.max(1);
         let floor = if effective_pending > fair_share {
             fair_share.div_ceil(2)
@@ -488,13 +481,6 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
         };
         let target = share.max(floor).min(cap);
 
-        /*
-         * Estimate how many workers will compete for the budget.
-         * The pipeline (ready + pending) tells us how many more
-         * workers are about to start.  When the pipeline empties the
-         * estimate drops to the current concurrent count, giving the
-         * remaining workers a larger share of the budget.
-         */
         let pipeline = self.ready.len() + pending_count;
         let active_threads =
             (concurrent + pipeline).min(budget.build_threads.saturating_sub(excluded));
@@ -504,12 +490,6 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
             .saturating_sub(locked_extra)
             .saturating_sub(budget.reserved);
 
-        /*
-         * Redistribute surplus from capped packages.  For each locked
-         * worker, compute how much of its proportional share it left
-         * on the table due to its cap.  Spread that surplus across
-         * uncapped (or higher-capped) workers proportionally.
-         */
         let locked_waste: usize = budget
             .locked
             .keys()
@@ -1235,17 +1215,16 @@ mod tests {
     }
 
     /**
-     * No history, different remaining depths: the package that
-     * unblocks the deepest chain of dependents gets strictly more
-     * cores than a leaf with nothing below it.
+     * Higher-weight packages get more cores.
      *
      * Graph:
-     *   root -> d1 -> d2 -> d3   (remaining_depth(root) = 300)
-     *   leaf1, leaf2, leaf3       (remaining_depth = 0)
+     *   root (w=400) -> d1 -> d2 -> d3
+     *   leaf1 (w=50), leaf2 (w=50), leaf3 (w=50)
      *
      * All four are dispatched concurrently.  root should get the
-     * majority of the budget because building it faster unblocks
-     * the critical chain.
+     * majority of the budget because its higher weight means it
+     * will build for longer and therefore benefit more from extra
+     * cores.
      */
     #[test]
     fn jobs_weighted_allocation() {
@@ -1262,13 +1241,15 @@ mod tests {
                 .or_default()
                 .insert(pkg(dependent));
             reverse_deps.entry(pkg(dependent)).or_default();
-            weights.insert(pkg(dep), 100);
-            weights.insert(pkg(dependent), 100);
+        }
+        weights.insert(pkg("root"), 400);
+        for name in ["d1", "d2", "d3"] {
+            weights.insert(pkg(name), 100);
         }
 
         for name in ["leaf1", "leaf2", "leaf3"] {
             incoming.insert(pkg(name), HashSet::new());
-            weights.insert(pkg(name), 100);
+            weights.insert(pkg(name), 50);
         }
 
         let mut sched = Scheduler::new(
@@ -1350,23 +1331,23 @@ mod tests {
     }
 
     /**
-     * A critical package must not be starved by leaves.
+     * A high-weight pending package must not be starved by leaves.
      *
      * gate is MAKE_JOBS_SAFE=no so it never participates in the
      * budget (no request/release).  3 leaves are independent and
      * do request jobs.  critical is blocked on gate and has a deep
      * chain of dependents (c1 -> c2 -> c3).
      *
-     *   gate -----> critical -> c1 -> c2 -> c3
-     *   leaf1, leaf2, leaf3  (independent, no dependents)
+     *   gate (w=50) -> critical (w=400) -> c1 -> c2 -> c3
+     *   leaf1 (w=50), leaf2 (w=50), leaf3 (w=50)
      *
      * With build_threads=4 and max_jobs=16, the look-ahead sees
-     * that critical (remaining_depth=300) is one completion away
-     * from being dispatched.  This inflates the weight denominator,
-     * giving each leaf a reduced floor (half of fair_share) instead
-     * of a full fair_share.  When gate finishes and critical takes
-     * its slot, it gets the majority of the remaining budget --
-     * more than all leaves combined.
+     * that critical (w=400) is one completion away from being
+     * dispatched.  Its high weight inflates the denominator, giving
+     * each leaf a reduced floor (half of fair_share) instead of a
+     * full fair_share.  When gate finishes and critical takes its
+     * slot, it gets the majority of the remaining budget -- more
+     * than all leaves combined.
      */
     #[test]
     fn jobs_reservation_for_critical_package() {
@@ -1389,13 +1370,15 @@ mod tests {
                 .insert(pkg(dependent));
             reverse_deps.entry(pkg(dependent)).or_default();
         }
-        for name in ["gate", "critical", "c1", "c2", "c3"] {
+        weights.insert(pkg("gate"), 50);
+        weights.insert(pkg("critical"), 400);
+        for name in ["c1", "c2", "c3"] {
             weights.insert(pkg(name), 100);
         }
 
         for name in ["leaf1", "leaf2", "leaf3"] {
             incoming.insert(pkg(name), HashSet::new());
-            weights.insert(pkg(name), 100);
+            weights.insert(pkg(name), 50);
         }
 
         let mut sched = Scheduler::new(
@@ -1423,8 +1406,8 @@ mod tests {
         /*
          * gate is MAKE_JOBS_SAFE=no: it never calls request_make_jobs.
          * The 3 leaves request.  The look-ahead sees critical
-         * (remaining_depth=300) blocked only on gate (running), so
-         * pending_weight=300 inflates the denominator.  Each leaf
+         * (w=400) blocked only on gate (running), so
+         * pending_weight=400 inflates the denominator.  Each leaf
          * gets a reduced floor (half of fair_share) instead of a
          * full fair_share, reserving most of the budget for critical.
          */
@@ -1457,8 +1440,8 @@ mod tests {
         /*
          * critical requests.  Its pending dependents (c1..c3) all
          * depend on critical itself, so they are excluded from the
-         * look-ahead.  pending_weight=0.  With weight 300 vs leaves
-         * at 1 each, critical gets the majority of the remaining
+         * look-ahead.  pending_weight=0.  With weight 400 vs leaves
+         * at 50 each, critical gets the majority of the remaining
          * budget -- more than all leaves combined.
          */
         let crit_jobs = sched.request_make_jobs(&crit).expect("budget initialized");
