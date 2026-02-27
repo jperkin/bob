@@ -801,11 +801,15 @@ impl<'a> PkgBuilder<'a> {
         fs::copy(&host_pkgfile, &dest)?;
 
         // Measure disk usage before clean destroys WRKDIR
-        if let Some(ref wrkdir) = self.wrkdir {
-            match fs_extra::dir::get_size(wrkdir) {
-                Ok(size) => stats.disk_usage = Some(size),
-                Err(e) => debug!(error = %e, "Failed to measure disk usage"),
-            }
+        match self.wrkdir {
+            Some(ref wrkdir) => match fs_extra::dir::get_size(wrkdir) {
+                Ok(size) => {
+                    debug!(wrkdir = %wrkdir.display(), size, "Measured WRKDIR disk usage");
+                    stats.disk_usage = Some(size);
+                }
+                Err(e) => debug!(wrkdir = %wrkdir.display(), error = %e, "Failed to measure disk usage"),
+            },
+            None => debug!("No WRKDIR available for disk usage measurement"),
         }
 
         // Clean
@@ -2267,16 +2271,30 @@ impl Build {
                 .collect();
             let pkgpath_refs: Vec<&str> = pkgpath_strs.iter().map(|s| s.as_str()).collect();
             let usage = db.disk_usage_by_pkgpath(&pkgpath_refs);
+            debug!(
+                total_packages = pkgpath_strs.len(),
+                history_entries = usage.len(),
+                threshold = w.threshold,
+                "WRKOBJDIR disk usage query results"
+            );
             let mut map = HashMap::new();
             let mut tmpfs_count = 0usize;
             let mut disk_count = 0usize;
             for (pkgname, idx) in &self.scanpkgs {
-                let dir = match usage.get(&idx.pkgpath.to_string()) {
+                let pkgpath = idx.pkgpath.to_string();
+                let dir = match usage.get(&pkgpath) {
                     Some(&size) if size <= w.threshold => {
+                        debug!(%pkgname, %pkgpath, size, "wrkobjdir: tmpfs (under threshold)");
                         tmpfs_count += 1;
                         &w.tmpfs
                     }
-                    _ => {
+                    Some(&size) => {
+                        debug!(%pkgname, %pkgpath, size, "wrkobjdir: disk (over threshold)");
+                        disk_count += 1;
+                        &w.disk
+                    }
+                    None => {
+                        debug!(%pkgname, %pkgpath, "wrkobjdir: disk (no history)");
                         disk_count += 1;
                         &w.disk
                     }

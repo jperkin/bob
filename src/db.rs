@@ -1871,7 +1871,10 @@ impl Database {
     pub fn disk_usage_by_pkgpath(&self, pkgpaths: &[&str]) -> HashMap<String, u64> {
         let conn = match self.history_conn() {
             Ok(c) => c,
-            Err(_) => return HashMap::new(),
+            Err(e) => {
+                warn!(error = %e, "disk_usage_by_pkgpath: failed to open history db");
+                return HashMap::new();
+            }
         };
 
         if pkgpaths.is_empty() {
@@ -1909,13 +1912,19 @@ impl Database {
 
         let mut stmt = match conn.prepare(&sql) {
             Ok(s) => s,
-            Err(_) => return HashMap::new(),
+            Err(e) => {
+                warn!(error = %e, "disk_usage_by_pkgpath: failed to prepare query");
+                return HashMap::new();
+            }
         };
         let rows = match stmt.query_map(param_refs.as_slice(), |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         }) {
             Ok(r) => r,
-            Err(_) => return HashMap::new(),
+            Err(e) => {
+                warn!(error = %e, "disk_usage_by_pkgpath: query failed");
+                return HashMap::new();
+            }
         };
 
         let mut result = HashMap::new();
