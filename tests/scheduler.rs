@@ -505,6 +505,8 @@ struct SimResult {
     ticks: u64,
     utilization: f64,
     completed: usize,
+    peak_cores: usize,
+    overcommit_ticks: u64,
 }
 
 fn run_make_jobs_sim(
@@ -576,6 +578,8 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
     let mut total_job_ticks: u64 = 0;
     let mut total_ticks: u64 = 0;
     let mut histogram: Vec<u64> = vec![0; max_jobs + 1];
+    let mut peak_cores: usize = 0;
+    let mut overcommit_ticks: u64 = 0;
     let mut completed = 0usize;
     let mut max_active = 0usize;
 
@@ -754,6 +758,12 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
         histogram[used.min(max_jobs)] += 1;
         total_job_ticks += used as u64;
         total_ticks += 1;
+        if used > peak_cores {
+            peak_cores = used;
+        }
+        if used > 16 {
+            overcommit_ticks += 1;
+        }
 
         let mut finished_phase: Vec<String> = Vec::new();
         for (pkg, a) in active.iter_mut() {
@@ -835,6 +845,8 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
         ticks: total_ticks,
         utilization,
         completed,
+        peak_cores,
+        overcommit_ticks,
     }
 }
 
@@ -981,14 +993,15 @@ fn depgraph_make_jobs_mutt_experiments() {
     );
     eprintln!("Actual build time: 70m23s (4 workers x MAKE_JOBS=4)\n");
     eprintln!(
-        "{:<55} {:>8} {:>8} {:>6}",
-        "Configuration", "Wall", "vs base", "Util%"
+        "{:<55} {:>8} {:>8} {:>6} {:>5} {:>6}",
+        "Configuration", "Wall", "vs base", "Util%", "Peak", ">16"
     );
-    eprintln!("{}", "-".repeat(81));
+    eprintln!("{}", "-".repeat(95));
 
     struct Experiment {
         label: &'static str,
         threads: usize,
+        max_jobs: usize,
         use_weights: bool,
         use_caps: bool,
         fixed_jobs: Option<usize>,
@@ -998,36 +1011,73 @@ fn depgraph_make_jobs_mutt_experiments() {
         Experiment {
             label: "ACTUAL: fixed 4 workers x MAKE_JOBS=4",
             threads: 4,
+            max_jobs: 16,
             use_weights: false,
             use_caps: false,
             fixed_jobs: Some(4),
         },
         Experiment {
-            label: "fixed 4 workers x MAKE_JOBS=8",
+            label: "dynamic 4 threads + weights",
             threads: 4,
-            use_weights: false,
-            use_caps: false,
-            fixed_jobs: Some(8),
-        },
-        Experiment {
-            label: "fixed 4 workers x MAKE_JOBS=16",
-            threads: 4,
-            use_weights: false,
-            use_caps: false,
-            fixed_jobs: Some(16),
-        },
-        Experiment {
-            label: "dynamic 4 threads",
-            threads: 4,
-            use_weights: false,
+            max_jobs: 16,
+            use_weights: true,
             use_caps: true,
             fixed_jobs: None,
         },
         Experiment {
-            label: "dynamic 4 threads + weights",
+            label: "dynamic + weights, 1.25x overcommit (20)",
             threads: 4,
+            max_jobs: 20,
             use_weights: true,
             use_caps: true,
+            fixed_jobs: None,
+        },
+        Experiment {
+            label: "dynamic + weights, 1.5x overcommit (24)",
+            threads: 4,
+            max_jobs: 24,
+            use_weights: true,
+            use_caps: true,
+            fixed_jobs: None,
+        },
+        Experiment {
+            label: "dynamic + weights, 2x overcommit (32)",
+            threads: 4,
+            max_jobs: 32,
+            use_weights: true,
+            use_caps: true,
+            fixed_jobs: None,
+        },
+        Experiment {
+            label: "dynamic + weights, 3x overcommit (48)",
+            threads: 4,
+            max_jobs: 48,
+            use_weights: true,
+            use_caps: true,
+            fixed_jobs: None,
+        },
+        Experiment {
+            label: "dynamic + weights, no caps @16",
+            threads: 4,
+            max_jobs: 16,
+            use_weights: true,
+            use_caps: false,
+            fixed_jobs: None,
+        },
+        Experiment {
+            label: "dynamic + weights, no caps, 1.5x overcommit (24)",
+            threads: 4,
+            max_jobs: 24,
+            use_weights: true,
+            use_caps: false,
+            fixed_jobs: None,
+        },
+        Experiment {
+            label: "dynamic + weights, no caps, 2x overcommit (32)",
+            threads: 4,
+            max_jobs: 32,
+            use_weights: true,
+            use_caps: false,
             fixed_jobs: None,
         },
     ];
@@ -1116,7 +1166,7 @@ fn depgraph_make_jobs_mutt_experiments() {
     for exp in &experiments {
         let result = run_sim(&SimConfig {
             build_threads: exp.threads,
-            max_jobs: 16,
+            max_jobs: exp.max_jobs,
             graph: Some(&g),
             unsafe_pkgs: &history.unsafe_pkgs,
             timings: Some(&history.timings),
@@ -1146,12 +1196,19 @@ fn depgraph_make_jobs_mutt_experiments() {
         } else {
             format!("{}s", diff)
         };
+        let oc_str = if result.overcommit_ticks > 0 {
+            format!("{:>5}s", result.overcommit_ticks)
+        } else {
+            "    -".to_string()
+        };
         eprintln!(
-            "{:<55} {:>8} {:>8} {:>5.1}%",
+            "{:<55} {:>8} {:>8} {:>5.1}% {:>5} {}",
             exp.label,
             fmt_time(result.ticks),
             diff_str,
-            result.utilization
+            result.utilization,
+            result.peak_cores,
+            oc_str,
         );
     }
     eprintln!();

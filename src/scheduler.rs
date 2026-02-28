@@ -362,6 +362,116 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
         }
     }
 
+    /*
+     * MAKE_JOBS Budget Allocation -- Design Notes
+     * ============================================
+     *
+     * Problem: N build threads share a pool of max_jobs CPU cores.
+     * Each thread runs one package at a time through serial phases
+     * (overhead, configure) and parallel phases (build).  When a
+     * package enters a parallel phase it calls request_make_jobs()
+     * to learn how many cores to use; when it leaves the phase it
+     * calls release_make_jobs() to return them.  Packages that are
+     * not MAKE_JOBS_SAFE are excluded and always run -j1.
+     *
+     * The algorithm maintains these hard invariants (verified by
+     * unit tests):
+     *
+     *   1. Sum of all allocations <= max_jobs
+     *   2. No allocation exceeds the package's scaling cap
+     *   3. Equal-weight packages get equal shares
+     *   4. Higher-weight packages get strictly more cores
+     *
+     * These invariants make the algorithm predictable: a user
+     * watching the build can understand why each package got the
+     * jobs count it did.
+     *
+     * The core formula is weight-proportional allocation with
+     * cap clamping and waste redistribution (locked_waste/absorb).
+     * Imputation scales known weights to estimate competition from
+     * packages not yet in the budget.
+     *
+     *
+     * Overcommit strategy
+     * -------------------
+     *
+     * Rather than complicating the allocation formula to squeeze
+     * more throughput from a fixed core budget, the recommended
+     * approach is overcommit: set max_jobs higher than physical
+     * cores (e.g., 1.5x-2x).  This works because:
+     *
+     * - Build threads spend significant time in serial phases
+     *   (overhead, configure) where they use exactly 1 core.
+     *   Overcommit lets the parallel phases of other packages
+     *   use those notionally-reserved cores.
+     *
+     * - Scaling caps derived from history (cpu/wall ratio) limit
+     *   poorly-scaling packages.  With a larger virtual pool,
+     *   well-scaling packages can claim more cores without the
+     *   cap being the binding constraint, while the cap still
+     *   prevents waste on packages that cannot use the cores.
+     *
+     * - The invariants hold with any max_jobs value, so the
+     *   algorithm remains simple and predictable.
+     *
+     * Simulation results (71-package mutt build, 4 threads,
+     * 16 physical cores, actual build 70m23s, critical-path
+     * minimum 52m44s):
+     *
+     *   max_jobs=16:  60m25s  (no overcommit)
+     *   max_jobs=20:  59m19s  (1.25x)
+     *   max_jobs=24:  58m30s  (1.5x)
+     *   max_jobs=32:  57m14s  (2x)
+     *
+     *
+     * Experiments tried and rejected
+     * ------------------------------
+     *
+     * The following algorithm changes were tested against the mutt
+     * simulation.  All of them either broke the hard invariants or
+     * produced worse results.  Overcommit at max_jobs=32 achieved
+     * the same throughput (57m14s) while preserving all invariants.
+     *
+     * - Passive/dead-end worker classification: Discounting
+     *   workers in serial phases or those whose completion would
+     *   not unblock new work.  Helped modestly (59m46s at 16
+     *   cores) but added complexity and interacted poorly with
+     *   other changes.
+     *
+     * - Real ready-queue weights (instead of imputation): Using
+     *   actual weights of ready packages rather than scaling known
+     *   weights.  Improved results (58m23s) because imputation
+     *   inflated estimated_total when ready packages were much
+     *   lighter than active builders.  However, this complicated
+     *   the estimated_total calculation and was subsumed by the
+     *   surplus bonus (which it was a prerequisite for).
+     *
+     * - Two-tier surplus bonus: After computing the capped target,
+     *   distributing leftover cores proportional to weight.  Best
+     *   single-algorithm result (57m28s at 16 cores) but violated
+     *   invariants 1 and 2 -- allocations could exceed both the
+     *   cap and max_jobs.  Simple overcommit to 32 cores achieved
+     *   57m14s while keeping all invariants intact.
+     *
+     * - Subtracting passive cores from available: Shrunk the pool,
+     *   starving budget participants.  Result: 60m55s.
+     *
+     * - Using in_budget as concurrent (ignoring ready queue):
+     *   First builders over-allocated.  Result: 61m20s.
+     *
+     * - Giving ALL surplus to requester: First builder locked
+     *   everything.  Result: 62m33s.
+     *
+     * - Halving effective_pending: Current builders over-allocated,
+     *   starving the heavy arrival.  Result: 60m28s.
+     *
+     * - Removing caps entirely: Poorly-scaling packages grabbed
+     *   cores better used by well-scaling ones.  Result: 58m01s
+     *   at 16 cores.  (Notably, no-caps + overcommit does very
+     *   well in simulation -- 55m59s at 24 cores -- but caps
+     *   serve a purpose under real contention with many threads.)
+     */
+
     /**
      * Compute MAKE_JOBS allocation for a package entering a build phase.
      *
