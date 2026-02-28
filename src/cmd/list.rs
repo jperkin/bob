@@ -16,12 +16,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
+use std::str::FromStr;
 
 use anyhow::{Result, bail};
 use clap::Subcommand;
 use crossterm::terminal;
 use regex::Regex;
 use serde_json;
+use strum::{EnumCount, EnumProperty, VariantArray};
 
 use bob::db::{Database, PackageStatusRow};
 use bob::try_println;
@@ -57,33 +59,68 @@ pub enum OutputFormat {
     Json,
 }
 
+/// Columns available in `bob list status` output.
+///
+/// Variant order determines the column index in each row array.
+/// Properties drive default selection and maximum display width.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    strum::EnumCount,
+    strum::EnumProperty,
+    strum::EnumString,
+    strum::IntoStaticStr,
+    strum::VariantArray,
+)]
+#[strum(serialize_all = "snake_case")]
+#[repr(usize)]
+enum StatusColumn {
+    #[strum(props(default = "true", max_width = "40"))]
+    Pkgname = 0,
+    #[strum(props(max_width = "35"))]
+    Pkgpath = 1,
+    #[strum(props(default = "true"))]
+    Status = 2,
+    #[strum(props(default = "true"))]
+    Reason = 3,
+    MultiVersion = 4,
+}
+
+impl StatusColumn {
+    /// Maximum display width for table output, or `usize::MAX` if uncapped.
+    fn max_width(self) -> usize {
+        self.get_str("max_width")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(usize::MAX)
+    }
+
+    /// Whether this column is shown by default.
+    fn is_default(self) -> bool {
+        self.get_str("default").is_some()
+    }
+
+    /// All valid column names, joined for error messages.
+    fn all_names_joined() -> String {
+        Self::VARIANTS
+            .iter()
+            .map(<&str>::from)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// True if any of the given column names include `multi_version`.
+    fn need_multi(cols: &[StatusColumn]) -> bool {
+        cols.contains(&StatusColumn::MultiVersion)
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum ListCmd {
     /// Show comprehensive package build status
-    #[command(after_long_help = "\
-Status values:
-  pending              Ready to build
-  success              Built successfully
-  up-to-date           Binary already exists
-  failed               Build attempted and failed
-  preskipped           PKG_SKIP_REASON set
-  prefailed            PKG_FAIL_REASON set
-  unresolved           Has unresolved dependencies
-  indirect-failed      Blocked by package that failed to build
-  indirect-preskipped  Blocked by preskipped package
-  indirect-prefailed   Blocked by prefailed package
-  indirect-unresolved  Blocked by package with unresolved dependencies
-
-Examples:
-  bob list status                           Show pending/failed packages
-  bob list status -a                        Show all packages
-  bob list status -s preskipped,prefailed   Show all pre-* packages
-  bob list status py-                       Show packages matching 'py-'
-  bob list status flim glib2 mutt           Show multiple package matches
-  bob list status -s failed -o pkgpath      Show failed with pkgpath column
-  bob list status -Ho pkgpath -s pending    Show all pending pkgpath builds
-  bob list status -o pkgpath,multi_version  Show MULTI_VERSION flags
-")]
+    #[command(after_long_help = PackageStateKind::status_help())]
     Status {
         /// Show all packages including success and up-to-date
         #[arg(short, long)]
@@ -527,34 +564,27 @@ fn print_build_status(
     pkg_filters: &[String],
     show_all: bool,
 ) -> Result<()> {
-    let all_cols = ["pkgname", "pkgpath", "status", "reason", "multi_version"];
-    let default_cols = ["pkgname", "status", "reason"];
-    let cols: Vec<&str> = if columns.is_some() {
-        columns
-            .map(|c| c.iter().map(|s| s.as_str()).collect())
-            .unwrap_or_default()
+    let cols: Vec<StatusColumn> = if let Some(user_cols) = columns {
+        user_cols
+            .iter()
+            .map(|s| {
+                StatusColumn::from_str(s).map_err(|_| {
+                    anyhow::anyhow!(
+                        "Unknown column '{}'. Valid columns: {}",
+                        s,
+                        StatusColumn::all_names_joined()
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
     } else if long {
-        all_cols.to_vec()
+        StatusColumn::VARIANTS.to_vec()
     } else {
-        default_cols.to_vec()
-    };
-
-    for col in &cols {
-        if !all_cols.contains(col) {
-            bail!(
-                "Unknown column '{}'. Valid columns: {}",
-                col,
-                all_cols.join(", ")
-            );
-        }
-    }
-
-    let max_width = |col: &str| -> usize {
-        match col {
-            "pkgname" => 40,
-            "pkgpath" => 35,
-            _ => usize::MAX,
-        }
+        StatusColumn::VARIANTS
+            .iter()
+            .filter(|c| c.is_default())
+            .copied()
+            .collect()
     };
 
     let pkg_patterns: Vec<Regex> = pkg_filters
@@ -562,8 +592,7 @@ fn print_build_status(
         .map(|p| Regex::new(p).map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", p, e)))
         .collect::<Result<Vec<_>>>()?;
 
-    let need_multi = cols.contains(&"multi_version");
-    let all_pkgs = db.get_all_package_status(need_multi)?;
+    let all_pkgs = db.get_all_package_status(StatusColumn::need_multi(&cols))?;
     let id_to_pkg: HashMap<i64, &PackageStatusRow> = all_pkgs.iter().map(|p| (p.id, p)).collect();
 
     let dep_ids = db.get_resolved_dep_ids()?;
@@ -611,7 +640,7 @@ fn print_build_status(
         status != success && status != up_to_date
     };
 
-    let mut rows: Vec<[String; 5]> = Vec::new();
+    let mut rows: Vec<[String; StatusColumn::COUNT]> = Vec::new();
     for id in &sorted_ids {
         let pkg = match id_to_pkg.get(id) {
             Some(p) => p,
@@ -639,13 +668,13 @@ fn print_build_status(
             .map(|v| v.join(" "))
             .unwrap_or_default();
 
-        rows.push([
-            pkg.pkgname.clone(),
-            pkg.pkgpath.clone(),
-            status.to_string(),
-            reason,
-            multi_version,
-        ]);
+        let mut row = std::array::from_fn(|_| String::new());
+        row[StatusColumn::Pkgname as usize] = pkg.pkgname.clone();
+        row[StatusColumn::Pkgpath as usize] = pkg.pkgpath.clone();
+        row[StatusColumn::Status as usize] = status.to_string();
+        row[StatusColumn::Reason as usize] = reason;
+        row[StatusColumn::MultiVersion as usize] = multi_version;
+        rows.push(row);
     }
 
     if rows.is_empty() {
@@ -655,26 +684,16 @@ fn print_build_status(
         return Ok(());
     }
 
-    let col_idx = |name: &str| -> usize {
-        match name {
-            "pkgname" => 0,
-            "pkgpath" => 1,
-            "status" => 2,
-            "reason" => 3,
-            "multi_version" => 4,
-            _ => 0,
-        }
-    };
-
     match format {
         OutputFormat::Table => {
             let widths: Vec<usize> = cols
                 .iter()
                 .map(|&col| {
-                    let idx = col_idx(col);
-                    let header_len = col.len();
+                    let idx = col as usize;
+                    let name: &str = col.into();
+                    let header_len = name.len();
                     let max_data = rows.iter().map(|r| r[idx].len()).max().unwrap_or(0);
-                    header_len.max(max_data).min(max_width(col))
+                    header_len.max(max_data).min(col.max_width())
                 })
                 .collect();
 
@@ -682,7 +701,10 @@ fn print_build_status(
                 let header: Vec<String> = cols
                     .iter()
                     .zip(&widths)
-                    .map(|(&col, &w)| format!("{:<width$}", col.to_uppercase(), width = w))
+                    .map(|(&col, &w)| {
+                        let name: &str = col.into();
+                        format!("{:<width$}", name.to_uppercase(), width = w)
+                    })
                     .collect();
                 if !try_println(header.join("  ").trim_end()) {
                     return Ok(());
@@ -693,7 +715,7 @@ fn print_build_status(
                 let values: Vec<String> = cols
                     .iter()
                     .zip(&widths)
-                    .map(|(&col, &w)| format!("{:<width$}", row[col_idx(col)], width = w))
+                    .map(|(&col, &w)| format!("{:<width$}", row[col as usize], width = w))
                     .collect();
                 if !try_println(values.join("  ").trim_end()) {
                     break;
@@ -701,14 +723,17 @@ fn print_build_status(
             }
         }
         OutputFormat::Csv => {
-            if !no_header && !try_println(&cols.join(",")) {
-                return Ok(());
+            if !no_header {
+                let header: Vec<&str> = cols.iter().map(<&str>::from).collect();
+                if !try_println(&header.join(",")) {
+                    return Ok(());
+                }
             }
             for row in &rows {
                 let values: Vec<String> = cols
                     .iter()
                     .map(|&col| {
-                        let v = &row[col_idx(col)];
+                        let v = &row[col as usize];
                         if v.contains(',') || v.contains('"') {
                             format!("\"{}\"", v.replace('"', "\"\""))
                         } else {
@@ -727,9 +752,10 @@ fn print_build_status(
                 .map(|row| {
                     cols.iter()
                         .map(|&col| {
+                            let name: &str = col.into();
                             (
-                                col.to_string(),
-                                serde_json::Value::String(row[col_idx(col)].clone()),
+                                name.to_string(),
+                                serde_json::Value::String(row[col as usize].clone()),
                             )
                         })
                         .collect()

@@ -23,13 +23,14 @@
 //! labels, database IDs, and parsing without needing a full instance.
 
 use std::str::FromStr;
-use strum::EnumCount;
+use strum::{EnumCount, EnumMessage, VariantArray};
 
 /// Plain discriminant for [`PackageState`], ordered by lifecycle phase.
 ///
 /// Derives provide kebab-case status labels ([`IntoStaticStr`]/[`EnumString`]),
-/// integer conversion ([`FromRepr`] with `#[repr(i32)]`), and iteration
-/// ([`EnumIter`]).
+/// integer conversion ([`FromRepr`] with `#[repr(i32)]`), iteration
+/// ([`EnumIter`]/[`VariantArray`]), and per-variant descriptions
+/// ([`EnumMessage`]).
 #[derive(
     Clone,
     Copy,
@@ -38,24 +39,70 @@ use strum::EnumCount;
     Eq,
     strum::EnumCount,
     strum::EnumIter,
+    strum::EnumMessage,
     strum::EnumString,
     strum::FromRepr,
     strum::IntoStaticStr,
+    strum::VariantArray,
 )]
 #[strum(serialize_all = "kebab-case")]
 #[repr(i32)]
 pub enum PackageStateKind {
+    #[strum(message = "PKG_SKIP_REASON set")]
     PreSkipped = 0,
+    #[strum(message = "PKG_FAIL_REASON set")]
     PreFailed = 1,
+    #[strum(message = "Has unresolved dependencies")]
     Unresolved = 2,
+    #[strum(message = "Blocked by preskipped package")]
     IndirectPreSkipped = 3,
+    #[strum(message = "Blocked by prefailed package")]
     IndirectPreFailed = 4,
+    #[strum(message = "Blocked by package with unresolved dependencies")]
     IndirectUnresolved = 5,
+    #[strum(message = "Ready to build")]
     Pending = 6,
+    #[strum(message = "Binary already exists")]
     UpToDate = 7,
+    #[strum(message = "Built successfully")]
     Success = 8,
+    #[strum(message = "Build attempted and failed")]
     Failed = 9,
+    #[strum(message = "Blocked by package that failed to build")]
     IndirectFailed = 10,
+}
+
+impl PackageStateKind {
+    /// Generate the `after_long_help` text listing all status values.
+    pub fn status_help() -> String {
+        let max_name = Self::VARIANTS
+            .iter()
+            .map(|v| <&str>::from(v).len())
+            .max()
+            .unwrap_or(0);
+
+        let mut help = String::from("Status values:\n");
+        for v in Self::VARIANTS {
+            let name: &str = v.into();
+            let desc = v.get_message().unwrap_or("");
+            help.push_str(&format!("  {:<width$}  {}\n", name, desc, width = max_name));
+        }
+
+        help.push_str(
+            "\n\
+             Examples:\n  \
+             bob list status                           Show pending/failed packages\n  \
+             bob list status -a                        Show all packages\n  \
+             bob list status -s preskipped,prefailed   Show all pre-* packages\n  \
+             bob list status py-                       Show packages matching 'py-'\n  \
+             bob list status flim glib2 mutt           Show multiple package matches\n  \
+             bob list status -s failed -o pkgpath      Show failed with pkgpath column\n  \
+             bob list status -Ho pkgpath -s pending    Show all pending pkgpath builds\n  \
+             bob list status -o pkgpath,multi_version  Show MULTI_VERSION flags",
+        );
+
+        help
+    }
 }
 
 /// State of a package across the scan and build lifecycle.

@@ -469,19 +469,11 @@ pub struct PkgBuildStats {
 }
 
 /// Result of a package build.
-#[derive(Debug)]
+#[derive(Debug, strum::Display)]
+#[strum(serialize_all = "lowercase")]
 enum PkgBuildResult {
     Success(PkgBuildStats),
     Failed(PkgBuildStats),
-}
-
-impl std::fmt::Display for PkgBuildResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Success(_) => write!(f, "success"),
-            Self::Failed(_) => write!(f, "failed"),
-        }
-    }
 }
 
 /// How to run a command.
