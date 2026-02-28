@@ -2370,6 +2370,11 @@ impl Build {
             logdir,
         };
 
+        let cpu_sampler = crate::cpu::start_cpu_sampler();
+        if cpu_sampler.is_some() {
+            debug!("CPU usage sampler started");
+        }
+
         println!("Building packages...");
 
         // Set up multi-line progress display using ratatui inline viewport
@@ -2850,6 +2855,17 @@ impl Build {
             elapsed_ms = join_start.elapsed().as_millis(),
             "Worker threads completed"
         );
+
+        if let Some(sampler) = cpu_sampler {
+            let samples = sampler.stop();
+            if !samples.is_empty() {
+                if let Err(e) = db.store_cpu_usage(&samples) {
+                    warn!(error = %e, "Failed to save CPU usage samples");
+                } else {
+                    debug!(count = samples.len(), "Saved CPU usage samples");
+                }
+            }
+        }
 
         // Stop the refresh thread
         stop_refresh.store(true, Ordering::Relaxed);
