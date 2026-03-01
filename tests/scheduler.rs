@@ -488,13 +488,16 @@ struct SimConfig<'a> {
     unsafe_pkgs: &'a HashSet<String>,
     timings: Option<&'a HashMap<String, PkgTiming>>,
     weights: HashMap<String, usize>,
-    caps: HashMap<String, usize>,
+    efficiency: HashMap<String, f64>,
     verbose: bool,
     min_utilization: f64,
     /// When set, every parallel phase gets exactly this many jobs
     /// regardless of the budget system.  Models the real-world
     /// "fixed MAKE_JOBS=N" behaviour.
     fixed_jobs: Option<usize>,
+    /// Per-package job allocation, bypassing the budget system.
+    /// Packages not in this map get fair_share (max_jobs / threads).
+    jobs_override: Option<HashMap<String, usize>>,
     /// Packages whose configure phase benefits from parallelism.
     /// Packages not in this set skip the MAKE_JOBS budget during
     /// configure (assumed serial).
@@ -519,17 +522,22 @@ fn run_make_jobs_sim(
     let conf_par = timings
         .map(|t| configure_parallel_from_history(t))
         .unwrap_or_default();
+    let weights = timings.map(|t| weights_from_history(t)).unwrap_or_default();
+    let efficiency = timings
+        .map(|t| efficiency_from_history(t))
+        .unwrap_or_default();
     run_sim(&SimConfig {
         build_threads,
         max_jobs,
         graph,
         unsafe_pkgs,
         timings,
-        weights: HashMap::new(),
-        caps: HashMap::new(),
+        weights,
+        efficiency,
         verbose: graph.is_some(),
         min_utilization: 40.0,
         fixed_jobs: None,
+        jobs_override: None,
         configure_parallel: conf_par,
     })
 }
@@ -550,8 +558,8 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
         HashSet::new(),
         HashSet::new(),
     );
-    if cfg.fixed_jobs.is_none() {
-        sched.init_budget(cfg.max_jobs, cfg.build_threads, cfg.caps.clone());
+    if cfg.fixed_jobs.is_none() && cfg.jobs_override.is_none() {
+        sched.init_budget(cfg.max_jobs, cfg.build_threads, &cfg.efficiency);
     }
     let timings = cfg.timings;
     let unsafe_pkgs = cfg.unsafe_pkgs;
@@ -559,6 +567,7 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
     let build_threads = cfg.build_threads;
     let verbose = cfg.verbose;
     let fixed_jobs = cfg.fixed_jobs;
+    let jobs_override = &cfg.jobs_override;
     let configure_parallel = &cfg.configure_parallel;
 
     let phase_count = if timings.is_some() {
@@ -577,7 +586,7 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
     let mut active: HashMap<String, Active> = HashMap::new();
     let mut total_job_ticks: u64 = 0;
     let mut total_ticks: u64 = 0;
-    let mut histogram: Vec<u64> = vec![0; max_jobs + 1];
+    let mut histogram: Vec<u64> = Vec::new();
     let mut peak_cores: usize = 0;
     let mut overcommit_ticks: u64 = 0;
     let mut completed = 0usize;
@@ -649,6 +658,7 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
      * Enter or leave the MAKE_JOBS budget for a package at a phase
      * boundary.  Returns the core allocation for the new phase.
      */
+    let fair_share = max_jobs / build_threads.max(1);
     let enter_phase = |sched: &mut Scheduler<String>,
                        pkg: &str,
                        phase: usize,
@@ -656,6 +666,10 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
      -> (usize, bool) {
         let dominated = unsafe_pkgs.contains(pkg);
         if is_parallel_phase(phase) && !dominated {
+            if let Some(overrides) = jobs_override {
+                let jobs = overrides.get(pkg).copied().unwrap_or(fair_share);
+                return (jobs, false);
+            }
             if timings.is_some()
                 && phase == PHASE_CONFIGURE
                 && fixed_jobs.is_none()
@@ -755,7 +769,10 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
         max_active = max_active.max(active.len());
 
         let used: usize = active.values().map(|a| a.jobs).sum();
-        histogram[used.min(max_jobs)] += 1;
+        if used >= histogram.len() {
+            histogram.resize(used + 1, 0);
+        }
+        histogram[used] += 1;
         total_job_ticks += used as u64;
         total_ticks += 1;
         if used > peak_cores {
@@ -823,13 +840,42 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
         );
         eprintln!("Ticks: {}, max concurrent: {}", total_ticks, max_active);
 
+        eprintln!(
+            "Peak allocated: {} cores ({}x overcommit)",
+            peak_cores,
+            if max_jobs > 0 {
+                format!("{:.1}", peak_cores as f64 / max_jobs as f64)
+            } else {
+                "-".to_string()
+            }
+        );
+
+        let at_or_below: u64 = histogram.iter().take(max_jobs + 1).sum();
+        let above: u64 = histogram.iter().skip(max_jobs + 1).sum();
+        eprintln!(
+            "Time at/below {} cores: {} ticks ({:.1}%), above: {} ticks ({:.1}%)",
+            max_jobs,
+            at_or_below,
+            at_or_below as f64 / total_ticks as f64 * 100.0,
+            above,
+            above as f64 / total_ticks as f64 * 100.0,
+        );
+
         eprintln!("Core usage histogram:");
         let max_count = *histogram.iter().max().unwrap_or(&1);
         for (cores, &count) in histogram.iter().enumerate() {
             if count > 0 {
                 let bar_len = (count * 50 / max_count) as usize;
                 let bar: String = "#".repeat(bar_len);
-                eprintln!("  {:>3} cores: {:>6} ticks  {}", cores, count, bar);
+                let marker = if cores == max_jobs {
+                    " <-- max_jobs"
+                } else {
+                    ""
+                };
+                eprintln!(
+                    "  {:>3} cores: {:>6} ticks  {}{}",
+                    cores, count, bar, marker
+                );
             }
         }
     }
@@ -857,6 +903,15 @@ fn depgraph_make_jobs_full() {
 
 const MUTT_DEPGRAPH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/depgraph-mutt.zst");
 const MUTT_HISTORY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/history-mutt.zst");
+
+const BULK_LARGE_DEPGRAPH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/data/depgraph-bulk-large.zst"
+);
+const BULK_LARGE_HISTORY: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/data/history-bulk-large.zst"
+);
 
 #[test]
 fn depgraph_make_jobs_mutt() {
@@ -911,22 +966,23 @@ fn weights_from_history(timings: &HashMap<String, PkgTiming>) -> HashMap<String,
 }
 
 /**
- * Derive per-package parallelism caps from CPU/wall ratio during
- * the build phase.  Only packages that demonstrably underutilize
- * their allocated cores (ratio < 80% of make_jobs) get capped.
- * Packages that scale well are left uncapped.
+ * Compute per-package parallelism efficiency from history.
+ *
+ * efficiency = cpu_time / (wall_time * make_jobs), clamped to [0.01, 1.0].
+ * Values near 1.0 mean the package uses cores well; near 0.0 means
+ * mostly serial despite being given multiple jobs.
+ *
+ * Packages built with make_jobs <= 1 or with no build phase data
+ * are omitted (defaulting to 1.0 in the scheduler).
  */
-fn caps_from_history(timings: &HashMap<String, PkgTiming>) -> HashMap<String, usize> {
+fn efficiency_from_history(timings: &HashMap<String, PkgTiming>) -> HashMap<String, f64> {
     timings
         .iter()
         .filter_map(|(k, v)| {
             if v.build_ms > 0 && v.history_jobs > 1 {
-                let ratio = v.cpu_build_ms as f64 / v.build_ms as f64;
-                if ratio < v.history_jobs as f64 * 0.8 {
-                    Some((k.clone(), (ratio.ceil() as usize).max(1)))
-                } else {
-                    None
-                }
+                let cpu_ratio = v.cpu_build_ms as f64 / v.build_ms as f64;
+                let eff = (cpu_ratio / v.history_jobs as f64).clamp(0.01, 1.0);
+                Some((k.clone(), eff))
             } else {
                 None
             }
@@ -949,6 +1005,54 @@ fn configure_parallel_from_history(timings: &HashMap<String, PkgTiming>) -> Hash
         .collect()
 }
 
+/**
+ * Compute per-package job allocations from build time and weight.
+ *
+ * Score = build_time_secs * time_factor + weight * weight_factor.
+ * Packages are ranked by score; those above `percentile` get
+ * `boost_jobs`, the rest get `base_jobs`.
+ */
+fn compute_jobs_override(
+    pkgs: &HashMap<String, HashSet<String>>,
+    timings: &HashMap<String, PkgTiming>,
+    weights: &HashMap<String, usize>,
+    time_factor: f64,
+    weight_factor: f64,
+    percentile: f64,
+    base_jobs: usize,
+    boost_jobs: usize,
+) -> HashMap<String, usize> {
+    let mut scores: Vec<(String, f64)> = pkgs
+        .keys()
+        .map(|pkg| {
+            let build_secs = timings
+                .get(pkg)
+                .map(|t| t.build_ms as f64 / 1000.0)
+                .unwrap_or(0.0);
+            let w = weights.get(pkg).copied().unwrap_or(100) as f64;
+            let score = build_secs * time_factor + w * weight_factor;
+            (pkg.clone(), score)
+        })
+        .collect();
+    scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let threshold_idx = ((scores.len() as f64) * percentile / 100.0) as usize;
+    let threshold = scores
+        .get(threshold_idx)
+        .map(|(_, s)| *s)
+        .unwrap_or(f64::MAX);
+    scores
+        .into_iter()
+        .map(|(pkg, score)| {
+            let jobs = if score >= threshold {
+                boost_jobs
+            } else {
+                base_jobs
+            };
+            (pkg, jobs)
+        })
+        .collect()
+}
+
 fn fmt_time(ticks: u64) -> String {
     format!("{}m{:02}s", ticks / 60, ticks % 60)
 }
@@ -958,7 +1062,7 @@ fn depgraph_make_jobs_mutt_verbose() {
     let g = load_depgraph_zst(MUTT_DEPGRAPH);
     let history = load_history(MUTT_HISTORY);
     let weights = weights_from_history(&history.timings);
-    let caps = caps_from_history(&history.timings);
+    let eff = efficiency_from_history(&history.timings);
     let conf_par = configure_parallel_from_history(&history.timings);
     run_sim(&SimConfig {
         build_threads: 4,
@@ -967,10 +1071,11 @@ fn depgraph_make_jobs_mutt_verbose() {
         unsafe_pkgs: &history.unsafe_pkgs,
         timings: Some(&history.timings),
         weights,
-        caps,
+        efficiency: eff,
         verbose: true,
         min_utilization: 0.0,
         fixed_jobs: None,
+        jobs_override: None,
         configure_parallel: conf_par,
     });
 }
@@ -984,7 +1089,7 @@ fn depgraph_make_jobs_mutt_experiments() {
     let g = load_depgraph_zst(MUTT_DEPGRAPH);
     let history = load_history(MUTT_HISTORY);
     let weights = weights_from_history(&history.timings);
-    let caps = caps_from_history(&history.timings);
+    let eff = efficiency_from_history(&history.timings);
     let conf_par = configure_parallel_from_history(&history.timings);
 
     eprintln!(
@@ -1003,9 +1108,22 @@ fn depgraph_make_jobs_mutt_experiments() {
         threads: usize,
         max_jobs: usize,
         use_weights: bool,
-        use_caps: bool,
         fixed_jobs: Option<usize>,
+        jobs_override: Option<HashMap<String, usize>>,
     }
+
+    let ov = |tf: f64, wf: f64, pct: f64, base: usize, boost: usize| {
+        compute_jobs_override(
+            &g.incoming,
+            &history.timings,
+            &weights,
+            tf,
+            wf,
+            pct,
+            base,
+            boost,
+        )
+    };
 
     let experiments = [
         Experiment {
@@ -1013,72 +1131,80 @@ fn depgraph_make_jobs_mutt_experiments() {
             threads: 4,
             max_jobs: 16,
             use_weights: false,
-            use_caps: false,
             fixed_jobs: Some(4),
+            jobs_override: None,
         },
         Experiment {
-            label: "dynamic 4 threads + weights",
+            label: "dynamic scheduler (score-based, mutt)",
             threads: 4,
             max_jobs: 16,
             use_weights: true,
-            use_caps: true,
             fixed_jobs: None,
+            jobs_override: None,
         },
         Experiment {
-            label: "dynamic + weights, 1.25x overcommit (20)",
-            threads: 4,
-            max_jobs: 20,
-            use_weights: true,
-            use_caps: true,
-            fixed_jobs: None,
-        },
-        Experiment {
-            label: "dynamic + weights, 1.5x overcommit (24)",
-            threads: 4,
-            max_jobs: 24,
-            use_weights: true,
-            use_caps: true,
-            fixed_jobs: None,
-        },
-        Experiment {
-            label: "dynamic + weights, 2x overcommit (32)",
-            threads: 4,
-            max_jobs: 32,
-            use_weights: true,
-            use_caps: true,
-            fixed_jobs: None,
-        },
-        Experiment {
-            label: "dynamic + weights, 3x overcommit (48)",
-            threads: 4,
-            max_jobs: 48,
-            use_weights: true,
-            use_caps: true,
-            fixed_jobs: None,
-        },
-        Experiment {
-            label: "dynamic + weights, no caps @16",
+            label: "time: top 10% -> 8, rest 4",
             threads: 4,
             max_jobs: 16,
             use_weights: true,
-            use_caps: false,
             fixed_jobs: None,
+            jobs_override: Some(ov(1.0, 0.0, 90.0, 4, 8)),
         },
         Experiment {
-            label: "dynamic + weights, no caps, 1.5x overcommit (24)",
+            label: "time: top 10% -> 16, rest 4",
             threads: 4,
-            max_jobs: 24,
+            max_jobs: 16,
             use_weights: true,
-            use_caps: false,
             fixed_jobs: None,
+            jobs_override: Some(ov(1.0, 0.0, 90.0, 4, 16)),
         },
         Experiment {
-            label: "dynamic + weights, no caps, 2x overcommit (32)",
+            label: "weight: top 10% -> 8, rest 4",
             threads: 4,
-            max_jobs: 32,
+            max_jobs: 16,
             use_weights: true,
-            use_caps: false,
             fixed_jobs: None,
+            jobs_override: Some(ov(0.0, 1.0, 90.0, 4, 8)),
+        },
+        Experiment {
+            label: "weight: top 10% -> 16, rest 4",
+            threads: 4,
+            max_jobs: 16,
+            use_weights: true,
+            fixed_jobs: None,
+            jobs_override: Some(ov(0.0, 1.0, 90.0, 4, 16)),
+        },
+        Experiment {
+            label: "combined: top 10% -> 8, rest 4",
+            threads: 4,
+            max_jobs: 16,
+            use_weights: true,
+            fixed_jobs: None,
+            jobs_override: Some(ov(1.0, 1.0, 90.0, 4, 8)),
+        },
+        Experiment {
+            label: "combined: top 10% -> 16, rest 4",
+            threads: 4,
+            max_jobs: 16,
+            use_weights: true,
+            fixed_jobs: None,
+            jobs_override: Some(ov(1.0, 1.0, 90.0, 4, 16)),
+        },
+        Experiment {
+            label: "combined: top 5% -> 16, rest 4",
+            threads: 4,
+            max_jobs: 16,
+            use_weights: true,
+            fixed_jobs: None,
+            jobs_override: Some(ov(1.0, 1.0, 95.0, 4, 16)),
+        },
+        Experiment {
+            label: "combined: top 20% -> 8, rest 4",
+            threads: 4,
+            max_jobs: 16,
+            use_weights: true,
+            fixed_jobs: None,
+            jobs_override: Some(ov(1.0, 1.0, 80.0, 4, 8)),
         },
     ];
 
@@ -1175,14 +1301,11 @@ fn depgraph_make_jobs_mutt_experiments() {
             } else {
                 HashMap::new()
             },
-            caps: if exp.use_caps {
-                caps.clone()
-            } else {
-                HashMap::new()
-            },
+            efficiency: eff.clone(),
             verbose: false,
             min_utilization: 0.0,
             fixed_jobs: exp.fixed_jobs,
+            jobs_override: exp.jobs_override.clone(),
             configure_parallel: conf_par.clone(),
         });
         if baseline_ticks == 0 {
@@ -1215,6 +1338,574 @@ fn depgraph_make_jobs_mutt_experiments() {
 }
 
 #[test]
+fn depgraph_make_jobs_bulk_large() {
+    let g = load_depgraph_zst(BULK_LARGE_DEPGRAPH);
+    eprintln!(
+        "\nbulk-large build: {} packages, {} edges",
+        g.pkg_count, g.edge_count
+    );
+    run_make_jobs_sim(4, 16, Some(&g), &HashSet::new(), None);
+}
+
+#[test]
+fn depgraph_make_jobs_bulk_large_timed() {
+    let g = load_depgraph_zst(BULK_LARGE_DEPGRAPH);
+    let history = load_history(BULK_LARGE_HISTORY);
+    let unsafe_list: Vec<&str> = history.unsafe_pkgs.iter().map(|s| s.as_str()).collect();
+    eprintln!(
+        "\nbulk-large build (timed): {} packages, {} edges, {} timings, {} unsafe {:?}",
+        g.pkg_count,
+        g.edge_count,
+        history.timings.len(),
+        history.unsafe_pkgs.len(),
+        unsafe_list
+    );
+    run_make_jobs_sim(
+        4,
+        16,
+        Some(&g),
+        &history.unsafe_pkgs,
+        Some(&history.timings),
+    );
+}
+
+#[test]
+fn depgraph_make_jobs_bulk_large_verbose() {
+    let g = load_depgraph_zst(BULK_LARGE_DEPGRAPH);
+    let history = load_history(BULK_LARGE_HISTORY);
+    let weights = weights_from_history(&history.timings);
+    let eff = efficiency_from_history(&history.timings);
+    let conf_par = configure_parallel_from_history(&history.timings);
+    run_sim(&SimConfig {
+        build_threads: 4,
+        max_jobs: 16,
+        graph: Some(&g),
+        unsafe_pkgs: &history.unsafe_pkgs,
+        timings: Some(&history.timings),
+        weights,
+        efficiency: eff,
+        verbose: true,
+        min_utilization: 0.0,
+        fixed_jobs: None,
+        jobs_override: None,
+        configure_parallel: conf_par,
+    });
+}
+
+#[test]
+fn depgraph_make_jobs_bulk_large_experiments() {
+    let g = load_depgraph_zst(BULK_LARGE_DEPGRAPH);
+    let history = load_history(BULK_LARGE_HISTORY);
+    let weights = weights_from_history(&history.timings);
+    let eff = efficiency_from_history(&history.timings);
+    let conf_par = configure_parallel_from_history(&history.timings);
+
+    eprintln!(
+        "\n=== bulk-large build experiments ({} packages) ===\n",
+        g.pkg_count
+    );
+    eprintln!(
+        "{:<55} {:>8} {:>8} {:>6} {:>5} {:>6}",
+        "Configuration", "Wall", "vs base", "Util%", "Peak", ">16"
+    );
+    eprintln!("{}", "-".repeat(95));
+
+    struct Experiment {
+        label: &'static str,
+        threads: usize,
+        max_jobs: usize,
+        use_weights: bool,
+        fixed_jobs: Option<usize>,
+        jobs_override: Option<HashMap<String, usize>>,
+    }
+
+    let ov = |tf: f64, wf: f64, pct: f64, base: usize, boost: usize| {
+        compute_jobs_override(
+            &g.incoming,
+            &history.timings,
+            &weights,
+            tf,
+            wf,
+            pct,
+            base,
+            boost,
+        )
+    };
+
+    let experiments = [
+        Experiment {
+            label: "ACTUAL: fixed 4 workers x MAKE_JOBS=4",
+            threads: 4,
+            max_jobs: 16,
+            use_weights: false,
+            fixed_jobs: Some(4),
+            jobs_override: None,
+        },
+        Experiment {
+            label: "dynamic scheduler (score-based, bulk)",
+            threads: 4,
+            max_jobs: 16,
+            use_weights: true,
+            fixed_jobs: None,
+            jobs_override: None,
+        },
+        Experiment {
+            label: "time: top 10% -> 8, rest 4",
+            threads: 4,
+            max_jobs: 16,
+            use_weights: true,
+            fixed_jobs: None,
+            jobs_override: Some(ov(1.0, 0.0, 90.0, 4, 8)),
+        },
+        Experiment {
+            label: "time: top 10% -> 16, rest 4",
+            threads: 4,
+            max_jobs: 16,
+            use_weights: true,
+            fixed_jobs: None,
+            jobs_override: Some(ov(1.0, 0.0, 90.0, 4, 16)),
+        },
+        Experiment {
+            label: "weight: top 10% -> 8, rest 4",
+            threads: 4,
+            max_jobs: 16,
+            use_weights: true,
+            fixed_jobs: None,
+            jobs_override: Some(ov(0.0, 1.0, 90.0, 4, 8)),
+        },
+        Experiment {
+            label: "weight: top 10% -> 16, rest 4",
+            threads: 4,
+            max_jobs: 16,
+            use_weights: true,
+            fixed_jobs: None,
+            jobs_override: Some(ov(0.0, 1.0, 90.0, 4, 16)),
+        },
+        Experiment {
+            label: "combined: top 10% -> 8, rest 4",
+            threads: 4,
+            max_jobs: 16,
+            use_weights: true,
+            fixed_jobs: None,
+            jobs_override: Some(ov(1.0, 1.0, 90.0, 4, 8)),
+        },
+        Experiment {
+            label: "combined: top 10% -> 16, rest 4",
+            threads: 4,
+            max_jobs: 16,
+            use_weights: true,
+            fixed_jobs: None,
+            jobs_override: Some(ov(1.0, 1.0, 90.0, 4, 16)),
+        },
+        Experiment {
+            label: "combined: top 5% -> 16, rest 4",
+            threads: 4,
+            max_jobs: 16,
+            use_weights: true,
+            fixed_jobs: None,
+            jobs_override: Some(ov(1.0, 1.0, 95.0, 4, 16)),
+        },
+        Experiment {
+            label: "combined: top 20% -> 8, rest 4",
+            threads: 4,
+            max_jobs: 16,
+            use_weights: true,
+            fixed_jobs: None,
+            jobs_override: Some(ov(1.0, 1.0, 80.0, 4, 8)),
+        },
+    ];
+
+    {
+        let mut path_time: HashMap<String, u64> = HashMap::new();
+        let mut topo_order: Vec<String> = Vec::new();
+        let mut remaining: HashMap<String, usize> = g
+            .incoming
+            .iter()
+            .map(|(k, v)| (k.clone(), v.len()))
+            .collect();
+        let mut queue: VecDeque<String> = remaining
+            .iter()
+            .filter(|(_, v)| **v == 0)
+            .map(|(k, _)| k.clone())
+            .collect();
+        while let Some(pkg) = queue.pop_front() {
+            topo_order.push(pkg.clone());
+            if let Some(rdeps) = g.reverse_deps.get(&pkg) {
+                for rdep in rdeps {
+                    if let Some(c) = remaining.get_mut(rdep) {
+                        *c -= 1;
+                        if *c == 0 {
+                            queue.push_back(rdep.clone());
+                        }
+                    }
+                }
+            }
+        }
+        for pkg in &topo_order {
+            let pt = history.timings.get(pkg);
+            let pkg_secs = if let Some(pt) = pt {
+                let pre = pt.overhead_pre_ms.div_ceil(1000) as u64;
+                let post = pt.overhead_post_ms.div_ceil(1000) as u64;
+                let conf_wall = if pt.cpu_configure_ms > pt.configure_ms && pt.history_jobs > 1 {
+                    let hj = pt.history_jobs as f64;
+                    let serial = ((pt.configure_ms as f64 - pt.cpu_configure_ms as f64 / hj)
+                        / (1.0 - 1.0 / hj))
+                        .max(0.0);
+                    let parallel = (pt.cpu_configure_ms as f64 - serial).max(0.0);
+                    ((serial + parallel / 16.0) / 1000.0).ceil().max(1.0) as u64
+                } else {
+                    pt.configure_ms.div_ceil(1000) as u64
+                };
+                let build_wall = if pt.cpu_build_ms > pt.build_ms && pt.history_jobs > 1 {
+                    let hj = pt.history_jobs as f64;
+                    let serial = ((pt.build_ms as f64 - pt.cpu_build_ms as f64 / hj)
+                        / (1.0 - 1.0 / hj))
+                        .max(0.0);
+                    let parallel = (pt.cpu_build_ms as f64 - serial).max(0.0);
+                    ((serial + parallel / 16.0) / 1000.0).ceil().max(1.0) as u64
+                } else {
+                    pt.build_ms.div_ceil(1000) as u64
+                };
+                pre + conf_wall + build_wall + post
+            } else {
+                5
+            };
+            let dep_max = g
+                .incoming
+                .get(pkg)
+                .map(|deps| {
+                    deps.iter()
+                        .filter_map(|d| path_time.get(d))
+                        .max()
+                        .copied()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            path_time.insert(pkg.clone(), dep_max + pkg_secs);
+        }
+        let critical = path_time.values().max().copied().unwrap_or(0);
+        eprintln!(
+            "Theoretical minimum (critical path @16 jobs): {}\n",
+            fmt_time(critical)
+        );
+    }
+
+    let mut baseline_ticks = 0u64;
+    for exp in &experiments {
+        let result = run_sim(&SimConfig {
+            build_threads: exp.threads,
+            max_jobs: exp.max_jobs,
+            graph: Some(&g),
+            unsafe_pkgs: &history.unsafe_pkgs,
+            timings: Some(&history.timings),
+            weights: if exp.use_weights {
+                weights.clone()
+            } else {
+                HashMap::new()
+            },
+            efficiency: eff.clone(),
+            verbose: false,
+            min_utilization: 0.0,
+            fixed_jobs: exp.fixed_jobs,
+            jobs_override: exp.jobs_override.clone(),
+            configure_parallel: conf_par.clone(),
+        });
+        if baseline_ticks == 0 {
+            baseline_ticks = result.ticks;
+        }
+        let diff = result.ticks as i64 - baseline_ticks as i64;
+        let diff_str = if diff == 0 {
+            "--".to_string()
+        } else if diff > 0 {
+            format!("+{}s", diff)
+        } else {
+            format!("{}s", diff)
+        };
+        let oc_str = if result.overcommit_ticks > 0 {
+            format!("{:>5}s", result.overcommit_ticks)
+        } else {
+            "    -".to_string()
+        };
+        eprintln!(
+            "{:<55} {:>8} {:>8} {:>5.1}% {:>5} {}",
+            exp.label,
+            fmt_time(result.ticks),
+            diff_str,
+            result.utilization,
+            result.peak_cores,
+            oc_str,
+        );
+    }
+    eprintln!();
+}
+
+/**
+ * Sweep many configurations across both workloads and rank by
+ * aggregate improvement.  Uses geometric mean of (baseline/result)
+ * so neither workload dominates.
+ */
+#[test]
+fn depgraph_make_jobs_sweep() {
+    let mutt_g = load_depgraph_zst(MUTT_DEPGRAPH);
+    let mutt_h = load_history(MUTT_HISTORY);
+    let mutt_w = weights_from_history(&mutt_h.timings);
+    let mutt_cp = configure_parallel_from_history(&mutt_h.timings);
+
+    let bulk_g = load_depgraph_zst(BULK_LARGE_DEPGRAPH);
+    let bulk_h = load_history(BULK_LARGE_HISTORY);
+    let bulk_w = weights_from_history(&bulk_h.timings);
+    let bulk_cp = configure_parallel_from_history(&bulk_h.timings);
+
+    let run_one = |g: &DepGraph,
+                   h: &HistoryData,
+                   cp: &HashSet<String>,
+                   w: &HashMap<String, usize>,
+                   ovr: Option<HashMap<String, usize>>|
+     -> u64 {
+        run_sim(&SimConfig {
+            build_threads: 4,
+            max_jobs: 16,
+            graph: Some(g),
+            unsafe_pkgs: &h.unsafe_pkgs,
+            timings: Some(&h.timings),
+            weights: w.clone(),
+            efficiency: HashMap::new(),
+            verbose: false,
+            min_utilization: 0.0,
+            fixed_jobs: if ovr.is_none() { Some(4) } else { None },
+            jobs_override: ovr,
+            configure_parallel: cp.clone(),
+        })
+        .ticks
+    };
+
+    let mutt_base = run_one(&mutt_g, &mutt_h, &mutt_cp, &mutt_w, None);
+    let bulk_base = run_one(&bulk_g, &bulk_h, &bulk_cp, &bulk_w, None);
+
+    eprintln!(
+        "\nBaselines: mutt={} bulk-large={}",
+        fmt_time(mutt_base),
+        fmt_time(bulk_base)
+    );
+
+    struct Row {
+        label: String,
+        mutt_ticks: u64,
+        bulk_ticks: u64,
+        geo_mean: f64,
+    }
+
+    let mut results: Vec<Row> = Vec::new();
+
+    let percentiles = [80.0, 85.0, 90.0, 95.0];
+    let boosts = [6, 8, 10, 12, 16];
+    let factors: &[(&str, f64, f64)] = &[
+        ("time", 1.0, 0.0),
+        ("weight", 0.0, 1.0),
+        ("comb", 1.0, 1.0),
+        ("comb2:1", 2.0, 1.0),
+        ("comb1:2", 1.0, 2.0),
+    ];
+
+    for &(fname, tf, wf) in factors {
+        for &pct in &percentiles {
+            for &boost in &boosts {
+                let label = format!("{} p{:.0} -> {}", fname, pct, boost);
+                let mutt_ovr = compute_jobs_override(
+                    &mutt_g.incoming,
+                    &mutt_h.timings,
+                    &mutt_w,
+                    tf,
+                    wf,
+                    pct,
+                    4,
+                    boost,
+                );
+                let bulk_ovr = compute_jobs_override(
+                    &bulk_g.incoming,
+                    &bulk_h.timings,
+                    &bulk_w,
+                    tf,
+                    wf,
+                    pct,
+                    4,
+                    boost,
+                );
+                let mt = run_one(&mutt_g, &mutt_h, &mutt_cp, &mutt_w, Some(mutt_ovr));
+                let bt = run_one(&bulk_g, &bulk_h, &bulk_cp, &bulk_w, Some(bulk_ovr));
+                let mutt_ratio = mutt_base as f64 / mt as f64;
+                let bulk_ratio = bulk_base as f64 / bt as f64;
+                let geo = (mutt_ratio * bulk_ratio).sqrt();
+                results.push(Row {
+                    label,
+                    mutt_ticks: mt,
+                    bulk_ticks: bt,
+                    geo_mean: geo,
+                });
+            }
+        }
+    }
+
+    /* Also try graduated: top 5% -> 16, next 10% -> 8, rest 4 */
+    for &(fname, tf, wf) in factors {
+        let label = format!("{} graduated 5/15/rest", fname);
+        let grad = |pkgs: &HashMap<String, HashSet<String>>,
+                    timings: &HashMap<String, PkgTiming>,
+                    weights: &HashMap<String, usize>|
+         -> HashMap<String, usize> {
+            let mut scores: Vec<(String, f64)> = pkgs
+                .keys()
+                .map(|pkg| {
+                    let build_secs = timings
+                        .get(pkg)
+                        .map(|t| t.build_ms as f64 / 1000.0)
+                        .unwrap_or(0.0);
+                    let w = weights.get(pkg).copied().unwrap_or(100) as f64;
+                    (pkg.clone(), build_secs * tf + w * wf)
+                })
+                .collect();
+            scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            let p85 = scores
+                .get(scores.len() * 85 / 100)
+                .map(|x| x.1)
+                .unwrap_or(f64::MAX);
+            let p95 = scores
+                .get(scores.len() * 95 / 100)
+                .map(|x| x.1)
+                .unwrap_or(f64::MAX);
+            scores
+                .into_iter()
+                .map(|(pkg, score)| {
+                    let jobs = if score >= p95 {
+                        16
+                    } else if score >= p85 {
+                        8
+                    } else {
+                        4
+                    };
+                    (pkg, jobs)
+                })
+                .collect()
+        };
+        let mt = run_one(
+            &mutt_g,
+            &mutt_h,
+            &mutt_cp,
+            &mutt_w,
+            Some(grad(&mutt_g.incoming, &mutt_h.timings, &mutt_w)),
+        );
+        let bt = run_one(
+            &bulk_g,
+            &bulk_h,
+            &bulk_cp,
+            &bulk_w,
+            Some(grad(&bulk_g.incoming, &bulk_h.timings, &bulk_w)),
+        );
+        let geo = ((mutt_base as f64 / mt as f64) * (bulk_base as f64 / bt as f64)).sqrt();
+        results.push(Row {
+            label,
+            mutt_ticks: mt,
+            bulk_ticks: bt,
+            geo_mean: geo,
+        });
+
+        /* 5/10/20/rest graduated */
+        let label2 = format!("{} graduated 5/10/20/rest", fname);
+        let grad2 = |pkgs: &HashMap<String, HashSet<String>>,
+                     timings: &HashMap<String, PkgTiming>,
+                     weights: &HashMap<String, usize>|
+         -> HashMap<String, usize> {
+            let mut scores: Vec<(String, f64)> = pkgs
+                .keys()
+                .map(|pkg| {
+                    let build_secs = timings
+                        .get(pkg)
+                        .map(|t| t.build_ms as f64 / 1000.0)
+                        .unwrap_or(0.0);
+                    let w = weights.get(pkg).copied().unwrap_or(100) as f64;
+                    (pkg.clone(), build_secs * tf + w * wf)
+                })
+                .collect();
+            scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            let p80 = scores
+                .get(scores.len() * 80 / 100)
+                .map(|x| x.1)
+                .unwrap_or(f64::MAX);
+            let p90 = scores
+                .get(scores.len() * 90 / 100)
+                .map(|x| x.1)
+                .unwrap_or(f64::MAX);
+            let p95 = scores
+                .get(scores.len() * 95 / 100)
+                .map(|x| x.1)
+                .unwrap_or(f64::MAX);
+            scores
+                .into_iter()
+                .map(|(pkg, score)| {
+                    let jobs = if score >= p95 {
+                        16
+                    } else if score >= p90 {
+                        12
+                    } else if score >= p80 {
+                        8
+                    } else {
+                        4
+                    };
+                    (pkg, jobs)
+                })
+                .collect()
+        };
+        let mt2 = run_one(
+            &mutt_g,
+            &mutt_h,
+            &mutt_cp,
+            &mutt_w,
+            Some(grad2(&mutt_g.incoming, &mutt_h.timings, &mutt_w)),
+        );
+        let bt2 = run_one(
+            &bulk_g,
+            &bulk_h,
+            &bulk_cp,
+            &bulk_w,
+            Some(grad2(&bulk_g.incoming, &bulk_h.timings, &bulk_w)),
+        );
+        let geo2 = ((mutt_base as f64 / mt2 as f64) * (bulk_base as f64 / bt2 as f64)).sqrt();
+        results.push(Row {
+            label: label2,
+            mutt_ticks: mt2,
+            bulk_ticks: bt2,
+            geo_mean: geo2,
+        });
+    }
+
+    results.sort_by(|a, b| {
+        b.geo_mean
+            .partial_cmp(&a.geo_mean)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    eprintln!(
+        "\n{:<40} {:>8} {:>7} {:>10} {:>7} {:>6}",
+        "Configuration", "mutt", "mutt%", "bulk", "bulk%", "geo"
+    );
+    eprintln!("{}", "-".repeat(85));
+    for r in &results {
+        let mutt_pct = (1.0 - r.mutt_ticks as f64 / mutt_base as f64) * 100.0;
+        let bulk_pct = (1.0 - r.bulk_ticks as f64 / bulk_base as f64) * 100.0;
+        eprintln!(
+            "{:<40} {:>8} {:>+6.1}% {:>10} {:>+6.1}% {:>5.3}",
+            r.label,
+            fmt_time(r.mutt_ticks),
+            mutt_pct,
+            fmt_time(r.bulk_ticks),
+            bulk_pct,
+            r.geo_mean,
+        );
+    }
+    eprintln!();
+}
+
+#[test]
 fn depgraph_single_failure() {
     let g = load_depgraph();
     let fail_pkgs: HashSet<String> = most_depended_on(g, 1).into_iter().collect();
@@ -1226,4 +1917,90 @@ fn depgraph_multi_failure() {
     let g = load_depgraph();
     let fail_pkgs: HashSet<String> = most_depended_on(g, 3).into_iter().collect();
     run_build(32, &fail_pkgs);
+}
+
+fn transitive_dep_count(
+    pkg: &str,
+    reverse_deps: &HashMap<String, HashSet<String>>,
+    incoming: &HashMap<String, HashSet<String>>,
+) -> usize {
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut queue: VecDeque<&str> = VecDeque::new();
+    if let Some(rdeps) = reverse_deps.get(pkg) {
+        for r in rdeps {
+            if incoming.contains_key(r.as_str()) && visited.insert(r.as_str()) {
+                queue.push_back(r.as_str());
+            }
+        }
+    }
+    while let Some(p) = queue.pop_front() {
+        if let Some(rdeps) = reverse_deps.get(p) {
+            for r in rdeps {
+                if incoming.contains_key(r.as_str()) && visited.insert(r.as_str()) {
+                    queue.push_back(r.as_str());
+                }
+            }
+        }
+    }
+    visited.len()
+}
+
+#[test]
+fn depgraph_precomputed_jobs_dump() {
+    for (label, depgraph_path, history_path) in [
+        ("mutt", MUTT_DEPGRAPH, MUTT_HISTORY),
+        ("bulk-large", BULK_LARGE_DEPGRAPH, BULK_LARGE_HISTORY),
+    ] {
+        let g = load_depgraph_zst(depgraph_path);
+        let history = load_history(history_path);
+        let weights = weights_from_history(&history.timings);
+        let eff = efficiency_from_history(&history.timings);
+
+        let mut sched = Scheduler::new(
+            g.incoming.clone(),
+            g.reverse_deps.clone(),
+            weights.clone(),
+            HashSet::new(),
+            HashSet::new(),
+        );
+        sched.init_budget(16, 4, &eff);
+
+        let mut rows: Vec<(String, usize, usize, f64, usize)> = Vec::new();
+        for pkg in g.incoming.keys() {
+            let jobs = sched.precomputed_jobs(pkg).unwrap_or(0);
+            let duration = weights.get(pkg).copied().unwrap_or(0);
+            let deps = transitive_dep_count(pkg, &g.reverse_deps, &g.incoming);
+            let efficiency = eff.get(pkg).copied().unwrap_or(1.0);
+            rows.push((pkg.clone(), jobs, duration, efficiency, deps));
+        }
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
+
+        eprintln!(
+            "\n=== {} precomputed jobs (top 40 of {}) ===",
+            label,
+            rows.len()
+        );
+        eprintln!(
+            "{:<40} {:>4} {:>8} {:>6} {:>6}",
+            "Package", "Jobs", "Dur(s)", "Eff", "Deps"
+        );
+        eprintln!("{}", "-".repeat(68));
+        for (pkg, jobs, dur, efficiency, deps) in rows.iter().take(40) {
+            eprintln!(
+                "{:<40} {:>4} {:>8} {:>6.2} {:>6}",
+                pkg, jobs, dur, efficiency, deps
+            );
+        }
+
+        let mut job_dist: HashMap<usize, usize> = HashMap::new();
+        for (_, jobs, _, _, _) in &rows {
+            *job_dist.entry(*jobs).or_default() += 1;
+        }
+        let mut dist: Vec<(usize, usize)> = job_dist.into_iter().collect();
+        dist.sort();
+        eprintln!("\nJobs distribution:");
+        for (jobs, count) in &dist {
+            eprintln!("  {:>3} jobs: {:>5} packages", jobs, count);
+        }
+    }
 }

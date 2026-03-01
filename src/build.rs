@@ -2282,20 +2282,8 @@ impl Build {
         let mut scheduler = Scheduler::new(incoming, reverse_deps, weights, done, failed);
 
         if let Some(max_jobs) = self.config.jobs() {
-            let eff = db.effective_jobs(&pkg_refs).unwrap_or_default();
-            let mut caps = HashMap::new();
-            for (pkgname, _idx) in &self.scanpkgs {
-                if let Some(&cap) = eff.get(pkgname.pkgbase()) {
-                    caps.insert(pkgname.clone(), cap);
-                }
-            }
-            if !caps.is_empty() {
-                info!(
-                    packages_with_caps = caps.len(),
-                    "Loaded MAKE_JOBS caps from build history"
-                );
-            }
-            scheduler.init_budget(max_jobs, self.config.build_threads(), caps);
+            let efficiency: HashMap<PkgName, f64> = HashMap::new();
+            scheduler.init_budget(max_jobs, self.config.build_threads(), &efficiency);
         }
 
         let conf_par = db.configure_parallel(&pkg_refs).unwrap_or_default();
