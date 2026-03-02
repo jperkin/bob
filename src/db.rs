@@ -87,7 +87,7 @@ fn history_schema() -> String {
 /**
  * Schema version for bob.db - update when schema changes.
  */
-const SCHEMA_VERSION: i32 = 20260226;
+const SCHEMA_VERSION: i32 = 20260302;
 
 /**
  * Schema version for history.db - update when history schema changes.
@@ -137,6 +137,8 @@ pub struct PackageStatusRow {
     pub multi_version: Option<String>,
     pub build_outcome: Option<i32>,
     pub outcome_detail: Option<String>,
+    pub dep_count: Option<i64>,
+    pub weight: Option<i64>,
 }
 
 impl PackageRow {
@@ -318,7 +320,9 @@ impl Database {
                  build_reason TEXT,
                  is_bootstrap INTEGER DEFAULT 0,
                  pbulk_weight INTEGER DEFAULT 100,
-                 scan_data TEXT
+                 scan_data TEXT,
+                 dep_count INTEGER,
+                 weight INTEGER
              );
 
              CREATE INDEX idx_packages_pkgpath ON packages(pkgpath);
@@ -568,14 +572,16 @@ impl Database {
             "SELECT p.id, p.pkgname, p.pkgpath, p.skip_reason,
                     p.fail_reason, p.build_reason,
                     json_extract(p.scan_data, '$.MULTI_VERSION'),
-                    b.outcome, b.outcome_detail
+                    b.outcome, b.outcome_detail,
+                    p.dep_count, p.weight
              FROM packages p
              LEFT JOIN builds b ON b.package_id = p.id"
         } else {
             "SELECT p.id, p.pkgname, p.pkgpath, p.skip_reason,
                     p.fail_reason, p.build_reason,
                     NULL,
-                    b.outcome, b.outcome_detail
+                    b.outcome, b.outcome_detail,
+                    p.dep_count, p.weight
              FROM packages p
              LEFT JOIN builds b ON b.package_id = p.id"
         };
@@ -592,6 +598,8 @@ impl Database {
                 multi_version: row.get(6)?,
                 build_outcome: row.get(7)?,
                 outcome_detail: row.get(8)?,
+                dep_count: row.get(9)?,
+                weight: row.get(10)?,
             })
         })?;
         mapped.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -807,6 +815,23 @@ impl Database {
         )?;
         for (package_id, depends_on_id) in deps {
             stmt.execute(params![package_id, depends_on_id])?;
+        }
+        drop(stmt);
+        tx.commit()
+    }
+
+    /**
+     * Store pre-computed dependency scores for packages.
+     *
+     * Each entry is `(package_id, dep_count, weight)`.
+     */
+    pub fn store_dep_scores(&self, scores: &[(i64, Option<i64>, Option<i64>)]) -> Result<()> {
+        let tx = self.transaction()?;
+        let mut stmt = self
+            .conn
+            .prepare("UPDATE packages SET dep_count = ?1, weight = ?2 WHERE id = ?3")?;
+        for &(id, dc, w) in scores {
+            stmt.execute(params![dc, w, id])?;
         }
         drop(stmt);
         tx.commit()

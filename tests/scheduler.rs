@@ -488,7 +488,6 @@ struct SimConfig<'a> {
     unsafe_pkgs: &'a HashSet<String>,
     timings: Option<&'a HashMap<String, PkgTiming>>,
     weights: HashMap<String, usize>,
-    efficiency: HashMap<String, f64>,
     verbose: bool,
     min_utilization: f64,
     /// When set, every parallel phase gets exactly this many jobs
@@ -498,16 +497,12 @@ struct SimConfig<'a> {
     /// Per-package job allocation, bypassing the budget system.
     /// Packages not in this map get fair_share (max_jobs / threads).
     jobs_override: Option<HashMap<String, usize>>,
-    /// Packages whose configure phase benefits from parallelism.
-    /// Packages not in this set skip the MAKE_JOBS budget during
-    /// configure (assumed serial).
-    configure_parallel: HashSet<String>,
 }
 
 struct SimResult {
     ticks: u64,
     utilization: f64,
-    completed: usize,
+    _completed: usize,
     peak_cores: usize,
     overcommit_ticks: u64,
 }
@@ -519,13 +514,7 @@ fn run_make_jobs_sim(
     unsafe_pkgs: &HashSet<String>,
     timings: Option<&HashMap<String, PkgTiming>>,
 ) -> SimResult {
-    let conf_par = timings
-        .map(|t| configure_parallel_from_history(t))
-        .unwrap_or_default();
     let weights = timings.map(|t| weights_from_history(t)).unwrap_or_default();
-    let efficiency = timings
-        .map(|t| efficiency_from_history(t))
-        .unwrap_or_default();
     run_sim(&SimConfig {
         build_threads,
         max_jobs,
@@ -533,12 +522,10 @@ fn run_make_jobs_sim(
         unsafe_pkgs,
         timings,
         weights,
-        efficiency,
         verbose: graph.is_some(),
-        min_utilization: 40.0,
+        min_utilization: 38.0,
         fixed_jobs: None,
         jobs_override: None,
-        configure_parallel: conf_par,
     })
 }
 
@@ -559,7 +546,7 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
         HashSet::new(),
     );
     if cfg.fixed_jobs.is_none() && cfg.jobs_override.is_none() {
-        sched.init_budget(cfg.max_jobs, cfg.build_threads, &cfg.efficiency);
+        sched.init_budget(cfg.max_jobs, cfg.build_threads);
     }
     let timings = cfg.timings;
     let unsafe_pkgs = cfg.unsafe_pkgs;
@@ -568,8 +555,6 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
     let verbose = cfg.verbose;
     let fixed_jobs = cfg.fixed_jobs;
     let jobs_override = &cfg.jobs_override;
-    let configure_parallel = &cfg.configure_parallel;
-
     let phase_count = if timings.is_some() {
         PHASE_COUNT_TIMED
     } else {
@@ -669,13 +654,6 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
             if let Some(overrides) = jobs_override {
                 let jobs = overrides.get(pkg).copied().unwrap_or(fair_share);
                 return (jobs, false);
-            }
-            if timings.is_some()
-                && phase == PHASE_CONFIGURE
-                && fixed_jobs.is_none()
-                && !configure_parallel.contains(pkg)
-            {
-                return (1, false);
             }
             if let Some(fj) = fixed_jobs {
                 (fj, false)
@@ -890,7 +868,7 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
     SimResult {
         ticks: total_ticks,
         utilization,
-        completed,
+        _completed: completed,
         peak_cores,
         overcommit_ticks,
     }
@@ -966,46 +944,6 @@ fn weights_from_history(timings: &HashMap<String, PkgTiming>) -> HashMap<String,
 }
 
 /**
- * Compute per-package parallelism efficiency from history.
- *
- * efficiency = cpu_time / (wall_time * make_jobs), clamped to [0.01, 1.0].
- * Values near 1.0 mean the package uses cores well; near 0.0 means
- * mostly serial despite being given multiple jobs.
- *
- * Packages built with make_jobs <= 1 or with no build phase data
- * are omitted (defaulting to 1.0 in the scheduler).
- */
-fn efficiency_from_history(timings: &HashMap<String, PkgTiming>) -> HashMap<String, f64> {
-    timings
-        .iter()
-        .filter_map(|(k, v)| {
-            if v.build_ms > 0 && v.history_jobs > 1 {
-                let cpu_ratio = v.cpu_build_ms as f64 / v.build_ms as f64;
-                let eff = (cpu_ratio / v.history_jobs as f64).clamp(0.01, 1.0);
-                Some((k.clone(), eff))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-/**
- * Identify packages whose configure phase is parallel from history.
- * A package qualifies if `cpu_configure / configure > 1.5` and
- * `history_jobs > 1` (was not budget-starved to -j1).
- */
-fn configure_parallel_from_history(timings: &HashMap<String, PkgTiming>) -> HashSet<String> {
-    timings
-        .iter()
-        .filter(|(_, v)| {
-            v.configure_ms > 0 && v.history_jobs > 1 && v.cpu_configure_ms > v.configure_ms * 3 / 2
-        })
-        .map(|(k, _)| k.clone())
-        .collect()
-}
-
-/**
  * Compute per-package job allocations from build time and weight.
  *
  * Score = build_time_secs * time_factor + weight * weight_factor.
@@ -1062,8 +1000,7 @@ fn depgraph_make_jobs_mutt_verbose() {
     let g = load_depgraph_zst(MUTT_DEPGRAPH);
     let history = load_history(MUTT_HISTORY);
     let weights = weights_from_history(&history.timings);
-    let eff = efficiency_from_history(&history.timings);
-    let conf_par = configure_parallel_from_history(&history.timings);
+
     run_sim(&SimConfig {
         build_threads: 4,
         max_jobs: 16,
@@ -1071,12 +1008,11 @@ fn depgraph_make_jobs_mutt_verbose() {
         unsafe_pkgs: &history.unsafe_pkgs,
         timings: Some(&history.timings),
         weights,
-        efficiency: eff,
+
         verbose: true,
         min_utilization: 0.0,
         fixed_jobs: None,
         jobs_override: None,
-        configure_parallel: conf_par,
     });
 }
 
@@ -1089,8 +1025,6 @@ fn depgraph_make_jobs_mutt_experiments() {
     let g = load_depgraph_zst(MUTT_DEPGRAPH);
     let history = load_history(MUTT_HISTORY);
     let weights = weights_from_history(&history.timings);
-    let eff = efficiency_from_history(&history.timings);
-    let conf_par = configure_parallel_from_history(&history.timings);
 
     eprintln!(
         "\n=== mutt build experiments ({} packages) ===",
@@ -1301,12 +1235,11 @@ fn depgraph_make_jobs_mutt_experiments() {
             } else {
                 HashMap::new()
             },
-            efficiency: eff.clone(),
+
             verbose: false,
             min_utilization: 0.0,
             fixed_jobs: exp.fixed_jobs,
             jobs_override: exp.jobs_override.clone(),
-            configure_parallel: conf_par.clone(),
         });
         if baseline_ticks == 0 {
             baseline_ticks = result.ticks;
@@ -1374,8 +1307,7 @@ fn depgraph_make_jobs_bulk_large_verbose() {
     let g = load_depgraph_zst(BULK_LARGE_DEPGRAPH);
     let history = load_history(BULK_LARGE_HISTORY);
     let weights = weights_from_history(&history.timings);
-    let eff = efficiency_from_history(&history.timings);
-    let conf_par = configure_parallel_from_history(&history.timings);
+
     run_sim(&SimConfig {
         build_threads: 4,
         max_jobs: 16,
@@ -1383,12 +1315,11 @@ fn depgraph_make_jobs_bulk_large_verbose() {
         unsafe_pkgs: &history.unsafe_pkgs,
         timings: Some(&history.timings),
         weights,
-        efficiency: eff,
+
         verbose: true,
         min_utilization: 0.0,
         fixed_jobs: None,
         jobs_override: None,
-        configure_parallel: conf_par,
     });
 }
 
@@ -1397,8 +1328,6 @@ fn depgraph_make_jobs_bulk_large_experiments() {
     let g = load_depgraph_zst(BULK_LARGE_DEPGRAPH);
     let history = load_history(BULK_LARGE_HISTORY);
     let weights = weights_from_history(&history.timings);
-    let eff = efficiency_from_history(&history.timings);
-    let conf_par = configure_parallel_from_history(&history.timings);
 
     eprintln!(
         "\n=== bulk-large build experiments ({} packages) ===\n",
@@ -1603,12 +1532,11 @@ fn depgraph_make_jobs_bulk_large_experiments() {
             } else {
                 HashMap::new()
             },
-            efficiency: eff.clone(),
+
             verbose: false,
             min_utilization: 0.0,
             fixed_jobs: exp.fixed_jobs,
             jobs_override: exp.jobs_override.clone(),
-            configure_parallel: conf_par.clone(),
         });
         if baseline_ticks == 0 {
             baseline_ticks = result.ticks;
@@ -1649,16 +1577,12 @@ fn depgraph_make_jobs_sweep() {
     let mutt_g = load_depgraph_zst(MUTT_DEPGRAPH);
     let mutt_h = load_history(MUTT_HISTORY);
     let mutt_w = weights_from_history(&mutt_h.timings);
-    let mutt_cp = configure_parallel_from_history(&mutt_h.timings);
-
     let bulk_g = load_depgraph_zst(BULK_LARGE_DEPGRAPH);
     let bulk_h = load_history(BULK_LARGE_HISTORY);
     let bulk_w = weights_from_history(&bulk_h.timings);
-    let bulk_cp = configure_parallel_from_history(&bulk_h.timings);
 
     let run_one = |g: &DepGraph,
                    h: &HistoryData,
-                   cp: &HashSet<String>,
                    w: &HashMap<String, usize>,
                    ovr: Option<HashMap<String, usize>>|
      -> u64 {
@@ -1669,18 +1593,17 @@ fn depgraph_make_jobs_sweep() {
             unsafe_pkgs: &h.unsafe_pkgs,
             timings: Some(&h.timings),
             weights: w.clone(),
-            efficiency: HashMap::new(),
+
             verbose: false,
             min_utilization: 0.0,
             fixed_jobs: if ovr.is_none() { Some(4) } else { None },
             jobs_override: ovr,
-            configure_parallel: cp.clone(),
         })
         .ticks
     };
 
-    let mutt_base = run_one(&mutt_g, &mutt_h, &mutt_cp, &mutt_w, None);
-    let bulk_base = run_one(&bulk_g, &bulk_h, &bulk_cp, &bulk_w, None);
+    let mutt_base = run_one(&mutt_g, &mutt_h, &mutt_w, None);
+    let bulk_base = run_one(&bulk_g, &bulk_h, &bulk_w, None);
 
     eprintln!(
         "\nBaselines: mutt={} bulk-large={}",
@@ -1731,8 +1654,8 @@ fn depgraph_make_jobs_sweep() {
                     4,
                     boost,
                 );
-                let mt = run_one(&mutt_g, &mutt_h, &mutt_cp, &mutt_w, Some(mutt_ovr));
-                let bt = run_one(&bulk_g, &bulk_h, &bulk_cp, &bulk_w, Some(bulk_ovr));
+                let mt = run_one(&mutt_g, &mutt_h, &mutt_w, Some(mutt_ovr));
+                let bt = run_one(&bulk_g, &bulk_h, &bulk_w, Some(bulk_ovr));
                 let mutt_ratio = mutt_base as f64 / mt as f64;
                 let bulk_ratio = bulk_base as f64 / bt as f64;
                 let geo = (mutt_ratio * bulk_ratio).sqrt();
@@ -1790,14 +1713,12 @@ fn depgraph_make_jobs_sweep() {
         let mt = run_one(
             &mutt_g,
             &mutt_h,
-            &mutt_cp,
             &mutt_w,
             Some(grad(&mutt_g.incoming, &mutt_h.timings, &mutt_w)),
         );
         let bt = run_one(
             &bulk_g,
             &bulk_h,
-            &bulk_cp,
             &bulk_w,
             Some(grad(&bulk_g.incoming, &bulk_h.timings, &bulk_w)),
         );
@@ -1858,14 +1779,12 @@ fn depgraph_make_jobs_sweep() {
         let mt2 = run_one(
             &mutt_g,
             &mutt_h,
-            &mutt_cp,
             &mutt_w,
             Some(grad2(&mutt_g.incoming, &mutt_h.timings, &mutt_w)),
         );
         let bt2 = run_one(
             &bulk_g,
             &bulk_h,
-            &bulk_cp,
             &bulk_w,
             Some(grad2(&bulk_g.incoming, &bulk_h.timings, &bulk_w)),
         );
@@ -1954,7 +1873,6 @@ fn depgraph_precomputed_jobs_dump() {
         let g = load_depgraph_zst(depgraph_path);
         let history = load_history(history_path);
         let weights = weights_from_history(&history.timings);
-        let eff = efficiency_from_history(&history.timings);
 
         let mut sched = Scheduler::new(
             g.incoming.clone(),
@@ -1963,15 +1881,14 @@ fn depgraph_precomputed_jobs_dump() {
             HashSet::new(),
             HashSet::new(),
         );
-        sched.init_budget(16, 4, &eff);
+        sched.init_budget(16, 4);
 
-        let mut rows: Vec<(String, usize, usize, f64, usize)> = Vec::new();
+        let mut rows: Vec<(String, usize, usize, usize)> = Vec::new();
         for pkg in g.incoming.keys() {
             let jobs = sched.precomputed_jobs(pkg).unwrap_or(0);
             let duration = weights.get(pkg).copied().unwrap_or(0);
             let deps = transitive_dep_count(pkg, &g.reverse_deps, &g.incoming);
-            let efficiency = eff.get(pkg).copied().unwrap_or(1.0);
-            rows.push((pkg.clone(), jobs, duration, efficiency, deps));
+            rows.push((pkg.clone(), jobs, duration, deps));
         }
         rows.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
 
@@ -1981,19 +1898,16 @@ fn depgraph_precomputed_jobs_dump() {
             rows.len()
         );
         eprintln!(
-            "{:<40} {:>4} {:>8} {:>6} {:>6}",
-            "Package", "Jobs", "Dur(s)", "Eff", "Deps"
+            "{:<40} {:>4} {:>8} {:>6}",
+            "Package", "Jobs", "Dur(s)", "Deps"
         );
-        eprintln!("{}", "-".repeat(68));
-        for (pkg, jobs, dur, efficiency, deps) in rows.iter().take(40) {
-            eprintln!(
-                "{:<40} {:>4} {:>8} {:>6.2} {:>6}",
-                pkg, jobs, dur, efficiency, deps
-            );
+        eprintln!("{}", "-".repeat(62));
+        for (pkg, jobs, dur, deps) in rows.iter().take(40) {
+            eprintln!("{:<40} {:>4} {:>8} {:>6}", pkg, jobs, dur, deps);
         }
 
         let mut job_dist: HashMap<usize, usize> = HashMap::new();
-        for (_, jobs, _, _, _) in &rows {
+        for (_, jobs, _, _) in &rows {
             *job_dist.entry(*jobs).or_default() += 1;
         }
         let mut dist: Vec<(usize, usize)> = job_dist.into_iter().collect();

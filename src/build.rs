@@ -504,7 +504,6 @@ struct BuildSession {
     sandbox: Sandbox,
     state: RunState,
     wrkobjdir_map: HashMap<PkgName, PathBuf>,
-    configure_parallel: HashSet<PkgName>,
 }
 
 /// Package builder that executes build stages.
@@ -518,7 +517,6 @@ struct PkgBuilder<'a> {
     output_tx: Option<Sender<ChannelCommand>>,
     make_jobs: MakeJobs,
     wrkdir: Option<PathBuf>,
-    configure_parallel: bool,
 }
 
 impl<'a> PkgBuilder<'a> {
@@ -536,7 +534,6 @@ impl<'a> PkgBuilder<'a> {
             .logdir()
             .join(pkginfo.index.pkgname.pkgname());
         let build_user = session.config.build_user().map(|s| s.to_string());
-        let configure_parallel = session.configure_parallel.contains(&pkginfo.index.pkgname);
         Self {
             session,
             sandbox_id,
@@ -547,7 +544,6 @@ impl<'a> PkgBuilder<'a> {
             output_tx,
             make_jobs,
             wrkdir,
-            configure_parallel,
         }
     }
 
@@ -628,18 +624,8 @@ impl<'a> PkgBuilder<'a> {
             return Ok(PkgBuildResult::Failed(stats));
         }
 
-        /*
-         * Configure -- request MAKE_JOBS budget only for packages whose
-         * configure phase actually benefits from parallelism.  Most
-         * packages have serial configure; skipping the budget keeps
-         * cores available for other workers.
-         */
         let stage_start = Instant::now();
-        let conf_jobs = if self.configure_parallel {
-            self.request_make_jobs()
-        } else {
-            None
-        };
+        let conf_jobs = self.request_make_jobs();
         let conf_arg = conf_jobs.map(|j| format!("MAKE_JOBS={}", j));
         let conf_flag: Vec<&str> = conf_arg.iter().map(|s| s.as_str()).collect();
         let conf_suffix = if let Some(j) = conf_jobs {
@@ -2282,22 +2268,7 @@ impl Build {
         let mut scheduler = Scheduler::new(incoming, reverse_deps, weights, done, failed);
 
         if let Some(max_jobs) = self.config.jobs() {
-            let efficiency: HashMap<PkgName, f64> = HashMap::new();
-            scheduler.init_budget(max_jobs, self.config.build_threads(), &efficiency);
-        }
-
-        let conf_par = db.configure_parallel(&pkg_refs).unwrap_or_default();
-        let configure_parallel: HashSet<PkgName> = self
-            .scanpkgs
-            .keys()
-            .filter(|pkg| conf_par.contains(pkg.pkgbase()))
-            .cloned()
-            .collect();
-        if !configure_parallel.is_empty() {
-            info!(
-                packages = configure_parallel.len(),
-                "Parallel configure phases from build history"
-            );
+            scheduler.init_budget(max_jobs, self.config.build_threads());
         }
 
         /*
@@ -2545,7 +2516,6 @@ impl Build {
             sandbox: self.scope.sandbox().clone(),
             state: state_flag.clone(),
             wrkobjdir_map,
-            configure_parallel,
         });
         let progress_clone = Arc::clone(&progress);
         let state_for_manager = state_flag.clone();

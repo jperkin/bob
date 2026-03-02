@@ -99,28 +99,20 @@ pub struct Scheduler<K: Ord> {
  * ===========================
  *
  * Pre-computes a default MAKE_JOBS value for every package based on
- * three inputs (in priority order):
+ * two inputs:
  *
- *   1. Dependency importance -- how many packages transitively depend
- *      on this one.  cwrappers (depended on by everything) gets the
- *      highest importance; leaf packages get 0.  Finishing important
- *      packages faster unblocks more work.
+ *   1. Build duration -- estimated serial time from history
+ *      (build-phase wall time * make_jobs).  Longer builds save
+ *      more absolute time from extra cores.
  *
- *   2. Build duration -- historical wall-clock time in seconds.
- *      Longer builds save more absolute time from extra cores.
- *      A 3-hour build at -j8 vs -j4 saves far more than a 30-second
- *      build at the same ratio.
- *
- *   3. Parallelism efficiency -- how effectively a package uses
- *      multiple cores, measured as cpu_time / (wall_time * jobs).
- *      Lower priority: dampens allocation for packages that cannot
- *      use extra cores, so they go to packages that can.
+ *   2. Dependency importance -- how many packages transitively
+ *      depend on this one.  Finishing important packages faster
+ *      unblocks more work.
  *
  * The combined score for each package is:
  *
  *   score = duration^DURATION_EXP
  *         * (1 + dep_count)^IMPORTANCE_EXP
- *         * efficiency^EFFICIENCY_EXP
  *
  * The raw score range is compressed with a log transform before
  * mapping to jobs:
@@ -161,13 +153,6 @@ const DURATION_EXP: f64 = 0.5;
  * 0.3 gives modest influence (1800 dependents -> 9x multiplier).
  */
 const IMPORTANCE_EXP: f64 = 0.3;
-
-/**
- * Exponent for parallelism efficiency.  Controls how much
- * inefficient packages are penalised.  0.2 is a gentle dampener
- * (efficiency 0.1 -> 0.63x, efficiency 0.5 -> 0.87x).
- */
-const EFFICIENCY_EXP: f64 = 0.2;
 
 /**
  * Maximum multiplier of fair_share for concurrent builds.
@@ -407,30 +392,20 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
     /**
      * Initialize the MAKE_JOBS budget.
      *
-     * Pre-computes a jobs value for every package from three inputs:
-     * build duration (from `self.weights`), dependency importance
-     * (computed from `self.reverse_deps`), and parallelism efficiency
-     * (from the `efficiency` map, where values are in 0.0..=1.0;
-     * packages not in the map default to 1.0).
+     * Pre-computes a jobs value for every package from two inputs:
+     * build duration (from `self.weights`) and dependency importance
+     * (computed from `self.reverse_deps`).
      */
-    pub fn init_budget(
-        &mut self,
-        max_jobs: usize,
-        build_threads: usize,
-        efficiency: &HashMap<K, f64>,
-    ) {
-        let fair_share = max_jobs / build_threads.max(1);
+    pub fn init_budget(&mut self, max_jobs: usize, build_threads: usize) {
         let dep_counts = self.transitive_dependent_counts();
+        let fair_share = max_jobs / build_threads.max(1);
 
         let mut scores: Vec<(K, f64)> = Vec::new();
         for pkg in self.incoming.keys().chain(self.running.iter()) {
             let duration = self.weights.get(pkg).copied().unwrap_or(0) as f64;
             let deps = dep_counts.get(pkg).copied().unwrap_or(0) as f64;
-            let eff = efficiency.get(pkg).copied().unwrap_or(1.0);
 
-            let score = duration.max(1.0).powf(DURATION_EXP)
-                * (1.0 + deps).powf(IMPORTANCE_EXP)
-                * eff.max(0.01).powf(EFFICIENCY_EXP);
+            let score = duration.max(1.0).powf(DURATION_EXP) * (1.0 + deps).powf(IMPORTANCE_EXP);
             scores.push((pkg.clone(), score));
         }
 
@@ -473,37 +448,8 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
         });
     }
 
-    /**
-     * Compute the number of transitive dependents for each package.
-     *
-     * For each package in `incoming`, counts how many other packages
-     * transitively depend on it (i.e. the size of its reachable set
-     * through `reverse_deps`).
-     */
     fn transitive_dependent_counts(&self) -> HashMap<K, usize> {
-        let mut counts: HashMap<&K, usize> = HashMap::new();
-        for pkg in self.incoming.keys() {
-            let mut visited: HashSet<&K> = HashSet::new();
-            let mut queue: VecDeque<&K> = VecDeque::new();
-            if let Some(rdeps) = self.reverse_deps.get(pkg) {
-                for r in rdeps {
-                    if self.incoming.contains_key(r) && visited.insert(r) {
-                        queue.push_back(r);
-                    }
-                }
-            }
-            while let Some(p) = queue.pop_front() {
-                if let Some(rdeps) = self.reverse_deps.get(p) {
-                    for r in rdeps {
-                        if self.incoming.contains_key(r) && visited.insert(r) {
-                            queue.push_back(r);
-                        }
-                    }
-                }
-            }
-            counts.insert(pkg, visited.len());
-        }
-        counts.into_iter().map(|(k, v)| (k.clone(), v)).collect()
+        transitive_dependent_counts(&self.incoming, &self.reverse_deps)
     }
 
     /**
@@ -614,6 +560,90 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
     fn is_sole_buildable(&self, _pkg: &K) -> bool {
         self.running.len() <= 1 && self.ready.is_empty()
     }
+}
+
+/**
+ * Compute MAKE_JOBS budget from pre-computed dep counts and durations.
+ *
+ * This applies the same scoring formula as [`Scheduler::init_budget`]
+ * but without requiring a full Scheduler instance or dependency graph.
+ * Useful for displaying jobs allocations from stored scan data.
+ */
+pub fn compute_budget<K>(
+    dep_counts: &HashMap<K, i64>,
+    durations: &HashMap<K, usize>,
+    max_jobs: usize,
+    build_threads: usize,
+) -> HashMap<K, usize>
+where
+    K: Eq + Hash + Clone,
+{
+    let fair_share = max_jobs / build_threads.max(1);
+
+    let mut scores: Vec<(&K, f64)> = Vec::new();
+    for (pkg, &dc) in dep_counts {
+        let duration = durations.get(pkg).copied().unwrap_or(0) as f64;
+        let deps = dc.max(0) as f64;
+        let score = duration.max(1.0).powf(DURATION_EXP) * (1.0 + deps).powf(IMPORTANCE_EXP);
+        scores.push((pkg, score));
+    }
+
+    let ceiling = ((fair_share as f64 * PEAK_MULTIPLIER).round() as usize).clamp(1, max_jobs);
+
+    let log_scores: Vec<f64> = scores.iter().map(|(_, s)| s.max(1.0).ln()).collect();
+    let min_log = log_scores.iter().copied().fold(f64::INFINITY, f64::min);
+    let max_log = log_scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let log_range = (max_log - min_log).max(f64::EPSILON);
+
+    let mut budget: HashMap<K, usize> = HashMap::new();
+    for (i, &(pkg, _)) in scores.iter().enumerate() {
+        let t = (log_scores[i] - min_log) / log_range;
+        let jobs = (1.0 + (ceiling - 1) as f64 * t).round() as usize;
+        budget.insert(pkg.clone(), jobs.clamp(1, max_jobs));
+    }
+
+    budget
+}
+
+/**
+ * Compute the number of transitive dependents for each package.
+ *
+ * For each package in `incoming`, counts how many other packages
+ * transitively depend on it (i.e. the size of its reachable set
+ * through `reverse_deps`).
+ *
+ * Uses per-node BFS through the reverse_deps graph.
+ */
+fn transitive_dependent_counts<K>(
+    incoming: &HashMap<K, HashSet<K>>,
+    reverse_deps: &HashMap<K, HashSet<K>>,
+) -> HashMap<K, usize>
+where
+    K: Eq + Hash + Clone + Ord,
+{
+    let mut counts: HashMap<K, usize> = HashMap::new();
+    for pkg in incoming.keys() {
+        let mut visited: HashSet<&K> = HashSet::new();
+        let mut queue: VecDeque<&K> = VecDeque::new();
+        if let Some(rdeps) = reverse_deps.get(pkg) {
+            for r in rdeps {
+                if incoming.contains_key(r) && visited.insert(r) {
+                    queue.push_back(r);
+                }
+            }
+        }
+        while let Some(node) = queue.pop_front() {
+            if let Some(rdeps) = reverse_deps.get(node) {
+                for r in rdeps {
+                    if incoming.contains_key(r) && visited.insert(r) {
+                        queue.push_back(r);
+                    }
+                }
+            }
+        }
+        counts.insert(pkg.clone(), visited.len());
+    }
+    counts
 }
 
 /**
@@ -1169,7 +1199,7 @@ mod tests {
             HashSet::new(),
             HashSet::new(),
         );
-        sched.init_budget(16, 4, &HashMap::new());
+        sched.init_budget(16, 4);
 
         let Poll::Ready(Some(a)) = sched.poll() else {
             panic!("a should be ready");
@@ -1188,7 +1218,7 @@ mod tests {
     fn jobs_longer_duration_gets_more() {
         let names = ["short", "medium", "long", "huge"];
         let mut sched = independent_sched(&names, &[10, 100, 1000, 10000]);
-        sched.init_budget(16, 4, &HashMap::new());
+        sched.init_budget(16, 4);
 
         let mut allocs: HashMap<String, usize> = HashMap::new();
         for _ in 0..4 {
@@ -1228,7 +1258,7 @@ mod tests {
     fn jobs_equal_score_equal_allocation() {
         let names = ["p0", "p1", "p2", "p3"];
         let mut sched = independent_sched(&names, &[100, 100, 100, 100]);
-        sched.init_budget(16, 4, &HashMap::new());
+        sched.init_budget(16, 4);
 
         let mut allocs = Vec::new();
         for _ in 0..4 {
@@ -1288,7 +1318,7 @@ mod tests {
             HashSet::new(),
             HashSet::new(),
         );
-        sched.init_budget(16, 4, &HashMap::new());
+        sched.init_budget(16, 4);
 
         let mut dispatched = Vec::new();
         while dispatched.len() < 2 {
@@ -1360,7 +1390,7 @@ mod tests {
             HashSet::new(),
             HashSet::new(),
         );
-        sched.init_budget(16, 4, &HashMap::new());
+        sched.init_budget(16, 4);
 
         let mut dispatched = Vec::new();
         for _ in 0..4 {
@@ -1398,45 +1428,12 @@ mod tests {
         );
     }
 
-    /**
-     * Low efficiency reduces job allocation.
-     *
-     * Two packages with identical duration and no dependents.
-     * One has perfect efficiency (1.0), the other has poor
-     * efficiency (0.1).  The efficient package should get more.
-     */
-    #[test]
-    fn jobs_efficiency_dampens_allocation() {
-        let names = ["efficient", "inefficient"];
-        let mut sched = independent_sched(&names, &[1000, 1000]);
-        let mut eff: HashMap<String, f64> = HashMap::new();
-        eff.insert(pkg("efficient"), 1.0);
-        eff.insert(pkg("inefficient"), 0.1);
-        sched.init_budget(16, 2, &eff);
-
-        let mut allocs: HashMap<String, usize> = HashMap::new();
-        for _ in 0..2 {
-            let Poll::Ready(Some(p)) = sched.poll() else {
-                panic!("should be ready");
-            };
-            let j = sched.request_make_jobs(&p).expect("budget initialized");
-            allocs.insert(p, j);
-        }
-
-        assert!(
-            allocs[&pkg("efficient")] > allocs[&pkg("inefficient")],
-            "efficient ({}) should get more than inefficient ({})",
-            allocs[&pkg("efficient")],
-            allocs[&pkg("inefficient")]
-        );
-    }
-
     /** All allocations are within [1, max_jobs]. */
     #[test]
     fn jobs_always_within_bounds() {
         let names = ["tiny", "small", "big", "huge"];
         let mut sched = independent_sched(&names, &[1, 10, 5000, 50000]);
-        sched.init_budget(16, 4, &HashMap::new());
+        sched.init_budget(16, 4);
 
         for _ in 0..4 {
             let Poll::Ready(Some(p)) = sched.poll() else {
