@@ -806,22 +806,7 @@ impl Database {
     }
 
     /**
-     * Store resolved dependencies in batch.
-     */
-    fn store_resolved_dependencies_batch(&self, deps: &[(i64, i64)]) -> Result<()> {
-        let tx = self.transaction()?;
-        let mut stmt = self.conn.prepare(
-            "INSERT OR IGNORE INTO resolved_depends (package_id, depends_on_id) VALUES (?1, ?2)",
-        )?;
-        for (package_id, depends_on_id) in deps {
-            stmt.execute(params![package_id, depends_on_id])?;
-        }
-        drop(stmt);
-        tx.commit()
-    }
-
-    /**
-     * Store pre-computed dependency scores for packages.
+     * Store pre-computed dep_count and weight values.
      *
      * Each entry is `(package_id, dep_count, weight)`.
      */
@@ -832,6 +817,21 @@ impl Database {
             .prepare("UPDATE packages SET dep_count = ?1, weight = ?2 WHERE id = ?3")?;
         for &(id, dc, w) in scores {
             stmt.execute(params![dc, w, id])?;
+        }
+        drop(stmt);
+        tx.commit()
+    }
+
+    /**
+     * Store resolved dependencies in batch.
+     */
+    fn store_resolved_dependencies_batch(&self, deps: &[(i64, i64)]) -> Result<()> {
+        let tx = self.transaction()?;
+        let mut stmt = self.conn.prepare(
+            "INSERT OR IGNORE INTO resolved_depends (package_id, depends_on_id) VALUES (?1, ?2)",
+        )?;
+        for (package_id, depends_on_id) in deps {
+            stmt.execute(params![package_id, depends_on_id])?;
         }
         drop(stmt);
         tx.commit()
@@ -1801,214 +1801,6 @@ impl Database {
      * successful builds only.
      */
     /**
-     * Query MAKE_JOBS caps for packages from build history.
-     *
-     * Examines the last 5 successful builds per pkgpath.  For each
-     * build, computes `ratio = cpu_time / wall_time` and checks
-     * whether the package had headroom (ratio < 80% of its
-     * allocation).  A cap is applied only when at least 2 headroom
-     * observations are found and they are consistent (max/min <= 2).
-     * The cap is `ceil(max_ratio)`, clamped to at least 1.
-     *
-     * Returns pkgpath to cap.  Absent entries mean uncapped.
-     * Returns an empty map if the history database is unavailable.
-     */
-    /**
-     * Query effective MAKE_JOBS caps from build history.
-     *
-     * Accepts `(pkgpath, pkgbase)` pairs to correctly handle
-     * MULTI_VERSION packages.  See [`duration_by_pkg`] for details.
-     *
-     * Returns pkgbase to cap.  Absent entries mean uncapped.
-     * Returns an empty map if the history database is unavailable.
-     */
-    pub fn effective_jobs(&self, pkgs: &[(&str, &str)]) -> Result<HashMap<String, usize>> {
-        let conn = match self.history_conn() {
-            Ok(c) => c,
-            Err(_) => return Ok(HashMap::new()),
-        };
-
-        if pkgs.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        let build_stage = Stage::Build as i32;
-        let success_outcome = PackageStateKind::Success as i32;
-        let out: &str = HistoryKind::Outcome.into();
-        let mj: &str = HistoryKind::MakeJobs.into();
-        let pkgname_col: &str = HistoryKind::Pkgname.into();
-
-        let mut conditions = Vec::with_capacity(pkgs.len());
-        for i in 0..pkgs.len() {
-            let p = i * 2 + 1;
-            conditions.push(format!(
-                "(h.pkgpath = ?{} AND h.{pkgname_col} LIKE ?{} || '-%')",
-                p,
-                p + 1
-            ));
-        }
-        let where_clause = conditions.join(" OR ");
-
-        let sql = format!(
-            "WITH recent AS ( \
-                 SELECT h.{pkgname_col}, ct.duration AS cpu_ms, \
-                        wt.duration AS wall_ms, h.{mj} AS make_jobs, \
-                        ROW_NUMBER() OVER ( \
-                            PARTITION BY h.pkgpath, h.{pkgname_col} \
-                            ORDER BY h.id DESC \
-                        ) AS rn \
-                 FROM build_history h \
-                 JOIN cpu_times ct ON ct.history_id = h.id \
-                      AND ct.stage = {build_stage} \
-                 JOIN wall_times wt ON wt.history_id = h.id \
-                      AND wt.stage = {build_stage} \
-                 WHERE ({where_clause}) \
-                   AND h.{out} = {success_outcome} \
-             ) \
-             SELECT {pkgname_col}, cpu_ms, wall_ms, make_jobs \
-             FROM recent WHERE rn <= 5",
-        );
-
-        let params: Vec<Box<dyn rusqlite::ToSql>> = pkgs
-            .iter()
-            .flat_map(|(pkgpath, pkgbase)| {
-                vec![
-                    Box::new(pkgpath.to_string()) as Box<dyn rusqlite::ToSql>,
-                    Box::new(pkgbase.to_string()) as Box<dyn rusqlite::ToSql>,
-                ]
-            })
-            .collect();
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| &**p).collect();
-
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(param_refs.as_slice(), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, f64>(1)?,
-                row.get::<_, f64>(2)?,
-                row.get::<_, i64>(3)? as usize,
-            ))
-        })?;
-
-        let mut result = HashMap::new();
-        for row in rows {
-            let (pkgname, cpu_ms, wall_ms, make_jobs) = row?;
-            if make_jobs <= 1 || wall_ms <= 0.0 {
-                continue;
-            }
-            let pkgbase = PkgName::new(&pkgname).pkgbase().to_string();
-            if result.contains_key(&pkgbase) {
-                continue;
-            }
-            let ratio = cpu_ms / wall_ms;
-            if ratio < make_jobs as f64 * 0.8 {
-                result.insert(pkgbase, (ratio.ceil() as usize).max(1));
-            }
-        }
-
-        Ok(result)
-    }
-
-    /**
-     * Identify packages whose configure phase benefits from parallelism.
-     *
-     * Queries cpu/wall time ratios for [`Stage::Configure`] from recent
-     * successful builds.  Only records where `make_jobs > 1` are
-     * considered -- a package allocated `-j1` under budget pressure will
-     * show a ~1.0 ratio regardless of whether configure is parallel.
-     *
-     * A package is deemed parallel if at least 2 qualifying records
-     * show `cpu / wall > 1.5`.  Packages not in the returned set are
-     * assumed serial and should skip the MAKE_JOBS budget during
-     * configure to free cores for other workers.
-     *
-     * Returns an empty set on error or if no history exists.
-     */
-    pub fn configure_parallel(&self, pkgs: &[(&str, &str)]) -> Result<HashSet<String>> {
-        let conn = match self.history_conn() {
-            Ok(c) => c,
-            Err(_) => return Ok(HashSet::new()),
-        };
-
-        if pkgs.is_empty() {
-            return Ok(HashSet::new());
-        }
-
-        let configure_stage = Stage::Configure as i32;
-        let success_outcome = PackageStateKind::Success as i32;
-        let out: &str = HistoryKind::Outcome.into();
-        let mj: &str = HistoryKind::MakeJobs.into();
-        let pkgname_col: &str = HistoryKind::Pkgname.into();
-
-        let mut conditions = Vec::with_capacity(pkgs.len());
-        for i in 0..pkgs.len() {
-            let p = i * 2 + 1;
-            conditions.push(format!(
-                "(h.pkgpath = ?{} AND h.{pkgname_col} LIKE ?{} || '-%')",
-                p,
-                p + 1
-            ));
-        }
-        let where_clause = conditions.join(" OR ");
-
-        let sql = format!(
-            "WITH recent AS ( \
-                 SELECT h.{pkgname_col}, ct.duration AS cpu_ms, \
-                        wt.duration AS wall_ms, \
-                        ROW_NUMBER() OVER ( \
-                            PARTITION BY h.pkgpath, h.{pkgname_col} \
-                            ORDER BY h.id DESC \
-                        ) AS rn \
-                 FROM build_history h \
-                 JOIN cpu_times ct ON ct.history_id = h.id \
-                      AND ct.stage = {configure_stage} \
-                 JOIN wall_times wt ON wt.history_id = h.id \
-                      AND wt.stage = {configure_stage} \
-                 WHERE ({where_clause}) \
-                   AND h.{out} = {success_outcome} \
-                   AND h.{mj} > 1 \
-             ) \
-             SELECT {pkgname_col}, cpu_ms, wall_ms \
-             FROM recent WHERE rn <= 5",
-        );
-
-        let params: Vec<Box<dyn rusqlite::ToSql>> = pkgs
-            .iter()
-            .flat_map(|(pkgpath, pkgbase)| {
-                vec![
-                    Box::new(pkgpath.to_string()) as Box<dyn rusqlite::ToSql>,
-                    Box::new(pkgbase.to_string()) as Box<dyn rusqlite::ToSql>,
-                ]
-            })
-            .collect();
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| &**p).collect();
-
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(param_refs.as_slice(), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, f64>(1)?,
-                row.get::<_, f64>(2)?,
-            ))
-        })?;
-
-        let mut result = HashSet::new();
-        let mut seen = HashSet::new();
-        for row in rows {
-            let (pkgname, cpu_ms, wall_ms) = row?;
-            let pkgbase = PkgName::new(&pkgname).pkgbase().to_string();
-            if !seen.insert(pkgbase.clone()) {
-                continue;
-            }
-            if wall_ms > 0.0 && cpu_ms / wall_ms > 1.5 {
-                result.insert(pkgbase);
-            }
-        }
-
-        Ok(result)
-    }
-
-    /**
      * Query the most recent successful build duration per package.
      *
      * Accepts `(pkgpath, pkgbase)` pairs to correctly handle
@@ -2057,9 +1849,13 @@ impl Database {
         }
         let where_clause = conditions.join(" OR ");
 
+        let build_stage = Stage::Build as i32;
+        let jobs: &str = HistoryKind::MakeJobs.into();
+
         let sql = format!(
             "WITH matched AS ( \
                  SELECT h.pkgpath, h.{pkgname_col}, h.{dur}, \
+                        h.{jobs}, h.id, \
                         ROW_NUMBER() OVER ( \
                             PARTITION BY h.pkgpath, h.{pkgname_col} \
                             ORDER BY h.id DESC \
@@ -2068,7 +1864,13 @@ impl Database {
                  WHERE ({where_clause}) \
                    AND h.{out} = {success_outcome} \
              ) \
-             SELECT pkgpath, {pkgname_col}, {dur} FROM matched WHERE rn = 1",
+             SELECT m.pkgpath, m.{pkgname_col}, \
+                    COALESCE(wt.duration, m.{dur}) \
+                        * MAX(m.{jobs}, 1) \
+             FROM matched m \
+             LEFT JOIN wall_times wt ON wt.history_id = m.id \
+                  AND wt.stage = {build_stage} \
+             WHERE m.rn = 1",
         );
 
         let params: Vec<Box<dyn rusqlite::ToSql>> = pkgs
@@ -2180,7 +1982,105 @@ impl Database {
     }
 
     /**
+     * Query the most recent successful build's CPU time for the build
+     * phase per package.
+     *
+     * Accepts `(pkgpath, pkgbase)` pairs to correctly handle
+     * MULTI_VERSION packages.  See [`duration_by_pkg`] for details.
+     *
+     * Returns a map of pkgbase to CPU duration in milliseconds.
+     * Packages without CPU data are omitted.  Returns an empty map
+     * on error.
+     */
+    pub fn cpu_time_by_pkg(&self, pkgs: &[(&str, &str)]) -> HashMap<String, u64> {
+        let conn = match self.history_conn() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "cpu_time_by_pkg: failed to open history db");
+                return HashMap::new();
+            }
+        };
+
+        if pkgs.is_empty() {
+            return HashMap::new();
+        }
+
+        let out: &str = HistoryKind::Outcome.into();
+        let pkgname_col: &str = HistoryKind::Pkgname.into();
+        let success_outcome = PackageStateKind::Success as i32;
+
+        let mut conditions = Vec::with_capacity(pkgs.len());
+        for i in 0..pkgs.len() {
+            let p = i * 2 + 1;
+            conditions.push(format!(
+                "(h.pkgpath = ?{} AND h.{pkgname_col} LIKE ?{} || '-%')",
+                p,
+                p + 1
+            ));
+        }
+        let where_clause = conditions.join(" OR ");
+
+        let build_stage = Stage::Build as i32;
+
+        let sql = format!(
+            "WITH matched AS ( \
+                 SELECT h.pkgpath, h.{pkgname_col}, h.id, \
+                        ROW_NUMBER() OVER ( \
+                            PARTITION BY h.pkgpath, h.{pkgname_col} \
+                            ORDER BY h.id DESC \
+                        ) AS rn \
+                 FROM build_history h \
+                 WHERE ({where_clause}) \
+                   AND h.{out} = {success_outcome} \
+             ) \
+             SELECT m.{pkgname_col}, ct.duration \
+             FROM matched m \
+             JOIN cpu_times ct ON ct.history_id = m.id \
+                  AND ct.stage = {build_stage} \
+             WHERE m.rn = 1",
+        );
+
+        let params: Vec<Box<dyn rusqlite::ToSql>> = pkgs
+            .iter()
+            .flat_map(|(pkgpath, pkgbase)| {
+                vec![
+                    Box::new(pkgpath.to_string()) as Box<dyn rusqlite::ToSql>,
+                    Box::new(pkgbase.to_string()) as Box<dyn rusqlite::ToSql>,
+                ]
+            })
+            .collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| &**p).collect();
+
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "cpu_time_by_pkg: failed to prepare query");
+                return HashMap::new();
+            }
+        };
+        let rows = match stmt.query_map(param_refs.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, "cpu_time_by_pkg: query failed");
+                return HashMap::new();
+            }
+        };
+
+        let mut result = HashMap::new();
+        for row in rows.flatten() {
+            let (pkgname, ms) = row;
+            let pkgbase = PkgName::new(&pkgname).pkgbase().to_string();
+            result.insert(pkgbase, ms as u64);
+        }
+        result
+    }
+
+    /**
      * Query the most recent successful build's CPU time for all packages.
+     *
+     * Like [`cpu_time_by_pkg`] but without filtering.
      *
      * Returns a map of pkgbase to CPU duration in milliseconds.
      */
