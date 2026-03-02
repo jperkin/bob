@@ -127,7 +127,7 @@ pub use build::{
 pub use config::{Config, Options, Pkgsrc, PkgsrcEnv, Sandboxes, SchedulerConfig, WrkObjDir};
 pub use cpu::{CpuSample, CpuSamplerHandle, start_cpu_sampler};
 pub use db::Database;
-pub use history::{History, HistoryKind};
+pub use history::{History, HistoryKind, format_duration};
 pub use init::Init;
 pub use pkgstate::{PackageCounts, PackageState, PackageStateKind};
 pub use report::write_html_report;

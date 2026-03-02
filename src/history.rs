@@ -194,7 +194,7 @@ fn format_timestamp(epoch: i64) -> String {
     String::from_utf8_lossy(&buf[..len]).to_string()
 }
 
-fn format_duration(ms: u64) -> String {
+pub fn format_duration(ms: u64) -> String {
     if ms < 1000 {
         format!("{}ms", ms)
     } else if ms < 60_000 {
