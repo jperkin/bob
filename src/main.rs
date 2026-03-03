@@ -17,6 +17,7 @@
 use anyhow::{Context, Result, bail};
 use bob::Init;
 use bob::Interrupted;
+use bob::PackageStateKind;
 use bob::RunState;
 use bob::build::{self, Build};
 use bob::config::Config;
@@ -161,7 +162,9 @@ impl BuildRunner {
      */
     fn update_pkg_summary(&self, prior: &[String], summary: &build::BuildSummary) {
         let changed = match self.db.get_successful_packages() {
-            Ok(current) => prior != current || summary.counts().success > 0,
+            Ok(current) => {
+                prior != current || summary.counts().states[PackageStateKind::Success] > 0
+            }
             Err(_) => true,
         };
         if !changed {
@@ -280,6 +283,8 @@ enum SandboxCmd {
     Create,
     /// Destroy all sandboxes
     Destroy,
+    /// Create a sandbox and start an interactive shell
+    Exec,
     /// List currently created sandboxes
     List,
 }
@@ -317,6 +322,22 @@ enum UtilCmd {
         /// Output file (defaults to stdout)
         #[arg(short, long)]
         output: Option<PathBuf>,
+    },
+    /// Simulate a parallel build and show scheduling efficiency
+    ///
+    /// Reads a dependency graph file (one "dep -> dependent" edge per line)
+    /// and simulates a build with the given number of workers.  Without
+    /// --timings each package takes one time unit; with --timings packages
+    /// take the duration specified in the file.
+    SimulateBuild {
+        /// Dependency graph file (use "-" for stdin)
+        file: PathBuf,
+        /// Number of workers
+        #[arg(short, long, default_value = "4")]
+        workers: usize,
+        /// Per-package timings file ("pkgname duration" per line)
+        #[arg(short, long)]
+        timings: Option<PathBuf>,
     },
 }
 
@@ -516,6 +537,16 @@ fn run() -> Result<()> {
             }
         }
         Cmd::Util {
+            cmd:
+                UtilCmd::SimulateBuild {
+                    file,
+                    workers,
+                    timings,
+                },
+        } => {
+            cmd::simulate::run(&file, workers, timings.as_deref())?;
+        }
+        Cmd::Util {
             cmd: UtilCmd::PrintPresolve { output },
         } => {
             let config = Config::load(args.config.as_deref())?;
@@ -548,8 +579,9 @@ fn run() -> Result<()> {
             if let Some(path) = output {
                 std::fs::write(&path, &out)?;
                 let c = result.counts();
-                let s = &c.skipped;
-                let skipped = s.pkg_skip + s.pkg_fail + s.unresolved;
+                let s = &c.states;
+                use bob::PackageStateKind::*;
+                let skipped = s[PreSkipped] + s[PreFailed] + s[Unresolved];
                 println!(
                     "Wrote {} buildable, {} skipped to {}",
                     c.buildable,
@@ -688,6 +720,15 @@ fn run() -> Result<()> {
                 bail!("No sandboxes configured");
             }
             sandbox.list_all()?;
+        }
+        Cmd::Util {
+            cmd: UtilCmd::Sandbox {
+                cmd: SandboxCmd::Exec,
+            },
+        } => {
+            let config = Config::load(args.config.as_deref())?;
+            logging::init(config.dbdir(), config.log_level())?;
+            cmd::sandbox::exec(&config)?;
         }
     };
 

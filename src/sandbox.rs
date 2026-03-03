@@ -81,11 +81,26 @@ use rayon::prelude::*;
 use std::fs;
 use std::io::Write;
 use std::os::unix::process::CommandExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, info_span, warn};
+
+/*
+ * The libc crate does not expose wait4() on illumos, but it is available
+ * in libc as a wrapper around waitid().  Declare it here.
+ */
+#[cfg(target_os = "illumos")]
+unsafe extern "C" {
+    fn wait4(
+        pid: libc::pid_t,
+        status: *mut libc::c_int,
+        options: libc::c_int,
+        rusage: *mut libc::rusage,
+    ) -> libc::pid_t;
+}
 
 /// How often to check the shutdown flag while waiting for something else.
 /// This determines the maximum latency between Ctrl+C and response.
@@ -147,18 +162,41 @@ pub(crate) fn format_process_info(pids: &[&str]) -> String {
  * Poll for child process exit while checking a run state flag.  If
  * shutdown is requested, kill the child and return an error.  During
  * stop the child is allowed to continue running.
+ *
+ * Uses wait4() instead of try_wait() to collect resource usage from the
+ * child process.  Returns the exit status and CPU time (user + system).
  */
-pub fn wait_with_shutdown(child: &mut Child, state: &RunState) -> Result<ExitStatus> {
+pub fn wait_with_shutdown(child: &mut Child, state: &RunState) -> Result<(ExitStatus, Duration)> {
+    let pid = child.id() as libc::pid_t;
     loop {
         if state.is_shutdown() {
             let _ = child.kill();
             let _ = child.wait();
             bail!("Interrupted by shutdown");
         }
-        match child.try_wait()? {
-            Some(status) => return Ok(status),
-            None => std::thread::sleep(SHUTDOWN_POLL_INTERVAL),
+        let mut status: libc::c_int = 0;
+        let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
+        #[cfg(target_os = "illumos")]
+        let ret = unsafe { wait4(pid, &mut status, libc::WNOHANG, &mut rusage) };
+        #[cfg(not(target_os = "illumos"))]
+        let ret = unsafe { libc::wait4(pid, &mut status, libc::WNOHANG, &mut rusage) };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            bail!("wait4 failed for pid {}: {}", pid, err);
         }
+        if ret == 0 {
+            std::thread::sleep(SHUTDOWN_POLL_INTERVAL);
+            continue;
+        }
+        let utime = Duration::new(
+            rusage.ru_utime.tv_sec as u64,
+            rusage.ru_utime.tv_usec as u32 * 1000,
+        );
+        let stime = Duration::new(
+            rusage.ru_stime.tv_sec as u64,
+            rusage.ru_stime.tv_usec as u32 * 1000,
+        );
+        return Ok((ExitStatus::from_raw(status), utime + stime));
     }
 }
 
@@ -263,6 +301,12 @@ impl Sandbox {
             Command::new(cmd)
         };
         self.apply_environment(&mut c);
+        unsafe {
+            c.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
         c
     }
 
@@ -273,7 +317,7 @@ impl Sandbox {
      * inherited unchanged.  If a section is present, `clear` defaults to
      * true and only explicitly configured variables are available.
      */
-    fn apply_environment(&self, cmd: &mut Command) {
+    pub fn apply_environment(&self, cmd: &mut Command) {
         let Some(env) = self.config.environment() else {
             return;
         };
@@ -436,6 +480,14 @@ impl Sandbox {
     }
 
     /**
+     * Return a sandbox ID that does not collide with any existing sandbox.
+     */
+    pub fn next_available_id(&self) -> Result<usize> {
+        let ids = self.discover_sandboxes()?;
+        Ok(ids.last().map_or(0, |max| max + 1))
+    }
+
+    /**
      * Create a single sandbox by id.
      * If the sandbox already exists and is valid (has lock), this is a no-op.
      */
@@ -462,10 +514,6 @@ impl Sandbox {
     /**
      * Execute a script file with supplied environment variables and optional
      * stdin data.
-     *
-     * If protected is true, the process is placed in its own process group
-     * to isolate it from terminal signals (Ctrl+C). Use this for cleanup
-     * scripts that must complete even during shutdown.
      */
     pub fn execute(
         &self,
@@ -473,7 +521,6 @@ impl Sandbox {
         script: &Path,
         envs: Vec<(String, String)>,
         stdin_data: Option<&str>,
-        protected: bool,
     ) -> Result<Child> {
         use std::io::Write;
 
@@ -489,10 +536,6 @@ impl Sandbox {
         }
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-        if protected {
-            cmd.process_group(0);
-        }
 
         let mut child = cmd.spawn()?;
 
@@ -576,7 +619,7 @@ impl Sandbox {
     ) -> Result<bool> {
         if let Some(script) = config.script("pre-build") {
             info!(script = %script.display(), "Running pre-build script");
-            let child = self.execute(id, script, envs, None, false)?;
+            let child = self.execute(id, script, envs, None)?;
             let output = child.wait_with_output()?;
             if output.status.success() {
                 info!(script = %script.display(), result = "success", "Finished running pre-build script");
@@ -600,9 +643,6 @@ impl Sandbox {
      * Run the post-build script if configured.
      * Returns Ok(true) if script ran successfully or wasn't configured,
      * Ok(false) if script failed.
-     *
-     * Post-build scripts run with signal protection (process_group(0)) to
-     * ensure cleanup completes even during shutdown from Ctrl+C.
      */
     pub fn run_post_build(
         &self,
@@ -612,8 +652,7 @@ impl Sandbox {
     ) -> Result<bool> {
         if let Some(script) = config.script("post-build") {
             info!(script = %script.display(), "Running post-build script");
-            // Use protected=true to ensure cleanup completes during shutdown
-            let child = self.execute(id, script, envs, None, true)?;
+            let child = self.execute(id, script, envs, None)?;
             let output = child.wait_with_output()?;
             if output.status.success() {
                 info!(script = %script.display(), result = "success", "Finished running post-build script");
@@ -1038,6 +1077,9 @@ impl Sandbox {
         let output = if chroot {
             let mut c = Command::new("/usr/sbin/chroot");
             self.apply_environment(&mut c);
+            for (key, val) in self.config.script_env(None) {
+                c.env(key, val);
+            }
             c.arg(&sandbox_path)
                 .arg("/bin/sh")
                 .arg("-c")
@@ -1050,6 +1092,9 @@ impl Sandbox {
         } else {
             let mut c = Command::new("/bin/sh");
             self.apply_environment(&mut c);
+            for (key, val) in self.config.script_env(None) {
+                c.env(key, val);
+            }
             c.arg("-c")
                 .arg(cmd)
                 .env("bob_sandbox_path", &sandbox_path)
@@ -1295,18 +1340,10 @@ impl SandboxScope {
      * On error or interrupt, newly created sandboxes are rolled back but
      * previously existing sandboxes remain (they'll be cleaned up on drop).
      */
-    pub fn ensure(&mut self, n: usize) -> Result<()> {
+    pub fn ensure(&mut self, n: usize) -> Result<bool> {
         if !self.sandbox.enabled() || n <= self.count {
-            return Ok(());
+            return Ok(false);
         }
-        let to_create = n - self.count;
-        if to_create == 1 {
-            print!("Creating sandbox...");
-        } else {
-            print!("Creating {} sandboxes...", to_create);
-        }
-        let _ = std::io::stdout().flush();
-        let start = Instant::now();
         let results: Vec<(usize, Result<()>)> = (self.count..n)
             .into_par_iter()
             .map(|i| (i, self.sandbox.create(i)))
@@ -1333,7 +1370,6 @@ impl SandboxScope {
             }
         }
         if let Some(e) = first_error {
-            println!();
             for i in &sandbox_ids {
                 if let Err(destroy_err) = self.sandbox.destroy(*i) {
                     eprintln!("Warning: failed to destroy sandbox {}: {}", i, destroy_err);
@@ -1341,9 +1377,8 @@ impl SandboxScope {
             }
             return Err(e);
         }
-        println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
         self.count = n;
-        Ok(())
+        Ok(true)
     }
 
     /// Access the underlying sandbox for operations.
@@ -1354,6 +1389,11 @@ impl SandboxScope {
     /// Return whether sandboxes are enabled.
     pub fn enabled(&self) -> bool {
         self.sandbox.enabled()
+    }
+
+    /// Return the number of sandboxes currently managed.
+    pub fn count(&self) -> usize {
+        self.count
     }
 
     /// Access the run state flag.

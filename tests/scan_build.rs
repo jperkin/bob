@@ -9,9 +9,10 @@
  */
 
 use anyhow::{Context, Result};
+use bob::PackageStateKind::*;
 use bob::{
-    Build, BuildOutcome, Config, Database, RunState, Sandbox, Scan, ScanSummary, SkipReason,
-    config::PkgsrcEnv, sandbox::SandboxScope,
+    Build, Config, Database, PackageState, RunState, Sandbox, Scan, ScanSummary, config::PkgsrcEnv,
+    sandbox::SandboxScope,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -469,19 +470,25 @@ fn test_full_tree_scan() -> Result<()> {
     );
 
     // 1 pkg_skip: skip-me
-    assert_eq!(c.skipped.pkg_skip, 1, "expected 1 pkg_skip");
+    assert_eq!(c.states[PreSkipped], 1, "expected 1 pkg_skip");
 
     // 1 pkg_fail: fail-me
-    assert_eq!(c.skipped.pkg_fail, 1, "expected 1 pkg_fail");
+    assert_eq!(c.states[PreFailed], 1, "expected 1 pkg_fail");
 
     // 1 indirect_preskip: dep-skip (depends on skip-me)
-    assert_eq!(c.skipped.indirect_preskip, 1, "expected 1 indirect_preskip");
+    assert_eq!(
+        c.states[IndirectPreSkipped], 1,
+        "expected 1 indirect_preskip"
+    );
 
     // 1 indirect_prefail: dep-fail (depends on fail-me)
-    assert_eq!(c.skipped.indirect_prefail, 1, "expected 1 indirect_prefail");
+    assert_eq!(
+        c.states[IndirectPreFailed], 1,
+        "expected 1 indirect_prefail"
+    );
 
     // 1 unresolved: bad-dep (depends on nonexistent)
-    assert_eq!(c.skipped.unresolved, 1, "expected 1 unresolved");
+    assert_eq!(c.states[Unresolved], 1, "expected 1 unresolved");
 
     // Total should be 20
     assert_eq!(result.packages.len(), 20, "expected 20 total packages");
@@ -490,55 +497,55 @@ fn test_full_tree_scan() -> Result<()> {
     for pkg in &result.packages {
         match pkg.pkgpath().as_path().to_string_lossy().as_ref() {
             "test/skip-me" => {
-                if let bob::ScanResult::Skipped { reason, .. } = pkg {
+                if let bob::ScanResult::Skipped { state, .. } = pkg {
                     assert!(
-                        matches!(reason, SkipReason::PkgSkip(_)),
-                        "skip-me should be PkgSkip, got {:?}",
-                        reason
+                        matches!(state, PackageState::PreSkipped(_)),
+                        "skip-me should be PreSkipped, got {:?}",
+                        state
                     );
                 } else {
                     panic!("skip-me should be Skipped");
                 }
             }
             "test/dep-skip" => {
-                if let bob::ScanResult::Skipped { reason, .. } = pkg {
+                if let bob::ScanResult::Skipped { state, .. } = pkg {
                     assert!(
-                        matches!(reason, SkipReason::IndirectPreskip(_)),
-                        "dep-skip should be IndirectPreskip, got {:?}",
-                        reason
+                        matches!(state, PackageState::IndirectPreSkipped(_)),
+                        "dep-skip should be IndirectPreSkipped, got {:?}",
+                        state
                     );
                 } else {
                     panic!("dep-skip should be Skipped");
                 }
             }
             "test/fail-me" => {
-                if let bob::ScanResult::Skipped { reason, .. } = pkg {
+                if let bob::ScanResult::Skipped { state, .. } = pkg {
                     assert!(
-                        matches!(reason, SkipReason::PkgFail(_)),
-                        "fail-me should be PkgFail, got {:?}",
-                        reason
+                        matches!(state, PackageState::PreFailed(_)),
+                        "fail-me should be PreFailed, got {:?}",
+                        state
                     );
                 } else {
                     panic!("fail-me should be Skipped");
                 }
             }
             "test/dep-fail" => {
-                if let bob::ScanResult::Skipped { reason, .. } = pkg {
+                if let bob::ScanResult::Skipped { state, .. } = pkg {
                     assert!(
-                        matches!(reason, SkipReason::IndirectPrefail(_)),
-                        "dep-fail should be IndirectPrefail, got {:?}",
-                        reason
+                        matches!(state, PackageState::IndirectPreFailed(_)),
+                        "dep-fail should be IndirectPreFailed, got {:?}",
+                        state
                     );
                 } else {
                     panic!("dep-fail should be Skipped");
                 }
             }
             "test/bad-dep" => {
-                if let bob::ScanResult::Skipped { reason, .. } = pkg {
+                if let bob::ScanResult::Skipped { state, .. } = pkg {
                     assert!(
-                        matches!(reason, SkipReason::UnresolvedDep(_)),
-                        "bad-dep should be UnresolvedDep, got {:?}",
-                        reason
+                        matches!(state, PackageState::Unresolved(_)),
+                        "bad-dep should be Unresolved, got {:?}",
+                        state
                     );
                 } else {
                     panic!("bad-dep should be Skipped");
@@ -579,9 +586,9 @@ fn test_limited_scan() -> Result<()> {
 
     let c = result.counts();
     assert_eq!(c.buildable, 4, "all 4 packages should be buildable");
-    assert_eq!(c.skipped.pkg_skip, 0);
-    assert_eq!(c.skipped.pkg_fail, 0);
-    assert_eq!(c.skipped.unresolved, 0);
+    assert_eq!(c.states[PreSkipped], 0);
+    assert_eq!(c.states[PreFailed], 0);
+    assert_eq!(c.states[Unresolved], 0);
 
     // Verify the expected packages are present
     let pkgpaths: Vec<String> = result
@@ -631,17 +638,21 @@ fn test_full_build() -> Result<()> {
 
     // 5 success: base, mid, also-base, top, multi
     assert_eq!(
-        bc.success, 5,
+        bc.states[Success], 5,
         "expected 5 successful builds, got {}",
-        bc.success
+        bc.states[Success]
     );
 
     // 6 failed: build-fail, fail-checksum, fail-at-build, fail-install,
     //   fail-package, chain-d
-    assert_eq!(bc.failed, 6, "expected 6 failed builds, got {}", bc.failed);
+    assert_eq!(
+        bc.states[Failed], 6,
+        "expected 6 failed builds, got {}",
+        bc.states[Failed]
+    );
 
     // 4 skipped: dep-bfail, chain-c, chain-b, chain-a
-    let indirect_failed = bc.skipped.indirect_failed;
+    let indirect_failed = bc.states[IndirectFailed];
     assert_eq!(
         indirect_failed, 4,
         "expected 4 indirect-failed skips, got {}",
@@ -654,30 +665,27 @@ fn test_full_build() -> Result<()> {
         match name {
             "base-1.0" | "mid-1.0" | "also-base-1.0" | "top-1.0" | "py313-multi-1.0" => {
                 assert!(
-                    matches!(r.outcome, BuildOutcome::Success),
+                    matches!(r.state, PackageState::Success),
                     "{} should be Success, got {:?}",
                     name,
-                    r.outcome
+                    r.state
                 );
             }
             "build-fail-1.0" | "fail-checksum-1.0" | "fail-at-build-1.0" | "fail-install-1.0"
             | "fail-package-1.0" | "chain-d-1.0" => {
                 assert!(
-                    matches!(r.outcome, BuildOutcome::Failed(_)),
+                    matches!(r.state, PackageState::Failed(_)),
                     "{} should be Failed, got {:?}",
                     name,
-                    r.outcome
+                    r.state
                 );
             }
             "dep-bfail-1.0" | "chain-c-1.0" | "chain-b-1.0" | "chain-a-1.0" => {
                 assert!(
-                    matches!(
-                        r.outcome,
-                        BuildOutcome::Skipped(SkipReason::IndirectFailed(_))
-                    ),
+                    matches!(r.state, PackageState::IndirectFailed(_)),
                     "{} should be Skipped(IndirectFailed), got {:?}",
                     name,
-                    r.outcome
+                    r.state
                 );
             }
             _ => {}
@@ -795,7 +803,7 @@ fn test_build_bootstrap_skips_deinstall() -> Result<()> {
     let build_result = build.start(&state, &db)?;
 
     // base should succeed
-    assert_eq!(build_result.counts().success, 1);
+    assert_eq!(build_result.counts().states[Success], 1);
 
     // Verify no deinstall log exists (bootstrap skips deinstall)
     let base_logdir = h.logdir().join("base-1.0");
@@ -946,9 +954,9 @@ fn test_build_results_in_db() -> Result<()> {
         .get_build_result(base.id)?
         .expect("base-1.0 should have a build result");
     assert!(
-        matches!(base_result.outcome, BuildOutcome::Success),
+        matches!(base_result.state, PackageState::Success),
         "base-1.0 should be Success, got {:?}",
-        base_result.outcome
+        base_result.state
     );
 
     // Verify failed package
@@ -959,9 +967,9 @@ fn test_build_results_in_db() -> Result<()> {
         .get_build_result(bf.id)?
         .expect("build-fail-1.0 should have a build result");
     assert!(
-        matches!(bf_result.outcome, BuildOutcome::Failed(_)),
+        matches!(bf_result.state, PackageState::Failed(_)),
         "build-fail-1.0 should be Failed, got {:?}",
-        bf_result.outcome
+        bf_result.state
     );
 
     // get_all_build_results
@@ -1196,16 +1204,16 @@ show-subdir-var:
 }
 
 /// Verify that each build phase can independently fail and produce the
-/// correct BuildOutcome::Failed result.
+/// correct PackageState::Failed result.
 #[test]
 fn test_build_failure_at_each_phase() -> Result<()> {
     let h = TestHarness::new()?;
     let (_, _, build_result) = run_scan_and_build(&h)?;
 
-    let outcomes: HashMap<&str, &BuildOutcome> = build_result
+    let outcomes: HashMap<&str, &PackageState> = build_result
         .results
         .iter()
-        .map(|r| (r.pkgname.pkgname(), &r.outcome))
+        .map(|r| (r.pkgname.pkgname(), &r.state))
         .collect();
 
     // Each fail-* package should have Failed outcome
@@ -1220,7 +1228,7 @@ fn test_build_failure_at_each_phase() -> Result<()> {
             .get(name)
             .unwrap_or_else(|| panic!("{} should have a build result", name));
         assert!(
-            matches!(outcome, BuildOutcome::Failed(_)),
+            matches!(outcome, PackageState::Failed(_)),
             "{} should be Failed, got {:?}",
             name,
             outcome
@@ -1343,16 +1351,16 @@ fn test_cascading_failure_chain() -> Result<()> {
     let h = TestHarness::new()?;
     let (_, _, build_result) = run_scan_and_build(&h)?;
 
-    let outcomes: HashMap<&str, &BuildOutcome> = build_result
+    let outcomes: HashMap<&str, &PackageState> = build_result
         .results
         .iter()
-        .map(|r| (r.pkgname.pkgname(), &r.outcome))
+        .map(|r| (r.pkgname.pkgname(), &r.state))
         .collect();
 
     // chain-d: direct failure
     let chain_d = outcomes.get("chain-d-1.0").expect("chain-d should exist");
     assert!(
-        matches!(chain_d, BuildOutcome::Failed(_)),
+        matches!(chain_d, PackageState::Failed(_)),
         "chain-d should be Failed, got {:?}",
         chain_d
     );
@@ -1363,16 +1371,13 @@ fn test_cascading_failure_chain() -> Result<()> {
             .get(name)
             .unwrap_or_else(|| panic!("{} should exist", name));
         assert!(
-            matches!(
-                outcome,
-                BuildOutcome::Skipped(SkipReason::IndirectFailed(_))
-            ),
+            matches!(outcome, PackageState::IndirectFailed(_)),
             "{} should be IndirectFailed, got {:?}",
             name,
             outcome
         );
         // Verify the reason mentions chain-d
-        if let BuildOutcome::Skipped(SkipReason::IndirectFailed(msg)) = outcome {
+        if let PackageState::IndirectFailed(msg) = outcome {
             assert!(
                 msg.contains("chain-d"),
                 "{} IndirectFailed reason should mention chain-d, got: {}",
@@ -1477,11 +1482,15 @@ fn test_limited_build() -> Result<()> {
     // All 4 should succeed
     let bc = build_result.counts();
     assert_eq!(
-        bc.success, 4,
+        bc.states[Success], 4,
         "expected 4 successful builds, got {}",
-        bc.success
+        bc.states[Success]
     );
-    assert_eq!(bc.failed, 0, "expected 0 failures, got {}", bc.failed);
+    assert_eq!(
+        bc.states[Failed], 0,
+        "expected 0 failures, got {}",
+        bc.states[Failed]
+    );
 
     // Verify the expected packages built
     let built: Vec<&str> = build_result
@@ -1533,7 +1542,7 @@ fn test_build_resume_no_new_work() -> Result<()> {
 
     // First full scan + build
     let (_, scan_result, first_build) = run_scan_and_build(&h)?;
-    assert_eq!(first_build.counts().success, 5);
+    assert_eq!(first_build.counts().states[Success], 5);
 
     // Second build with same config - should produce no new results
     let config = h.load_config()?;
@@ -1609,9 +1618,9 @@ pkgsrc = {{
     let build_result = build.start(&state, &db)?;
 
     let bc = build_result.counts();
-    assert_eq!(bc.success, 5, "expected 5 successful builds");
-    assert_eq!(bc.failed, 6, "expected 6 failed builds");
-    assert_eq!(bc.skipped.indirect_failed, 4, "expected 4 indirect-failed");
+    assert_eq!(bc.states[Success], 5, "expected 5 successful builds");
+    assert_eq!(bc.states[Failed], 6, "expected 6 failed builds");
+    assert_eq!(bc.states[IndirectFailed], 4, "expected 4 indirect-failed");
 
     Ok(())
 }
@@ -1623,7 +1632,7 @@ fn test_rebuild_after_clear() -> Result<()> {
 
     // First build
     let (db, scan_result, first) = run_scan_and_build(&h)?;
-    assert_eq!(first.counts().success, 5);
+    assert_eq!(first.counts().states[Success], 5);
 
     // Clear all build results
     let cleared = db.clear_builds()?;
@@ -1646,7 +1655,7 @@ fn test_rebuild_after_clear() -> Result<()> {
 
     let rebuild_result = build.start(&state, &db)?;
     assert_eq!(
-        rebuild_result.counts().success,
+        rebuild_result.counts().states[Success],
         5,
         "rebuild should succeed for same 5 packages"
     );
@@ -1709,9 +1718,9 @@ fn test_selective_rebuild_after_failure() -> Result<()> {
         "build-fail should have a new build result"
     );
     assert!(
-        matches!(bf_result.map(|r| &r.outcome), Some(BuildOutcome::Success)),
+        matches!(bf_result.map(|r| &r.state), Some(PackageState::Success)),
         "fixed build-fail should succeed, got {:?}",
-        bf_result.map(|r| &r.outcome)
+        bf_result.map(|r| &r.state)
     );
 
     Ok(())
@@ -1730,7 +1739,7 @@ fn test_multi_version_package() -> Result<()> {
         .find(|r| r.pkgname.pkgname() == "py313-multi-1.0");
     assert!(multi.is_some(), "py313-multi should have a build result");
     assert!(
-        matches!(multi.map(|r| &r.outcome), Some(BuildOutcome::Success)),
+        matches!(multi.map(|r| &r.state), Some(PackageState::Success)),
         "py313-multi should succeed"
     );
 
@@ -1803,21 +1812,21 @@ fn test_build_durations() -> Result<()> {
     let (_, _, build_result) = run_scan_and_build(&h)?;
 
     for r in &build_result.results {
-        match &r.outcome {
-            BuildOutcome::Success | BuildOutcome::Failed(_) => {
+        match &r.state {
+            PackageState::Success | PackageState::Failed(_) => {
                 // Direct builds should have non-zero duration
                 // (though very fast builds might be sub-millisecond)
                 // Just verify it's a valid Duration
                 assert!(
-                    r.build_stats.total_duration.as_nanos() > 0,
+                    r.build_stats.duration.as_nanos() > 0,
                     "{} should have non-zero duration",
                     r.pkgname.pkgname()
                 );
             }
-            BuildOutcome::Skipped(SkipReason::IndirectFailed(_)) => {
+            PackageState::IndirectFailed(_) => {
                 // Indirect failures have zero duration (never attempted)
                 assert_eq!(
-                    r.build_stats.total_duration,
+                    r.build_stats.duration,
                     std::time::Duration::ZERO,
                     "{} indirect failure should have zero duration",
                     r.pkgname.pkgname()
@@ -1864,7 +1873,7 @@ fn count_pkg_summary_entries(content: &str) -> usize {
 /// Returns true if pkg_summary was regenerated.
 fn maybe_generate(db: &Database, prior: &[String], summary: &bob::BuildSummary) -> Result<bool> {
     let current = db.get_successful_packages()?;
-    if prior != current || summary.counts().success > 0 {
+    if prior != current || summary.counts().states[Success] > 0 {
         bob::generate_pkg_summary(db, 2)?;
         Ok(true)
     } else {
@@ -2123,14 +2132,14 @@ fn test_pkg_summary_regenerated_on_same_name_rebuild() -> Result<()> {
         .iter()
         .find(|r| r.pkgname.pkgname() == "top-1.0");
     assert!(
-        matches!(top.map(|r| &r.outcome), Some(BuildOutcome::Success)),
+        matches!(top.map(|r| &r.state), Some(PackageState::Success)),
         "top-1.0 should have been rebuilt successfully"
     );
 
     let current = db.get_successful_packages()?;
     assert_eq!(prior, current, "same set of successful package names");
     assert!(
-        summary.counts().success > 0,
+        summary.counts().states[Success] > 0,
         "but a new build succeeded (metadata may differ)"
     );
 
@@ -2186,8 +2195,8 @@ fn test_pkg_summary_skipped_when_all_fail() -> Result<()> {
     let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
     let summary = build.start(&state, &db)?;
 
-    assert_eq!(summary.counts().success, 0);
-    assert!(summary.counts().failed > 0);
+    assert_eq!(summary.counts().states[Success], 0);
+    assert!(summary.counts().states[Failed] > 0);
 
     let prior: Vec<String> = vec![];
     let generated = maybe_generate(&db, &prior, &summary)?;
@@ -2229,7 +2238,7 @@ fn test_pkg_summary_regenerated_when_new_packages_added() -> Result<()> {
     let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
     let first_summary = build.start(&state, &db)?;
 
-    assert_eq!(first_summary.counts().success, 1);
+    assert_eq!(first_summary.counts().states[Success], 1);
     let prior_first: Vec<String> = vec![];
     let generated = maybe_generate(&db, &prior_first, &first_summary)?;
     assert!(generated);
@@ -2266,7 +2275,7 @@ fn test_pkg_summary_regenerated_when_new_packages_added() -> Result<()> {
     let second_summary = build2.start(&state2, &db)?;
 
     assert!(
-        second_summary.counts().success >= 3,
+        second_summary.counts().states[Success] >= 3,
         "mid, also-base, top should succeed (base cached)"
     );
 
@@ -2383,7 +2392,7 @@ fn test_pkg_summary_skipped_when_interrupted() -> Result<()> {
 
     // Without the interrupt, this WOULD have triggered regeneration
     assert!(
-        prior != current || summary.counts().success > 0,
+        prior != current || summary.counts().states[Success] > 0,
         "condition should be true (would regenerate if not interrupted)"
     );
 

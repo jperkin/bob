@@ -11,6 +11,20 @@ options = {
     log_level = "info",
 }
 
+--
+-- Scheduler settings for dynamic resource allocation.  The scheduler uses
+-- statistics from the history database, knowledge of upcoming builds, and
+-- package weight to make informed choices for what MAKE_JOBS should be set
+-- to for each package build.
+--
+-- On first builds with no history, conservative values are used.
+--
+--[[
+scheduler = {
+    jobs = 24,
+}
+]]
+
 -- Environment variables for sandbox processes.  It is recommended to be as
 -- strict as possible, as pollution from the user environment can negatively
 -- impact builds.

@@ -23,68 +23,16 @@ use crossterm::terminal;
 use regex::Regex;
 use serde_json;
 
-use bob::build::{BuildOutcome, OutcomeType, Stage};
 use bob::db::{Database, PackageStatusRow};
-use bob::scan::SkipReason;
 use bob::try_println;
+use bob::{PackageState, PackageStateKind};
 
 fn use_color() -> bool {
     std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
 }
 
-/**
- * Status filter for package listing.
- */
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum StatusFilter {
-    /// Ready to build
-    Pending,
-    /// Built successfully
-    Success,
-    /// Binary already exists
-    #[value(name = "up-to-date")]
-    UpToDate,
-    /// Build attempted and failed
-    Failed,
-    /// PKG_SKIP_REASON set
-    Preskipped,
-    /// PKG_FAIL_REASON set
-    Prefailed,
-    /// Blocked by preskipped package
-    #[value(name = "indirect-preskipped")]
-    IndirectPreskipped,
-    /// Blocked by prefailed package
-    #[value(name = "indirect-prefailed")]
-    IndirectPrefailed,
-    /// Has unresolved dependencies
-    Unresolved,
-    /// Blocked by package with unresolved dependencies
-    #[value(name = "indirect-unresolved")]
-    IndirectUnresolved,
-    /// Blocked by package that failed to build
-    #[value(name = "indirect-failed")]
-    IndirectFailed,
-}
-
-impl StatusFilter {
-    /// Status string not backed by a BuildOutcome (package not yet built).
-    const PENDING: &'static str = "pending";
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => Self::PENDING,
-            Self::Success => BuildOutcome::Success.status(),
-            Self::UpToDate => BuildOutcome::UpToDate.status(),
-            Self::Failed => BuildOutcome::Failed(String::new()).status(),
-            Self::Preskipped => SkipReason::PkgSkip(String::new()).status(),
-            Self::Prefailed => SkipReason::PkgFail(String::new()).status(),
-            Self::IndirectPreskipped => SkipReason::IndirectPreskip(String::new()).status(),
-            Self::IndirectPrefailed => SkipReason::IndirectPrefail(String::new()).status(),
-            Self::Unresolved => SkipReason::UnresolvedDep(String::new()).status(),
-            Self::IndirectUnresolved => SkipReason::IndirectUnresolved(String::new()).status(),
-            Self::IndirectFailed => SkipReason::IndirectFailed(String::new()).status(),
-        }
-    }
+fn parse_status(s: &str) -> Result<PackageStateKind, String> {
+    s.parse().map_err(|_| format!("unknown status '{}'", s))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -139,11 +87,10 @@ Examples:
         #[arg(
             short = 's',
             long = "status",
-            value_enum,
+            value_parser = parse_status,
             value_delimiter = ',',
-            hide_possible_values = true
         )]
-        statuses: Vec<StatusFilter>,
+        statuses: Vec<PackageStateKind>,
         /// Package filters (regex on name or path)
         packages: Vec<String>,
     },
@@ -178,11 +125,12 @@ Examples:
         path: bool,
     },
     /// View build history
+    #[command(after_long_help = bob::HistoryKind::after_help())]
     History {
         /// Hide column headers
         #[arg(short = 'H')]
         no_header: bool,
-        /// Columns to display (comma-separated; add per-stage durations with pre-clean,depends,checksum,configure,install,package,deinstall,clean)
+        /// Columns to display (comma-separated, see --help for full list)
         #[arg(short = 'o', value_delimiter = ',')]
         columns: Option<Vec<String>>,
         /// Filter by pkgpath or pkgname (regex)
@@ -298,12 +246,12 @@ fn print_build_tree(
     let results = db.get_all_build_results()?;
     let excluded: HashSet<String> = results
         .iter()
-        .filter(|r| matches!(r.outcome, BuildOutcome::UpToDate | BuildOutcome::Skipped(_)))
+        .filter(|r| matches!(r.state, PackageState::UpToDate) || r.state.is_skip())
         .map(|r| r.pkgname.pkgname().to_string())
         .collect();
     let up_to_date: HashSet<String> = results
         .iter()
-        .filter(|r| matches!(r.outcome, BuildOutcome::UpToDate))
+        .filter(|r| matches!(r.state, PackageState::UpToDate))
         .map(|r| r.pkgname.pkgname().to_string())
         .collect();
 
@@ -517,7 +465,7 @@ fn print_build_tree(
  */
 fn print_build_status(
     db: &Database,
-    statuses: &[StatusFilter],
+    statuses: &[PackageStateKind],
     columns: Option<&[String]>,
     no_header: bool,
     pkg_filters: &[String],
@@ -566,37 +514,39 @@ fn print_build_status(
     let (sorted_ids, _) = bob::build_order(&id_deps, |_| 1);
 
     let get_status = |pkg: &PackageStatusRow| -> (&'static str, String) {
-        if let Some(outcome) = pkg
+        if let Some(state) = pkg
             .build_outcome
-            .and_then(|id| OutcomeType::try_from(id).ok())
-            .map(|ot| BuildOutcome::from_db(ot, pkg.outcome_detail.clone()))
+            .and_then(|id| PackageState::from_db(id, pkg.outcome_detail.clone()))
         {
-            (outcome.status(), outcome.reason().unwrap_or_default())
+            let reason = state.detail().map(String::from).unwrap_or_default();
+            (state.status(), reason)
         } else if let Some(reason) = &pkg.build_reason {
-            (StatusFilter::Pending.as_str(), reason.clone())
+            (PackageStateKind::Pending.into(), reason.clone())
         } else if let Some(reason) = &pkg.fail_reason {
             (
-                StatusFilter::Prefailed.as_str(),
+                PackageStateKind::PreFailed.into(),
                 format!("PKG_FAIL_REASON: {}", reason),
             )
         } else if let Some(reason) = &pkg.skip_reason {
             (
-                StatusFilter::Preskipped.as_str(),
+                PackageStateKind::PreSkipped.into(),
                 format!("PKG_SKIP_REASON: {}", reason),
             )
         } else {
-            (StatusFilter::Pending.as_str(), String::new())
+            (PackageStateKind::Pending.into(), String::new())
         }
     };
 
     let matches_status = |status: &str| -> bool {
         if !statuses.is_empty() {
-            return statuses.iter().any(|f| f.as_str() == status);
+            return statuses.iter().any(|f| <&str>::from(f) == status);
         }
         if show_all {
             return true;
         }
-        status != StatusFilter::Success.as_str() && status != StatusFilter::UpToDate.as_str()
+        let success: &str = PackageStateKind::Success.into();
+        let up_to_date: &str = PackageStateKind::UpToDate.into();
+        status != success && status != up_to_date
     };
 
     let mut rows: Vec<[String; 5]> = Vec::new();
@@ -689,61 +639,20 @@ fn print_build_status(
     Ok(())
 }
 
-fn format_duration_ms(ms: u64) -> String {
-    if ms < 1000 {
-        format!("{}ms", ms)
-    } else if ms < 60_000 {
-        format!("{:.1}s", ms as f64 / 1000.0)
-    } else if ms < 3_600_000 {
-        let mins = ms / 60_000;
-        let secs = (ms % 60_000) / 1000;
-        format!("{}m{:02}s", mins, secs)
-    } else {
-        let hours = ms / 3_600_000;
-        let mins = (ms % 3_600_000) / 60_000;
-        format!("{}h{:02}m", hours, mins)
-    }
-}
-
 fn print_history(
     db: &Database,
     columns: Option<&[String]>,
     no_header: bool,
     package: Option<&str>,
 ) -> Result<()> {
-    let all_cols = [
-        "timestamp",
-        "pkgpath",
-        "pkgname",
-        "outcome",
-        "stage",
-        "jobs",
-        "build",
-        "total",
-        "pre-clean",
-        "depends",
-        "checksum",
-        "configure",
-        "install",
-        "package",
-        "deinstall",
-        "clean",
-    ];
-    let default_cols: Vec<&str> = vec![
-        "timestamp",
-        "pkgname",
-        "outcome",
-        "stage",
-        "jobs",
-        "build",
-        "total",
-    ];
+    let all_cols = bob::HistoryKind::all_names();
+    let default_cols = bob::HistoryKind::default_names();
     let cols: Vec<&str> = columns
         .map(|c| c.iter().map(|s| s.as_str()).collect())
         .unwrap_or(default_cols);
 
     for col in &cols {
-        if !all_cols.contains(col) {
+        if !all_cols.iter().any(|c| c == col) {
             bail!(
                 "Unknown column '{}'. Valid columns: {}",
                 col,
@@ -751,17 +660,6 @@ fn print_history(
             );
         }
     }
-
-    let stage_cols: &[(&str, Stage)] = &[
-        ("pre-clean", Stage::PreClean),
-        ("depends", Stage::Depends),
-        ("checksum", Stage::Checksum),
-        ("configure", Stage::Configure),
-        ("install", Stage::Install),
-        ("package", Stage::Package),
-        ("deinstall", Stage::Deinstall),
-        ("clean", Stage::Clean),
-    ];
 
     let pattern = package
         .map(|p| Regex::new(p).map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", p, e)))
@@ -778,77 +676,17 @@ fn print_history(
         return Ok(());
     }
 
-    let col_idx = |name: &str| -> usize {
-        match name {
-            "timestamp" => 0,
-            "pkgpath" => 1,
-            "pkgname" => 2,
-            "outcome" => 3,
-            "stage" => 4,
-            "jobs" => 5,
-            "build" => 6,
-            "total" => 7,
-            _ => {
-                for (i, &(sc, _)) in stage_cols.iter().enumerate() {
-                    if sc == name {
-                        return 8 + i;
-                    }
-                }
-                0
-            }
-        }
-    };
-
     let mut rows: Vec<Vec<String>> = Vec::new();
     for rec in &records {
-        let stage = if rec.outcome == OutcomeType::Success {
-            "-".to_string()
-        } else {
-            rec.stage
-                .map(|s| s.as_str().to_string())
-                .unwrap_or_else(|| "-".to_string())
-        };
-        let jobs = if rec.make_jobs == 0 {
-            "-".to_string()
-        } else {
-            rec.make_jobs.to_string()
-        };
-        let build = rec
-            .build_duration
-            .map(|d| format_duration_ms(d.as_millis() as u64))
-            .unwrap_or_else(|| "-".to_string());
-        let total = format_duration_ms(rec.total_duration.as_millis() as u64);
-
-        let mut row = vec![
-            rec.timestamp.clone(),
-            rec.pkgpath.clone(),
-            rec.pkgname.clone(),
-            rec.outcome.as_str().to_string(),
-            stage,
-            jobs,
-            build,
-            total,
-        ];
-
-        for &(_, stage_val) in stage_cols {
-            let dur = rec
-                .stage_durations
-                .iter()
-                .find(|(s, _)| *s == stage_val)
-                .map(|(_, d)| format_duration_ms(d.as_millis() as u64))
-                .unwrap_or_else(|| "-".to_string());
-            row.push(dur);
-        }
-
-        rows.push(row);
+        rows.push(cols.iter().map(|&col| rec.format_col(col)).collect());
     }
 
     let widths: Vec<usize> = cols
         .iter()
-        .map(|&col| {
-            let idx = col_idx(col);
+        .enumerate()
+        .map(|(i, col)| {
             let header_len = col.len();
-            let max_data = rows.iter().map(|r| r[idx].len()).max().unwrap_or(0);
+            let max_data = rows.iter().map(|r| r[i].len()).max().unwrap_or(0);
             header_len.max(max_data)
         })
         .collect();
@@ -865,10 +703,10 @@ fn print_history(
     }
 
     for row in &rows {
-        let values: Vec<String> = cols
+        let values: Vec<String> = row
             .iter()
             .zip(&widths)
-            .map(|(&col, &w)| format!("{:<width$}", row[col_idx(col)], width = w))
+            .map(|(val, &w)| format!("{:<width$}", val, width = w))
             .collect();
         if !try_println(values.join("  ").trim_end()) {
             break;
