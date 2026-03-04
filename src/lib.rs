@@ -20,16 +20,17 @@ pub mod action;
 pub mod build;
 pub mod config;
 pub mod db;
-mod pkgstate;
+pub mod logging;
 pub mod report;
 pub mod sandbox;
 pub mod scan;
+pub mod scheduler;
 pub mod state;
 pub mod summary;
 
-// Internal modules - exposed for binary use but not primary API
+mod history;
 mod init;
-pub mod logging;
+mod pkgstate;
 mod tui;
 
 use std::collections::{HashMap, VecDeque};
@@ -124,10 +125,12 @@ pub use build::{
 };
 pub use config::{Config, Options, Pkgsrc, PkgsrcEnv, Sandboxes, SchedulerConfig};
 pub use db::Database;
+pub use history::{History, HistoryKind, format_duration};
 pub use init::Init;
 pub use pkgstate::{PackageCounts, PackageState, PackageStateKind};
 pub use report::write_html_report;
 pub use sandbox::Sandbox;
 pub use scan::{ResolvedPackage, Scan, ScanResult, ScanSummary};
+pub use scheduler::{Scheduler, compute_budget};
 pub use state::RunState;
 pub use summary::generate_pkg_summary;

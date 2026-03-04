@@ -23,7 +23,6 @@ use crossterm::terminal;
 use regex::Regex;
 use serde_json;
 
-use bob::build::Stage;
 use bob::db::{Database, PackageStatusRow};
 use bob::try_println;
 use bob::{PackageState, PackageStateKind};
@@ -126,11 +125,12 @@ Examples:
         path: bool,
     },
     /// View build history
+    #[command(after_long_help = bob::HistoryKind::after_help())]
     History {
         /// Hide column headers
         #[arg(short = 'H')]
         no_header: bool,
-        /// Columns to display (comma-separated; add per-stage durations with pre-clean,depends,checksum,configure,install,package,deinstall,clean)
+        /// Columns to display (comma-separated, see --help for full list)
         #[arg(short = 'o', value_delimiter = ',')]
         columns: Option<Vec<String>>,
         /// Filter by pkgpath or pkgname (regex)
@@ -639,61 +639,20 @@ fn print_build_status(
     Ok(())
 }
 
-fn format_duration_ms(ms: u64) -> String {
-    if ms < 1000 {
-        format!("{}ms", ms)
-    } else if ms < 60_000 {
-        format!("{:.1}s", ms as f64 / 1000.0)
-    } else if ms < 3_600_000 {
-        let mins = ms / 60_000;
-        let secs = (ms % 60_000) / 1000;
-        format!("{}m{:02}s", mins, secs)
-    } else {
-        let hours = ms / 3_600_000;
-        let mins = (ms % 3_600_000) / 60_000;
-        format!("{}h{:02}m", hours, mins)
-    }
-}
-
 fn print_history(
     db: &Database,
     columns: Option<&[String]>,
     no_header: bool,
     package: Option<&str>,
 ) -> Result<()> {
-    let all_cols = [
-        "timestamp",
-        "pkgpath",
-        "pkgname",
-        "outcome",
-        "stage",
-        "jobs",
-        "build",
-        "total",
-        "pre-clean",
-        "depends",
-        "checksum",
-        "configure",
-        "install",
-        "package",
-        "deinstall",
-        "clean",
-    ];
-    let default_cols: Vec<&str> = vec![
-        "timestamp",
-        "pkgname",
-        "outcome",
-        "stage",
-        "jobs",
-        "build",
-        "total",
-    ];
+    let all_cols = bob::HistoryKind::all_names();
+    let default_cols = bob::HistoryKind::default_names();
     let cols: Vec<&str> = columns
         .map(|c| c.iter().map(|s| s.as_str()).collect())
         .unwrap_or(default_cols);
 
     for col in &cols {
-        if !all_cols.contains(col) {
+        if !all_cols.iter().any(|c| c == col) {
             bail!(
                 "Unknown column '{}'. Valid columns: {}",
                 col,
@@ -701,17 +660,6 @@ fn print_history(
             );
         }
     }
-
-    let stage_cols: &[(&str, Stage)] = &[
-        ("pre-clean", Stage::PreClean),
-        ("depends", Stage::Depends),
-        ("checksum", Stage::Checksum),
-        ("configure", Stage::Configure),
-        ("install", Stage::Install),
-        ("package", Stage::Package),
-        ("deinstall", Stage::Deinstall),
-        ("clean", Stage::Clean),
-    ];
 
     let pattern = package
         .map(|p| Regex::new(p).map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", p, e)))
@@ -728,83 +676,17 @@ fn print_history(
         return Ok(());
     }
 
-    let col_idx = |name: &str| -> usize {
-        match name {
-            "timestamp" => 0,
-            "pkgpath" => 1,
-            "pkgname" => 2,
-            "outcome" => 3,
-            "stage" => 4,
-            "jobs" => 5,
-            "build" => 6,
-            "total" => 7,
-            _ => {
-                for (i, &(sc, _)) in stage_cols.iter().enumerate() {
-                    if sc == name {
-                        return 8 + i;
-                    }
-                }
-                0
-            }
-        }
-    };
-
     let mut rows: Vec<Vec<String>> = Vec::new();
     for rec in &records {
-        let stage = if rec.outcome == PackageStateKind::Success {
-            "-".to_string()
-        } else {
-            rec.stage
-                .map(|s| {
-                    let st: &str = s.into();
-                    st.to_string()
-                })
-                .unwrap_or_else(|| "-".to_string())
-        };
-        let jobs = if rec.make_jobs == 0 {
-            "-".to_string()
-        } else {
-            rec.make_jobs.to_string()
-        };
-        let build = rec
-            .build_duration
-            .map(|d| format_duration_ms(d.as_millis() as u64))
-            .unwrap_or_else(|| "-".to_string());
-        let total = format_duration_ms(rec.total_duration.as_millis() as u64);
-
-        let mut row = vec![
-            rec.timestamp.clone(),
-            rec.pkgpath.clone(),
-            rec.pkgname.clone(),
-            {
-                let s: &str = rec.outcome.into();
-                s.to_string()
-            },
-            stage,
-            jobs,
-            build,
-            total,
-        ];
-
-        for &(_, stage_val) in stage_cols {
-            let dur = rec
-                .stage_durations
-                .iter()
-                .find(|(s, _)| *s == stage_val)
-                .map(|(_, d)| format_duration_ms(d.as_millis() as u64))
-                .unwrap_or_else(|| "-".to_string());
-            row.push(dur);
-        }
-
-        rows.push(row);
+        rows.push(cols.iter().map(|&col| rec.format_col(col)).collect());
     }
 
     let widths: Vec<usize> = cols
         .iter()
-        .map(|&col| {
-            let idx = col_idx(col);
+        .enumerate()
+        .map(|(i, col)| {
             let header_len = col.len();
-            let max_data = rows.iter().map(|r| r[idx].len()).max().unwrap_or(0);
+            let max_data = rows.iter().map(|r| r[i].len()).max().unwrap_or(0);
             header_len.max(max_data)
         })
         .collect();
@@ -821,10 +703,10 @@ fn print_history(
     }
 
     for row in &rows {
-        let values: Vec<String> = cols
+        let values: Vec<String> = row
             .iter()
             .zip(&widths)
-            .map(|(&col, &w)| format!("{:<width$}", row[col_idx(col)], width = w))
+            .map(|(val, &w)| format!("{:<width$}", val, width = w))
             .collect();
         if !try_println(values.join("  ").trim_end()) {
             break;

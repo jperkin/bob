@@ -48,10 +48,11 @@ use indexmap::IndexMap;
 use petgraph::graphmap::DiGraphMap;
 use pkgsrc::{Depend, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
-use std::io::BufReader;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::{BufReader, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tracing::{debug, error, info, info_span, trace, warn};
 
 /// A successfully resolved package that is ready to build.
@@ -215,6 +216,8 @@ pub struct ScanSummary {
     pub pkgpaths: usize,
     /// All packages in scan order with their outcomes.
     pub packages: Vec<ScanResult>,
+    /// Transitive dependent count per pkgname, computed during resolution.
+    pub dep_counts: HashMap<PkgName, usize>,
 }
 
 /// Counts of packages by state, plus buildable and scanfail totals.
@@ -599,16 +602,20 @@ impl Scan {
          *
          * Ensure sandbox 0 exists. The caller manages overall lifecycle.
          */
-        scope.ensure(1)?;
-
         if scope.enabled() {
-            // Run pre-build script if defined
+            print!("Creating sandbox...");
+            let _ = std::io::stdout().flush();
+            let start = Instant::now();
+            scope.ensure(1)?;
             if !self
                 .sandbox
                 .run_pre_build(0, &self.config, self.config.script_env(None))?
             {
                 warn!("pre-build script failed");
             }
+            println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
+        } else {
+            scope.ensure(1)?;
         }
 
         let env = match db.load_pkgsrc_env() {
@@ -1512,6 +1519,8 @@ impl Scan {
 
         Self::propagate_failures(&depends, &mut skip_reasons);
 
+        let dep_counts = Self::transitive_dependent_counts(&depends);
+
         let mut packages: Vec<ScanResult> = Vec::new();
         let mut count_buildable = 0;
         let mut count_filtered = 0;
@@ -1565,7 +1574,11 @@ impl Scan {
             .map(|p| p.pkgpath())
             .collect::<HashSet<_>>()
             .len();
-        let summary = ScanSummary { pkgpaths, packages };
+        let summary = ScanSummary {
+            pkgpaths,
+            packages,
+            dep_counts,
+        };
 
         let c = summary.counts();
         info!(
@@ -1577,6 +1590,171 @@ impl Scan {
         );
 
         Ok(summary)
+    }
+
+    /**
+     * Compute the number of transitive dependents for each package.
+     *
+     * For each package in `depends`, counts how many other packages
+     * transitively depend on it via BFS through the reverse edges.
+     */
+    fn transitive_dependent_counts(
+        depends: &HashMap<PkgName, Vec<PkgName>>,
+    ) -> HashMap<PkgName, usize> {
+        let mut reverse_deps: HashMap<&PkgName, Vec<&PkgName>> = HashMap::new();
+        for pkg in depends.keys() {
+            reverse_deps.entry(pkg).or_default();
+        }
+        for (pkg, deps) in depends {
+            for dep in deps {
+                reverse_deps.entry(dep).or_default().push(pkg);
+            }
+        }
+
+        let mut counts = HashMap::new();
+        for pkg in depends.keys() {
+            let mut visited: HashSet<&PkgName> = HashSet::new();
+            let mut queue: VecDeque<&PkgName> = VecDeque::new();
+            if let Some(rdeps) = reverse_deps.get(pkg) {
+                for r in rdeps {
+                    if depends.contains_key(*r) && visited.insert(r) {
+                        queue.push_back(r);
+                    }
+                }
+            }
+            while let Some(node) = queue.pop_front() {
+                if let Some(rdeps) = reverse_deps.get(node) {
+                    for r in rdeps {
+                        if depends.contains_key(*r) && visited.insert(r) {
+                            queue.push_back(r);
+                        }
+                    }
+                }
+            }
+            counts.insert(pkg.clone(), visited.len());
+        }
+        counts
+    }
+
+    /**
+     * Compute critical-path scores and store dep_count + weight to the DB.
+     *
+     * dep_counts are already computed in the ScanSummary during resolve().
+     * Weight (critical-path score) is computed here using build durations
+     * from history.
+     */
+    fn store_dep_scores(db: &crate::db::Database, summary: &ScanSummary) -> Result<()> {
+        let mut incoming: HashMap<&PkgName, Vec<&PkgName>> = HashMap::new();
+        let mut reverse_deps: HashMap<&PkgName, Vec<&PkgName>> = HashMap::new();
+        for pkg in &summary.packages {
+            let Some(pkgname) = pkg.pkgname() else {
+                continue;
+            };
+            incoming.entry(pkgname).or_default();
+            reverse_deps.entry(pkgname).or_default();
+            for dep in pkg.depends() {
+                incoming.entry(pkgname).or_default().push(dep);
+                reverse_deps.entry(dep).or_default().push(pkgname);
+            }
+        }
+
+        let owned_pairs: Vec<(String, String)> = summary
+            .packages
+            .iter()
+            .filter_map(|p| {
+                let pkgname = p.pkgname()?;
+                let base = pkgname.pkgbase().to_string();
+                Some((p.pkgpath().to_string(), base))
+            })
+            .collect();
+        let pkg_pairs: Vec<(&str, &str)> = owned_pairs
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let durations: HashMap<String, usize> = db
+            .duration_by_pkg(&pkg_pairs)
+            .into_iter()
+            .map(|(k, v)| (k, v as usize))
+            .collect();
+
+        let crit_scores = Self::critical_path_scores(&incoming, &reverse_deps, |pkg: &PkgName| {
+            let base = pkg.pkgbase().to_string();
+            durations.get(&base).copied().unwrap_or(100)
+        });
+
+        let mut scores: Vec<(i64, Option<i64>, Option<i64>)> = Vec::new();
+        for pkg in &summary.packages {
+            let Some(pkgname) = pkg.pkgname() else {
+                continue;
+            };
+            let Some(pkg_id) = db.get_package_id(pkgname.pkgname())? else {
+                continue;
+            };
+            let dc = summary.dep_counts.get(pkgname).map(|&c| c as i64);
+            let w = crit_scores.get(pkgname).map(|&s| s as i64);
+            if dc.is_some() || w.is_some() {
+                scores.push((pkg_id, dc, w));
+            }
+        }
+
+        db.store_dep_scores(&scores)
+    }
+
+    /**
+     * Compute critical-path scores for all packages.
+     *
+     * The score for a package is the longest weighted chain through its
+     * transitive dependents (max at each node, not sum).
+     */
+    fn critical_path_scores(
+        incoming: &HashMap<&PkgName, Vec<&PkgName>>,
+        reverse_deps: &HashMap<&PkgName, Vec<&PkgName>>,
+        weight: impl Fn(&PkgName) -> usize,
+    ) -> HashMap<PkgName, usize> {
+        let mut pending: HashMap<&PkgName, usize> = HashMap::new();
+        for pkg in incoming.keys() {
+            let count = reverse_deps
+                .get(pkg)
+                .map(|s| s.iter().filter(|r| incoming.contains_key(*r)).count())
+                .unwrap_or(0);
+            pending.insert(pkg, count);
+        }
+
+        let mut queue: VecDeque<&PkgName> = pending
+            .iter()
+            .filter(|(_, c)| **c == 0)
+            .map(|(&p, _)| p)
+            .collect();
+
+        let mut scores: HashMap<&PkgName, usize> = HashMap::new();
+
+        while let Some(pkg) = queue.pop_front() {
+            let score = reverse_deps
+                .get(pkg)
+                .map(|rdeps| {
+                    rdeps
+                        .iter()
+                        .filter(|r| incoming.contains_key(*r))
+                        .filter_map(|r| scores.get(r).map(|&s| weight(r) + s))
+                        .max()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            scores.insert(pkg, score);
+
+            if let Some(deps) = incoming.get(pkg) {
+                for dep in deps {
+                    if let Some(c) = pending.get_mut(dep) {
+                        *c = c.saturating_sub(1);
+                        if *c == 0 {
+                            queue.push_back(dep);
+                        }
+                    }
+                }
+            }
+        }
+
+        scores.into_iter().map(|(k, v)| (k.clone(), v)).collect()
     }
 
     /**
@@ -1599,6 +1777,7 @@ impl Scan {
         let result = self.resolve(scan_data)?;
         db.store_resolved_deps(&result)?;
         db.store_scan_skipped(&result)?;
+        Self::store_dep_scores(db, &result)?;
         println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
 
         let errors: Vec<_> = result.errors().collect();
