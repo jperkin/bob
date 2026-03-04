@@ -507,7 +507,7 @@ fn run() -> Result<()> {
         Cmd::List { cmd } => {
             let config = Config::load(args.config.as_deref())?;
             let db = Database::open(config.dbdir())?;
-            cmd::list::run(&db, cmd)?;
+            cmd::list::run(&db, cmd, config.jobs(), config.build_threads())?;
         }
         Cmd::Util {
             cmd: UtilCmd::PrintDepGraph { output },

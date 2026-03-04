@@ -97,7 +97,7 @@ Examples:
         /// Output format
         #[arg(short = 'f', long, value_enum, default_value_t = OutputFormat::Table)]
         format: OutputFormat,
-        /// Columns to display (comma-separated: pkgname,pkgpath,status,reason,multi_version)
+        /// Columns to display (comma-separated; use -l to see all)
         #[arg(short = 'o', value_delimiter = ',')]
         columns: Option<Vec<String>>,
         /// Filter by status (repeatable or comma-separated)
@@ -164,7 +164,12 @@ Examples:
     },
 }
 
-pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
+pub fn run(
+    db: &Database,
+    cmd: ListCmd,
+    max_jobs: Option<usize>,
+    build_threads: usize,
+) -> Result<()> {
     if !matches!(cmd, ListCmd::History { .. }) && db.count_packages()? == 0 {
         bail!("No packages in database. Run 'bob scan' first.");
     }
@@ -188,6 +193,8 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
                 format,
                 &packages,
                 all,
+                max_jobs,
+                build_threads,
             )?;
         }
         ListCmd::Tree {
@@ -526,8 +533,20 @@ fn print_build_status(
     format: OutputFormat,
     pkg_filters: &[String],
     show_all: bool,
+    max_jobs: Option<usize>,
+    build_threads: usize,
 ) -> Result<()> {
-    let all_cols = ["pkgname", "pkgpath", "status", "reason", "multi_version"];
+    let all_cols = [
+        "pkgname",
+        "pkgpath",
+        "status",
+        "reason",
+        "multi_version",
+        "deps",
+        "weight",
+        "cpu",
+        "jobs",
+    ];
     let default_cols = ["pkgname", "status", "reason"];
     let cols: Vec<&str> = if columns.is_some() {
         columns
@@ -553,9 +572,15 @@ fn print_build_status(
         match col {
             "pkgname" => 40,
             "pkgpath" => 35,
+            "deps" => 6,
+            "weight" => 8,
+            "cpu" => 8,
+            "jobs" => 4,
             _ => usize::MAX,
         }
     };
+
+    let right_align = |col: &str| -> bool { matches!(col, "deps" | "weight" | "cpu" | "jobs") };
 
     let pkg_patterns: Vec<Regex> = pkg_filters
         .iter()
@@ -574,6 +599,34 @@ fn print_build_status(
     }
 
     let (sorted_ids, _) = bob::build_order(&id_deps, |_| 1);
+
+    let cpu_times = if cols.contains(&"cpu") {
+        db.cpu_time_by_pkg_all()
+    } else {
+        HashMap::new()
+    };
+
+    let precomputed_jobs = if cols.contains(&"jobs") {
+        if let Some(mj) = max_jobs {
+            let durations: HashMap<String, usize> = db
+                .duration_by_pkg_all()
+                .into_iter()
+                .map(|(k, v)| (k, v as usize))
+                .collect();
+            let dep_counts: HashMap<String, i64> = all_pkgs
+                .iter()
+                .filter_map(|p| {
+                    let base = pkgsrc::PkgName::new(&p.pkgname).pkgbase().to_string();
+                    p.dep_count.map(|dc| (base, dc))
+                })
+                .collect();
+            bob::compute_budget(&dep_counts, &durations, mj, build_threads)
+        } else {
+            HashMap::new()
+        }
+    } else {
+        HashMap::new()
+    };
 
     let get_status = |pkg: &PackageStatusRow| -> (&'static str, String) {
         if let Some(state) = pkg
@@ -611,7 +664,7 @@ fn print_build_status(
         status != success && status != up_to_date
     };
 
-    let mut rows: Vec<[String; 5]> = Vec::new();
+    let mut rows: Vec<Vec<String>> = Vec::new();
     for id in &sorted_ids {
         let pkg = match id_to_pkg.get(id) {
             Some(p) => p,
@@ -639,13 +692,38 @@ fn print_build_status(
             .map(|v| v.join(" "))
             .unwrap_or_default();
 
-        rows.push([
-            pkg.pkgname.clone(),
-            pkg.pkgpath.clone(),
-            status.to_string(),
-            reason,
-            multi_version,
-        ]);
+        let dash = || "-".to_string();
+        let pkgbase = pkgsrc::PkgName::new(&pkg.pkgname).pkgbase().to_string();
+
+        let row: Vec<String> = cols
+            .iter()
+            .map(|&col| match col {
+                "pkgname" => pkg.pkgname.clone(),
+                "pkgpath" => pkg.pkgpath.clone(),
+                "status" => status.to_string(),
+                "reason" => reason.clone(),
+                "multi_version" => multi_version.clone(),
+                "deps" => pkg.dep_count.map(|c| c.to_string()).unwrap_or_else(dash),
+                "weight" => pkg.weight.map(|s| s.to_string()).unwrap_or_else(dash),
+                "cpu" => cpu_times
+                    .get(&pkgbase)
+                    .map(|ms| bob::format_duration(*ms))
+                    .unwrap_or_else(dash),
+                "jobs" => {
+                    if max_jobs.is_none() {
+                        dash()
+                    } else {
+                        let base = pkgsrc::PkgName::new(&pkg.pkgname).pkgbase().to_string();
+                        precomputed_jobs
+                            .get(&base)
+                            .map(|j| j.to_string())
+                            .unwrap_or_else(dash)
+                    }
+                }
+                _ => String::new(),
+            })
+            .collect();
+        rows.push(row);
     }
 
     if rows.is_empty() {
@@ -655,25 +733,14 @@ fn print_build_status(
         return Ok(());
     }
 
-    let col_idx = |name: &str| -> usize {
-        match name {
-            "pkgname" => 0,
-            "pkgpath" => 1,
-            "status" => 2,
-            "reason" => 3,
-            "multi_version" => 4,
-            _ => 0,
-        }
-    };
-
     match format {
         OutputFormat::Table => {
             let widths: Vec<usize> = cols
                 .iter()
-                .map(|&col| {
-                    let idx = col_idx(col);
+                .enumerate()
+                .map(|(i, &col)| {
                     let header_len = col.len();
-                    let max_data = rows.iter().map(|r| r[idx].len()).max().unwrap_or(0);
+                    let max_data = rows.iter().map(|r| r[i].len()).max().unwrap_or(0);
                     header_len.max(max_data).min(max_width(col))
                 })
                 .collect();
@@ -682,7 +749,13 @@ fn print_build_status(
                 let header: Vec<String> = cols
                     .iter()
                     .zip(&widths)
-                    .map(|(&col, &w)| format!("{:<width$}", col.to_uppercase(), width = w))
+                    .map(|(&col, &w)| {
+                        if right_align(col) {
+                            format!("{:>width$}", col.to_uppercase(), width = w)
+                        } else {
+                            format!("{:<width$}", col.to_uppercase(), width = w)
+                        }
+                    })
                     .collect();
                 if !try_println(header.join("  ").trim_end()) {
                     return Ok(());
@@ -692,8 +765,15 @@ fn print_build_status(
             for row in &rows {
                 let values: Vec<String> = cols
                     .iter()
+                    .enumerate()
                     .zip(&widths)
-                    .map(|(&col, &w)| format!("{:<width$}", row[col_idx(col)], width = w))
+                    .map(|((i, &col), &w)| {
+                        if right_align(col) {
+                            format!("{:>width$}", row[i], width = w)
+                        } else {
+                            format!("{:<width$}", row[i], width = w)
+                        }
+                    })
                     .collect();
                 if !try_println(values.join("  ").trim_end()) {
                     break;
@@ -705,10 +785,9 @@ fn print_build_status(
                 return Ok(());
             }
             for row in &rows {
-                let values: Vec<String> = cols
+                let values: Vec<String> = row
                     .iter()
-                    .map(|&col| {
-                        let v = &row[col_idx(col)];
+                    .map(|v| {
                         if v.contains(',') || v.contains('"') {
                             format!("\"{}\"", v.replace('"', "\"\""))
                         } else {
@@ -726,11 +805,9 @@ fn print_build_status(
                 .iter()
                 .map(|row| {
                     cols.iter()
-                        .map(|&col| {
-                            (
-                                col.to_string(),
-                                serde_json::Value::String(row[col_idx(col)].clone()),
-                            )
+                        .enumerate()
+                        .map(|(i, &col)| {
+                            (col.to_string(), serde_json::Value::String(row[i].clone()))
                         })
                         .collect()
                 })
