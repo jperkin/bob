@@ -91,7 +91,7 @@
 //! | `ifexists` | boolean | Only perform action if source exists (default: false) |
 //! | `ifset` | string | Only perform action if the named config variable is set (e.g. `"pkgsrc.build_user"`). Occurrences of `{var}` in `create`/`destroy` are replaced with the variable's value. |
 
-use anyhow::{Error, bail};
+use anyhow::{Context, Error, bail};
 use mlua::{Result as LuaResult, Table};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -162,7 +162,8 @@ pub struct Action {
 /// The type of sandbox action to perform.
 ///
 /// Used internally to dispatch action handling.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, strum::EnumString)]
+#[strum(serialize_all = "lowercase")]
 pub enum ActionType {
     /// Mount a filesystem inside the sandbox.
     Mount,
@@ -189,7 +190,8 @@ pub enum ActionType {
 /// | `nfs` | | Yes | Yes | Yes | Yes |
 /// | `proc` | | Yes | No | Yes | Yes |
 /// | `tmp` | | Yes | Yes | Yes | Yes |
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, strum::EnumString)]
+#[strum(serialize_all = "lowercase")]
 pub enum FSType {
     /// Bind mount from host filesystem.
     ///
@@ -204,6 +206,12 @@ pub enum FSType {
     /// | macOS | `bindfs` (requires installation) |
     /// | NetBSD | `mount_null` |
     /// | illumos | `mount -F lofs` |
+    #[strum(
+        serialize = "bind",
+        serialize = "lofs",
+        serialize = "loop",
+        serialize = "null"
+    )]
     Bind,
 
     /// Device filesystem.
@@ -271,45 +279,6 @@ pub enum FSType {
     Tmp,
 }
 
-impl FromStr for ActionType {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "mount" => Ok(ActionType::Mount),
-            "copy" => Ok(ActionType::Copy),
-            "cmd" => Ok(ActionType::Cmd),
-            "symlink" => Ok(ActionType::Symlink),
-            _ => bail!(
-                "Unsupported action type '{}' (expected 'mount', 'copy', 'cmd', or 'symlink')",
-                s
-            ),
-        }
-    }
-}
-
-impl FromStr for FSType {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "bind" => Ok(FSType::Bind),
-            "dev" => Ok(FSType::Dev),
-            "fd" => Ok(FSType::Fd),
-            "nfs" => Ok(FSType::Nfs),
-            "proc" => Ok(FSType::Proc),
-            "tmp" => Ok(FSType::Tmp),
-            /*
-             * Aliases for bind mount types across different systems.
-             */
-            "lofs" => Ok(FSType::Bind),
-            "loop" => Ok(FSType::Bind),
-            "null" => Ok(FSType::Bind),
-            _ => bail!("Unsupported filesystem type '{}'", s),
-        }
-    }
-}
-
 impl Action {
     pub fn from_lua(t: &Table) -> LuaResult<Self> {
         // "dir" can be used as shorthand when src and dest are the same
@@ -347,11 +316,12 @@ impl Action {
 
     pub fn action_type(&self) -> Result<ActionType, Error> {
         ActionType::from_str(&self.action)
+            .context(format!("unsupported action type '{}'", self.action))
     }
 
     pub fn fs_type(&self) -> Result<FSType, Error> {
         match &self.fs {
-            Some(fs) => FSType::from_str(fs),
+            Some(fs) => FSType::from_str(fs).context(format!("unsupported filesystem type '{fs}'")),
             None => bail!("'mount' action requires 'fs' field"),
         }
     }
