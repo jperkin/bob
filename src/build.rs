@@ -938,7 +938,7 @@ impl<'a> PkgBuilder<'a> {
                 }
             });
 
-            let status = wait_with_shutdown(&mut child, &self.session.state)?;
+            let (status, _cpu_time) = wait_with_shutdown(&mut child, &self.session.state)?;
 
             // Reader thread will exit when pipe closes (process exits)
             let _ = tee_handle.join();
@@ -974,7 +974,7 @@ impl<'a> PkgBuilder<'a> {
                     .stderr(Stdio::from(log_err))
                     .spawn()
                     .with_context(|| format!("Failed to spawn {}", cmd.display()))?;
-                wait_with_shutdown(&mut child, &self.session.state)
+                wait_with_shutdown(&mut child, &self.session.state).map(|(s, _)| s)
             }
             RunAs::User => {
                 let user = self.build_user.as_ref().unwrap();
@@ -997,7 +997,7 @@ impl<'a> PkgBuilder<'a> {
                     .stderr(Stdio::from(log_err))
                     .spawn()
                     .context("Failed to spawn su command")?;
-                wait_with_shutdown(&mut child, &self.session.state)
+                wait_with_shutdown(&mut child, &self.session.state).map(|(s, _)| s)
             }
         }
     }
