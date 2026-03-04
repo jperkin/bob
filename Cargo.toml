@@ -38,6 +38,7 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 zstd = "0.13"
+systemstat = "0.2"
 
 # Use procfs on Linux for process enumeration
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -49,9 +50,12 @@ mlua = { version = "0.10", features = ["lua54", "vendored", "send"] }
 
 # Use system Lua on illumos (lua-src doesn't support it)
 [target.'cfg(target_os = "illumos")'.dependencies]
+kstat-rs = "0.2"
 mlua = { version = "0.10", features = ["lua54", "send"] }
 
 [dev-dependencies]
 tempfile = "3.24.0"
 zstd = "0.13"
 
+[patch.crates-io]
+systemstat = { git = "https://github.com/jperkin/systemstat", branch = "platform-support" }

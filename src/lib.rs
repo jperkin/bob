@@ -19,6 +19,7 @@
 pub mod action;
 pub mod build;
 pub mod config;
+pub mod cpu;
 pub mod db;
 pub mod logging;
 pub mod report;
@@ -124,6 +125,7 @@ pub use build::{
     pkg_up_to_date,
 };
 pub use config::{Config, Options, Pkgsrc, PkgsrcEnv, Sandboxes, SchedulerConfig, WrkObjDir};
+pub use cpu::{CpuSample, CpuSamplerHandle, start_cpu_sampler};
 pub use db::Database;
 pub use history::{History, HistoryKind, format_duration};
 pub use init::Init;
