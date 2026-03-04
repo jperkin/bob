@@ -44,9 +44,10 @@
 
 use crate::config::PkgsrcEnv;
 use crate::sandbox::{SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
-use crate::scan::{ResolvedPackage, SkipReason, SkippedCounts};
+use crate::scan::ResolvedPackage;
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, RunState, Sandbox};
+use crate::{PackageCounts, PackageState};
 use anyhow::{Context, bail};
 use crossterm::event;
 use glob::Pattern;
@@ -397,67 +398,6 @@ pub enum Stage {
     Package = 7,
     Deinstall = 8,
     Clean = 9,
-}
-
-/**
- * Database representation of build outcomes.
- *
- * This is the flat discriminant stored in the `outcome_types` lookup
- * table.  [`BuildOutcome`] and [`SkipReason`] carry associated data;
- * `OutcomeType` is the integer key.
- */
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
-pub enum OutcomeType {
-    Success = 1,
-    Failed = 2,
-    UpToDate = 3,
-    PkgSkip = 4,
-    PkgFail = 5,
-    IndirectPreskip = 6,
-    IndirectPrefail = 7,
-    Unresolved = 8,
-    IndirectUnresolved = 9,
-    IndirectFailed = 10,
-}
-
-impl OutcomeType {
-    /**
-     * Display name matching the lookup table.
-     */
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Success => "success",
-            Self::Failed => "failed",
-            Self::UpToDate => "up_to_date",
-            Self::PkgSkip => "pkg_skip",
-            Self::PkgFail => "pkg_fail",
-            Self::IndirectPreskip => "indirect_preskip",
-            Self::IndirectPrefail => "indirect_prefail",
-            Self::Unresolved => "unresolved",
-            Self::IndirectUnresolved => "indirect_unresolved",
-            Self::IndirectFailed => "indirect_failed",
-        }
-    }
-}
-
-impl TryFrom<i32> for OutcomeType {
-    type Error = anyhow::Error;
-    fn try_from(v: i32) -> anyhow::Result<Self> {
-        match v {
-            1 => Ok(Self::Success),
-            2 => Ok(Self::Failed),
-            3 => Ok(Self::UpToDate),
-            4 => Ok(Self::PkgSkip),
-            5 => Ok(Self::PkgFail),
-            6 => Ok(Self::IndirectPreskip),
-            7 => Ok(Self::IndirectPrefail),
-            8 => Ok(Self::Unresolved),
-            9 => Ok(Self::IndirectUnresolved),
-            10 => Ok(Self::IndirectFailed),
-            _ => anyhow::bail!("Unknown outcome type id: {}", v),
-        }
-    }
 }
 
 /**
@@ -1498,82 +1438,6 @@ impl<'a> BuildCallback for ChannelCallback<'a> {
     }
 }
 
-/// Outcome of a package build attempt.
-///
-/// Used in [`BuildResult`] to indicate whether the build succeeded, failed,
-/// or was skipped.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub enum BuildOutcome {
-    /// Package built and packaged successfully.
-    Success,
-    /// Package build failed.
-    ///
-    /// The string contains the failure reason (e.g., "Failed in build phase").
-    Failed(String),
-    /// Package did not need to be built - we already have a binary package
-    /// for this revision.
-    UpToDate,
-    /// Package was not built due to a scan-phase failure.
-    ///
-    /// Contains the reason for skipping.
-    Skipped(SkipReason),
-}
-
-impl BuildOutcome {
-    /**
-     * Returns the outcome type for database storage.
-     */
-    pub fn outcome_type(&self) -> OutcomeType {
-        match self {
-            BuildOutcome::Success => OutcomeType::Success,
-            BuildOutcome::UpToDate => OutcomeType::UpToDate,
-            BuildOutcome::Failed(_) => OutcomeType::Failed,
-            BuildOutcome::Skipped(skip) => skip.outcome_type(),
-        }
-    }
-
-    /// Returns the detail string for database storage.
-    pub fn db_detail(&self) -> Option<String> {
-        match self {
-            BuildOutcome::Success | BuildOutcome::UpToDate => None,
-            BuildOutcome::Failed(s) => Some(s.clone()),
-            BuildOutcome::Skipped(skip) => Some(skip.to_string()),
-        }
-    }
-
-    /**
-     * Creates a BuildOutcome from database outcome type and detail.
-     */
-    pub fn from_db(ot: OutcomeType, detail: Option<String>) -> Self {
-        match ot {
-            OutcomeType::Success => BuildOutcome::Success,
-            OutcomeType::UpToDate => BuildOutcome::UpToDate,
-            OutcomeType::Failed => BuildOutcome::Failed(detail.unwrap_or_default()),
-            _ => SkipReason::from_db(ot, detail.unwrap_or_default())
-                .map_or_else(|| unreachable!(), BuildOutcome::Skipped),
-        }
-    }
-
-    /// Returns the display status string.
-    pub fn status(&self) -> &'static str {
-        match self {
-            BuildOutcome::Success => "success",
-            BuildOutcome::UpToDate => "up-to-date",
-            BuildOutcome::Failed(_) => "failed",
-            BuildOutcome::Skipped(skip) => skip.status(),
-        }
-    }
-
-    /// Returns the reason string, if any.
-    pub fn reason(&self) -> Option<String> {
-        match self {
-            BuildOutcome::Success | BuildOutcome::UpToDate => None,
-            BuildOutcome::Failed(msg) => Some(msg.clone()),
-            BuildOutcome::Skipped(skip) => Some(skip.to_string()),
-        }
-    }
-}
-
 /// Result of building a single package.
 ///
 /// Contains the outcome, timing, and log location for a package build.
@@ -1583,8 +1447,8 @@ pub struct BuildResult {
     pub pkgname: PkgName,
     /// Package path in pkgsrc (e.g., `mail/mutt`).
     pub pkgpath: Option<PkgPath>,
-    /// Build outcome (success, failure, or skipped).
-    pub outcome: BuildOutcome,
+    /// Package state.
+    pub state: PackageState,
     /// Path to build logs directory, if available.
     ///
     /// For failed builds, this contains `pre-clean.log`, `build.log`, etc.
@@ -1601,15 +1465,14 @@ impl BuildResult {
      * Returns None for skipped, up-to-date, or indirect outcomes.
      */
     pub fn history_input(&self) -> Option<crate::db::HistoryInput> {
-        let outcome = match &self.outcome {
-            BuildOutcome::Success => OutcomeType::Success,
-            BuildOutcome::Failed(_) => OutcomeType::Failed,
+        match &self.state {
+            PackageState::Success | PackageState::Failed(_) => {}
             _ => return None,
-        };
+        }
         Some(crate::db::HistoryInput {
             pkgpath: self.pkgpath.as_ref()?.to_string(),
             pkgname: self.pkgname.pkgname().to_string(),
-            outcome,
+            outcome: self.state.kind(),
             make_jobs: self.build_stats.make_jobs.count(),
             stage: self.build_stats.stage,
             build_duration: self.build_stats.build_duration,
@@ -1620,17 +1483,11 @@ impl BuildResult {
     }
 }
 
-/// Counts of build results by outcome category.
+/// Counts of build results by state, plus scanfail total.
 #[derive(Clone, Debug, Default)]
 pub struct BuildCounts {
-    /// Packages that built successfully.
-    pub success: usize,
-    /// Packages that failed to build.
-    pub failed: usize,
-    /// Packages already up-to-date (binary package exists).
-    pub up_to_date: usize,
-    /// Packages that were skipped.
-    pub skipped: SkippedCounts,
+    /// Counts by [`PackageState`] variant.
+    pub states: PackageCounts,
     /// Packages that failed to scan.
     pub scanfail: usize,
 }
@@ -1647,33 +1504,14 @@ pub struct BuildSummary {
 }
 
 impl BuildSummary {
-    /// Compute all outcome counts in a single pass.
+    /// Compute all counts in a single pass.
     pub fn counts(&self) -> BuildCounts {
         let mut c = BuildCounts {
             scanfail: self.scanfail.len(),
             ..Default::default()
         };
         for r in &self.results {
-            match &r.outcome {
-                BuildOutcome::Success => c.success += 1,
-                BuildOutcome::Failed(_) => c.failed += 1,
-                BuildOutcome::UpToDate => c.up_to_date += 1,
-                BuildOutcome::Skipped(SkipReason::PkgSkip(_)) => c.skipped.pkg_skip += 1,
-                BuildOutcome::Skipped(SkipReason::PkgFail(_)) => c.skipped.pkg_fail += 1,
-                BuildOutcome::Skipped(SkipReason::UnresolvedDep(_)) => c.skipped.unresolved += 1,
-                BuildOutcome::Skipped(SkipReason::IndirectPreskip(_)) => {
-                    c.skipped.indirect_preskip += 1
-                }
-                BuildOutcome::Skipped(SkipReason::IndirectPrefail(_)) => {
-                    c.skipped.indirect_prefail += 1
-                }
-                BuildOutcome::Skipped(SkipReason::IndirectUnresolved(_)) => {
-                    c.skipped.indirect_unresolved += 1
-                }
-                BuildOutcome::Skipped(SkipReason::IndirectFailed(_)) => {
-                    c.skipped.indirect_failed += 1
-                }
-            }
+            c.states.add(&r.state);
         }
         c
     }
@@ -1682,7 +1520,7 @@ impl BuildSummary {
     pub fn failed(&self) -> Vec<&BuildResult> {
         self.results
             .iter()
-            .filter(|r| matches!(r.outcome, BuildOutcome::Failed(_)))
+            .filter(|r| matches!(r.state, PackageState::Failed(_)))
             .collect()
     }
 
@@ -1690,16 +1528,13 @@ impl BuildSummary {
     pub fn succeeded(&self) -> Vec<&BuildResult> {
         self.results
             .iter()
-            .filter(|r| matches!(r.outcome, BuildOutcome::Success))
+            .filter(|r| matches!(r.state, PackageState::Success))
             .collect()
     }
 
     /// Get all skipped results.
     pub fn skipped(&self) -> Vec<&BuildResult> {
-        self.results
-            .iter()
-            .filter(|r| matches!(r.outcome, BuildOutcome::Skipped(_)))
-            .collect()
+        self.results.iter().filter(|r| r.state.is_skip()).collect()
     }
 }
 
@@ -2283,10 +2118,10 @@ impl BuildJobs {
             self.results.push(BuildResult {
                 pkgname: pkg,
                 pkgpath: scanpkg.map(|s| s.pkgpath.clone()),
-                outcome: BuildOutcome::Skipped(SkipReason::IndirectFailed(format!(
+                state: PackageState::IndirectFailed(format!(
                     "dependency {} failed",
                     pkgname.pkgname()
-                ))),
+                )),
                 log_dir,
                 build_stats: PkgBuildStats::default(),
             });
@@ -2482,8 +2317,8 @@ impl Build {
         let mut cached_count = 0usize;
 
         for (pkgname, result) in &self.cached {
-            match result.outcome {
-                BuildOutcome::Success | BuildOutcome::UpToDate => {
+            match result.state {
+                PackageState::Success | PackageState::UpToDate => {
                     // Completed package - remove from incoming, add to done
                     incoming.remove(pkgname);
                     done.insert(pkgname.clone());
@@ -2494,8 +2329,8 @@ impl Build {
                     // Don't add to results - already in database
                     cached_count += 1;
                 }
-                BuildOutcome::Failed(_) | BuildOutcome::Skipped(_) => {
-                    // Failed package - remove from incoming, add to failed
+                _ => {
+                    // Failed/skipped package - remove from incoming, add to failed
                     incoming.remove(pkgname);
                     failed.insert(pkgname.clone());
                     // Don't add to results - already in database
@@ -2705,7 +2540,7 @@ impl Build {
                                         manager_tx.send(ChannelCommand::JobSuccess(BuildResult {
                                             pkgname,
                                             pkgpath: Some(pkgpath),
-                                            outcome: BuildOutcome::Success,
+                                            state: PackageState::Success,
                                             log_dir: Some(log_dir),
                                             build_stats,
                                         }));
@@ -2715,9 +2550,7 @@ impl Build {
                                         manager_tx.send(ChannelCommand::JobFailed(BuildResult {
                                             pkgname,
                                             pkgpath: Some(pkgpath),
-                                            outcome: BuildOutcome::Failed(
-                                                "Build failed".to_string(),
-                                            ),
+                                            state: PackageState::Failed("Build failed".to_string()),
                                             log_dir: Some(log_dir),
                                             build_stats,
                                         }));
@@ -2733,7 +2566,7 @@ impl Build {
                                             BuildResult {
                                                 pkgname,
                                                 pkgpath: Some(pkgpath),
-                                                outcome: BuildOutcome::Failed(e.to_string()),
+                                                state: PackageState::Failed(e.to_string()),
                                                 log_dir: Some(log_dir),
                                                 build_stats,
                                             },

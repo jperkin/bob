@@ -42,9 +42,10 @@ use pkgsrc::{PkgName, PkgPath, ScanIndex};
 use rusqlite::{Connection, params};
 use tracing::{debug, warn};
 
-use crate::build::{BuildOutcome, BuildResult, OutcomeType, PkgBuildStats, Stage};
+use crate::build::{BuildResult, PkgBuildStats, Stage};
 use crate::config::PkgsrcEnv;
 use crate::try_println;
+use crate::{PackageState, PackageStateKind};
 
 /**
  * Schema version for bob.db - update when schema changes.
@@ -125,7 +126,7 @@ impl PackageRow {
 pub struct HistoryInput {
     pub pkgpath: String,
     pub pkgname: String,
-    pub outcome: OutcomeType,
+    pub outcome: PackageStateKind,
     /// MAKE_JOBS used: 0 means MAKE_JOBS_SAFE=no (parallel make not supported).
     pub make_jobs: usize,
     /// Last build stage attempted, if any.
@@ -146,7 +147,7 @@ pub struct HistoryInput {
 pub struct HistoryRecord {
     pub pkgpath: String,
     pub pkgname: String,
-    pub outcome: OutcomeType,
+    pub outcome: PackageStateKind,
     pub make_jobs: usize,
     pub stage: Option<Stage>,
     pub build_duration: Option<Duration>,
@@ -295,12 +296,7 @@ impl Database {
                  id INTEGER PRIMARY KEY,
                  name TEXT UNIQUE NOT NULL
              );
-             INSERT INTO outcome_types (id, name) VALUES
-                 (1, 'success'), (2, 'failed'), (3, 'up_to_date'),
-                 (4, 'pkg_skip'), (5, 'pkg_fail'),
-                 (6, 'indirect_preskip'), (7, 'indirect_prefail'),
-                 (8, 'unresolved'), (9, 'indirect_unresolved'),
-                 (10, 'indirect_failed');
+             INSERT INTO outcome_types (id, name) VALUES {outcome_types};
 
              CREATE TABLE stage_types (
                  id INTEGER PRIMARY KEY,
@@ -367,7 +363,8 @@ impl Database {
                  key TEXT PRIMARY KEY,
                  value TEXT NOT NULL
              );",
-            SCHEMA_VERSION
+            SCHEMA_VERSION,
+            outcome_types = PackageState::db_values(),
         ))?;
 
         debug!(version = SCHEMA_VERSION, "Created schema");
@@ -774,7 +771,7 @@ impl Database {
         let tx = self.transaction()?;
 
         for pkg in &summary.packages {
-            if let ScanResult::Skipped { reason, index, .. } = pkg {
+            if let ScanResult::Skipped { state, index, .. } = pkg {
                 let Some(idx) = index else { continue };
                 let pkgname = idx.pkgname.pkgname();
 
@@ -782,8 +779,8 @@ impl Database {
                     continue;
                 };
 
-                let outcome = reason.outcome_type() as i32;
-                let detail = reason.to_string();
+                let outcome = state.db_id();
+                let detail = state.to_string();
 
                 self.conn.execute(
                     "INSERT OR IGNORE INTO builds
@@ -869,8 +866,6 @@ impl Database {
      * skipped during resolution (stored in the builds table).
      */
     pub fn load_resolved_packages(&self) -> Result<Vec<crate::scan::ResolvedPackage>> {
-        use crate::build::BuildOutcome;
-
         let skipped_ids: HashSet<i64> = {
             let mut stmt = self
                 .conn
@@ -880,8 +875,8 @@ impl Database {
             let mut ids = HashSet::new();
             for row in rows {
                 let (id, outcome_id) = row?;
-                if let Ok(ot) = OutcomeType::try_from(outcome_id) {
-                    if matches!(BuildOutcome::from_db(ot, None), BuildOutcome::Skipped(_)) {
+                if let Some(state) = PackageState::from_db(outcome_id, None) {
+                    if state.is_skip() {
                         ids.insert(id);
                     }
                 }
@@ -934,8 +929,8 @@ impl Database {
      * Store a build result by package ID.
      */
     pub fn store_build_result(&self, package_id: i64, result: &BuildResult) -> Result<()> {
-        let outcome = result.outcome.outcome_type() as i32;
-        let detail = result.outcome.db_detail();
+        let outcome = result.state.db_id();
+        let detail = result.state.detail().map(String::from);
         let stage = result.build_stats.stage.map(|s| s as i32);
         let duration_ms = result.build_stats.total_duration.as_millis() as i64;
         let log_dir = result.log_dir.as_ref().map(|p| p.display().to_string());
@@ -1000,7 +995,8 @@ impl Database {
 
         match result {
             Ok((pkgname, pkgpath, outcome_id, detail, stage_id, duration_ms, log_dir)) => {
-                let ot = OutcomeType::try_from(outcome_id)?;
+                let outcome = PackageState::from_db(outcome_id, detail)
+                    .ok_or_else(|| anyhow::anyhow!("Unknown outcome type id: {}", outcome_id))?;
                 let stage = stage_id
                     .map(|id| {
                         Stage::from_repr(id)
@@ -1010,7 +1006,7 @@ impl Database {
                 Ok(Some(BuildResult {
                     pkgname: PkgName::new(&pkgname),
                     pkgpath: pkgpath.and_then(|p| PkgPath::new(&p).ok()),
-                    outcome: BuildOutcome::from_db(ot, detail),
+                    state: outcome,
                     log_dir: log_dir.map(std::path::PathBuf::from),
                     build_stats: PkgBuildStats {
                         stage,
@@ -1088,14 +1084,14 @@ impl Database {
         let mut results = Vec::new();
         for row in rows {
             let (pkgname, pkgpath, outcome_id, detail, stage_id, duration_ms, log_dir) = row?;
-            let Ok(ot) = OutcomeType::try_from(outcome_id) else {
+            let Some(outcome) = PackageState::from_db(outcome_id, detail) else {
                 continue;
             };
             let stage = stage_id.and_then(Stage::from_repr);
             results.push(BuildResult {
                 pkgname: PkgName::new(&pkgname),
                 pkgpath: pkgpath.and_then(|p| PkgPath::new(&p).ok()),
-                outcome: BuildOutcome::from_db(ot, detail),
+                state: outcome,
                 log_dir: log_dir.map(std::path::PathBuf::from),
                 build_stats: PkgBuildStats {
                     stage,
@@ -1125,7 +1121,7 @@ impl Database {
              GROUP BY b.failed_dep_id",
         )?;
 
-        let rows = stmt.query_map([OutcomeType::IndirectFailed as i32], |row| {
+        let rows = stmt.query_map([PackageStateKind::IndirectFailed as i32], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
 
@@ -1166,13 +1162,6 @@ impl Database {
             anyhow::bail!("Package '{}' not found in database", package);
         };
 
-        let success = OutcomeType::Success as i32;
-        let up_to_date = OutcomeType::UpToDate as i32;
-        let failed = OutcomeType::Failed as i32;
-        let pkg_fail = OutcomeType::PkgFail as i32;
-        let pkg_skip = OutcomeType::PkgSkip as i32;
-        let unresolved = OutcomeType::Unresolved as i32;
-
         let mut stmt = self.conn.prepare(
             "WITH RECURSIVE
              blocking(id, outcome) AS (
@@ -1200,15 +1189,26 @@ impl Database {
 
         let rows = stmt.query_map(
             params![
-                pkg.id, success, up_to_date, failed, pkg_fail, pkg_skip, unresolved
+                pkg.id,
+                PackageStateKind::Success as i32,
+                PackageStateKind::UpToDate as i32,
+                PackageStateKind::Failed as i32,
+                PackageStateKind::PreFailed as i32,
+                PackageStateKind::PreSkipped as i32,
+                PackageStateKind::Unresolved as i32,
             ],
             |row| {
                 let pkgname: String = row.get(0)?;
                 let pkgpath: String = row.get(1)?;
                 let outcome_id: i32 = row.get(2)?;
-                let status = OutcomeType::try_from(outcome_id)
-                    .map(|ot| BuildOutcome::from_db(ot, None).status())
-                    .unwrap_or("unknown");
+                let kind = PackageStateKind::from_repr(outcome_id).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Integer,
+                        format!("unknown outcome type id: {}", outcome_id).into(),
+                    )
+                })?;
+                let status: &str = kind.into();
                 Ok((pkgname, pkgpath, status.to_string()))
             },
         )?;
@@ -1319,7 +1319,10 @@ impl Database {
         )?;
 
         let rows = stmt.query_map(
-            params![OutcomeType::Failed as i32, OutcomeType::PkgFail as i32],
+            params![
+                PackageStateKind::Failed as i32,
+                PackageStateKind::PreFailed as i32
+            ],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
 
@@ -1363,14 +1366,14 @@ impl Database {
         for (id, depth) in &affected {
             let (outcome, detail, dur, dep_id) = if *depth == 0 {
                 (
-                    OutcomeType::Failed as i32,
+                    PackageStateKind::Failed as i32,
                     reason.to_string(),
                     duration.as_millis() as i64,
                     None,
                 )
             } else {
                 (
-                    OutcomeType::IndirectFailed as i32,
+                    PackageStateKind::IndirectFailed as i32,
                     format!("depends on failed {}", pkgname),
                     0,
                     Some(package_id),
@@ -1504,7 +1507,9 @@ impl Database {
         )?;
 
         let pkgnames = stmt
-            .query_map([OutcomeType::Failed as i32], |row| row.get::<_, String>(0))?
+            .query_map([PackageStateKind::Failed as i32], |row| {
+                row.get::<_, String>(0)
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(pkgnames)
@@ -1523,7 +1528,10 @@ impl Database {
 
         let pkgnames = stmt
             .query_map(
-                params![OutcomeType::Success as i32, OutcomeType::UpToDate as i32],
+                params![
+                    PackageStateKind::Success as i32,
+                    PackageStateKind::UpToDate as i32
+                ],
                 |row| row.get::<_, String>(0),
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1675,7 +1683,8 @@ impl Database {
                     continue;
                 }
             }
-            let outcome = OutcomeType::try_from(outcome_id)?;
+            let outcome = PackageStateKind::from_repr(outcome_id)
+                .ok_or_else(|| anyhow::anyhow!("Unknown outcome type id: {}", outcome_id))?;
             let stage = stage_id
                 .map(|id| {
                     Stage::from_repr(id).ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", id))
@@ -1745,7 +1754,7 @@ impl Database {
             "SELECT AVG(build_duration_ms) FROM build_history \
              WHERE pkgpath = ?1 AND outcome = ?2 \
                AND build_duration_ms IS NOT NULL",
-            params![pkgpath, OutcomeType::Success as i32],
+            params![pkgpath, PackageStateKind::Success as i32],
             |row| row.get(0),
         )?;
         Ok(result.map(|ms| Duration::from_millis(ms as u64)))
@@ -1783,12 +1792,7 @@ fn open_history_conn(dbdir: &Path) -> Result<Connection> {
                  id INTEGER PRIMARY KEY,
                  name TEXT UNIQUE NOT NULL
              );
-             INSERT INTO outcome_types (id, name) VALUES
-                 (1, 'success'), (2, 'failed'), (3, 'up_to_date'),
-                 (4, 'pkg_skip'), (5, 'pkg_fail'),
-                 (6, 'indirect_preskip'), (7, 'indirect_prefail'),
-                 (8, 'unresolved'), (9, 'indirect_unresolved'),
-                 (10, 'indirect_failed');
+             INSERT INTO outcome_types (id, name) VALUES {outcome_types};
 
              CREATE TABLE stage_types (
                  id INTEGER PRIMARY KEY,
@@ -1822,7 +1826,8 @@ fn open_history_conn(dbdir: &Path) -> Result<Connection> {
                  duration_ms INTEGER NOT NULL,
                  PRIMARY KEY (history_id, stage)
              );",
-            HISTORY_SCHEMA_VERSION
+            HISTORY_SCHEMA_VERSION,
+            outcome_types = PackageState::db_values(),
         ))?;
     } else {
         let version: i32 =
