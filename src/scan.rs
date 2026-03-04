@@ -614,7 +614,7 @@ impl Scan {
         let env = match db.load_pkgsrc_env() {
             Ok(env) => env,
             Err(_) => {
-                let env = PkgsrcEnv::fetch(&self.config, &self.sandbox)?;
+                let env = PkgsrcEnv::fetch(&self.config, &self.sandbox, 0)?;
                 db.store_pkgsrc_env(&env)?;
                 env
             }

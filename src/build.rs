@@ -1242,7 +1242,7 @@ impl<'a> PkgBuilder<'a> {
         if !self.make_jobs.is_safe() {
             return None;
         }
-        self.session.config.dynamic_jobs()?;
+        self.session.config.jobs()?;
         let output_tx = self.output_tx.as_ref()?;
         let (tx, rx) = mpsc::channel();
         let _ = output_tx.send(ChannelCommand::BuildPhaseEntry(
@@ -1262,7 +1262,7 @@ impl<'a> PkgBuilder<'a> {
         if !self.make_jobs.is_safe() {
             return;
         }
-        if self.session.config.dynamic_jobs().is_none() {
+        if self.session.config.jobs().is_none() {
             return;
         }
         if let Some(ref output_tx) = self.output_tx {
@@ -2616,8 +2616,8 @@ impl Build {
             let build_threads = session.config.build_threads();
             let mut make_jobs_budget = session
                 .config
-                .dynamic_jobs()
-                .map(|dj| MakeJobsBudget::new(dj.max, dj.min, build_threads));
+                .jobs()
+                .map(|max| MakeJobsBudget::new(max, 1, build_threads));
 
             loop {
                 if state_for_manager.is_shutdown() {

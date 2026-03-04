@@ -122,7 +122,7 @@ pub use build::{
     Build, BuildCounts, BuildReason, BuildResult, BuildSummary, MakeJobs, PkgBuildStats, Stage,
     pkg_up_to_date,
 };
-pub use config::{Config, DynamicJobs, Options, Pkgsrc, PkgsrcEnv, Sandboxes};
+pub use config::{Config, Options, Pkgsrc, PkgsrcEnv, Sandboxes, SchedulerConfig};
 pub use db::Database;
 pub use init::Init;
 pub use pkgstate::{PackageCounts, PackageState, PackageStateKind};

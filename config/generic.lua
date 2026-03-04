@@ -12,6 +12,20 @@ options = {
     log_level = "info",
 }
 
+--
+-- Scheduler settings for dynamic resource allocation.  The scheduler uses
+-- statistics from the history database, knowledge of upcoming builds, and
+-- package weight to make informed choices for what MAKE_JOBS should be set
+-- to for each package build.
+--
+-- On first builds with no history, conservative values are used.
+--
+--[[
+scheduler = {
+    jobs = 24,
+}
+]]
+
 -- Variables that configure pkgsrc, where it is, what packages to build, etc.
 pkgsrc = {
     basedir = "/usr/pkgsrc",
