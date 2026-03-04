@@ -141,6 +141,9 @@ Examples:
         /// Hide column headers
         #[arg(short = 'H')]
         no_header: bool,
+        /// Show all columns
+        #[arg(short = 'l', long)]
+        long: bool,
         /// Output raw numeric values (ms for durations, bytes for sizes)
         #[arg(short = 'r', long)]
         raw: bool,
@@ -200,6 +203,7 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
         }
         ListCmd::History {
             no_header,
+            long,
             raw,
             format,
             columns,
@@ -209,6 +213,7 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
                 db,
                 columns.as_deref(),
                 no_header,
+                long,
                 raw,
                 format,
                 package.as_deref(),
@@ -669,15 +674,22 @@ fn print_history(
     db: &Database,
     columns: Option<&[String]>,
     no_header: bool,
+    long: bool,
     raw: bool,
     format: HistoryFormat,
     package: Option<&str>,
 ) -> Result<()> {
     let all_cols = bob::HistoryKind::all_names();
     let default_cols = bob::HistoryKind::default_names();
-    let cols: Vec<&str> = columns
-        .map(|c| c.iter().map(|s| s.as_str()).collect())
-        .unwrap_or(default_cols);
+    let cols: Vec<&str> = if columns.is_some() {
+        columns
+            .map(|c| c.iter().map(|s| s.as_str()).collect())
+            .unwrap_or_default()
+    } else if long {
+        all_cols.iter().map(|s| s.as_str()).collect()
+    } else {
+        default_cols
+    };
 
     for col in &cols {
         if !all_cols.iter().any(|c| c == col) {
