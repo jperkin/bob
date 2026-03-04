@@ -2077,12 +2077,14 @@ fn open_history_conn(dbdir: &Path) -> Result<Connection> {
 
              CREATE INDEX idx_history_pkgpath
                  ON build_history(pkgpath);
+             CREATE INDEX idx_history_pkgpath_outcome
+                 ON build_history(pkgpath, outcome);
              CREATE INDEX idx_history_timestamp
                  ON build_history(timestamp);
 
              CREATE TABLE wall_times (
                  history_id INTEGER NOT NULL
-                     REFERENCES build_history(id),
+                     REFERENCES build_history(id) ON DELETE CASCADE,
                  stage INTEGER NOT NULL REFERENCES stage_types(id),
                  duration INTEGER NOT NULL,
                  PRIMARY KEY (history_id, stage)
@@ -2090,7 +2092,7 @@ fn open_history_conn(dbdir: &Path) -> Result<Connection> {
 
              CREATE TABLE cpu_times (
                  history_id INTEGER NOT NULL
-                     REFERENCES build_history(id),
+                     REFERENCES build_history(id) ON DELETE CASCADE,
                  stage INTEGER NOT NULL REFERENCES stage_types(id),
                  duration INTEGER NOT NULL,
                  PRIMARY KEY (history_id, stage)
