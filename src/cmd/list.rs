@@ -110,9 +110,9 @@ Examples:
         /// Include up-to-date packages
         #[arg(short, long)]
         all: bool,
-        /// Output format
-        #[arg(short = 'f', long, value_enum, default_value_t = TreeOutput::Utf8)]
-        format: TreeOutput,
+        /// Output format (default: utf8 on terminal, none otherwise)
+        #[arg(short = 'f', long, value_enum)]
+        format: Option<TreeOutput>,
         /// Output pkgpath instead of pkgname
         #[arg(short, long)]
         path: bool,
@@ -179,6 +179,11 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
             path,
             package,
         } => {
+            let format = format.unwrap_or(if std::io::stdout().is_terminal() {
+                TreeOutput::Utf8
+            } else {
+                TreeOutput::None
+            });
             print_build_tree(db, path, all, format, package.as_deref())?;
         }
         ListCmd::Blockers { package, path } => {
