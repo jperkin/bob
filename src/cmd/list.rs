@@ -23,68 +23,17 @@ use crossterm::terminal;
 use regex::Regex;
 use serde_json;
 
-use bob::build::{BuildOutcome, OutcomeType, Stage};
+use bob::build::Stage;
 use bob::db::{Database, PackageStatusRow};
-use bob::scan::SkipReason;
 use bob::try_println;
+use bob::{PackageState, PackageStateKind};
 
 fn use_color() -> bool {
     std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
 }
 
-/**
- * Status filter for package listing.
- */
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum StatusFilter {
-    /// Ready to build
-    Pending,
-    /// Built successfully
-    Success,
-    /// Binary already exists
-    #[value(name = "up-to-date")]
-    UpToDate,
-    /// Build attempted and failed
-    Failed,
-    /// PKG_SKIP_REASON set
-    Preskipped,
-    /// PKG_FAIL_REASON set
-    Prefailed,
-    /// Blocked by preskipped package
-    #[value(name = "indirect-preskipped")]
-    IndirectPreskipped,
-    /// Blocked by prefailed package
-    #[value(name = "indirect-prefailed")]
-    IndirectPrefailed,
-    /// Has unresolved dependencies
-    Unresolved,
-    /// Blocked by package with unresolved dependencies
-    #[value(name = "indirect-unresolved")]
-    IndirectUnresolved,
-    /// Blocked by package that failed to build
-    #[value(name = "indirect-failed")]
-    IndirectFailed,
-}
-
-impl StatusFilter {
-    /// Status string not backed by a BuildOutcome (package not yet built).
-    const PENDING: &'static str = "pending";
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => Self::PENDING,
-            Self::Success => BuildOutcome::Success.status(),
-            Self::UpToDate => BuildOutcome::UpToDate.status(),
-            Self::Failed => BuildOutcome::Failed(String::new()).status(),
-            Self::Preskipped => SkipReason::PkgSkip(String::new()).status(),
-            Self::Prefailed => SkipReason::PkgFail(String::new()).status(),
-            Self::IndirectPreskipped => SkipReason::IndirectPreskip(String::new()).status(),
-            Self::IndirectPrefailed => SkipReason::IndirectPrefail(String::new()).status(),
-            Self::Unresolved => SkipReason::UnresolvedDep(String::new()).status(),
-            Self::IndirectUnresolved => SkipReason::IndirectUnresolved(String::new()).status(),
-            Self::IndirectFailed => SkipReason::IndirectFailed(String::new()).status(),
-        }
-    }
+fn parse_status(s: &str) -> Result<PackageStateKind, String> {
+    s.parse().map_err(|_| format!("unknown status '{}'", s))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -139,11 +88,10 @@ Examples:
         #[arg(
             short = 's',
             long = "status",
-            value_enum,
+            value_parser = parse_status,
             value_delimiter = ',',
-            hide_possible_values = true
         )]
-        statuses: Vec<StatusFilter>,
+        statuses: Vec<PackageStateKind>,
         /// Package filters (regex on name or path)
         packages: Vec<String>,
     },
@@ -298,12 +246,12 @@ fn print_build_tree(
     let results = db.get_all_build_results()?;
     let excluded: HashSet<String> = results
         .iter()
-        .filter(|r| matches!(r.outcome, BuildOutcome::UpToDate | BuildOutcome::Skipped(_)))
+        .filter(|r| matches!(r.state, PackageState::UpToDate) || r.state.is_skip())
         .map(|r| r.pkgname.pkgname().to_string())
         .collect();
     let up_to_date: HashSet<String> = results
         .iter()
-        .filter(|r| matches!(r.outcome, BuildOutcome::UpToDate))
+        .filter(|r| matches!(r.state, PackageState::UpToDate))
         .map(|r| r.pkgname.pkgname().to_string())
         .collect();
 
@@ -517,7 +465,7 @@ fn print_build_tree(
  */
 fn print_build_status(
     db: &Database,
-    statuses: &[StatusFilter],
+    statuses: &[PackageStateKind],
     columns: Option<&[String]>,
     no_header: bool,
     pkg_filters: &[String],
@@ -566,37 +514,39 @@ fn print_build_status(
     let (sorted_ids, _) = bob::build_order(&id_deps, |_| 1);
 
     let get_status = |pkg: &PackageStatusRow| -> (&'static str, String) {
-        if let Some(outcome) = pkg
+        if let Some(state) = pkg
             .build_outcome
-            .and_then(|id| OutcomeType::try_from(id).ok())
-            .map(|ot| BuildOutcome::from_db(ot, pkg.outcome_detail.clone()))
+            .and_then(|id| PackageState::from_db(id, pkg.outcome_detail.clone()))
         {
-            (outcome.status(), outcome.reason().unwrap_or_default())
+            let reason = state.detail().map(String::from).unwrap_or_default();
+            (state.status(), reason)
         } else if let Some(reason) = &pkg.build_reason {
-            (StatusFilter::Pending.as_str(), reason.clone())
+            (PackageStateKind::Pending.into(), reason.clone())
         } else if let Some(reason) = &pkg.fail_reason {
             (
-                StatusFilter::Prefailed.as_str(),
+                PackageStateKind::PreFailed.into(),
                 format!("PKG_FAIL_REASON: {}", reason),
             )
         } else if let Some(reason) = &pkg.skip_reason {
             (
-                StatusFilter::Preskipped.as_str(),
+                PackageStateKind::PreSkipped.into(),
                 format!("PKG_SKIP_REASON: {}", reason),
             )
         } else {
-            (StatusFilter::Pending.as_str(), String::new())
+            (PackageStateKind::Pending.into(), String::new())
         }
     };
 
     let matches_status = |status: &str| -> bool {
         if !statuses.is_empty() {
-            return statuses.iter().any(|f| f.as_str() == status);
+            return statuses.iter().any(|f| <&str>::from(f) == status);
         }
         if show_all {
             return true;
         }
-        status != StatusFilter::Success.as_str() && status != StatusFilter::UpToDate.as_str()
+        let success: &str = PackageStateKind::Success.into();
+        let up_to_date: &str = PackageStateKind::UpToDate.into();
+        status != success && status != up_to_date
     };
 
     let mut rows: Vec<[String; 5]> = Vec::new();
@@ -801,7 +751,7 @@ fn print_history(
 
     let mut rows: Vec<Vec<String>> = Vec::new();
     for rec in &records {
-        let stage = if rec.outcome == OutcomeType::Success {
+        let stage = if rec.outcome == PackageStateKind::Success {
             "-".to_string()
         } else {
             rec.stage
@@ -823,7 +773,7 @@ fn print_history(
             rec.timestamp.clone(),
             rec.pkgpath.clone(),
             rec.pkgname.clone(),
-            rec.outcome.as_str().to_string(),
+            rec.outcome.as_ref().to_string(),
             stage,
             jobs,
             build,

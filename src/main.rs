@@ -17,6 +17,7 @@
 use anyhow::{Context, Result, bail};
 use bob::Init;
 use bob::Interrupted;
+use bob::PackageStateKind;
 use bob::RunState;
 use bob::build::{self, Build};
 use bob::config::Config;
@@ -26,6 +27,10 @@ use bob::report;
 use bob::sandbox::{Sandbox, SandboxScope};
 use bob::scan::Scan;
 use clap::{Parser, Subcommand};
+use indexmap::IndexMap;
+use pkgsrc::ScanIndex;
+use std::fs::File;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -161,7 +166,9 @@ impl BuildRunner {
      */
     fn update_pkg_summary(&self, prior: &[String], summary: &build::BuildSummary) {
         let changed = match self.db.get_successful_packages() {
-            Ok(current) => prior != current || summary.counts().success > 0,
+            Ok(current) => {
+                prior != current || summary.counts().states[bob::PackageStateKind::Success] > 0
+            }
             Err(_) => true,
         };
         if !changed {
@@ -548,8 +555,10 @@ fn run() -> Result<()> {
             if let Some(path) = output {
                 std::fs::write(&path, &out)?;
                 let c = result.counts();
-                let s = &c.skipped;
-                let skipped = s.pkg_skip + s.pkg_fail + s.unresolved;
+                let s = &c.states;
+                let skipped = s[PackageStateKind::PreSkipped]
+                    + s[PackageStateKind::PreFailed]
+                    + s[PackageStateKind::Unresolved];
                 println!(
                     "Wrote {} buildable, {} skipped to {}",
                     c.buildable,
@@ -563,11 +572,6 @@ fn run() -> Result<()> {
         Cmd::Util {
             cmd: UtilCmd::ImportScan { file },
         } => {
-            use indexmap::IndexMap;
-            use pkgsrc::ScanIndex;
-            use std::fs::File;
-            use std::io::BufReader;
-
             let config = Config::load(args.config.as_deref())?;
             let db = Database::open(config.dbdir())?;
 

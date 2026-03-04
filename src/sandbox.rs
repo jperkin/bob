@@ -475,8 +475,6 @@ impl Sandbox {
         stdin_data: Option<&str>,
         protected: bool,
     ) -> Result<Child> {
-        use std::io::Write;
-
         let mut cmd = self.command(id, script);
         cmd.current_dir("/");
 
@@ -514,8 +512,6 @@ impl Sandbox {
         content: &str,
         envs: Vec<(String, String)>,
     ) -> Result<Child> {
-        use std::io::Write;
-
         let mut cmd = self.command(id, Path::new("/bin/sh"));
         cmd.current_dir("/").arg("-s");
 

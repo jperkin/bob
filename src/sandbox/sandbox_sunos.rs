@@ -19,7 +19,7 @@ use anyhow::{Context, bail};
 use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
 use tracing::{debug, info, warn};
 
 impl Sandbox {
@@ -187,8 +187,6 @@ impl Sandbox {
      * processes using the mount point.
      */
     pub fn kill_processes_for_path(&self, path: &Path) {
-        use std::process::Stdio;
-
         for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
             let output = Command::new("fuser")
                 .arg("-c")
@@ -222,8 +220,6 @@ impl Sandbox {
 
     /// Kill all processes with open file handles within a sandbox path.
     pub fn kill_processes(&self, sandbox: &Path) {
-        use std::process::Stdio;
-
         for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
             // Query fuser first to get PIDs for logging
             let output = Command::new("fuser")
@@ -278,8 +274,6 @@ impl Sandbox {
 
     /// Get info about processes using files in a directory.
     fn get_process_info(&self, sandbox: &Path) -> String {
-        use std::process::Stdio;
-
         // Get PIDs using fuser
         let output = Command::new("fuser")
             .arg(sandbox)
