@@ -1905,10 +1905,15 @@ impl Database {
         result
     }
 
-    /// Query the most recent successful build's disk usage per pkgpath.
-    ///
-    /// Returns a map of pkgpath to disk usage in bytes.  Packages with
-    /// no recorded disk usage are omitted.  Returns an empty map on error.
+    /**
+     * Query the most recent successful build's disk usage per package.
+     *
+     * Accepts `(pkgpath, pkgbase)` pairs to correctly handle
+     * MULTI_VERSION packages.  See [`duration_by_pkg`] for details.
+     *
+     * Returns a map of pkgbase to disk usage in bytes.  Packages with
+     * no recorded disk usage are omitted.  Returns an empty map on error.
+     */
     pub fn disk_usage_by_pkg(&self, pkgs: &[(&str, &str)]) -> HashMap<String, u64> {
         let conn = match self.history_conn() {
             Ok(c) => c,
@@ -1986,6 +1991,141 @@ impl Database {
             let (pkgname, size) = row;
             let pkgbase = PkgName::new(&pkgname).pkgbase().to_string();
             result.insert(pkgbase, size as u64);
+        }
+        result
+    }
+
+    /**
+     * Query the most recent successful build duration for all packages.
+     *
+     * Like [`duration_by_pkg`] but without filtering -- retrieves data
+     * for every package in the history database.  Much faster when the
+     * caller needs data for most or all packages (avoids building a
+     * massive OR-clause).
+     *
+     * Returns a map of pkgbase to duration in milliseconds.
+     */
+    pub fn duration_by_pkg_all(&self) -> HashMap<String, u64> {
+        let conn = match self.history_conn() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "duration_by_pkg_all: failed to open history db");
+                return HashMap::new();
+            }
+        };
+
+        let dur: &str = HistoryKind::Duration.into();
+        let out: &str = HistoryKind::Outcome.into();
+        let pkgname_col: &str = HistoryKind::Pkgname.into();
+        let success_outcome = PackageStateKind::Success as i32;
+        let build_stage = Stage::Build as i32;
+        let jobs: &str = HistoryKind::MakeJobs.into();
+
+        let sql = format!(
+            "WITH matched AS ( \
+                 SELECT h.{pkgname_col}, h.{dur}, h.{jobs}, h.id, \
+                        ROW_NUMBER() OVER ( \
+                            PARTITION BY h.pkgpath, h.{pkgname_col} \
+                            ORDER BY h.id DESC \
+                        ) AS rn \
+                 FROM build_history h \
+                 WHERE h.{out} = {success_outcome} \
+             ) \
+             SELECT m.{pkgname_col}, \
+                    COALESCE(wt.duration, m.{dur}) \
+                        * MAX(m.{jobs}, 1) \
+             FROM matched m \
+             LEFT JOIN wall_times wt ON wt.history_id = m.id \
+                  AND wt.stage = {build_stage} \
+             WHERE m.rn = 1",
+        );
+
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "duration_by_pkg_all: failed to prepare query");
+                return HashMap::new();
+            }
+        };
+        let rows = match stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, "duration_by_pkg_all: query failed");
+                return HashMap::new();
+            }
+        };
+
+        let mut result = HashMap::new();
+        for row in rows.flatten() {
+            let (pkgname, ms) = row;
+            let pkgbase = PkgName::new(&pkgname).pkgbase().to_string();
+            result.insert(pkgbase, ms as u64);
+        }
+        result
+    }
+
+    /**
+     * Query the most recent successful build's CPU time for all packages.
+     *
+     * Like [`cpu_time_by_pkg`] but without filtering.
+     *
+     * Returns a map of pkgbase to CPU duration in milliseconds.
+     */
+    pub fn cpu_time_by_pkg_all(&self) -> HashMap<String, u64> {
+        let conn = match self.history_conn() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "cpu_time_by_pkg_all: failed to open history db");
+                return HashMap::new();
+            }
+        };
+
+        let out: &str = HistoryKind::Outcome.into();
+        let pkgname_col: &str = HistoryKind::Pkgname.into();
+        let success_outcome = PackageStateKind::Success as i32;
+        let build_stage = Stage::Build as i32;
+
+        let sql = format!(
+            "WITH matched AS ( \
+                 SELECT h.{pkgname_col}, h.id, \
+                        ROW_NUMBER() OVER ( \
+                            PARTITION BY h.pkgpath, h.{pkgname_col} \
+                            ORDER BY h.id DESC \
+                        ) AS rn \
+                 FROM build_history h \
+                 WHERE h.{out} = {success_outcome} \
+             ) \
+             SELECT m.{pkgname_col}, ct.duration \
+             FROM matched m \
+             JOIN cpu_times ct ON ct.history_id = m.id \
+                  AND ct.stage = {build_stage} \
+             WHERE m.rn = 1",
+        );
+
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "cpu_time_by_pkg_all: failed to prepare query");
+                return HashMap::new();
+            }
+        };
+        let rows = match stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, "cpu_time_by_pkg_all: query failed");
+                return HashMap::new();
+            }
+        };
+
+        let mut result = HashMap::new();
+        for row in rows.flatten() {
+            let (pkgname, ms) = row;
+            let pkgbase = PkgName::new(&pkgname).pkgbase().to_string();
+            result.insert(pkgbase, ms as u64);
         }
         result
     }
