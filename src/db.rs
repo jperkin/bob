@@ -1989,6 +1989,28 @@ impl Database {
         }
         result
     }
+
+    /**
+     * Write CPU usage samples to the `cpu_usage` table in history.db.
+     */
+    pub fn store_cpu_usage(&self, samples: &[crate::cpu::CpuSample]) -> Result<()> {
+        if samples.is_empty() {
+            return Ok(());
+        }
+        let conn = self.history_conn()?;
+        let tx = conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO cpu_usage (timestamp, user_pct, sys_pct) \
+                 VALUES (?1, ?2, ?3)",
+            )?;
+            for s in samples {
+                stmt.execute(params![s.timestamp, s.user_pct as i32, s.sys_pct as i32])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 /**
@@ -2092,7 +2114,13 @@ fn open_history_conn(dbdir: &Path) -> Result<Connection> {
                  duration INTEGER NOT NULL,
                  PRIMARY KEY (history_id, stage)
              );
-",
+
+             CREATE TABLE cpu_usage (
+                 timestamp INTEGER NOT NULL,
+                 user_pct INTEGER NOT NULL,
+                 sys_pct INTEGER NOT NULL
+             );
+             CREATE INDEX idx_cpu_timestamp ON cpu_usage(timestamp);",
             HISTORY_SCHEMA_VERSION,
             outcome_types = PackageState::db_values(),
             stages = stage_values(),

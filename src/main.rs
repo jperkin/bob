@@ -91,7 +91,20 @@ impl BuildRunner {
             }
         }
 
+        let cpu_sampler = bob::start_cpu_sampler();
+
         scan.start(&self.db, scope)?;
+
+        if let Some(sampler) = cpu_sampler {
+            let samples = sampler.stop();
+            if !samples.is_empty() {
+                if let Err(e) = self.db.store_cpu_usage(&samples) {
+                    tracing::warn!(error = %e, "Failed to save scan CPU usage samples");
+                } else {
+                    tracing::debug!(count = samples.len(), "Saved scan CPU usage samples");
+                }
+            }
+        }
 
         // Handle scan errors
         let scan_errors: Vec<_> = scan.scan_errors().collect();
