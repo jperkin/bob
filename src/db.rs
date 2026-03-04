@@ -1001,7 +1001,12 @@ impl Database {
         match result {
             Ok((pkgname, pkgpath, outcome_id, detail, stage_id, duration_ms, log_dir)) => {
                 let ot = OutcomeType::try_from(outcome_id)?;
-                let stage = stage_id.map(Stage::try_from).transpose()?;
+                let stage = stage_id
+                    .map(|id| {
+                        Stage::from_repr(id)
+                            .ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", id))
+                    })
+                    .transpose()?;
                 Ok(Some(BuildResult {
                     pkgname: PkgName::new(&pkgname),
                     pkgpath: pkgpath.and_then(|p| PkgPath::new(&p).ok()),
@@ -1086,7 +1091,7 @@ impl Database {
             let Ok(ot) = OutcomeType::try_from(outcome_id) else {
                 continue;
             };
-            let stage = stage_id.and_then(|id| Stage::try_from(id).ok());
+            let stage = stage_id.and_then(Stage::from_repr);
             results.push(BuildResult {
                 pkgname: PkgName::new(&pkgname),
                 pkgpath: pkgpath.and_then(|p| PkgPath::new(&p).ok()),
@@ -1671,7 +1676,11 @@ impl Database {
                 }
             }
             let outcome = OutcomeType::try_from(outcome_id)?;
-            let stage = stage_id.map(Stage::try_from).transpose()?;
+            let stage = stage_id
+                .map(|id| {
+                    Stage::from_repr(id).ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", id))
+                })
+                .transpose()?;
             history_ids.push(id);
             results.push(HistoryRecord {
                 pkgpath,
@@ -1714,7 +1723,8 @@ impl Database {
             for row in rows {
                 let (history_id, stage_id, duration_ms) = row?;
                 if let Some(&idx) = id_to_idx.get(&history_id) {
-                    let stage = Stage::try_from(stage_id)?;
+                    let stage = Stage::from_repr(stage_id)
+                        .ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", stage_id))?;
                     results[idx]
                         .stage_durations
                         .push((stage, Duration::from_millis(duration_ms as u64)));

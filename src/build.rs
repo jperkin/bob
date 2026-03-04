@@ -372,8 +372,20 @@ pub fn pkg_up_to_date(
  *
  * Discriminants match the `stage_types` lookup table in the database.
  */
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::FromRepr,
+    strum::IntoStaticStr,
+    strum::VariantArray,
+)]
 #[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case", const_into_str)]
 #[repr(i32)]
 pub enum Stage {
     PreClean = 1,
@@ -385,40 +397,6 @@ pub enum Stage {
     Package = 7,
     Deinstall = 8,
     Clean = 9,
-}
-
-impl TryFrom<i32> for Stage {
-    type Error = anyhow::Error;
-    fn try_from(v: i32) -> anyhow::Result<Self> {
-        match v {
-            1 => Ok(Self::PreClean),
-            2 => Ok(Self::Depends),
-            3 => Ok(Self::Checksum),
-            4 => Ok(Self::Configure),
-            5 => Ok(Self::Build),
-            6 => Ok(Self::Install),
-            7 => Ok(Self::Package),
-            8 => Ok(Self::Deinstall),
-            9 => Ok(Self::Clean),
-            _ => anyhow::bail!("Unknown stage id: {}", v),
-        }
-    }
-}
-
-impl Stage {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Stage::PreClean => "pre-clean",
-            Stage::Depends => "depends",
-            Stage::Checksum => "checksum",
-            Stage::Configure => "configure",
-            Stage::Build => "build",
-            Stage::Install => "install",
-            Stage::Package => "package",
-            Stage::Deinstall => "deinstall",
-            Stage::Clean => "clean",
-        }
-    }
 }
 
 /**
@@ -659,7 +637,7 @@ impl<'a> PkgBuilder<'a> {
         // Pre-clean
         let stage_start = Instant::now();
         stats.stage = Some(Stage::PreClean);
-        callback.stage(Stage::PreClean.as_str());
+        callback.stage(Stage::PreClean.into_str());
         self.run_make_stage(Stage::PreClean, &pkgdir, &["clean"], RunAs::Root, false)?;
         stats
             .stage_durations
@@ -669,7 +647,7 @@ impl<'a> PkgBuilder<'a> {
         if !self.pkginfo.depends().is_empty() {
             let stage_start = Instant::now();
             stats.stage = Some(Stage::Depends);
-            callback.stage(Stage::Depends.as_str());
+            callback.stage(Stage::Depends.into_str());
             let _ = self.write_stage(Stage::Depends);
             if !self.install_dependencies()? {
                 stats
@@ -685,7 +663,7 @@ impl<'a> PkgBuilder<'a> {
         // Checksum
         let stage_start = Instant::now();
         stats.stage = Some(Stage::Checksum);
-        callback.stage(Stage::Checksum.as_str());
+        callback.stage(Stage::Checksum.into_str());
         if !self.run_make_stage(Stage::Checksum, &pkgdir, &["checksum"], RunAs::Root, true)? {
             stats
                 .stage_durations
@@ -707,7 +685,7 @@ impl<'a> PkgBuilder<'a> {
         let conf_suffix = conf_jobs.map(|j| format!(" -j{}", j)).unwrap_or_default();
 
         stats.stage = Some(Stage::Configure);
-        callback.stage(&format!("{}{}", Stage::Configure.as_str(), conf_suffix));
+        callback.stage(&format!("{}{}", Stage::Configure.into_str(), conf_suffix));
         let configure_log = self.logdir.join("configure.log");
         if !self.run_usergroup_if_needed(Stage::Configure, &pkgdir, &configure_log)? {
             self.release_make_jobs();
@@ -746,7 +724,7 @@ impl<'a> PkgBuilder<'a> {
         let build_suffix = build_jobs.map(|j| format!(" -j{}", j)).unwrap_or_default();
 
         stats.stage = Some(Stage::Build);
-        callback.stage(&format!("{}{}", Stage::Build.as_str(), build_suffix));
+        callback.stage(&format!("{}{}", Stage::Build.into_str(), build_suffix));
         let build_log = self.logdir.join("build.log");
         if !self.run_usergroup_if_needed(Stage::Build, &pkgdir, &build_log)? {
             let elapsed = build_phase_start.elapsed();
@@ -774,7 +752,7 @@ impl<'a> PkgBuilder<'a> {
         // Install
         let stage_start = Instant::now();
         stats.stage = Some(Stage::Install);
-        callback.stage(Stage::Install.as_str());
+        callback.stage(Stage::Install.into_str());
         let install_log = self.logdir.join("install.log");
         if !self.run_usergroup_if_needed(Stage::Install, &pkgdir, &install_log)? {
             stats
@@ -801,7 +779,7 @@ impl<'a> PkgBuilder<'a> {
         // Package
         let stage_start = Instant::now();
         stats.stage = Some(Stage::Package);
-        callback.stage(Stage::Package.as_str());
+        callback.stage(Stage::Package.into_str());
         if !self.run_make_stage(
             Stage::Package,
             &pkgdir,
@@ -831,7 +809,7 @@ impl<'a> PkgBuilder<'a> {
             // Test package deinstall
             let stage_start = Instant::now();
             stats.stage = Some(Stage::Deinstall);
-            callback.stage(Stage::Deinstall.as_str());
+            callback.stage(Stage::Deinstall.into_str());
             let _ = self.write_stage(Stage::Deinstall);
             if !self.pkg_delete(pkgname_str)? {
                 stats
@@ -866,7 +844,7 @@ impl<'a> PkgBuilder<'a> {
         // Clean
         let stage_start = Instant::now();
         stats.stage = Some(Stage::Clean);
-        callback.stage(Stage::Clean.as_str());
+        callback.stage(Stage::Clean.into_str());
         let _ = self.run_make_stage(Stage::Clean, &pkgdir, &["clean"], RunAs::Root, false);
         stats
             .stage_durations
@@ -890,7 +868,7 @@ impl<'a> PkgBuilder<'a> {
     /// Write the current stage to a .stage file.
     fn write_stage(&self, stage: Stage) -> anyhow::Result<()> {
         let stage_file = self.logdir.join(".stage");
-        fs::write(&stage_file, stage.as_str())?;
+        fs::write(&stage_file, stage.into_str())?;
         Ok(())
     }
 
@@ -917,7 +895,7 @@ impl<'a> PkgBuilder<'a> {
     ) -> anyhow::Result<bool> {
         let _ = self.write_stage(stage);
 
-        let logfile = self.logdir.join(format!("{}.log", stage.as_str()));
+        let logfile = self.logdir.join(format!("{}.log", stage.into_str()));
         let work_log = self.logdir.join("work.log");
 
         let owned_args =
@@ -925,7 +903,7 @@ impl<'a> PkgBuilder<'a> {
 
         let args: Vec<&str> = owned_args.iter().map(|s| s.as_str()).collect();
 
-        info!(stage = stage.as_str(), "Running make stage");
+        info!(stage = stage.into_str(), "Running make stage");
 
         let status =
             self.run_command_logged(self.session.config.make(), &args, run_as, &logfile)?;

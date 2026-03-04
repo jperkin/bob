@@ -805,7 +805,10 @@ fn print_history(
             "-".to_string()
         } else {
             rec.stage
-                .map(|s| s.as_str().to_string())
+                .map(|s| {
+                    let st: &str = s.into();
+                    st.to_string()
+                })
                 .unwrap_or_else(|| "-".to_string())
         };
         let jobs = if rec.make_jobs == 0 {
