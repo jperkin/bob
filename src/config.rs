@@ -495,16 +495,34 @@ pub struct Options {
 
 /// Scheduler configuration from the `scheduler` section.
 ///
-/// Controls dynamic CPU allocation informed by build history.
+/// Controls dynamic CPU and disk allocation informed by build history.
 ///
 /// - `jobs`: Total MAKE_JOBS CPU budget to distribute across concurrent builds.
 ///   A value of 1.5x the number of physical cores is recommended: builds spend
 ///   significant time in serial phases where allocated cores sit idle, and the
 ///   overcommit lets parallel phases of other packages use those cores.
+/// - `wrkobjdir`: Optional automatic WRKOBJDIR selection based on historical
+///   disk usage, routing large builds to disk and small builds to tmpfs.
 #[derive(Clone, Debug)]
 pub struct SchedulerConfig {
     /// Total MAKE_JOBS CPU budget.
     pub jobs: usize,
+    /// Optional WRKOBJDIR routing based on historical disk usage.
+    pub wrkobjdir: Option<WrkObjDir>,
+}
+
+/// WRKOBJDIR routing configuration.
+///
+/// Packages whose historical disk usage exceeds `threshold` build in `disk`;
+/// everything else builds in `tmpfs`.
+#[derive(Clone, Debug)]
+pub struct WrkObjDir {
+    /// Fast (tmpfs) WRKOBJDIR for builds under threshold.
+    pub tmpfs: PathBuf,
+    /// Disk-backed WRKOBJDIR for large builds.
+    pub disk: PathBuf,
+    /// Size threshold in bytes.
+    pub threshold: u64,
 }
 
 /// pkgsrc-related configuration from the `pkgsrc` section.
@@ -756,6 +774,13 @@ impl Config {
         self.file.scheduler.as_ref().map(|s| s.jobs)
     }
 
+    pub fn wrkobjdir(&self) -> Option<&WrkObjDir> {
+        self.file
+            .scheduler
+            .as_ref()
+            .and_then(|s| s.wrkobjdir.as_ref())
+    }
+
     pub fn script(&self, key: &str) -> Option<&PathBuf> {
         self.file.scripts.get(key)
     }
@@ -965,6 +990,11 @@ impl Config {
             if sched.jobs == 0 {
                 errors.push("scheduler.jobs must be at least 1".to_string());
             }
+            if let Some(w) = &sched.wrkobjdir {
+                if w.threshold == 0 {
+                    errors.push("scheduler.wrkobjdir.threshold must be greater than 0".to_string());
+                }
+            }
         }
 
         if errors.is_empty() {
@@ -1110,6 +1140,38 @@ fn get_required_string(table: &Table, field: &str) -> LuaResult<String> {
     }
 }
 
+/// Parse a human-readable size string into bytes.
+///
+/// Accepts integer suffixes K, M, G, T (case-insensitive) with optional
+/// fractional parts (e.g. "1.5G"), or bare byte counts.
+fn parse_size(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty size string".to_string());
+    }
+
+    let (num_str, multiplier) = match s.as_bytes().last() {
+        Some(b'K' | b'k') => (&s[..s.len() - 1], 1024u64),
+        Some(b'M' | b'm') => (&s[..s.len() - 1], 1024u64 * 1024),
+        Some(b'G' | b'g') => (&s[..s.len() - 1], 1024u64 * 1024 * 1024),
+        Some(b'T' | b't') => (&s[..s.len() - 1], 1024u64 * 1024 * 1024 * 1024),
+        _ => (s, 1u64),
+    };
+
+    if multiplier > 1 {
+        let n: f64 = num_str
+            .parse()
+            .map_err(|_| format!("invalid size: '{}'", s))?;
+        if n < 0.0 {
+            return Err(format!("negative size: '{}'", s));
+        }
+        Ok((n * multiplier as f64) as u64)
+    } else {
+        s.parse::<u64>()
+            .map_err(|_| format!("invalid size: '{}'", s))
+    }
+}
+
 fn parse_scheduler(globals: &Table) -> LuaResult<Option<SchedulerConfig>> {
     let value: Value = globals.get("scheduler")?;
     if value.is_nil() {
@@ -1120,14 +1182,36 @@ fn parse_scheduler(globals: &Table) -> LuaResult<Option<SchedulerConfig>> {
         .as_table()
         .ok_or_else(|| mlua::Error::runtime("'scheduler' must be a table"))?;
 
-    const KNOWN_KEYS: &[&str] = &["jobs"];
+    const KNOWN_KEYS: &[&str] = &["jobs", "wrkobjdir"];
     warn_unknown_keys(table, "scheduler", KNOWN_KEYS);
 
     let jobs: usize = table
         .get("jobs")
         .map_err(|_| mlua::Error::runtime("scheduler.jobs is required"))?;
 
-    Ok(Some(SchedulerConfig { jobs }))
+    let wrkobjdir = match table.get::<Value>("wrkobjdir")? {
+        Value::Nil => None,
+        Value::Table(t) => {
+            const WRK_KEYS: &[&str] = &["tmpfs", "disk", "threshold"];
+            warn_unknown_keys(&t, "scheduler.wrkobjdir", WRK_KEYS);
+
+            let tmpfs = PathBuf::from(get_required_string(&t, "tmpfs")?);
+            let disk = PathBuf::from(get_required_string(&t, "disk")?);
+            let threshold_str = get_required_string(&t, "threshold")?;
+            let threshold = parse_size(&threshold_str).map_err(|e| {
+                mlua::Error::runtime(format!("scheduler.wrkobjdir.threshold: {}", e))
+            })?;
+
+            Some(WrkObjDir {
+                tmpfs,
+                disk,
+                threshold,
+            })
+        }
+        _ => return Err(mlua::Error::runtime("scheduler.wrkobjdir must be a table")),
+    };
+
+    Ok(Some(SchedulerConfig { jobs, wrkobjdir }))
 }
 
 fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {

@@ -71,6 +71,8 @@ pub enum HistoryKind {
     MakeJobs,
     #[strum(message = "Total wall-clock duration", props(default = "true"))]
     Duration,
+    #[strum(message = "WRKDIR size at end of build")]
+    DiskUsage,
 }
 
 impl HistoryKind {
@@ -169,6 +171,7 @@ pub struct History {
     pub stage: Option<Stage>,
     pub make_jobs: usize,
     pub duration: Duration,
+    pub disk_usage: Option<u64>,
     /// Per-stage wall-clock durations.
     pub stage_durations: Vec<(Stage, Duration)>,
     /// Per-stage CPU time (user+sys from wait4).
@@ -204,6 +207,21 @@ pub fn format_duration(ms: u64) -> String {
         let hours = ms / 3_600_000;
         let mins = (ms % 3_600_000) / 60_000;
         format!("{}h{:02}m", hours, mins)
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    const K: u64 = 1024;
+    const M: u64 = 1024 * 1024;
+    const G: u64 = 1024 * 1024 * 1024;
+    if bytes >= G {
+        format!("{:.1}G", bytes as f64 / G as f64)
+    } else if bytes >= M {
+        format!("{:.1}M", bytes as f64 / M as f64)
+    } else if bytes >= K {
+        format!("{:.1}K", bytes as f64 / K as f64)
+    } else {
+        format!("{}B", bytes)
     }
 }
 
@@ -264,13 +282,14 @@ impl History {
                 }
             }
             HistoryKind::Duration => fmt_dur(self.duration),
+            HistoryKind::DiskUsage => self.disk_usage.map(format_size).unwrap_or_else(dash),
         }
     }
 
     /**
      * Format a column value as raw numeric output.
      *
-     * Durations are output as milliseconds and
+     * Durations are output as milliseconds, sizes as bytes, and
      * timestamps as epoch seconds.  All other columns are identical
      * to [`format_col`](Self::format_col).
      */
@@ -324,6 +343,7 @@ impl History {
                 }
             }
             HistoryKind::Duration => fmt_dur(self.duration),
+            HistoryKind::DiskUsage => self.disk_usage.map(|b| b.to_string()).unwrap_or_else(dash),
         }
     }
 }

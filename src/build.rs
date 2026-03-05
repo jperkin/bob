@@ -461,6 +461,8 @@ pub struct PkgBuildStats {
     pub stage_durations: Vec<(Stage, Duration)>,
     /// Per-stage CPU time (user+sys from wait4).
     pub stage_cpu_times: Vec<(Stage, Duration)>,
+    /// WRKDIR size in bytes, measured before clean.
+    pub disk_usage: Option<u64>,
     /// Wall-clock duration for the entire build.
     pub duration: Duration,
     /// Unix epoch when the build started.
@@ -502,6 +504,7 @@ struct BuildSession {
     pkgsrc_env: PkgsrcEnv,
     sandbox: Sandbox,
     state: RunState,
+    wrkobjdir_map: HashMap<PkgName, PathBuf>,
 }
 
 /// Package builder that executes build stages.
@@ -514,6 +517,7 @@ struct PkgBuilder<'a> {
     envs: Vec<(String, String)>,
     output_tx: Option<Sender<ChannelCommand>>,
     make_jobs: MakeJobs,
+    wrkdir: Option<PathBuf>,
 }
 
 impl<'a> PkgBuilder<'a> {
@@ -524,6 +528,7 @@ impl<'a> PkgBuilder<'a> {
         envs: Vec<(String, String)>,
         output_tx: Option<Sender<ChannelCommand>>,
         make_jobs: MakeJobs,
+        wrkdir: Option<PathBuf>,
     ) -> Self {
         let logdir = session
             .config
@@ -539,6 +544,7 @@ impl<'a> PkgBuilder<'a> {
             envs,
             output_tx,
             make_jobs,
+            wrkdir,
         }
     }
 
@@ -790,6 +796,20 @@ impl<'a> PkgBuilder<'a> {
             PathBuf::from(&pkgfile)
         };
         fs::copy(&host_pkgfile, &dest)?;
+
+        // Measure disk usage before clean destroys WRKDIR
+        match self.wrkdir {
+            Some(ref wrkdir) => match fs_extra::dir::get_size(wrkdir) {
+                Ok(size) => {
+                    debug!(wrkdir = %wrkdir.display(), size, "Measured WRKDIR disk usage");
+                    stats.disk_usage = Some(size);
+                }
+                Err(e) => {
+                    debug!(wrkdir = %wrkdir.display(), error = %e, "Failed to measure disk usage")
+                }
+            },
+            None => debug!("No WRKDIR available for disk usage measurement"),
+        }
 
         // Clean
         let stage_start = Instant::now();
@@ -1345,6 +1365,7 @@ impl BuildResult {
             stage: self.build_stats.stage,
             make_jobs: self.build_stats.make_jobs.count(),
             duration: self.build_stats.duration,
+            disk_usage: self.build_stats.disk_usage,
             stage_durations: self.build_stats.stage_durations.clone(),
             stage_cpu_times: self.build_stats.stage_cpu_times.clone(),
         })
@@ -1492,6 +1513,44 @@ impl<'a> MakeQuery<'a> {
         if value.is_empty() { None } else { Some(value) }
     }
 
+    /// Query multiple bmake variables in a single invocation.
+    fn vars(&self, names: &[&str]) -> HashMap<String, String> {
+        let pkgdir = self.session.config.pkgsrc().join(self.pkgpath.as_path());
+        let varnames_arg = names.join(" ");
+
+        let mut cmd = self
+            .session
+            .sandbox
+            .command(self.sandbox_id, self.session.config.make());
+        cmd.arg("-C")
+            .arg(&pkgdir)
+            .arg("show-vars")
+            .arg(format!("VARNAMES={}", varnames_arg));
+
+        for (key, value) in self.env {
+            cmd.env(key, value);
+        }
+
+        cmd.stderr(Stdio::null());
+
+        let output = match cmd.output() {
+            Ok(o) if o.status.success() => o,
+            _ => return HashMap::new(),
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+
+        let mut result = HashMap::new();
+        for (name, value) in names.iter().zip(&lines) {
+            let value = value.trim();
+            if !value.is_empty() {
+                result.insert(name.to_string(), value.to_string());
+            }
+        }
+        result
+    }
+
     /// Query a bmake variable and return as PathBuf.
     fn var_path(&self, name: &str) -> Option<PathBuf> {
         self.var(name).map(PathBuf::from)
@@ -1539,24 +1598,35 @@ impl PackageBuild {
             .config
             .script_env(Some(&self.session.pkgsrc_env));
 
+        // Inject scheduler-computed WRKOBJDIR unless the user's env
+        // function already set it (user overrides win).
+        if !pkg_env.contains_key("WRKOBJDIR") {
+            if let Some(wrkobjdir) = self.session.wrkobjdir_map.get(&self.pkginfo.index.pkgname) {
+                envs.push(("WRKOBJDIR".to_string(), wrkobjdir.display().to_string()));
+            }
+        }
+
         for (key, value) in &pkg_env {
             envs.push((key.clone(), value.clone()));
         }
 
         let patterns = self.session.config.save_wrkdir_patterns();
 
-        // Query MAKE_JOBS_SAFE and _MAKE_JOBS_N for this package
+        // Query MAKE_JOBS_SAFE, _MAKE_JOBS_N, and WRKDIR in one bmake call
         let make = MakeQuery::new(&self.session, self.sandbox_id, pkgpath, &pkg_env);
-        let make_jobs_safe = make
-            .var("MAKE_JOBS_SAFE")
+        let vars = make.vars(&["MAKE_JOBS_SAFE", "_MAKE_JOBS_N", "WRKDIR"]);
+        let make_jobs_safe = vars
+            .get("MAKE_JOBS_SAFE")
             .map(|v| !v.eq_ignore_ascii_case("no"))
             .unwrap_or(true);
         let make_jobs = if make_jobs_safe {
-            let n = make.var("_MAKE_JOBS_N").and_then(|v| v.parse().ok());
+            let n = vars.get("_MAKE_JOBS_N").and_then(|v| v.parse().ok());
             MakeJobs::Jobs(n.unwrap_or(1))
         } else {
             MakeJobs::NotSafe
         };
+        let wrkdir = vars.get("WRKDIR").map(|w| make.resolve_path(Path::new(w)));
+
         // Run pre-build script if defined (always runs)
         if !self.session.sandbox.run_pre_build(
             self.sandbox_id,
@@ -1574,6 +1644,7 @@ impl PackageBuild {
             envs.clone(),
             Some(status_tx.clone()),
             make_jobs,
+            wrkdir.clone(),
         );
 
         let mut callback = ChannelCallback::new(self.sandbox_id, status_tx);
@@ -1582,13 +1653,19 @@ impl PackageBuild {
         // Clear stage display
         let _ = status_tx.send(ChannelCommand::StageUpdate(self.sandbox_id, None));
 
+        let measure_wrkdir = || -> Option<u64> {
+            let w = wrkdir.as_ref()?;
+            fs_extra::dir::get_size(w).ok()
+        };
+
         let result = match result {
             Ok(r @ PkgBuildResult::Success(_)) => {
                 info!("Package build completed successfully");
                 r
             }
-            Ok(PkgBuildResult::Failed(stats)) => {
+            Ok(PkgBuildResult::Failed(mut stats)) => {
                 error!("Package build failed");
+                stats.disk_usage = measure_wrkdir();
                 self.cleanup_after_failure(
                     status_tx, pkgname, pkgpath, logdir, patterns, &pkg_env, &envs,
                 );
@@ -1596,11 +1673,13 @@ impl PackageBuild {
             }
             Err(e) => {
                 error!(error = %e, "Package build error");
+                let disk_usage = measure_wrkdir();
                 self.cleanup_after_failure(
                     status_tx, pkgname, pkgpath, logdir, patterns, &pkg_env, &envs,
                 );
                 PkgBuildResult::Failed(PkgBuildStats {
                     make_jobs,
+                    disk_usage,
                     ..PkgBuildStats::default()
                 })
             }
@@ -2191,6 +2270,56 @@ impl Build {
             scheduler.init_budget(max_jobs, self.config.build_threads());
         }
 
+        /*
+         * Build wrkobjdir map from historical disk usage.
+         *
+         * If scheduler.wrkobjdir is configured, look up each package's
+         * most recent disk usage and route large builds to disk.
+         * Packages with no history default to disk (safe choice
+         * since tmpfs is bounded and we cannot yet restart).
+         */
+        let wrkobjdir_map: HashMap<PkgName, PathBuf> = if let Some(w) = self.config.wrkobjdir() {
+            let usage = db.disk_usage_by_pkg(&pkg_refs);
+            debug!(
+                total_packages = pkg_pairs.len(),
+                history_entries = usage.len(),
+                threshold = w.threshold,
+                "WRKOBJDIR disk usage query results"
+            );
+            let mut map = HashMap::new();
+            let mut tmpfs_count = 0usize;
+            let mut disk_count = 0usize;
+            for (pkgname, idx) in &self.scanpkgs {
+                let pkgpath = idx.pkgpath.to_string();
+                let dir = match usage.get(pkgname.pkgbase()) {
+                    Some(&size) if size <= w.threshold => {
+                        debug!(%pkgname, %pkgpath, size, "wrkobjdir: tmpfs (under threshold)");
+                        tmpfs_count += 1;
+                        &w.tmpfs
+                    }
+                    Some(&size) => {
+                        debug!(%pkgname, %pkgpath, size, "wrkobjdir: disk (over threshold)");
+                        disk_count += 1;
+                        &w.disk
+                    }
+                    None => {
+                        debug!(%pkgname, %pkgpath, "wrkobjdir: disk (no history)");
+                        disk_count += 1;
+                        &w.disk
+                    }
+                };
+                map.insert(pkgname.clone(), dir.clone());
+            }
+            info!(
+                tmpfs = tmpfs_count,
+                disk = disk_count,
+                "WRKOBJDIR routing from build history"
+            );
+            map
+        } else {
+            HashMap::new()
+        };
+
         let logdir = self.config.logdir().clone();
         let jobs = BuildJobs {
             scanpkgs: self.scanpkgs.clone(),
@@ -2380,6 +2509,7 @@ impl Build {
             pkgsrc_env: self.pkgsrc_env.clone(),
             sandbox: self.scope.sandbox().clone(),
             state: state_flag.clone(),
+            wrkobjdir_map,
         });
         let progress_clone = Arc::clone(&progress);
         let state_for_manager = state_flag.clone();

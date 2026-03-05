@@ -77,6 +77,7 @@ fn history_schema() -> String {
                 HistoryKind::MakeJobs | HistoryKind::Duration | HistoryKind::Timestamp => {
                     "INTEGER NOT NULL"
                 }
+                HistoryKind::DiskUsage => "INTEGER",
             };
             format!("{name} {sql}")
         })
@@ -1649,6 +1650,7 @@ impl Database {
                 rec.stage.map(|s| s as i32),
                 rec.make_jobs as i64,
                 dur_ms(rec.duration),
+                rec.disk_usage.map(|s| s as i64),
             ],
         )?;
         let history_id = conn.last_insert_rowid();
@@ -1697,13 +1699,24 @@ impl Database {
                 row.get::<_, Option<i32>>(5)?,
                 row.get::<_, i64>(6)? as usize,
                 row.get::<_, i64>(7)?,
+                row.get::<_, Option<i64>>(8)?,
             ))
         })?;
 
         let mut results = Vec::new();
         let mut history_ids = Vec::new();
         for row in rows {
-            let (id, timestamp, pkgpath, pkgname, outcome_id, stage_id, make_jobs, duration) = row?;
+            let (
+                id,
+                timestamp,
+                pkgpath,
+                pkgname,
+                outcome_id,
+                stage_id,
+                make_jobs,
+                duration,
+                disk_usage,
+            ) = row?;
             if let Some(re) = pattern {
                 if !re.is_match(&pkgpath) && !re.is_match(&pkgname) {
                     continue;
@@ -1725,6 +1738,7 @@ impl Database {
                 stage,
                 make_jobs,
                 duration: Duration::from_millis(duration as u64),
+                disk_usage: disk_usage.map(|s| s as u64),
                 stage_durations: Vec::new(),
                 stage_cpu_times: Vec::new(),
             });
@@ -1887,6 +1901,91 @@ impl Database {
             let (pkgname, ms) = row;
             let pkgbase = PkgName::new(&pkgname).pkgbase().to_string();
             result.insert(pkgbase, ms as u64);
+        }
+        result
+    }
+
+    /// Query the most recent successful build's disk usage per pkgpath.
+    ///
+    /// Returns a map of pkgpath to disk usage in bytes.  Packages with
+    /// no recorded disk usage are omitted.  Returns an empty map on error.
+    pub fn disk_usage_by_pkg(&self, pkgs: &[(&str, &str)]) -> HashMap<String, u64> {
+        let conn = match self.history_conn() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "disk_usage_by_pkg: failed to open history db");
+                return HashMap::new();
+            }
+        };
+
+        if pkgs.is_empty() {
+            return HashMap::new();
+        }
+
+        let du: &str = HistoryKind::DiskUsage.into();
+        let out: &str = HistoryKind::Outcome.into();
+        let pkgname_col: &str = HistoryKind::Pkgname.into();
+        let success_outcome = PackageStateKind::Success as i32;
+
+        let mut conditions = Vec::with_capacity(pkgs.len());
+        for i in 0..pkgs.len() {
+            let p = i * 2 + 1;
+            conditions.push(format!(
+                "(h.pkgpath = ?{} AND h.{pkgname_col} LIKE ?{} || '-%')",
+                p,
+                p + 1
+            ));
+        }
+        let where_clause = conditions.join(" OR ");
+
+        let sql = format!(
+            "WITH matched AS ( \
+                 SELECT h.{pkgname_col}, h.{du}, \
+                        ROW_NUMBER() OVER ( \
+                            PARTITION BY h.pkgpath, h.{pkgname_col} \
+                            ORDER BY h.id DESC \
+                        ) AS rn \
+                 FROM build_history h \
+                 WHERE ({where_clause}) \
+                   AND h.{out} = {success_outcome} \
+                   AND h.{du} IS NOT NULL \
+             ) \
+             SELECT {pkgname_col}, {du} FROM matched WHERE rn = 1",
+        );
+
+        let params: Vec<Box<dyn rusqlite::ToSql>> = pkgs
+            .iter()
+            .flat_map(|(pkgpath, pkgbase)| {
+                vec![
+                    Box::new(pkgpath.to_string()) as Box<dyn rusqlite::ToSql>,
+                    Box::new(pkgbase.to_string()) as Box<dyn rusqlite::ToSql>,
+                ]
+            })
+            .collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| &**p).collect();
+
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "disk_usage_by_pkg: failed to prepare query");
+                return HashMap::new();
+            }
+        };
+        let rows = match stmt.query_map(param_refs.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, "disk_usage_by_pkg: query failed");
+                return HashMap::new();
+            }
+        };
+
+        let mut result = HashMap::new();
+        for row in rows.flatten() {
+            let (pkgname, size) = row;
+            let pkgbase = PkgName::new(&pkgname).pkgbase().to_string();
+            result.insert(pkgbase, size as u64);
         }
         result
     }
