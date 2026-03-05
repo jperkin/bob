@@ -62,6 +62,7 @@ pkgsrc = {
     -- the environment for scans and builds, avoiding expensive forks.  Only add
     -- variables that are calculated prior to mk.conf being included.
     cachevars = {
+        "_UNAME_V",
         "NATIVE_OPSYS",
         "NATIVE_OPSYS_VERSION",
         "NATIVE_OS_VERSION",
