@@ -2155,6 +2155,7 @@ impl Build {
          * Propagate cached failures: any package in incoming that depends on
          * a failed package must also be marked as failed.
          */
+        let mut indirect_failed_count = 0usize;
         loop {
             let mut newly_failed: Vec<PkgName> = Vec::new();
             for (pkgname, node) in &packages {
@@ -2168,6 +2169,7 @@ impl Build {
             if newly_failed.is_empty() {
                 break;
             }
+            indirect_failed_count += newly_failed.len();
             for pkgname in newly_failed {
                 packages.remove(&pkgname);
                 failed.insert(pkgname);
@@ -2322,10 +2324,11 @@ impl Build {
             .context("Failed to initialize progress display")?,
         ));
 
-        // Mark cached packages in progress display
-        if cached_count > 0 {
+        // Mark cached and indirect-failed packages in progress display
+        if cached_count > 0 || indirect_failed_count > 0 {
             if let Ok(mut p) = progress.lock() {
                 p.state_mut().cached = cached_count;
+                p.state_mut().skipped = indirect_failed_count;
             }
         }
 
@@ -2658,12 +2661,22 @@ impl Build {
                             let _ = completed_tx.send(r.clone());
                         }
 
+                        let indirect_count = jobs.results.len() - results_before - 1;
+
                         if let Ok(mut p) = progress_clone.lock() {
-                            let _ = p.print_status(
-                                "Failed",
-                                &format!("{} ({})", pkgname.pkgname(), format_duration(duration)),
-                            );
+                            let msg = if indirect_count > 0 {
+                                format!(
+                                    "{} ({}, breaks {})",
+                                    pkgname.pkgname(),
+                                    format_duration(duration),
+                                    indirect_count
+                                )
+                            } else {
+                                format!("{} ({})", pkgname.pkgname(), format_duration(duration))
+                            };
+                            let _ = p.print_status("Failed", &msg);
                             p.state_mut().increment_failed();
+                            p.state_mut().skipped += indirect_count;
                             if let Some(sid) = sid {
                                 p.clear_output_buffer(sid);
                                 p.state_mut().set_worker_idle(sid);
