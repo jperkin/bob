@@ -72,11 +72,14 @@
 //!         -- Only mount if source exists on host
 //!         { action = "mount", fs = "bind", dir = "/opt/local", ifexists = true },
 //!
-//!         -- Only run if pkgsrc.build_user is set; {pkgsrc.build_user} is
-//!         -- replaced with its value
+//!         -- Only run if pkgsrc.build_user is set
 //!         { action = "cmd", chroot = true,
 //!           ifset = "pkgsrc.build_user",
-//!           create = "mkdir -p /home/{pkgsrc.build_user}" },
+//!           create = [[
+//!                 mkdir -p ${bob_build_user_home}
+//!                 chown ${bob_build_user} ${bob_build_user_home}
+//!           ]],
+//!           destroy = "rm -rf ${bob_build_user_home}" },
 //!     },
 //! }
 //! ```

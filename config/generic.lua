@@ -44,9 +44,11 @@ pkgsrc = {
     tar = "/usr/bin/tar",
 
     -- It is strongly recommended to set up an unprivileged user to perform
-    -- builds.  If you do, ensure that their home directory is created inside
-    -- the sandbox and that work directories are writeable.
+    -- builds.  If this is enabled, there is an action below to automatically
+    -- create the user home directory.  If build_user_home is not set it is
+    -- fetched from getpwnam(3).
     -- build_user = "builder",
+    -- build_user_home = "/home/builder",
 
     -- List of pkgsrc variables to fetch once and cache.  These are then set in
     -- the environment for scans and builds, avoiding expensive forks.  Only add

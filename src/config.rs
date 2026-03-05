@@ -152,6 +152,7 @@
 //! | `bob_prefix` | Installation prefix. |
 //! | `bob_tar` | Path to the tar binary. |
 //! | `bob_build_user` | Unprivileged build user, if configured. |
+//! | `bob_build_user_home` | Home directory of the build user, if configured. |
 //! | `bob_bootstrap` | Path to the bootstrap tarball, if configured. |
 //!
 //! # Sandboxes Section
@@ -171,6 +172,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use mlua::{Lua, RegistryKey, Result as LuaResult, Table, Value};
 use pkgsrc::PkgPath;
 use std::collections::HashMap;
+use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -548,6 +550,8 @@ pub struct Pkgsrc {
     pub bootstrap: Option<PathBuf>,
     /// Unprivileged user for builds.
     pub build_user: Option<String>,
+    /// Home directory of build_user (resolved from password database).
+    pub build_user_home: Option<PathBuf>,
     /// Directory for build logs (defaults to dbdir/logs).
     pub logdir: Option<PathBuf>,
     /// Path to bmake binary.
@@ -837,6 +841,10 @@ impl Config {
         self.file.pkgsrc.build_user.as_deref()
     }
 
+    pub fn build_user_home(&self) -> Option<&Path> {
+        self.file.pkgsrc.build_user_home.as_deref()
+    }
+
     pub fn bootstrap(&self) -> Option<&PathBuf> {
         self.file.pkgsrc.bootstrap.as_ref()
     }
@@ -904,6 +912,12 @@ impl Config {
         envs.push(("bob_tar".to_string(), tar_value));
         if let Some(build_user) = self.build_user() {
             envs.push(("bob_build_user".to_string(), build_user.to_string()));
+        }
+        if let Some(home) = self.build_user_home() {
+            envs.push((
+                "bob_build_user_home".to_string(),
+                home.display().to_string(),
+            ));
         }
         if let Some(bootstrap) = self.bootstrap() {
             envs.push((
@@ -1172,6 +1186,27 @@ fn parse_size(s: &str) -> Result<u64, String> {
     }
 }
 
+/**
+ * Look up a user's home directory from the password database.
+ */
+fn get_home_dir(username: &str) -> Result<PathBuf, String> {
+    let cname = CString::new(username).map_err(|_| format!("invalid username: '{}'", username))?;
+    // SAFETY: getpwnam is called with a valid C string.
+    let pw = unsafe { libc::getpwnam(cname.as_ptr()) };
+    if pw.is_null() {
+        return Err(format!(
+            "user '{}' not found in password database",
+            username
+        ));
+    }
+    // SAFETY: pw is non-null and pw_dir is a valid C string.
+    let home = unsafe { CStr::from_ptr((*pw).pw_dir) };
+    let path = home
+        .to_str()
+        .map_err(|_| format!("non-UTF-8 home directory for user '{}'", username))?;
+    Ok(PathBuf::from(path))
+}
+
 fn parse_dynamic(globals: &Table) -> LuaResult<Option<DynamicConfig>> {
     let value: Value = globals.get("dynamic")?;
     if value.is_nil() {
@@ -1235,6 +1270,18 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         .get::<Option<String>>("bootstrap")?
         .map(PathBuf::from);
     let build_user: Option<String> = pkgsrc.get::<Option<String>>("build_user")?;
+    let build_user_home = if let Some(ref user) = build_user {
+        if let Some(explicit) = pkgsrc.get::<Option<String>>("build_user_home")? {
+            Some(PathBuf::from(explicit))
+        } else {
+            let home = get_home_dir(user)
+                .map_err(|e| mlua::Error::runtime(format!("pkgsrc.build_user: {}", e)))?;
+            pkgsrc.set("build_user_home", home.display().to_string())?;
+            Some(home)
+        }
+    } else {
+        None
+    };
     let logdir: Option<PathBuf> = pkgsrc.get::<Option<String>>("logdir")?.map(PathBuf::from);
     let make = get_required_string(&pkgsrc, "make")?;
     let tar: Option<PathBuf> = pkgsrc.get::<Option<String>>("tar")?.map(PathBuf::from);
@@ -1274,6 +1321,7 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         basedir: PathBuf::from(basedir),
         bootstrap,
         build_user,
+        build_user_home,
         cachevars,
         logdir,
         make: PathBuf::from(make),

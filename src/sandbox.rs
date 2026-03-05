@@ -1078,7 +1078,7 @@ impl Sandbox {
             }
             c.arg(&sandbox_path)
                 .arg("/bin/sh")
-                .arg("-c")
+                .arg("-ceu")
                 .arg(cmd)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -1091,7 +1091,7 @@ impl Sandbox {
             for (key, val) in self.config.script_env(None) {
                 c.env(key, val);
             }
-            c.arg("-c")
+            c.arg("-ceu")
                 .arg(cmd)
                 .env("bob_sandbox_path", &sandbox_path)
                 .current_dir(&sandbox_path)

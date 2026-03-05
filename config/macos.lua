@@ -55,8 +55,10 @@ pkgsrc = {
 
     -- It is strongly recommended to set up an unprivileged user to perform
     -- builds.  If this is enabled, there is an action below to automatically
-    -- create the user home directory.
+    -- create the user home directory.  If build_user_home is not set it is
+    -- fetched from getpwnam(3).
     -- build_user = "builder",
+    -- build_user_home = "/Users/builder",
 
     -- List of pkgsrc variables to fetch once and cache.  These are then set in
     -- the environment for scans and builds, avoiding expensive forks.  Only add
@@ -133,14 +135,16 @@ sandboxes = {
                 mkdir -p $(getconf DARWIN_USER_TEMP_DIR)
          ]] },
 
-        -- Configure build user directories if enabled.
-        { action = "cmd", chroot = true, ifset = "pkgsrc.build_user", create = [[
-                user="{pkgsrc.build_user}"
-                homedir=$(su ${user} -c 'echo ${HOME}')
-                tempdir=$(su ${user} -c 'getconf DARWIN_USER_TEMP_DIR')
-                mkdir -p ${homedir} ${tempdir}
-                chown -R ${user} ${homedir} ${tempdir}
-        ]] },
+        -- Configure build user directories if enabled.  Bob automatically
+        -- sets bob_build_user* variables when the build user is configured,
+        -- and the scripts are executed with 'set -eu', so these should be safe.
+        { action = "cmd", chroot = true, ifset = "pkgsrc.build_user",
+          create = [[
+                tempdir=$(su ${bob_build_user} -c 'getconf DARWIN_USER_TEMP_DIR')
+                mkdir -p ${bob_build_user_home} ${tempdir}
+                chown -R ${bob_build_user} ${bob_build_user_home} ${tempdir}
+          ]],
+          destroy = "rm -rf ${bob_build_user_home}" },
 
         -- It is recommended to mount pkgsrc read-only, but you will first need
         -- to configure DISTDIR, PACKAGES, and WRKOBJDIR to other directories.

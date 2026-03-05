@@ -53,8 +53,10 @@ pkgsrc = {
 
     -- It is strongly recommended to set up an unprivileged user to perform
     -- builds.  If this is enabled, there is an action below to automatically
-    -- create the user home directory.
+    -- create the user home directory.  If build_user_home is not set it is
+    -- fetched from getpwnam(3).
     -- build_user = "builder",
+    -- build_user_home = "/home/builder",
 
     -- List of pkgsrc variables to fetch once and cache.  These are then set in
     -- the environment for scans and builds, avoiding expensive forks.  Only add
@@ -137,13 +139,15 @@ sandboxes = {
         -- will execute successfully.  Perform additional chroot setup.
         { action = "cmd", chroot = true, create = "chmod 1777 /tmp /var/tmp" },
 
-        -- Configure build user home directory if enabled.
-        { action = "cmd", chroot = true, ifset = "pkgsrc.build_user", create = [[
-                user="{pkgsrc.build_user}"
-                homedir=$(su ${user} -c 'echo ${HOME}')
-                mkdir -p ${homedir}
-                chown ${user} ${homedir}
-        ]] },
+        -- Configure build user home directory if enabled.  Bob automatically
+        -- sets bob_build_user* variables when the build user is configured,
+        -- and the scripts are executed with 'set -eu', so these should be safe.
+        { action = "cmd", chroot = true, ifset = "pkgsrc.build_user",
+          create = [[
+                mkdir -p ${bob_build_user_home}
+                chown ${bob_build_user} ${bob_build_user_home}
+          ]],
+          destroy = "rm -rf ${bob_build_user_home}" },
 
         -- It is recommended to mount pkgsrc read-only, but you will first need
         -- to configure DISTDIR, PACKAGES, and WRKOBJDIR to other directories.
