@@ -88,12 +88,23 @@ fn history_schema() -> String {
 /**
  * Schema version for bob.db - update when schema changes.
  */
-const SCHEMA_VERSION: i32 = 20260303;
+const SCHEMA_VERSION: i32 = 20260305;
 
 /**
  * Schema version for history.db - update when history schema changes.
  */
 const HISTORY_SCHEMA_VERSION: i32 = 20260303;
+
+/**
+ * Dependency graph and per-package scheduling data.
+ *
+ * Returned by [`Database::get_scheduling_data`] for computing
+ * scheduling weights and transitive dependent counts.
+ */
+pub struct SchedulingData {
+    pub packages: HashMap<String, crate::scheduler::PackageNode<String>>,
+    pub reverse_deps: HashMap<String, HashSet<String>>,
+}
 
 /**
  * Lightweight package row without full scan data.
@@ -138,8 +149,6 @@ pub struct PackageStatusRow {
     pub multi_version: Option<String>,
     pub build_outcome: Option<i32>,
     pub outcome_detail: Option<String>,
-    pub dep_count: Option<i64>,
-    pub weight: Option<i64>,
 }
 
 impl PackageRow {
@@ -321,9 +330,7 @@ impl Database {
                  build_reason TEXT,
                  is_bootstrap INTEGER DEFAULT 0,
                  pbulk_weight INTEGER DEFAULT 100,
-                 scan_data TEXT,
-                 dep_count INTEGER,
-                 weight INTEGER
+                 scan_data TEXT
              );
 
              CREATE INDEX idx_packages_pkgpath ON packages(pkgpath);
@@ -573,16 +580,14 @@ impl Database {
             "SELECT p.id, p.pkgname, p.pkgpath, p.skip_reason,
                     p.fail_reason, p.build_reason,
                     json_extract(p.scan_data, '$.MULTI_VERSION'),
-                    b.outcome, b.outcome_detail,
-                    p.dep_count, p.weight
+                    b.outcome, b.outcome_detail
              FROM packages p
              LEFT JOIN builds b ON b.package_id = p.id"
         } else {
             "SELECT p.id, p.pkgname, p.pkgpath, p.skip_reason,
                     p.fail_reason, p.build_reason,
                     NULL,
-                    b.outcome, b.outcome_detail,
-                    p.dep_count, p.weight
+                    b.outcome, b.outcome_detail
              FROM packages p
              LEFT JOIN builds b ON b.package_id = p.id"
         };
@@ -599,8 +604,6 @@ impl Database {
                 multi_version: row.get(6)?,
                 build_outcome: row.get(7)?,
                 outcome_detail: row.get(8)?,
-                dep_count: row.get(9)?,
-                weight: row.get(10)?,
             })
         })?;
         mapped.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -803,23 +806,6 @@ impl Database {
     }
 
     /**
-     * Store pre-computed dep_count and weight values.
-     *
-     * Each entry is `(package_id, dep_count, weight)`.
-     */
-    pub fn store_dep_scores(&self, scores: &[(i64, Option<i64>, Option<i64>)]) -> Result<()> {
-        let tx = self.transaction()?;
-        let mut stmt = self
-            .conn
-            .prepare("UPDATE packages SET dep_count = ?1, weight = ?2 WHERE id = ?3")?;
-        for &(id, dc, w) in scores {
-            stmt.execute(params![dc, w, id])?;
-        }
-        drop(stmt);
-        tx.commit()
-    }
-
-    /**
      * Store resolved dependencies in batch.
      */
     fn store_resolved_dependencies_batch(&self, deps: &[(i64, i64)]) -> Result<()> {
@@ -881,6 +867,61 @@ impl Database {
             deps.entry(pkg).or_default().push(dep);
         }
         Ok(deps)
+    }
+
+    /**
+     * Get dependency graph and per-package scheduling data.
+     *
+     * Returns [`SchedulingData`] suitable for passing to the
+     * scheduler's [`scheduling_weights`](crate::scheduling_weights)
+     * function.
+     */
+    pub fn get_scheduling_data(&self) -> Result<SchedulingData> {
+        use crate::scheduler::PackageNode;
+
+        let mut packages: HashMap<String, PackageNode<String>> = HashMap::new();
+        let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
+
+        let mut stmt = self
+            .conn
+            .prepare("SELECT p.pkgname, p.pbulk_weight FROM packages p")?;
+        let pkg_rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?))
+        })?;
+        for row in pkg_rows {
+            let (pkgname, pw) = row?;
+            packages.insert(
+                pkgname.clone(),
+                PackageNode {
+                    deps: HashSet::new(),
+                    pbulk_weight: pw as usize,
+                    cpu_time: 0,
+                },
+            );
+            reverse_deps.entry(pkgname).or_default();
+        }
+
+        let mut stmt = self.conn.prepare(
+            "SELECT p1.pkgname, p2.pkgname
+             FROM resolved_depends rd
+             JOIN packages p1 ON rd.package_id = p1.id
+             JOIN packages p2 ON rd.depends_on_id = p2.id",
+        )?;
+        let dep_rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in dep_rows {
+            let (pkg, dep) = row?;
+            if let Some(node) = packages.get_mut(&pkg) {
+                node.deps.insert(dep.clone());
+            }
+            reverse_deps.entry(dep).or_default().insert(pkg);
+        }
+
+        Ok(SchedulingData {
+            packages,
+            reverse_deps,
+        })
     }
 
     /**

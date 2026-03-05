@@ -115,11 +115,26 @@ fn load_depgraph_zst(path: &str) -> DepGraph {
     }
 }
 
+fn default_packages(g: &DepGraph) -> HashMap<String, bob::PackageNode<String>> {
+    g.incoming
+        .iter()
+        .map(|(k, deps)| {
+            (
+                k.clone(),
+                bob::PackageNode {
+                    deps: deps.clone(),
+                    pbulk_weight: 100,
+                    cpu_time: 0,
+                },
+            )
+        })
+        .collect()
+}
+
 fn new_scheduler(g: &DepGraph) -> Scheduler<String> {
     Scheduler::new(
-        g.incoming.clone(),
+        default_packages(g),
         g.reverse_deps.clone(),
-        HashMap::new(),
         HashSet::new(),
         HashSet::new(),
     )
@@ -538,10 +553,24 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
             loaded
         }
     };
+    let packages: HashMap<String, bob::PackageNode<String>> = g
+        .incoming
+        .iter()
+        .map(|(k, deps)| {
+            let pw = cfg.weights.get(k).copied().unwrap_or(100);
+            (
+                k.clone(),
+                bob::PackageNode {
+                    deps: deps.clone(),
+                    pbulk_weight: pw,
+                    cpu_time: 0,
+                },
+            )
+        })
+        .collect();
     let mut sched = Scheduler::new(
-        g.incoming.clone(),
+        packages,
         g.reverse_deps.clone(),
-        cfg.weights.clone(),
         HashSet::new(),
         HashSet::new(),
     );
@@ -1874,10 +1903,24 @@ fn depgraph_precomputed_jobs_dump() {
         let history = load_history(history_path);
         let weights = weights_from_history(&history.timings);
 
+        let packages: HashMap<String, bob::PackageNode<String>> = g
+            .incoming
+            .iter()
+            .map(|(k, deps)| {
+                let pw = weights.get(k).copied().unwrap_or(100);
+                (
+                    k.clone(),
+                    bob::PackageNode {
+                        deps: deps.clone(),
+                        pbulk_weight: pw,
+                        cpu_time: 0,
+                    },
+                )
+            })
+            .collect();
         let mut sched = Scheduler::new(
-            g.incoming.clone(),
+            packages,
             g.reverse_deps.clone(),
-            weights.clone(),
             HashSet::new(),
             HashSet::new(),
         );
@@ -1916,5 +1959,61 @@ fn depgraph_precomputed_jobs_dump() {
         for (jobs, count) in &dist {
             eprintln!("  {:>3} jobs: {:>5} packages", jobs, count);
         }
+    }
+}
+
+/**
+ * Verify that the dep_count tiebreaker orders packages correctly within
+ * each total_weight tier: higher dep_count first.
+ */
+#[test]
+fn dep_count_breaks_weight_tie() {
+    let g = load_depgraph();
+    let packages = default_packages(g);
+    let (total_weights, dep_counts) = bob::scheduling_weights(&packages, &g.reverse_deps);
+
+    let mut sched = Scheduler::new(
+        packages,
+        g.reverse_deps.clone(),
+        HashSet::new(),
+        HashSet::new(),
+    );
+
+    let mut order: Vec<String> = Vec::new();
+    loop {
+        match sched.poll() {
+            Poll::Ready(Some(pkg)) => {
+                sched.mark_success(&pkg);
+                order.push(pkg);
+            }
+            _ => break,
+        }
+    }
+
+    /*
+     * Within each contiguous run of same-weight packages in the dispatch
+     * order, dep_count must be non-increasing.
+     */
+    let mut i = 0;
+    while i < order.len() {
+        let tw = total_weights.get(&order[i]).copied().unwrap_or(0);
+        let mut j = i;
+        while j < order.len() && total_weights.get(&order[j]).copied().unwrap_or(0) == tw {
+            j += 1;
+        }
+        for k in i..j.saturating_sub(1) {
+            let dc_a = dep_counts.get(&order[k]).copied().unwrap_or(0);
+            let dc_b = dep_counts.get(&order[k + 1]).copied().unwrap_or(0);
+            assert!(
+                dc_a >= dc_b,
+                "weight={}: {} (deps={}) before {} (deps={})",
+                tw,
+                order[k],
+                dc_a,
+                order[k + 1],
+                dc_b
+            );
+        }
+        i = j;
     }
 }

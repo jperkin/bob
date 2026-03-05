@@ -21,8 +21,8 @@ use std::task::Poll;
 
 use anyhow::{Context, Result, bail};
 
-use bob::Scheduler;
 use bob::try_println;
+use bob::{PackageNode, Scheduler};
 
 /**
  * Load per-package timings from a file.
@@ -80,7 +80,7 @@ pub fn run(file: &Path, workers: usize, timings_path: Option<&Path>) -> Result<(
         ))
     };
 
-    let mut incoming: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut packages: HashMap<String, PackageNode<String>> = HashMap::new();
     let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
     for line in reader.lines() {
         let line = line.context("Failed to read line")?;
@@ -91,11 +91,22 @@ pub fn run(file: &Path, workers: usize, timings_path: Option<&Path>) -> Result<(
         let Some((dep, dependent)) = line.split_once(" -> ") else {
             bail!("malformed edge: {}", line);
         };
-        incoming
+        packages
             .entry(dependent.to_string())
-            .or_default()
+            .or_insert_with(|| PackageNode {
+                deps: HashSet::new(),
+                pbulk_weight: 100,
+                cpu_time: 0,
+            })
+            .deps
             .insert(dep.to_string());
-        incoming.entry(dep.to_string()).or_default();
+        packages
+            .entry(dep.to_string())
+            .or_insert_with(|| PackageNode {
+                deps: HashSet::new(),
+                pbulk_weight: 100,
+                cpu_time: 0,
+            });
         reverse_deps
             .entry(dep.to_string())
             .or_default()
@@ -109,14 +120,8 @@ pub fn run(file: &Path, workers: usize, timings_path: Option<&Path>) -> Result<(
     };
     let duration = |pkg: &str| -> usize { timings.get(pkg).copied().unwrap_or(1) };
 
-    let pkg_count = incoming.len();
-    let mut sched = Scheduler::new(
-        incoming,
-        reverse_deps,
-        HashMap::new(),
-        HashSet::new(),
-        HashSet::new(),
-    );
+    let pkg_count = packages.len();
+    let mut sched = Scheduler::new(packages, reverse_deps, HashSet::new(), HashSet::new());
 
     /*
      * Event-driven simulation with explicit worker slots.  Each slot

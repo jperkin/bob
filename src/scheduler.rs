@@ -15,33 +15,20 @@
  */
 
 /*!
- * Build scheduling using critical-path ordering.
+ * Build scheduling using summed-weight ordering.
  *
- * Each package is scored by the longest chain of dependents below it
- * (the critical path), not the total number of dependents.  This
- * distinction matters because fan-out is parallelisable but chain
- * depth is not.
+ * Packages are prioritised by **total weight** -- the package's own
+ * PBULK_WEIGHT plus the sum of all unique transitive dependents'
+ * weights (diamond-deduplicated).  This matches the algorithm used
+ * by pbulk's `compute_tree_depth_rec()`.
  *
- * For example, given two independent roots with equal build weights:
+ * Tiebreakers, in order: transitive dependent count (more dependents
+ * first), historical CPU time (longer builds first), then package
+ * name (alphabetical) for determinism.
  *
- * ```text
- *     A          X
- *     |         /|\
- *     B        C D E
- *     |
- *     F
- * ```
- *
- * A naive sum-of-dependents score picks X first (4 total packages in
- * its subtree vs 3 in A's).  But with two or more workers, C/D/E all
- * build in parallel -- X's subtree only takes two serial steps.  A's
- * subtree is three steps deep (A, B, F) and cannot be parallelised,
- * so starting A first produces a shorter overall build.
- *
- * Critical-path scores are precomputed once at construction using a
- * reverse-topological traversal.  A ready set of packages whose
- * dependencies are all satisfied is maintained incrementally, giving
- * O(1) dispatch via [`Scheduler::poll`].
+ * A ready set of packages whose dependencies are all satisfied is
+ * maintained incrementally, giving O(1) dispatch via
+ * [`Scheduler::poll`].
  */
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -50,6 +37,19 @@ use std::hash::Hash;
 use std::sync::mpsc::Sender;
 use std::task::Poll;
 use tracing::debug;
+
+/**
+ * Per-package data for scheduling.
+ *
+ * Bundles the dependency set with the package's own scheduling
+ * metadata so that every package in the graph is guaranteed to
+ * have all required fields.
+ */
+pub struct PackageNode<K> {
+    pub deps: HashSet<K>,
+    pub pbulk_weight: usize,
+    pub cpu_time: u64,
+}
 
 /**
  * One-shot channel for returning MAKE_JOBS from the manager to a worker.
@@ -63,22 +63,27 @@ impl std::fmt::Debug for MakeJobsResponder {
 }
 
 /**
- * Sort key for ready packages: highest critical-path score first,
- * then lexicographically by name for determinism.
+ * Sort key for ready packages.
  *
- * `Reverse` wrapping on score gives descending order in BTreeSet.
+ * Fields are compared in declaration order via the derived `Ord`:
+ * highest total_weight first, then most transitive dependents,
+ * then highest historical CPU time, then alphabetical name.
+ *
+ * `Reverse` wrapping gives descending order in BTreeSet.
  */
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct ReadyKey<K: Ord> {
-    score: std::cmp::Reverse<usize>,
+    total_weight: std::cmp::Reverse<usize>,
+    dep_count: std::cmp::Reverse<usize>,
+    cpu_time: std::cmp::Reverse<u64>,
     pkg: K,
 }
 
 /**
- * Dependency-aware build scheduler using critical-path ordering.
+ * Dependency-aware build scheduler using summed-weight ordering.
  *
  * Tracks the live dependency graph and selects the next package to build
- * based on precomputed critical-path scores.  The dependency invariant is
+ * based on precomputed total weights.  The dependency invariant is
  * enforced: a package is only dispatched by [`poll`](Self::poll) when all
  * its dependencies have completed.
  */
@@ -86,7 +91,9 @@ pub struct Scheduler<K: Ord> {
     incoming: HashMap<K, HashSet<K>>,
     reverse_deps: HashMap<K, HashSet<K>>,
     ready: BTreeSet<ReadyKey<K>>,
-    scores: HashMap<K, usize>,
+    total_weights: HashMap<K, usize>,
+    dep_counts: HashMap<K, usize>,
+    cpu_times: HashMap<K, u64>,
     running: HashSet<K>,
     done: HashSet<K>,
     failed: HashSet<K>,
@@ -174,31 +181,43 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
     /**
      * Create a new scheduler.
      *
-     * `incoming` maps each package to its set of unsatisfied dependencies.
-     * `reverse_deps` maps each package to the set of packages that depend
-     * on it.  `weights` provides per-package build weight (e.g. from
-     * PBULK_WEIGHT); packages not in the map default to 100.
+     * `packages` maps each package to its [`PackageNode`] containing
+     * dependencies, PBULK_WEIGHT, and historical CPU time.  Because
+     * every field is part of the node, it is structurally impossible
+     * to have a package without its scheduling data.
      *
-     * Packages already in `done` or `failed` should have been removed from
-     * `incoming` before calling this constructor.
+     * `reverse_deps` maps each package to the set of packages that
+     * depend on it.
+     *
+     * Packages already in `done` or `failed` should have been removed
+     * from `packages` before calling this constructor.
      */
     pub fn new(
-        incoming: HashMap<K, HashSet<K>>,
+        packages: HashMap<K, PackageNode<K>>,
         reverse_deps: HashMap<K, HashSet<K>>,
-        weights: HashMap<K, usize>,
         done: HashSet<K>,
         failed: HashSet<K>,
     ) -> Self {
-        let scores = critical_path_scores(&incoming, &reverse_deps, |pkg| {
-            weights.get(pkg).copied().unwrap_or(100)
-        });
+        let mut incoming: HashMap<K, HashSet<K>> = HashMap::with_capacity(packages.len());
+        let mut weights: HashMap<K, usize> = HashMap::with_capacity(packages.len());
+        let mut cpu_times: HashMap<K, u64> = HashMap::with_capacity(packages.len());
+
+        for (pkg, node) in &packages {
+            incoming.insert(pkg.clone(), node.deps.clone());
+            weights.insert(pkg.clone(), node.pbulk_weight);
+            cpu_times.insert(pkg.clone(), node.cpu_time);
+        }
+
+        let (total_weights, dep_counts) =
+            scheduling_weights_inner(&incoming, &reverse_deps, &weights);
 
         let mut ready = BTreeSet::new();
-        for (pkg, deps) in &incoming {
-            if deps.is_empty() {
-                let score = scores.get(pkg).copied().unwrap_or(0);
+        for (pkg, node) in &packages {
+            if node.deps.is_empty() {
                 ready.insert(ReadyKey {
-                    score: std::cmp::Reverse(score),
+                    total_weight: std::cmp::Reverse(total_weights[pkg]),
+                    dep_count: std::cmp::Reverse(dep_counts[pkg]),
+                    cpu_time: std::cmp::Reverse(cpu_times[pkg]),
                     pkg: pkg.clone(),
                 });
             }
@@ -208,7 +227,9 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
             incoming,
             reverse_deps,
             ready,
-            scores,
+            total_weights,
+            dep_counts,
+            cpu_times,
             running: HashSet::new(),
             done,
             failed,
@@ -252,9 +273,10 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
             for dependent in dependents {
                 if let Some(deps) = self.incoming.get_mut(dependent) {
                     if deps.remove(pkg) && deps.is_empty() {
-                        let score = self.scores.get(dependent).copied().unwrap_or(0);
                         self.ready.insert(ReadyKey {
-                            score: std::cmp::Reverse(score),
+                            total_weight: std::cmp::Reverse(self.total_weights[dependent]),
+                            dep_count: std::cmp::Reverse(self.dep_counts[dependent]),
+                            cpu_time: std::cmp::Reverse(self.cpu_times[dependent]),
                             pkg: dependent.clone(),
                         });
                     }
@@ -296,9 +318,10 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
         let mut indirect: Vec<K> = Vec::with_capacity(broken.len());
         for pkg in broken {
             self.incoming.remove(&pkg);
-            let score = self.scores.get(&pkg).copied().unwrap_or(0);
             self.ready.remove(&ReadyKey {
-                score: std::cmp::Reverse(score),
+                total_weight: std::cmp::Reverse(self.total_weights[&pkg]),
+                dep_count: std::cmp::Reverse(self.dep_counts[&pkg]),
+                cpu_time: std::cmp::Reverse(self.cpu_times[&pkg]),
                 pkg: pkg.clone(),
             });
             self.failed.insert(pkg.clone());
@@ -355,7 +378,7 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
     }
 
     fn weight(&self, pkg: &K) -> usize {
-        self.weights.get(pkg).copied().unwrap_or(100)
+        self.weights[pkg]
     }
 
     /**
@@ -397,13 +420,12 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
      * (computed from `self.reverse_deps`).
      */
     pub fn init_budget(&mut self, max_jobs: usize, build_threads: usize) {
-        let dep_counts = self.transitive_dependent_counts();
         let fair_share = max_jobs / build_threads.max(1);
 
         let mut scores: Vec<(K, f64)> = Vec::new();
         for pkg in self.incoming.keys().chain(self.running.iter()) {
             let duration = self.weights.get(pkg).copied().unwrap_or(0) as f64;
-            let deps = dep_counts.get(pkg).copied().unwrap_or(0) as f64;
+            let deps = self.dep_counts.get(pkg).copied().unwrap_or(0) as f64;
 
             let score = duration.max(1.0).powf(DURATION_EXP) * (1.0 + deps).powf(IMPORTANCE_EXP);
             scores.push((pkg.clone(), score));
@@ -446,10 +468,6 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
             locked: HashMap::new(),
             excluded: HashSet::new(),
         });
-    }
-
-    fn transitive_dependent_counts(&self) -> HashMap<K, usize> {
-        transitive_dependent_counts(&self.incoming, &self.reverse_deps)
     }
 
     /**
@@ -563,6 +581,34 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
 }
 
 /**
+ * Sort items by build priority using the same [`ReadyKey`] ordering
+ * as the scheduler's ready set.
+ */
+pub fn sort_by_build_priority<T>(
+    items: &mut [T],
+    total_weight: impl Fn(&T) -> usize,
+    dep_count: impl Fn(&T) -> usize,
+    cpu_time: impl Fn(&T) -> u64,
+    name: impl Fn(&T) -> &str,
+) {
+    items.sort_by(|a, b| {
+        let ka = ReadyKey {
+            total_weight: std::cmp::Reverse(total_weight(a)),
+            dep_count: std::cmp::Reverse(dep_count(a)),
+            cpu_time: std::cmp::Reverse(cpu_time(a)),
+            pkg: name(a),
+        };
+        let kb = ReadyKey {
+            total_weight: std::cmp::Reverse(total_weight(b)),
+            dep_count: std::cmp::Reverse(dep_count(b)),
+            cpu_time: std::cmp::Reverse(cpu_time(b)),
+            pkg: name(b),
+        };
+        ka.cmp(&kb)
+    });
+}
+
+/**
  * Compute MAKE_JOBS budget from pre-computed dep counts and durations.
  *
  * This applies the same scoring formula as [`Scheduler::init_budget`]
@@ -606,116 +652,95 @@ where
 }
 
 /**
- * Compute the number of transitive dependents for each package.
+ * Compute scheduling weights and transitive dependent counts.
  *
- * For each package in `incoming`, counts how many other packages
- * transitively depend on it (i.e. the size of its reachable set
- * through `reverse_deps`).
+ * For each package, computes:
+ * - **total_weight**: own PBULK_WEIGHT plus the sum of all unique
+ *   transitive dependents' PBULK_WEIGHTs (diamond-deduplicated).
+ *   Matches pbulk's `compute_tree_depth_rec()` algorithm.
+ * - **dep_count**: number of unique transitive dependents.
  *
- * Uses per-node BFS through the reverse_deps graph.
+ * Uses an indexed BFS for performance: packages are mapped to dense
+ * integer IDs, the graph is stored as `Vec<Vec<usize>>`, and the
+ * visited set is a flat `Vec<bool>` cleared between iterations.
  */
-fn transitive_dependent_counts<K>(
-    incoming: &HashMap<K, HashSet<K>>,
+pub fn scheduling_weights<K>(
+    packages: &HashMap<K, PackageNode<K>>,
     reverse_deps: &HashMap<K, HashSet<K>>,
-) -> HashMap<K, usize>
+) -> (HashMap<K, usize>, HashMap<K, usize>)
 where
     K: Eq + Hash + Clone + Ord,
 {
-    let mut counts: HashMap<K, usize> = HashMap::new();
-    for pkg in incoming.keys() {
-        let mut visited: HashSet<&K> = HashSet::new();
-        let mut queue: VecDeque<&K> = VecDeque::new();
-        if let Some(rdeps) = reverse_deps.get(pkg) {
+    let incoming: HashMap<K, HashSet<K>> = packages
+        .iter()
+        .map(|(k, v)| (k.clone(), v.deps.clone()))
+        .collect();
+    let weights: HashMap<K, usize> = packages
+        .iter()
+        .map(|(k, v)| (k.clone(), v.pbulk_weight))
+        .collect();
+    scheduling_weights_inner(&incoming, reverse_deps, &weights)
+}
+
+fn scheduling_weights_inner<K>(
+    incoming: &HashMap<K, HashSet<K>>,
+    reverse_deps: &HashMap<K, HashSet<K>>,
+    pbulk_weights: &HashMap<K, usize>,
+) -> (HashMap<K, usize>, HashMap<K, usize>)
+where
+    K: Eq + Hash + Clone + Ord,
+{
+    let pkg_list: Vec<&K> = incoming.keys().collect();
+    let n = pkg_list.len();
+    let id_map: HashMap<&K, usize> = pkg_list.iter().enumerate().map(|(i, &p)| (p, i)).collect();
+
+    let weights: Vec<usize> = pkg_list.iter().map(|p| pbulk_weights[*p]).collect();
+
+    let mut rdeps_indexed: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (pkg, rdeps) in reverse_deps {
+        if let Some(&pid) = id_map.get(pkg) {
             for r in rdeps {
-                if incoming.contains_key(r) && visited.insert(r) {
+                if let Some(&rid) = id_map.get(r) {
+                    rdeps_indexed[pid].push(rid);
+                }
+            }
+        }
+    }
+
+    let mut total_weights: HashMap<K, usize> = HashMap::with_capacity(n);
+    let mut dep_counts: HashMap<K, usize> = HashMap::with_capacity(n);
+    let mut visited = vec![false; n];
+    let mut queue: VecDeque<usize> = VecDeque::new();
+
+    for (i, &pkg) in pkg_list.iter().enumerate() {
+        visited.iter_mut().for_each(|v| *v = false);
+        queue.clear();
+
+        let mut weight_sum = weights[i];
+        let mut count = 0usize;
+
+        for &r in &rdeps_indexed[i] {
+            if !visited[r] {
+                visited[r] = true;
+                queue.push_back(r);
+            }
+        }
+        while let Some(node) = queue.pop_front() {
+            weight_sum += weights[node];
+            count += 1;
+            for &r in &rdeps_indexed[node] {
+                if !visited[r] {
+                    visited[r] = true;
                     queue.push_back(r);
                 }
             }
         }
-        while let Some(node) = queue.pop_front() {
-            if let Some(rdeps) = reverse_deps.get(node) {
-                for r in rdeps {
-                    if incoming.contains_key(r) && visited.insert(r) {
-                        queue.push_back(r);
-                    }
-                }
-            }
-        }
-        counts.insert(pkg.clone(), visited.len());
-    }
-    counts
-}
 
-/**
- * Compute critical-path scores for all packages.
- *
- * The critical path score for a package is the longest weighted chain
- * through its transitive dependents (using `max` at each node, not `sum`).
- * Uses a reverse-topological traversal: leaves (packages with no
- * dependents) are processed first, then packages whose dependents have
- * all been scored.
- */
-fn critical_path_scores<K>(
-    incoming: &HashMap<K, HashSet<K>>,
-    reverse_deps: &HashMap<K, HashSet<K>>,
-    weight: impl Fn(&K) -> usize,
-) -> HashMap<K, usize>
-where
-    K: Eq + Hash + Clone + Ord,
-{
-    /*
-     * Count how many reverse deps (dependents) each package has.
-     * Packages with zero dependents are the leaves of the reverse graph.
-     */
-    let mut pending: HashMap<&K, usize> = HashMap::new();
-    for pkg in incoming.keys() {
-        let count = reverse_deps
-            .get(pkg)
-            .map(|s| s.iter().filter(|r| incoming.contains_key(*r)).count())
-            .unwrap_or(0);
-        pending.insert(pkg, count);
+        total_weights.insert(pkg.clone(), weight_sum);
+        dep_counts.insert(pkg.clone(), count);
     }
 
-    let mut queue: VecDeque<&K> = pending
-        .iter()
-        .filter(|(_, c)| **c == 0)
-        .map(|(&p, _)| p)
-        .collect();
-
-    let mut scores: HashMap<&K, usize> = HashMap::new();
-
-    while let Some(pkg) = queue.pop_front() {
-        /*
-         * Score = max(weight(dependent) + score(dependent)) over all
-         * dependents that are in our incoming set.  This gives the
-         * longest chain, not the sum.
-         */
-        let score = reverse_deps
-            .get(pkg)
-            .map(|rdeps| {
-                rdeps
-                    .iter()
-                    .filter(|r| incoming.contains_key(*r))
-                    .filter_map(|r| scores.get(r).map(|&s| weight(r) + s))
-                    .max()
-                    .unwrap_or(0)
-            })
-            .unwrap_or(0);
-        scores.insert(pkg, score);
-
-        if let Some(deps) = incoming.get(pkg) {
-            for dep in deps {
-                if let Some(c) = pending.get_mut(dep) {
-                    *c = c.saturating_sub(1);
-                    if *c == 0 {
-                        queue.push_back(dep);
-                    }
-                }
-            }
-        }
-    }
-
-    scores.into_iter().map(|(k, v)| (k.clone(), v)).collect()
+    (total_weights, dep_counts)
 }
 
 #[cfg(test)]
@@ -727,111 +752,215 @@ mod tests {
     }
 
     /**
-     * Verify that the critical path heuristic prefers a deep chain over a
-     * wide fan-out when both roots are ready.
+     * Package with more total blocked weight is preferred.
+     *
+     * x has 3 dependents at weight 100 each -> total = 400.
+     * w has 50 dependents at weight 1 each -> total = 150.
+     * x should be dispatched first.
      */
     #[test]
-    fn deep_chain_preferred_over_wide_fan() {
-        let chain_edges: Vec<(&str, &str)> = vec![("x-1.0", "y-1.0"), ("y-1.0", "z-1.0")];
-        let mut incoming: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut weight_map: HashMap<String, usize> = HashMap::new();
+    fn higher_total_weight_preferred() {
+        let mut g = build_graph(
+            &[("x-1.0", "y-1.0"), ("y-1.0", "z-1.0")],
+            &["x-1.0", "y-1.0", "z-1.0"],
+            100,
+        );
 
-        for &(dep, dependent) in &chain_edges {
-            incoming.entry(pkg(dependent)).or_default().insert(pkg(dep));
-            incoming.entry(pkg(dep)).or_default();
-            reverse_deps
-                .entry(pkg(dep))
-                .or_default()
-                .insert(pkg(dependent));
-            reverse_deps.entry(pkg(dependent)).or_default();
-        }
-        for name in ["x-1.0", "y-1.0", "z-1.0"] {
-            weight_map.insert(pkg(name), 100);
-        }
-
-        incoming.entry(pkg("w-1.0")).or_default();
-        reverse_deps.entry(pkg("w-1.0")).or_default();
-        weight_map.insert(pkg("w-1.0"), 100);
+        g.packages.insert(
+            pkg("w-1.0"),
+            PackageNode {
+                deps: HashSet::new(),
+                pbulk_weight: 100,
+                cpu_time: 0,
+            },
+        );
+        g.reverse_deps.entry(pkg("w-1.0")).or_default();
         for i in 0..50 {
             let fan = format!("f{}-1.0", i);
-            incoming
-                .entry(fan.clone())
-                .or_default()
-                .insert(pkg("w-1.0"));
-            reverse_deps
+            g.packages.insert(
+                fan.clone(),
+                PackageNode {
+                    deps: [pkg("w-1.0")].into_iter().collect(),
+                    pbulk_weight: 1,
+                    cpu_time: 0,
+                },
+            );
+            g.reverse_deps
                 .entry(pkg("w-1.0"))
                 .or_default()
                 .insert(fan.clone());
-            reverse_deps.entry(fan.clone()).or_default();
-            weight_map.insert(fan, 1);
+            g.reverse_deps.entry(fan).or_default();
         }
 
-        let mut sched = Scheduler::new(
-            incoming,
-            reverse_deps,
-            weight_map,
-            HashSet::new(),
-            HashSet::new(),
-        );
+        let mut sched = Scheduler::new(g.packages, g.reverse_deps, HashSet::new(), HashSet::new());
         assert_eq!(sched.poll(), Poll::Ready(Some(pkg("x-1.0"))));
     }
 
     /**
-     * Verify that the critical path score correctly distinguishes
-     * max-chain from sum: two packages with equal subtree sums but
-     * different critical paths should be ordered by critical path.
+     * Diamond graph: shared dependents are counted once, not twice.
+     *
+     *   a -> b, a -> c, b -> d, c -> d
+     *
+     * a's transitive dependents are {b, c, d} (not {b, c, d, d}).
+     * With uniform weight 100: total_weight(a) = 400.
      */
     #[test]
-    fn critical_path_beats_subtree_sum() {
-        let mut incoming: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut weight_map: HashMap<String, usize> = HashMap::new();
+    fn diamond_dedup() {
+        let g = build_graph(
+            &[("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")],
+            &["a", "b", "c", "d"],
+            100,
+        );
 
-        for &(dep, dependent) in &[("a-1.0", "b-1.0"), ("b-1.0", "c-1.0")] {
-            incoming.entry(pkg(dependent)).or_default().insert(pkg(dep));
-            incoming.entry(pkg(dep)).or_default();
+        let (tw, dc) = scheduling_weights(&g.packages, &g.reverse_deps);
+        assert_eq!(
+            tw[&pkg("a")],
+            400,
+            "a = self(100) + b(100) + c(100) + d(100)"
+        );
+        assert_eq!(dc[&pkg("a")], 3, "a has 3 transitive dependents");
+        assert_eq!(tw[&pkg("b")], 200, "b = self(100) + d(100)");
+        assert_eq!(dc[&pkg("b")], 1);
+        assert_eq!(tw[&pkg("d")], 100, "d = self(100), leaf");
+        assert_eq!(dc[&pkg("d")], 0);
+    }
+
+    /**
+     * High PBULK_WEIGHT leaf sorts above low-weight leaf.
+     *
+     * With no dependents, total_weight == own weight.
+     */
+    #[test]
+    fn pbulk_weight_affects_leaf_order() {
+        let mut packages: HashMap<String, PackageNode<String>> = HashMap::new();
+        packages.insert(
+            pkg("heavy"),
+            PackageNode {
+                deps: HashSet::new(),
+                pbulk_weight: 10000,
+                cpu_time: 0,
+            },
+        );
+        packages.insert(
+            pkg("light"),
+            PackageNode {
+                deps: HashSet::new(),
+                pbulk_weight: 1,
+                cpu_time: 0,
+            },
+        );
+        let reverse_deps = HashMap::new();
+
+        let mut sched = Scheduler::new(packages, reverse_deps, HashSet::new(), HashSet::new());
+        assert_eq!(sched.poll(), Poll::Ready(Some(pkg("heavy"))));
+        assert_eq!(sched.poll(), Poll::Ready(Some(pkg("light"))));
+    }
+
+    /**
+     * CPU time breaks ties when total_weight and dep_count are equal.
+     */
+    #[test]
+    fn cpu_time_tiebreak() {
+        let mut packages: HashMap<String, PackageNode<String>> = HashMap::new();
+        packages.insert(
+            pkg("slow"),
+            PackageNode {
+                deps: HashSet::new(),
+                pbulk_weight: 100,
+                cpu_time: 5000,
+            },
+        );
+        packages.insert(
+            pkg("fast"),
+            PackageNode {
+                deps: HashSet::new(),
+                pbulk_weight: 100,
+                cpu_time: 100,
+            },
+        );
+        let reverse_deps = HashMap::new();
+
+        let mut sched = Scheduler::new(packages, reverse_deps, HashSet::new(), HashSet::new());
+        assert_eq!(sched.poll(), Poll::Ready(Some(pkg("slow"))));
+        assert_eq!(sched.poll(), Poll::Ready(Some(pkg("fast"))));
+    }
+
+    /**
+     * Alphabetical name is the final tiebreak.
+     */
+    #[test]
+    fn alphabetical_tiebreak() {
+        let g = build_graph(&[], &["ccc", "aaa", "bbb"], 100);
+        let mut sched = Scheduler::new(g.packages, g.reverse_deps, HashSet::new(), HashSet::new());
+        assert_eq!(sched.poll(), Poll::Ready(Some(pkg("aaa"))));
+        assert_eq!(sched.poll(), Poll::Ready(Some(pkg("bbb"))));
+        assert_eq!(sched.poll(), Poll::Ready(Some(pkg("ccc"))));
+    }
+
+    /**
+     * Uniform weights: total_weight == W * (1 + dep_count).
+     */
+    #[test]
+    fn uniform_weight_identity() {
+        let g = build_graph(&[("a", "b"), ("b", "c")], &["a", "b", "c"], 100);
+        let (tw, dc) = scheduling_weights(&g.packages, &g.reverse_deps);
+        for name in ["a", "b", "c"] {
+            let w = tw[&pkg(name)];
+            let d = dc[&pkg(name)];
+            assert_eq!(
+                w,
+                100 * (1 + d),
+                "total_weight({}) = 100 * (1 + {})",
+                name,
+                d
+            );
+        }
+    }
+
+    struct TestGraph {
+        packages: HashMap<String, PackageNode<String>>,
+        reverse_deps: HashMap<String, HashSet<String>>,
+    }
+
+    fn build_graph(edges: &[(&str, &str)], names: &[&str], weight: usize) -> TestGraph {
+        let mut packages: HashMap<String, PackageNode<String>> = HashMap::new();
+        let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
+        for name in names {
+            packages.insert(
+                pkg(name),
+                PackageNode {
+                    deps: HashSet::new(),
+                    pbulk_weight: weight,
+                    cpu_time: 0,
+                },
+            );
+            reverse_deps.entry(pkg(name)).or_default();
+        }
+        for &(dep, dependent) in edges {
+            packages
+                .entry(pkg(dependent))
+                .or_insert_with(|| PackageNode {
+                    deps: HashSet::new(),
+                    pbulk_weight: weight,
+                    cpu_time: 0,
+                })
+                .deps
+                .insert(pkg(dep));
+            packages.entry(pkg(dep)).or_insert_with(|| PackageNode {
+                deps: HashSet::new(),
+                pbulk_weight: weight,
+                cpu_time: 0,
+            });
             reverse_deps
                 .entry(pkg(dep))
                 .or_default()
                 .insert(pkg(dependent));
             reverse_deps.entry(pkg(dependent)).or_default();
         }
-        for name in ["a-1.0", "b-1.0", "c-1.0"] {
-            weight_map.insert(pkg(name), 100);
-        }
-
-        incoming.entry(pkg("x-1.0")).or_default();
-        reverse_deps.entry(pkg("x-1.0")).or_default();
-        weight_map.insert(pkg("x-1.0"), 100);
-        for i in 0..200 {
-            let fan = format!("y{}-1.0", i);
-            incoming
-                .entry(fan.clone())
-                .or_default()
-                .insert(pkg("x-1.0"));
-            reverse_deps
-                .entry(pkg("x-1.0"))
-                .or_default()
-                .insert(fan.clone());
-            reverse_deps.entry(fan.clone()).or_default();
-            weight_map.insert(fan, 1);
-        }
-
-        let mut sched = Scheduler::new(
-            incoming,
+        TestGraph {
+            packages,
             reverse_deps,
-            weight_map,
-            HashSet::new(),
-            HashSet::new(),
-        );
-        assert_eq!(sched.poll(), Poll::Ready(Some(pkg("a-1.0"))));
-    }
-
-    struct TestGraph {
-        incoming: HashMap<String, HashSet<String>>,
-        reverse_deps: HashMap<String, HashSet<String>>,
-        weights: HashMap<String, usize>,
+        }
     }
 
     /**
@@ -842,40 +971,14 @@ mod tests {
      *        c -> e
      */
     fn small_graph() -> TestGraph {
-        let edges: Vec<(&str, &str)> =
-            vec![("a", "b"), ("a", "c"), ("b", "d"), ("c", "d"), ("c", "e")];
-        let mut incoming: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
-        for &(dep, dependent) in &edges {
-            incoming.entry(pkg(dependent)).or_default().insert(pkg(dep));
-            incoming.entry(pkg(dep)).or_default();
-            reverse_deps
-                .entry(pkg(dep))
-                .or_default()
-                .insert(pkg(dependent));
-            reverse_deps.entry(pkg(dependent)).or_default();
-        }
-        let mut weights: HashMap<String, usize> = HashMap::new();
-        for name in ["a", "b", "c", "d", "e"] {
-            weights.insert(pkg(name), 10);
-        }
-        TestGraph {
-            incoming,
-            reverse_deps,
-            weights,
-        }
+        let edges = [("a", "b"), ("a", "c"), ("b", "d"), ("c", "d"), ("c", "e")];
+        build_graph(&edges, &["a", "b", "c", "d", "e"], 10)
     }
 
     #[test]
     fn lifecycle_success() {
         let g = small_graph();
-        let mut sched = Scheduler::new(
-            g.incoming,
-            g.reverse_deps,
-            g.weights,
-            HashSet::new(),
-            HashSet::new(),
-        );
+        let mut sched = Scheduler::new(g.packages, g.reverse_deps, HashSet::new(), HashSet::new());
 
         assert_eq!(sched.incoming_count(), 5);
         assert_eq!(sched.running_count(), 0);
@@ -926,13 +1029,7 @@ mod tests {
     #[test]
     fn lifecycle_failure() {
         let g = small_graph();
-        let mut sched = Scheduler::new(
-            g.incoming,
-            g.reverse_deps,
-            g.weights,
-            HashSet::new(),
-            HashSet::new(),
-        );
+        let mut sched = Scheduler::new(g.packages, g.reverse_deps, HashSet::new(), HashSet::new());
 
         let Poll::Ready(Some(a)) = sched.poll() else {
             panic!("a should be ready");
@@ -982,29 +1079,8 @@ mod tests {
      */
     #[test]
     fn remaining_depth_tracks_live_graph() {
-        let edges: Vec<(&str, &str)> = vec![("a", "b"), ("b", "c")];
-        let mut incoming: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut weights: HashMap<String, usize> = HashMap::new();
-        for &(dep, dependent) in &edges {
-            incoming.entry(pkg(dependent)).or_default().insert(pkg(dep));
-            incoming.entry(pkg(dep)).or_default();
-            reverse_deps
-                .entry(pkg(dep))
-                .or_default()
-                .insert(pkg(dependent));
-            reverse_deps.entry(pkg(dependent)).or_default();
-        }
-        for name in ["a", "b", "c"] {
-            weights.insert(pkg(name), 10);
-        }
-        let mut sched = Scheduler::new(
-            incoming,
-            reverse_deps,
-            weights,
-            HashSet::new(),
-            HashSet::new(),
-        );
+        let g = build_graph(&[("a", "b"), ("b", "c")], &["a", "b", "c"], 10);
+        let mut sched = Scheduler::new(g.packages, g.reverse_deps, HashSet::new(), HashSet::new());
 
         /* a -> b -> c: depth(a) = weight(b) + weight(c) = 20 */
         assert_eq!(sched.remaining_depth(&pkg("a")), 20);
@@ -1049,29 +1125,12 @@ mod tests {
      */
     #[test]
     fn remaining_depth_excludes_failed() {
-        let edges: Vec<(&str, &str)> = vec![("r", "a"), ("r", "b"), ("a", "c")];
-        let mut incoming: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut weights: HashMap<String, usize> = HashMap::new();
-        for &(dep, dependent) in &edges {
-            incoming.entry(pkg(dependent)).or_default().insert(pkg(dep));
-            incoming.entry(pkg(dep)).or_default();
-            reverse_deps
-                .entry(pkg(dep))
-                .or_default()
-                .insert(pkg(dependent));
-            reverse_deps.entry(pkg(dependent)).or_default();
-        }
-        for name in ["r", "a", "b", "c"] {
-            weights.insert(pkg(name), 10);
-        }
-        let mut sched = Scheduler::new(
-            incoming,
-            reverse_deps,
-            weights,
-            HashSet::new(),
-            HashSet::new(),
+        let g = build_graph(
+            &[("r", "a"), ("r", "b"), ("a", "c")],
+            &["r", "a", "b", "c"],
+            10,
         );
+        let mut sched = Scheduler::new(g.packages, g.reverse_deps, HashSet::new(), HashSet::new());
 
         /* r -> a -> c and r -> b: depth(r) = 10 + 10 = 20 (via a -> c) */
         assert_eq!(sched.remaining_depth(&pkg("r")), 20);
@@ -1104,45 +1163,29 @@ mod tests {
         assert_eq!(sched.remaining_depth(&pkg("r")), 0);
     }
 
+    /**
+     * Non-uniform weights: heavier dependents contribute more.
+     *
+     *   a -> b (weight 500)
+     *   a -> c (weight 1)
+     *
+     * a's total_weight = 10 + 500 + 1 = 511.
+     */
     #[test]
-    fn weighted_critical_path_scores() {
-        let mut incoming: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut weights: HashMap<String, usize> = HashMap::new();
+    fn weighted_scheduling_scores() {
+        let mut g = build_graph(&[("a", "b"), ("a", "c")], &["a", "b", "c"], 100);
+        g.packages.get_mut(&pkg("a")).expect("a").pbulk_weight = 10;
+        g.packages.get_mut(&pkg("b")).expect("b").pbulk_weight = 500;
+        g.packages.get_mut(&pkg("c")).expect("c").pbulk_weight = 1;
 
-        /*
-         *   a -> b (weight 500)
-         *   a -> c (weight 1)
-         *
-         * a's critical path should go through b (the heavier dependent).
-         */
-        for &(dep, dependent) in &[("a", "b"), ("a", "c")] {
-            incoming.entry(pkg(dependent)).or_default().insert(pkg(dep));
-            incoming.entry(pkg(dep)).or_default();
-            reverse_deps
-                .entry(pkg(dep))
-                .or_default()
-                .insert(pkg(dependent));
-            reverse_deps.entry(pkg(dependent)).or_default();
-        }
-        weights.insert(pkg("a"), 10);
-        weights.insert(pkg("b"), 500);
-        weights.insert(pkg("c"), 1);
+        let (tw, dc) = scheduling_weights(&g.packages, &g.reverse_deps);
 
-        let scores = critical_path_scores(&incoming, &reverse_deps, |p| {
-            weights.get(p).copied().unwrap_or(100)
-        });
-
-        assert_eq!(
-            scores.get(&pkg("a")).copied().unwrap_or(0),
-            500,
-            "a's score should be weight(b) = 500"
-        );
-        assert_eq!(
-            scores.get(&pkg("b")).copied().unwrap_or(0),
-            0,
-            "b is a leaf, score 0"
-        );
+        assert_eq!(tw[&pkg("a")], 511, "a = 10 + 500 + 1");
+        assert_eq!(dc[&pkg("a")], 2);
+        assert_eq!(tw[&pkg("b")], 500, "b = self only");
+        assert_eq!(dc[&pkg("b")], 0);
+        assert_eq!(tw[&pkg("c")], 1, "c = self only");
+        assert_eq!(dc[&pkg("c")], 0);
     }
 
     /**
@@ -1150,21 +1193,18 @@ mod tests {
      * Optionally give each package a different weight.
      */
     fn independent_sched(names: &[&str], weight_vals: &[usize]) -> Scheduler<String> {
-        let mut incoming: HashMap<String, HashSet<String>> = HashMap::new();
-        let reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut weights: HashMap<String, usize> = HashMap::new();
+        let mut packages: HashMap<String, PackageNode<String>> = HashMap::new();
         for (i, &name) in names.iter().enumerate() {
-            incoming.insert(pkg(name), HashSet::new());
-            let w = weight_vals.get(i).copied().unwrap_or(100);
-            weights.insert(pkg(name), w);
+            packages.insert(
+                pkg(name),
+                PackageNode {
+                    deps: HashSet::new(),
+                    pbulk_weight: weight_vals.get(i).copied().unwrap_or(100),
+                    cpu_time: 0,
+                },
+            );
         }
-        Scheduler::new(
-            incoming,
-            reverse_deps,
-            weights,
-            HashSet::new(),
-            HashSet::new(),
-        )
+        Scheduler::new(packages, HashMap::new(), HashSet::new(), HashSet::new())
     }
 
     /**
@@ -1176,29 +1216,8 @@ mod tests {
      */
     #[test]
     fn jobs_sole_buildable_gets_max() {
-        let edges = vec![("a", "b")];
-        let mut incoming: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut weights: HashMap<String, usize> = HashMap::new();
-        for &(dep, dependent) in &edges {
-            incoming.entry(pkg(dependent)).or_default().insert(pkg(dep));
-            incoming.entry(pkg(dep)).or_default();
-            reverse_deps
-                .entry(pkg(dep))
-                .or_default()
-                .insert(pkg(dependent));
-            reverse_deps.entry(pkg(dependent)).or_default();
-        }
-        weights.insert(pkg("a"), 100);
-        weights.insert(pkg("b"), 100);
-
-        let mut sched = Scheduler::new(
-            incoming,
-            reverse_deps,
-            weights,
-            HashSet::new(),
-            HashSet::new(),
-        );
+        let g = build_graph(&[("a", "b")], &["a", "b"], 100);
+        let mut sched = Scheduler::new(g.packages, g.reverse_deps, HashSet::new(), HashSet::new());
         sched.init_budget(16, 4);
 
         let Poll::Ready(Some(a)) = sched.poll() else {
@@ -1291,33 +1310,14 @@ mod tests {
      */
     #[test]
     fn jobs_importance_boosts_allocation() {
-        let chain: Vec<(&str, &str)> = vec![("root", "d1"), ("d1", "d2"), ("d2", "d3")];
-        let mut incoming: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut weights: HashMap<String, usize> = HashMap::new();
-
-        for &(dep, dependent) in &chain {
-            incoming.entry(pkg(dependent)).or_default().insert(pkg(dep));
-            incoming.entry(pkg(dep)).or_default();
-            reverse_deps
-                .entry(pkg(dep))
-                .or_default()
-                .insert(pkg(dependent));
-            reverse_deps.entry(pkg(dependent)).or_default();
-        }
-        for name in ["root", "d1", "d2", "d3"] {
-            weights.insert(pkg(name), 100);
-        }
-        incoming.insert(pkg("leaf"), HashSet::new());
-        weights.insert(pkg("leaf"), 100);
-
-        let mut sched = Scheduler::new(
-            incoming,
-            reverse_deps,
-            weights,
-            HashSet::new(),
-            HashSet::new(),
+        let mut g = build_graph(
+            &[("root", "d1"), ("d1", "d2"), ("d2", "d3")],
+            &["root", "d1", "d2", "d3", "leaf"],
+            100,
         );
+        g.reverse_deps.entry(pkg("leaf")).or_default();
+
+        let mut sched = Scheduler::new(g.packages, g.reverse_deps, HashSet::new(), HashSet::new());
         sched.init_budget(16, 4);
 
         let mut dispatched = Vec::new();
@@ -1353,43 +1353,30 @@ mod tests {
      */
     #[test]
     fn jobs_heavy_package_after_unblock() {
-        let edges: Vec<(&str, &str)> = vec![
+        let edges = [
             ("gate", "critical"),
             ("critical", "c1"),
             ("c1", "c2"),
             ("c2", "c3"),
         ];
-        let mut incoming: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut weights: HashMap<String, usize> = HashMap::new();
-
-        for &(dep, dependent) in &edges {
-            incoming.entry(pkg(dependent)).or_default().insert(pkg(dep));
-            incoming.entry(pkg(dep)).or_default();
-            reverse_deps
-                .entry(pkg(dep))
-                .or_default()
-                .insert(pkg(dependent));
-            reverse_deps.entry(pkg(dependent)).or_default();
-        }
-        weights.insert(pkg("gate"), 50);
-        weights.insert(pkg("critical"), 400);
-        for name in ["c1", "c2", "c3"] {
-            weights.insert(pkg(name), 100);
-        }
-
-        for name in ["leaf1", "leaf2", "leaf3"] {
-            incoming.insert(pkg(name), HashSet::new());
-            weights.insert(pkg(name), 50);
-        }
-
-        let mut sched = Scheduler::new(
-            incoming,
-            reverse_deps,
-            weights,
-            HashSet::new(),
-            HashSet::new(),
+        let mut g = build_graph(
+            &edges,
+            &[
+                "gate", "critical", "c1", "c2", "c3", "leaf1", "leaf2", "leaf3",
+            ],
+            100,
         );
+        g.packages.get_mut(&pkg("gate")).expect("gate").pbulk_weight = 50;
+        g.packages
+            .get_mut(&pkg("critical"))
+            .expect("critical")
+            .pbulk_weight = 400;
+        for name in ["leaf1", "leaf2", "leaf3"] {
+            g.packages.get_mut(&pkg(name)).expect(name).pbulk_weight = 50;
+            g.reverse_deps.entry(pkg(name)).or_default();
+        }
+
+        let mut sched = Scheduler::new(g.packages, g.reverse_deps, HashSet::new(), HashSet::new());
         sched.init_budget(16, 4);
 
         let mut dispatched = Vec::new();

@@ -45,7 +45,7 @@
 use crate::config::PkgsrcEnv;
 use crate::sandbox::{SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
 use crate::scan::ResolvedPackage;
-use crate::scheduler::{MakeJobsResponder, Scheduler};
+use crate::scheduler::{MakeJobsResponder, PackageNode, Scheduler};
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, RunState, Sandbox};
 use crate::{PackageCounts, PackageState};
@@ -2096,20 +2096,15 @@ impl Build {
          * Populate BuildJobs.
          */
         debug!("Populating BuildJobs from scanpkgs");
-        let mut incoming: HashMap<PkgName, HashSet<PkgName>> = HashMap::new();
+        let mut packages: HashMap<PkgName, PackageNode<PkgName>> = HashMap::new();
         let mut reverse_deps: HashMap<PkgName, HashSet<PkgName>> = HashMap::new();
         for (pkgname, index) in &self.scanpkgs {
             let mut deps: HashSet<PkgName> = HashSet::new();
             for dep in index.depends() {
-                // Only track dependencies that are in our build queue.
-                // Dependencies outside scanpkgs are assumed to already be
-                // installed (from a previous build) or will cause the build
-                // to fail at runtime.
                 if !self.scanpkgs.contains_key(dep) {
                     continue;
                 }
                 deps.insert(dep.clone());
-                // Build reverse dependency map: dep -> packages that depend on it
                 reverse_deps
                     .entry(dep.clone())
                     .or_default()
@@ -2120,7 +2115,14 @@ impl Build {
                 deps = ?deps.iter().map(|d| d.pkgname()).collect::<Vec<_>>(),
                 "Adding package to incoming build queue"
             );
-            incoming.insert(pkgname.clone(), deps);
+            packages.insert(
+                pkgname.clone(),
+                PackageNode {
+                    deps,
+                    pbulk_weight: index.pbulk_weight(),
+                    cpu_time: 0,
+                },
+            );
         }
 
         /*
@@ -2134,21 +2136,16 @@ impl Build {
         for (pkgname, result) in &self.cached {
             match result.state {
                 PackageState::Success | PackageState::UpToDate => {
-                    // Completed package - remove from incoming, add to done
-                    incoming.remove(pkgname);
+                    packages.remove(pkgname);
                     done.insert(pkgname.clone());
-                    // Remove from deps of other packages
-                    for deps in incoming.values_mut() {
-                        deps.remove(pkgname);
+                    for node in packages.values_mut() {
+                        node.deps.remove(pkgname);
                     }
-                    // Don't add to results - already in database
                     cached_count += 1;
                 }
                 _ => {
-                    // Failed/skipped package - remove from incoming, add to failed
-                    incoming.remove(pkgname);
+                    packages.remove(pkgname);
                     failed.insert(pkgname.clone());
-                    // Don't add to results - already in database
                     cached_count += 1;
                 }
             }
@@ -2160,8 +2157,8 @@ impl Build {
          */
         loop {
             let mut newly_failed: Vec<PkgName> = Vec::new();
-            for (pkgname, deps) in &incoming {
-                for dep in deps {
+            for (pkgname, node) in &packages {
+                for dep in &node.deps {
                     if failed.contains(dep) {
                         newly_failed.push(pkgname.clone());
                         break;
@@ -2172,7 +2169,7 @@ impl Build {
                 break;
             }
             for pkgname in newly_failed {
-                incoming.remove(&pkgname);
+                packages.remove(&pkgname);
                 failed.insert(pkgname);
             }
         }
@@ -2182,13 +2179,13 @@ impl Build {
         }
 
         info!(
-            incoming_count = incoming.len(),
+            incoming_count = packages.len(),
             scanpkgs_count = self.scanpkgs.len(),
             cached_count = cached_count,
             "BuildJobs populated"
         );
 
-        if incoming.is_empty() {
+        if packages.is_empty() {
             return Ok(BuildSummary {
                 duration: started.elapsed(),
                 results,
@@ -2231,40 +2228,19 @@ impl Build {
             .collect();
 
         /*
-         * Build per-package weight map for critical-path scheduling.
+         * Populate historical CPU time for scheduling tiebreaker.
          *
-         * Historical build duration (in seconds) is the best predictor
-         * of how long a package will take, so prefer it over the static
-         * PBULK_WEIGHT.  Packages without history fall back to
-         * PBULK_WEIGHT, then to the default of 100.
+         * Keyed by pkgbase to handle version bumps and
+         * MULTI_VERSION packages.
          */
-        let hist_durations = db.duration_by_pkg(&pkg_refs);
-
-        let weights: HashMap<PkgName, usize> = incoming
-            .keys()
-            .map(|pkg| {
-                let w = hist_durations
-                    .get(pkg.pkgbase())
-                    .map(|&ms| (ms / 1000).max(1) as usize)
-                    .or_else(|| {
-                        self.scanpkgs
-                            .get(pkg)
-                            .and_then(|idx| idx.pbulk_weight())
-                            .and_then(|w| w.parse().ok())
-                    })
-                    .unwrap_or(100);
-                (pkg.clone(), w)
-            })
-            .collect();
-        if !hist_durations.is_empty() {
-            info!(
-                packages_with_history = hist_durations.len(),
-                total_packages = incoming.len(),
-                "Loaded build duration weights from history"
-            );
+        let hist_cpu = db.cpu_time_by_pkg_all();
+        for (pkgname, node) in &mut packages {
+            if let Some(&ct) = hist_cpu.get(pkgname.pkgbase()) {
+                node.cpu_time = ct;
+            }
         }
 
-        let mut scheduler = Scheduler::new(incoming, reverse_deps, weights, done, failed);
+        let mut scheduler = Scheduler::new(packages, reverse_deps, done, failed);
 
         if let Some(max_jobs) = self.config.jobs() {
             scheduler.init_budget(max_jobs, self.config.build_threads());

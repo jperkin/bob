@@ -155,39 +155,46 @@ fn print_build_status(
         .collect::<Result<Vec<_>>>()?;
 
     let need_multi = cols.contains(&"multi_version");
-    let all_pkgs = db.get_all_package_status(need_multi)?;
-    let id_to_pkg: HashMap<i64, &PackageStatusRow> = all_pkgs.iter().map(|p| (p.id, p)).collect();
+    let mut all_pkgs = db.get_all_package_status(need_multi)?;
 
-    let dep_ids = db.get_resolved_dep_ids()?;
-    let mut id_deps: HashMap<i64, Vec<i64>> = HashMap::new();
-    for &(pkg_id, dep_id) in &dep_ids {
-        id_deps.entry(pkg_id).or_default().push(dep_id);
-        id_deps.entry(dep_id).or_default();
+    let mut sched = db.get_scheduling_data()?;
+
+    let cpu_times = db.cpu_time_by_pkg_all();
+    for (pkgname, node) in &mut sched.packages {
+        let base = pkgsrc::PkgName::new(pkgname).pkgbase().to_string();
+        if let Some(&ct) = cpu_times.get(&base) {
+            node.cpu_time = ct;
+        }
     }
 
-    let (sorted_ids, _) = bob::build_order(&id_deps, |_| 1);
+    let (total_weights, dep_counts) = bob::scheduling_weights(&sched.packages, &sched.reverse_deps);
 
-    let cpu_times = if cols.contains(&"cpu") {
-        db.cpu_time_by_pkg_all()
-    } else {
-        HashMap::new()
-    };
+    bob::sort_by_build_priority(
+        &mut all_pkgs,
+        |p| total_weights.get(&p.pkgname).copied().unwrap_or(0),
+        |p| dep_counts.get(&p.pkgname).copied().unwrap_or(0),
+        |p| {
+            let base = pkgsrc::PkgName::new(&p.pkgname).pkgbase().to_string();
+            cpu_times.get(&base).copied().unwrap_or(0)
+        },
+        |p| &p.pkgname,
+    );
 
     let precomputed_jobs = if cols.contains(&"jobs") {
         if let Some(mj) = max_jobs {
-            let durations: HashMap<String, usize> = db
-                .duration_by_pkg_all()
-                .into_iter()
-                .map(|(k, v)| (k, v as usize))
-                .collect();
-            let dep_counts: HashMap<String, i64> = all_pkgs
+            let hist_durations = db.duration_by_pkg_all();
+            let durations: HashMap<String, usize> = hist_durations
                 .iter()
-                .filter_map(|p| {
-                    let base = pkgsrc::PkgName::new(&p.pkgname).pkgbase().to_string();
-                    p.dep_count.map(|dc| (base, dc))
+                .map(|(k, &v)| (k.clone(), v as usize))
+                .collect();
+            let dc_i64: HashMap<String, i64> = dep_counts
+                .iter()
+                .map(|(k, &v)| {
+                    let base = pkgsrc::PkgName::new(k).pkgbase().to_string();
+                    (base, v as i64)
                 })
                 .collect();
-            bob::compute_budget(&dep_counts, &durations, mj, build_threads)
+            bob::compute_budget(&dc_i64, &durations, mj, build_threads)
         } else {
             HashMap::new()
         }
@@ -232,12 +239,7 @@ fn print_build_status(
     };
 
     let mut rows: Vec<Vec<String>> = Vec::new();
-    for id in &sorted_ids {
-        let pkg = match id_to_pkg.get(id) {
-            Some(p) => p,
-            None => continue,
-        };
-
+    for pkg in &all_pkgs {
         if !pkg_patterns.is_empty()
             && !pkg_patterns
                 .iter()
@@ -270,8 +272,8 @@ fn print_build_status(
                 "status" => status.to_string(),
                 "reason" => reason.clone(),
                 "multi_version" => multi_version.clone(),
-                "deps" => pkg.dep_count.map(|c| c.to_string()).unwrap_or_else(dash),
-                "weight" => pkg.weight.map(|s| s.to_string()).unwrap_or_else(dash),
+                "deps" => dep_counts.get(&pkg.pkgname).unwrap_or(&0).to_string(),
+                "weight" => total_weights.get(&pkg.pkgname).unwrap_or(&0).to_string(),
                 "cpu" => cpu_times
                     .get(&pkgbase)
                     .map(|ms| bob::format_duration(*ms))
