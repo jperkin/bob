@@ -459,6 +459,8 @@ pub struct PkgBuildStats {
     pub build_duration: Option<Duration>,
     /// Per-stage durations for completed stages.
     pub stage_durations: Vec<(Stage, Duration)>,
+    /// Per-stage CPU time (user+sys from wait4).
+    pub stage_cpu_times: Vec<(Stage, Duration)>,
     /// Wall-clock duration for the entire build.
     pub total_duration: Duration,
     /// Unix epoch when the build started.
@@ -579,10 +581,12 @@ impl<'a> PkgBuilder<'a> {
         let stage_start = Instant::now();
         stats.stage = Some(Stage::PreClean);
         callback.stage(Stage::PreClean.into_str());
-        self.run_make_stage(Stage::PreClean, &pkgdir, &["clean"], RunAs::Root, false)?;
+        let (_, cpu_time) =
+            self.run_make_stage(Stage::PreClean, &pkgdir, &["clean"], RunAs::Root, false)?;
         stats
             .stage_durations
             .push((Stage::PreClean, stage_start.elapsed()));
+        stats.stage_cpu_times.push((Stage::PreClean, cpu_time));
 
         // Install dependencies
         if !self.pkginfo.depends().is_empty() {
@@ -605,15 +609,15 @@ impl<'a> PkgBuilder<'a> {
         let stage_start = Instant::now();
         stats.stage = Some(Stage::Checksum);
         callback.stage(Stage::Checksum.into_str());
-        if !self.run_make_stage(Stage::Checksum, &pkgdir, &["checksum"], RunAs::Root, true)? {
-            stats
-                .stage_durations
-                .push((Stage::Checksum, stage_start.elapsed()));
-            return Ok(PkgBuildResult::Failed(stats));
-        }
+        let (ok, cpu_time) =
+            self.run_make_stage(Stage::Checksum, &pkgdir, &["checksum"], RunAs::Root, true)?;
         stats
             .stage_durations
             .push((Stage::Checksum, stage_start.elapsed()));
+        stats.stage_cpu_times.push((Stage::Checksum, cpu_time));
+        if !ok {
+            return Ok(PkgBuildResult::Failed(stats));
+        }
 
         /*
          * Configure -- request MAKE_JOBS budget, release after configure
@@ -635,24 +639,22 @@ impl<'a> PkgBuilder<'a> {
                 .push((Stage::Configure, stage_start.elapsed()));
             return Ok(PkgBuildResult::Failed(stats));
         }
-        if !self.run_make_stage_with_flags(
+        let (ok, cpu_time) = self.run_make_stage_with_flags(
             Stage::Configure,
             &pkgdir,
             &["configure"],
             self.build_run_as(),
             true,
             &conf_flag,
-        )? {
-            self.release_make_jobs();
-            stats
-                .stage_durations
-                .push((Stage::Configure, stage_start.elapsed()));
-            return Ok(PkgBuildResult::Failed(stats));
-        }
+        )?;
         self.release_make_jobs();
         stats
             .stage_durations
             .push((Stage::Configure, stage_start.elapsed()));
+        stats.stage_cpu_times.push((Stage::Configure, cpu_time));
+        if !ok {
+            return Ok(PkgBuildResult::Failed(stats));
+        }
 
         // Build — re-request MAKE_JOBS with current remaining weights.
         let build_phase_start = Instant::now();
@@ -674,7 +676,7 @@ impl<'a> PkgBuilder<'a> {
             self.release_make_jobs();
             return Ok(PkgBuildResult::Failed(stats));
         }
-        let build_ok = self.run_make_stage_with_flags(
+        let (build_ok, cpu_time) = self.run_make_stage_with_flags(
             Stage::Build,
             &pkgdir,
             &["all"],
@@ -685,6 +687,7 @@ impl<'a> PkgBuilder<'a> {
         let build_elapsed = build_phase_start.elapsed();
         stats.build_duration = Some(build_elapsed);
         stats.stage_durations.push((Stage::Build, build_elapsed));
+        stats.stage_cpu_times.push((Stage::Build, cpu_time));
         self.release_make_jobs();
         if !build_ok {
             return Ok(PkgBuildResult::Failed(stats));
@@ -701,41 +704,39 @@ impl<'a> PkgBuilder<'a> {
                 .push((Stage::Install, stage_start.elapsed()));
             return Ok(PkgBuildResult::Failed(stats));
         }
-        if !self.run_make_stage(
+        let (ok, cpu_time) = self.run_make_stage(
             Stage::Install,
             &pkgdir,
             &["stage-install"],
             self.build_run_as(),
             true,
-        )? {
-            stats
-                .stage_durations
-                .push((Stage::Install, stage_start.elapsed()));
-            return Ok(PkgBuildResult::Failed(stats));
-        }
+        )?;
         stats
             .stage_durations
             .push((Stage::Install, stage_start.elapsed()));
+        stats.stage_cpu_times.push((Stage::Install, cpu_time));
+        if !ok {
+            return Ok(PkgBuildResult::Failed(stats));
+        }
 
         // Package
         let stage_start = Instant::now();
         stats.stage = Some(Stage::Package);
         callback.stage(Stage::Package.into_str());
-        if !self.run_make_stage(
+        let (ok, cpu_time) = self.run_make_stage(
             Stage::Package,
             &pkgdir,
             &["stage-package-create"],
             RunAs::Root,
             true,
-        )? {
-            stats
-                .stage_durations
-                .push((Stage::Package, stage_start.elapsed()));
-            return Ok(PkgBuildResult::Failed(stats));
-        }
+        )?;
         stats
             .stage_durations
             .push((Stage::Package, stage_start.elapsed()));
+        stats.stage_cpu_times.push((Stage::Package, cpu_time));
+        if !ok {
+            return Ok(PkgBuildResult::Failed(stats));
+        }
 
         // Get the package file path
         let pkgfile = self.get_make_var(&pkgdir, "STAGE_PKGFILE")?;
@@ -786,10 +787,12 @@ impl<'a> PkgBuilder<'a> {
         let stage_start = Instant::now();
         stats.stage = Some(Stage::Clean);
         callback.stage(Stage::Clean.into_str());
-        let _ = self.run_make_stage(Stage::Clean, &pkgdir, &["clean"], RunAs::Root, false);
+        let (_, cpu_time) =
+            self.run_make_stage(Stage::Clean, &pkgdir, &["clean"], RunAs::Root, false)?;
         stats
             .stage_durations
             .push((Stage::Clean, stage_start.elapsed()));
+        stats.stage_cpu_times.push((Stage::Clean, cpu_time));
 
         // Remove log directory on success
         let _ = fs::remove_dir_all(&self.logdir);
@@ -821,7 +824,7 @@ impl<'a> PkgBuilder<'a> {
         targets: &[&str],
         run_as: RunAs,
         include_make_flags: bool,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<(bool, Duration)> {
         self.run_make_stage_with_flags(stage, pkgdir, targets, run_as, include_make_flags, &[])
     }
 
@@ -833,7 +836,7 @@ impl<'a> PkgBuilder<'a> {
         run_as: RunAs,
         include_make_flags: bool,
         extra_flags: &[&str],
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<(bool, Duration)> {
         let _ = self.write_stage(stage);
 
         let logfile = self.logdir.join(format!("{}.log", stage.into_str()));
@@ -846,10 +849,10 @@ impl<'a> PkgBuilder<'a> {
 
         info!(stage = stage.into_str(), "Running make stage");
 
-        let status =
+        let (status, cpu_time) =
             self.run_command_logged(self.session.config.make(), &args, run_as, &logfile)?;
 
-        Ok(status.success())
+        Ok((status.success(), cpu_time))
     }
 
     /// Run a command with output logged to a file.
@@ -859,7 +862,7 @@ impl<'a> PkgBuilder<'a> {
         args: &[&str],
         run_as: RunAs,
         logfile: &Path,
-    ) -> anyhow::Result<ExitStatus> {
+    ) -> anyhow::Result<(ExitStatus, Duration)> {
         self.run_command_logged_with_env(cmd, args, run_as, logfile, &[])
     }
 
@@ -870,7 +873,7 @@ impl<'a> PkgBuilder<'a> {
         run_as: RunAs,
         logfile: &Path,
         extra_envs: &[(&str, &str)],
-    ) -> anyhow::Result<ExitStatus> {
+    ) -> anyhow::Result<(ExitStatus, Duration)> {
         let mut log = OpenOptions::new().create(true).append(true).open(logfile)?;
 
         // Write command being executed to the log file
@@ -937,17 +940,18 @@ impl<'a> PkgBuilder<'a> {
                 }
             });
 
-            let status = wait_with_shutdown(&mut child, &self.session.state)?;
+            let (status, cpu_time) = wait_with_shutdown(&mut child, &self.session.state)?;
 
             // Reader thread will exit when pipe closes (process exits)
             let _ = tee_handle.join();
 
             trace!(?cmd, ?status, "Command completed");
-            Ok(status)
+            Ok((status, cpu_time))
         } else {
-            let status = self.spawn_command_to_file(cmd, args, run_as, extra_envs, log)?;
+            let (status, cpu_time) =
+                self.spawn_command_to_file(cmd, args, run_as, extra_envs, log)?;
             trace!(?cmd, ?status, "Command completed");
-            Ok(status)
+            Ok((status, cpu_time))
         }
     }
 
@@ -959,7 +963,7 @@ impl<'a> PkgBuilder<'a> {
         run_as: RunAs,
         extra_envs: &[(&str, &str)],
         log: File,
-    ) -> anyhow::Result<ExitStatus> {
+    ) -> anyhow::Result<(ExitStatus, Duration)> {
         // Clone file handle for stderr (stdout and stderr both go to same file)
         let log_err = log.try_clone()?;
 
@@ -1048,7 +1052,7 @@ impl<'a> PkgBuilder<'a> {
             args.push(dep.as_str());
         }
 
-        let status = self.run_pkg_add_with_path(&args, &pkg_path, &logfile)?;
+        let (status, _) = self.run_pkg_add_with_path(&args, &pkg_path, &logfile)?;
         Ok(status.success())
     }
 
@@ -1058,7 +1062,7 @@ impl<'a> PkgBuilder<'a> {
         packages: &[&str],
         pkg_path: &Path,
         logfile: &Path,
-    ) -> anyhow::Result<ExitStatus> {
+    ) -> anyhow::Result<(ExitStatus, Duration)> {
         let pkg_add = self.session.pkgsrc_env.pkgtools.join("pkg_add");
         let pkg_dbdir = self.session.pkgsrc_env.pkg_dbdir.to_string_lossy();
         let pkg_path_value = pkg_path.to_string_lossy().to_string();
@@ -1076,7 +1080,7 @@ impl<'a> PkgBuilder<'a> {
         let pkg_dbdir = self.session.pkgsrc_env.pkg_dbdir.to_string_lossy();
         let logfile = self.logdir.join("package.log");
 
-        let status = self.run_command_logged(
+        let (status, _) = self.run_command_logged(
             &pkg_add,
             &["-K", &*pkg_dbdir, pkgfile],
             RunAs::Root,
@@ -1092,7 +1096,7 @@ impl<'a> PkgBuilder<'a> {
         let pkg_dbdir = self.session.pkgsrc_env.pkg_dbdir.to_string_lossy();
         let logfile = self.logdir.join("deinstall.log");
 
-        let status = self.run_command_logged(
+        let (status, _) = self.run_command_logged(
             &pkg_delete,
             &["-K", &*pkg_dbdir, pkgname],
             RunAs::Root,
@@ -1127,7 +1131,7 @@ impl<'a> PkgBuilder<'a> {
             args.push("clean");
         }
 
-        let status =
+        let (status, _) =
             self.run_command_logged(self.session.config.make(), &args, RunAs::Root, logfile)?;
         Ok(status.success())
     }
