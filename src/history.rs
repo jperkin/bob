@@ -110,7 +110,7 @@ impl HistoryKind {
         names
     }
 
-    /// Generate the `after_long_help` text for `bob list history`.
+    /// Generate the `after_long_help` text for `bob history`.
     pub fn after_help() -> String {
         let all_names = Self::all_names();
         let max_name = all_names.iter().map(|n| n.len()).max().unwrap_or(0);
@@ -147,10 +147,10 @@ impl HistoryKind {
         help.push_str(
             "\n\
              Examples:\n  \
-             bob list history                                        Show all build history\n  \
-             bob list history rust                                   Show history matching 'rust'\n  \
-             bob list history -o pkgname,build,cpu:build,duration    Show build wall+cpu time\n  \
-             bob list history -Ho pkgpath                            Show pkgpaths only, no header",
+             bob history                                        Show all build history\n  \
+             bob history rust                                   Show history matching 'rust'\n  \
+             bob history -o pkgname,build,cpu:build,duration    Show build wall+cpu time\n  \
+             bob history -Ho pkgpath                            Show pkgpaths only, no header",
         );
 
         help

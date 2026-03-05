@@ -276,10 +276,50 @@ enum Cmd {
         #[arg(short = 'l', long = "logs-only")]
         logs_only: bool,
     },
-    /// Query package build status
+    /// Show comprehensive package build status
+    #[command(after_long_help = "\
+Status values:
+  pending              Ready to build
+  success              Built successfully
+  up-to-date           Binary already exists
+  failed               Build attempted and failed
+  preskipped           PKG_SKIP_REASON set
+  prefailed            PKG_FAIL_REASON set
+  unresolved           Has unresolved dependencies
+  indirect-failed      Blocked by package that failed to build
+  indirect-preskipped  Blocked by preskipped package
+  indirect-prefailed   Blocked by prefailed package
+  indirect-unresolved  Blocked by package with unresolved dependencies
+
+Examples:
+  bob status                           Show pending/failed packages
+  bob status -a                        Show all packages
+  bob status -s preskipped,prefailed   Show all pre-* packages
+  bob status py-                       Show packages matching 'py-'
+  bob status flim glib2 mutt           Show multiple package matches
+  bob status -s failed -o pkgpath      Show failed with pkgpath column
+  bob status -Ho pkgpath -s pending    Show all pending pkgpath builds
+  bob status -o pkgpath,multi_version  Show MULTI_VERSION flags
+")]
+    Status {
+        #[command(flatten)]
+        args: cmd::status::StatusArgs,
+    },
+    /// View build history
+    #[command(after_long_help = bob::HistoryKind::after_help())]
+    History {
+        #[command(flatten)]
+        args: cmd::history::HistoryArgs,
+    },
+    /// Query package dependency information
     List {
         #[command(subcommand)]
         cmd: cmd::list::ListCmd,
+    },
+    /// Create and destroy build sandboxes
+    Sandbox {
+        #[command(subcommand)]
+        cmd: cmd::sandbox::SandboxCmd,
     },
     /// Utility commands for debugging and data import/export
     Util {
@@ -295,24 +335,7 @@ enum Cmd {
 }
 
 #[derive(Debug, Subcommand)]
-enum SandboxCmd {
-    /// Create all sandboxes
-    Create,
-    /// Destroy all sandboxes
-    Destroy,
-    /// Create a sandbox and start an interactive shell
-    Exec,
-    /// List currently created sandboxes
-    List,
-}
-
-#[derive(Debug, Subcommand)]
 enum UtilCmd {
-    /// Create and destroy build sandboxes
-    Sandbox {
-        #[command(subcommand)]
-        cmd: SandboxCmd,
-    },
     /// Import scan data (pscan or presolve format) into the database
     ///
     /// Accepts both raw pscan output from 'bmake pbulk-index' and presolve
@@ -508,10 +531,24 @@ fn run() -> Result<()> {
 
             db.execute_raw(&sql)?;
         }
+        Cmd::Status { args: status_args } => {
+            let config = Config::load(args.config.as_deref())?;
+            let db = Database::open(config.dbdir())?;
+            cmd::status::run(&db, status_args, config.jobs(), config.build_threads())?;
+        }
+        Cmd::History { args: history_args } => {
+            let config = Config::load(args.config.as_deref())?;
+            let db = Database::open(config.dbdir())?;
+            cmd::history::run(&db, history_args)?;
+        }
         Cmd::List { cmd } => {
             let config = Config::load(args.config.as_deref())?;
             let db = Database::open(config.dbdir())?;
-            cmd::list::run(&db, cmd, config.jobs(), config.build_threads())?;
+            cmd::list::run(&db, cmd)?;
+        }
+        Cmd::Sandbox { cmd: sandbox_cmd } => {
+            let config = Config::load(args.config.as_deref())?;
+            cmd::sandbox::run(&config, sandbox_cmd)?;
         }
         Cmd::Util {
             cmd: UtilCmd::PrintDepGraph { output },
@@ -695,53 +732,6 @@ fn run() -> Result<()> {
             } else {
                 print!("{}", out);
             }
-        }
-        Cmd::Util {
-            cmd: UtilCmd::Sandbox {
-                cmd: SandboxCmd::Create,
-            },
-        } => {
-            logging::init_stderr_if_enabled();
-            let config = Config::load(args.config.as_deref())?;
-            let sandbox = Sandbox::new(&config);
-            if !sandbox.enabled() {
-                bail!("No sandboxes configured");
-            }
-            sandbox.create_all(config.build_threads())?;
-        }
-        Cmd::Util {
-            cmd: UtilCmd::Sandbox {
-                cmd: SandboxCmd::Destroy,
-            },
-        } => {
-            logging::init_stderr_if_enabled();
-            let config = Config::load(args.config.as_deref())?;
-            let sandbox = Sandbox::new(&config);
-            if !sandbox.enabled() {
-                bail!("No sandboxes configured");
-            }
-            sandbox.destroy_all()?;
-        }
-        Cmd::Util {
-            cmd: UtilCmd::Sandbox {
-                cmd: SandboxCmd::List,
-            },
-        } => {
-            let config = Config::load(args.config.as_deref())?;
-            let sandbox = Sandbox::new(&config);
-            if !sandbox.enabled() {
-                bail!("No sandboxes configured");
-            }
-            sandbox.list_all()?;
-        }
-        Cmd::Util {
-            cmd: UtilCmd::Sandbox {
-                cmd: SandboxCmd::Exec,
-            },
-        } => {
-            let config = Config::load(args.config.as_deref())?;
-            logging::init(config.dbdir(), config.log_level())?;
-            cmd::sandbox::exec(&config)?;
         }
     };
 

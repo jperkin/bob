@@ -19,11 +19,58 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
+use clap::Subcommand;
 
 use bob::config::{Config, PkgsrcEnv};
+use bob::logging;
 use bob::sandbox::Sandbox;
 
-pub fn exec(config: &Config) -> Result<()> {
+#[derive(Debug, Subcommand)]
+pub enum SandboxCmd {
+    /// Create all sandboxes
+    Create,
+    /// Destroy all sandboxes
+    Destroy,
+    /// Create a sandbox and start an interactive shell
+    Exec,
+    /// List currently created sandboxes
+    List,
+}
+
+pub fn run(config: &Config, cmd: SandboxCmd) -> Result<()> {
+    match cmd {
+        SandboxCmd::Create => {
+            logging::init_stderr_if_enabled();
+            let sandbox = Sandbox::new(config);
+            if !sandbox.enabled() {
+                bail!("No sandboxes configured");
+            }
+            sandbox.create_all(config.build_threads())?;
+        }
+        SandboxCmd::Destroy => {
+            logging::init_stderr_if_enabled();
+            let sandbox = Sandbox::new(config);
+            if !sandbox.enabled() {
+                bail!("No sandboxes configured");
+            }
+            sandbox.destroy_all()?;
+        }
+        SandboxCmd::Exec => {
+            logging::init(config.dbdir(), config.log_level())?;
+            exec(config)?;
+        }
+        SandboxCmd::List => {
+            let sandbox = Sandbox::new(config);
+            if !sandbox.enabled() {
+                bail!("No sandboxes configured");
+            }
+            sandbox.list_all()?;
+        }
+    }
+    Ok(())
+}
+
+fn exec(config: &Config) -> Result<()> {
     let sandbox = Sandbox::new(config);
     if !sandbox.enabled() {
         bail!("No sandboxes configured");

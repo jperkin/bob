@@ -499,7 +499,7 @@ impl Sandbox {
             }
             bail!(
                 "Sandbox exists but is incomplete: {}.\n\
-                 Run 'bob util sandbox destroy' first.",
+                 Run 'bob sandbox destroy' first.",
                 sandbox.display()
             );
         }
@@ -811,7 +811,7 @@ impl Sandbox {
         } else {
             Err(anyhow::anyhow!(
                 "Failed to destroy {} sandbox{}.\n\
-                 Remove unexpected files, then run 'bob util sandbox destroy'.",
+                 Remove unexpected files, then run 'bob sandbox destroy'.",
                 failed,
                 if failed == 1 { "" } else { "es" }
             ))

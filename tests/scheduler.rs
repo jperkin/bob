@@ -367,7 +367,7 @@ fn phase_ticks(pkg: &str, phase: usize) -> u32 {
  * Per-package timing from real build history.
  *
  * All times are in milliseconds, matching the CSV output of
- * `bob list history -lr -f csv`.  Four phases model the full
+ * `bob history -lr -f csv`.  Four phases model the full
  * build lifecycle:
  *
  *   overhead_pre  = pre-clean + depends + checksum  (always -j1)
