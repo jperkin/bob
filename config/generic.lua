@@ -26,7 +26,7 @@ dynamic = {
     wrkobjdir = {
         tmpfs = "/tmp/work",
         disk = "/home/builder/work",
-        threshold = "2G",
+        threshold = "1G",
     },
 }
 ]]

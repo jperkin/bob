@@ -25,7 +25,7 @@ dynamic = {
     wrkobjdir = {
         tmpfs = "/tmp/work",
         disk = "/home/builder/work",
-        threshold = "2G",
+        threshold = "1G",
     },
 }
 ]]
@@ -110,7 +110,7 @@ sandboxes = {
         { action = "mount", fs = "proc", dir = "/proc" },
 
         { action = "mount", fs = "tmp", dir = "/tmp", opts = "size=1G" },
-        { action = "mount", fs = "tmp", dir = "/var/tmp", opts = "size=1G" },
+        { action = "mount", fs = "tmp", dir = "/var", opts = "size=1G" },
 
         { action = "mount", fs = "bind", dir = "/usr/bin", opts = "ro" },
         { action = "mount", fs = "bind", dir = "/usr/sbin", opts = "ro" },
@@ -129,7 +129,7 @@ sandboxes = {
 
         -- At this point everything should be set up so that chrooted commands
         -- will execute successfully.  Perform additional chroot setup.
-        { action = "cmd", chroot = true, create = "chmod 1777 /tmp /var/tmp" },
+        { action = "cmd", chroot = true, create = "mkdir -m 1777 /var/tmp; chmod 1777 /tmp" },
 
         -- Configure build user home directory if enabled.  Bob automatically
         -- sets bob_build_user* variables when the build user is configured,
