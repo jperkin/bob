@@ -21,13 +21,14 @@
 //!
 //! # Configuration File Structure
 //!
-//! A configuration file has five main sections:
+//! A configuration file has six main sections:
 //!
 //! - [`options`](#options-section) - General build options (optional)
 //! - [`environment`](#environment-section) - Environment variable configuration (optional)
 //! - [`pkgsrc`](#pkgsrc-section) - pkgsrc paths and package list (required)
 //! - [`scripts`](#scripts-section) - Build script paths (required)
 //! - [`sandboxes`](#sandboxes-section) - Sandbox configuration (optional)
+//! - [`scheduler`](#scheduler-section) - Scheduler configuration (optional)
 //!
 //! # Options Section
 //!
@@ -468,6 +469,8 @@ pub struct ConfigFile {
     pub sandboxes: Option<Sandboxes>,
     /// The `environment` section.
     pub environment: Option<Environment>,
+    /// The `scheduler` section.
+    pub scheduler: Option<SchedulerConfig>,
 }
 
 /// General build options from the `options` section.
@@ -476,15 +479,12 @@ pub struct ConfigFile {
 /// - `build_threads`: 1
 /// - `scan_threads`: 1
 /// - `log_level`: "info"
-/// - `dynamic_jobs`: disabled
 #[derive(Clone, Debug, Default)]
 pub struct Options {
     /// Number of parallel build sandboxes.
     pub build_threads: Option<usize>,
     /// Directory for bob state files (database, tracing log).
     pub dbdir: Option<PathBuf>,
-    /// Dynamic MAKE_JOBS allocation settings.
-    pub dynamic_jobs: Option<DynamicJobs>,
     /// Number of parallel scan processes.
     pub scan_threads: Option<usize>,
     /// If true, abort on scan errors. If false, continue and report failures.
@@ -493,17 +493,18 @@ pub struct Options {
     pub log_level: Option<String>,
 }
 
-/// Dynamic MAKE_JOBS configuration.
+/// Scheduler configuration from the `scheduler` section.
 ///
-/// Controls how MAKE_JOBS is distributed across concurrent builds based
-/// on package weight. The `max` field is the total CPU budget, and `min`
-/// is reserved per build thread to guarantee a minimum allocation.
+/// Controls dynamic CPU allocation informed by build history.
+///
+/// - `jobs`: Total MAKE_JOBS CPU budget to distribute across concurrent builds.
+///   A value of 1.5x the number of physical cores is recommended: builds spend
+///   significant time in serial phases where allocated cores sit idle, and the
+///   overcommit lets parallel phases of other packages use those cores.
 #[derive(Clone, Debug)]
-pub struct DynamicJobs {
-    /// Total CPU budget to distribute.
-    pub max: usize,
-    /// Minimum MAKE_JOBS reserved per build thread.
-    pub min: usize,
+pub struct SchedulerConfig {
+    /// Total MAKE_JOBS CPU budget.
+    pub jobs: usize,
 }
 
 /// pkgsrc-related configuration from the `pkgsrc` section.
@@ -751,11 +752,8 @@ impl Config {
         }
     }
 
-    pub fn dynamic_jobs(&self) -> Option<&DynamicJobs> {
-        self.file
-            .options
-            .as_ref()
-            .and_then(|o| o.dynamic_jobs.as_ref())
+    pub fn jobs(&self) -> Option<usize> {
+        self.file.scheduler.as_ref().map(|s| s.jobs)
     }
 
     pub fn script(&self, key: &str) -> Option<&PathBuf> {
@@ -957,19 +955,15 @@ impl Config {
             if opts.build_threads == Some(0) {
                 errors.push("build_threads must be at least 1".to_string());
             }
-            if let Some(ref dj) = opts.dynamic_jobs {
-                if dj.max < 1 {
-                    errors.push("dynamic_jobs.max must be at least 1".to_string());
-                }
-                if dj.min < 1 {
-                    errors.push("dynamic_jobs.min must be at least 1".to_string());
-                }
-                if dj.min > dj.max {
-                    errors.push("dynamic_jobs.min must not exceed dynamic_jobs.max".to_string());
-                }
-            }
             if opts.scan_threads == Some(0) {
                 errors.push("scan_threads must be at least 1".to_string());
+            }
+        }
+
+        // Scheduler validation
+        if let Some(sched) = &self.file.scheduler {
+            if sched.jobs == 0 {
+                errors.push("scheduler.jobs must be at least 1".to_string());
             }
         }
 
@@ -1025,6 +1019,8 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
         parse_sandboxes(&globals).map_err(|e| format!("Error parsing sandboxes config: {}", e))?;
     let environment = parse_environment(&globals)
         .map_err(|e| format!("Error parsing environment config: {}", e))?;
+    let scheduler =
+        parse_scheduler(&globals).map_err(|e| format!("Error parsing scheduler config: {}", e))?;
 
     // Store env function/table in registry if it exists
     let env_key = if let Ok(env_value) = pkgsrc_table.get::<Value>("env") {
@@ -1051,6 +1047,7 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
         scripts,
         sandboxes,
         environment,
+        scheduler,
     };
 
     Ok((config, lua_env))
@@ -1069,37 +1066,17 @@ fn parse_options(globals: &Table) -> LuaResult<Option<Options>> {
     const KNOWN_KEYS: &[&str] = &[
         "build_threads",
         "dbdir",
-        "dynamic_jobs",
         "log_level",
         "scan_threads",
         "strict_scan",
     ];
     warn_unknown_keys(table, "options", KNOWN_KEYS);
 
-    let dynamic_jobs = match table.get::<Value>("dynamic_jobs")? {
-        Value::Table(t) => {
-            let max: usize = t
-                .get("max")
-                .map_err(|_| mlua::Error::runtime("dynamic_jobs.max is required"))?;
-            let min: usize = t
-                .get("min")
-                .map_err(|_| mlua::Error::runtime("dynamic_jobs.min is required"))?;
-            Some(DynamicJobs { max, min })
-        }
-        Value::Nil => None,
-        _ => {
-            return Err(mlua::Error::runtime(
-                "dynamic_jobs must be a table with 'max' and 'min'",
-            ));
-        }
-    };
-
     let dbdir: Option<PathBuf> = table.get::<Option<String>>("dbdir")?.map(PathBuf::from);
 
     Ok(Some(Options {
         build_threads: table.get("build_threads").ok(),
         dbdir,
-        dynamic_jobs,
         scan_threads: table.get("scan_threads").ok(),
         strict_scan: table.get("strict_scan").ok(),
         log_level: table.get("log_level").ok(),
@@ -1131,6 +1108,26 @@ fn get_required_string(table: &Table, field: &str) -> LuaResult<String> {
             value.type_name()
         ))),
     }
+}
+
+fn parse_scheduler(globals: &Table) -> LuaResult<Option<SchedulerConfig>> {
+    let value: Value = globals.get("scheduler")?;
+    if value.is_nil() {
+        return Ok(None);
+    }
+
+    let table = value
+        .as_table()
+        .ok_or_else(|| mlua::Error::runtime("'scheduler' must be a table"))?;
+
+    const KNOWN_KEYS: &[&str] = &["jobs"];
+    warn_unknown_keys(table, "scheduler", KNOWN_KEYS);
+
+    let jobs: usize = table
+        .get("jobs")
+        .map_err(|_| mlua::Error::runtime("scheduler.jobs is required"))?;
+
+    Ok(Some(SchedulerConfig { jobs }))
 }
 
 fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
