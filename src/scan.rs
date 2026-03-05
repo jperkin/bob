@@ -1644,8 +1644,8 @@ impl Scan {
      * from history.
      */
     fn store_dep_scores(db: &crate::db::Database, summary: &ScanSummary) -> Result<()> {
-        let mut incoming: HashMap<&PkgName, Vec<&PkgName>> = HashMap::new();
-        let mut reverse_deps: HashMap<&PkgName, Vec<&PkgName>> = HashMap::new();
+        let mut incoming: HashMap<&PkgName, HashSet<&PkgName>> = HashMap::new();
+        let mut reverse_deps: HashMap<&PkgName, HashSet<&PkgName>> = HashMap::new();
         for pkg in &summary.packages {
             let Some(pkgname) = pkg.pkgname() else {
                 continue;
@@ -1653,8 +1653,8 @@ impl Scan {
             incoming.entry(pkgname).or_default();
             reverse_deps.entry(pkgname).or_default();
             for dep in pkg.depends() {
-                incoming.entry(pkgname).or_default().push(dep);
-                reverse_deps.entry(dep).or_default().push(pkgname);
+                incoming.entry(pkgname).or_default().insert(dep);
+                reverse_deps.entry(dep).or_default().insert(pkgname);
             }
         }
 
@@ -1677,10 +1677,11 @@ impl Scan {
             .map(|(k, v)| (k, v as usize))
             .collect();
 
-        let crit_scores = Self::critical_path_scores(&incoming, &reverse_deps, |pkg: &PkgName| {
-            let base = pkg.pkgbase().to_string();
-            durations.get(&base).copied().unwrap_or(100)
-        });
+        let crit_scores =
+            crate::scheduler::critical_path_scores(&incoming, &reverse_deps, |pkg: &&PkgName| {
+                let base = pkg.pkgbase().to_string();
+                durations.get(&base).copied().unwrap_or(100)
+            });
 
         let mut scores: Vec<(i64, Option<i64>, Option<i64>)> = Vec::new();
         for pkg in &summary.packages {
@@ -1698,63 +1699,6 @@ impl Scan {
         }
 
         db.store_dep_scores(&scores)
-    }
-
-    /**
-     * Compute critical-path scores for all packages.
-     *
-     * The score for a package is the longest weighted chain through its
-     * transitive dependents (max at each node, not sum).
-     */
-    fn critical_path_scores(
-        incoming: &HashMap<&PkgName, Vec<&PkgName>>,
-        reverse_deps: &HashMap<&PkgName, Vec<&PkgName>>,
-        weight: impl Fn(&PkgName) -> usize,
-    ) -> HashMap<PkgName, usize> {
-        let mut pending: HashMap<&PkgName, usize> = HashMap::new();
-        for pkg in incoming.keys() {
-            let count = reverse_deps
-                .get(pkg)
-                .map(|s| s.iter().filter(|r| incoming.contains_key(*r)).count())
-                .unwrap_or(0);
-            pending.insert(pkg, count);
-        }
-
-        let mut queue: VecDeque<&PkgName> = pending
-            .iter()
-            .filter(|(_, c)| **c == 0)
-            .map(|(&p, _)| p)
-            .collect();
-
-        let mut scores: HashMap<&PkgName, usize> = HashMap::new();
-
-        while let Some(pkg) = queue.pop_front() {
-            let score = reverse_deps
-                .get(pkg)
-                .map(|rdeps| {
-                    rdeps
-                        .iter()
-                        .filter(|r| incoming.contains_key(*r))
-                        .filter_map(|r| scores.get(r).map(|&s| weight(r) + s))
-                        .max()
-                        .unwrap_or(0)
-                })
-                .unwrap_or(0);
-            scores.insert(pkg, score);
-
-            if let Some(deps) = incoming.get(pkg) {
-                for dep in deps {
-                    if let Some(c) = pending.get_mut(dep) {
-                        *c = c.saturating_sub(1);
-                        if *c == 0 {
-                            queue.push_back(dep);
-                        }
-                    }
-                }
-            }
-        }
-
-        scores.into_iter().map(|(k, v)| (k.clone(), v)).collect()
     }
 
     /**

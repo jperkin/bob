@@ -562,6 +562,31 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
 }
 
 /**
+ * Sort items by build priority using the same [`ReadyKey`] ordering
+ * as the scheduler's ready set.
+ */
+pub fn sort_by_build_priority<T>(
+    items: &mut [T],
+    score: impl Fn(&T) -> usize,
+    dep_count: impl Fn(&T) -> usize,
+    name: impl Fn(&T) -> &str,
+) {
+    items.sort_by(|a, b| {
+        let ka = ReadyKey {
+            score: std::cmp::Reverse(score(a)),
+            dep_count: std::cmp::Reverse(dep_count(a)),
+            pkg: name(a),
+        };
+        let kb = ReadyKey {
+            score: std::cmp::Reverse(score(b)),
+            dep_count: std::cmp::Reverse(dep_count(b)),
+            pkg: name(b),
+        };
+        ka.cmp(&kb)
+    });
+}
+
+/**
  * Compute MAKE_JOBS budget from pre-computed dep counts and durations.
  *
  * This applies the same scoring formula as [`Scheduler::init_budget`]

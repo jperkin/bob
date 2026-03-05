@@ -138,8 +138,8 @@ pub struct PackageStatusRow {
     pub multi_version: Option<String>,
     pub build_outcome: Option<i32>,
     pub outcome_detail: Option<String>,
-    pub dep_count: Option<i64>,
-    pub weight: Option<i64>,
+    pub dep_count: i64,
+    pub weight: i64,
 }
 
 impl PackageRow {
@@ -574,7 +574,8 @@ impl Database {
                     p.fail_reason, p.build_reason,
                     json_extract(p.scan_data, '$.MULTI_VERSION'),
                     b.outcome, b.outcome_detail,
-                    p.dep_count, p.weight
+                    COALESCE(p.dep_count, 0),
+                    COALESCE(p.weight, 0)
              FROM packages p
              LEFT JOIN builds b ON b.package_id = p.id"
         } else {
@@ -582,7 +583,8 @@ impl Database {
                     p.fail_reason, p.build_reason,
                     NULL,
                     b.outcome, b.outcome_detail,
-                    p.dep_count, p.weight
+                    COALESCE(p.dep_count, 0),
+                    COALESCE(p.weight, 0)
              FROM packages p
              LEFT JOIN builds b ON b.package_id = p.id"
         };

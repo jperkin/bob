@@ -155,17 +155,13 @@ fn print_build_status(
         .collect::<Result<Vec<_>>>()?;
 
     let need_multi = cols.contains(&"multi_version");
-    let all_pkgs = db.get_all_package_status(need_multi)?;
-    let id_to_pkg: HashMap<i64, &PackageStatusRow> = all_pkgs.iter().map(|p| (p.id, p)).collect();
-
-    let dep_ids = db.get_resolved_dep_ids()?;
-    let mut id_deps: HashMap<i64, Vec<i64>> = HashMap::new();
-    for &(pkg_id, dep_id) in &dep_ids {
-        id_deps.entry(pkg_id).or_default().push(dep_id);
-        id_deps.entry(dep_id).or_default();
-    }
-
-    let (sorted_ids, _) = bob::build_order(&id_deps, |_| 1);
+    let mut all_pkgs = db.get_all_package_status(need_multi)?;
+    bob::sort_by_build_priority(
+        &mut all_pkgs,
+        |p| p.weight as usize,
+        |p| p.dep_count as usize,
+        |p| &p.pkgname,
+    );
 
     let cpu_times = if cols.contains(&"cpu") {
         db.cpu_time_by_pkg_all()
@@ -182,9 +178,9 @@ fn print_build_status(
                 .collect();
             let dep_counts: HashMap<String, i64> = all_pkgs
                 .iter()
-                .filter_map(|p| {
+                .map(|p| {
                     let base = pkgsrc::PkgName::new(&p.pkgname).pkgbase().to_string();
-                    p.dep_count.map(|dc| (base, dc))
+                    (base, p.dep_count)
                 })
                 .collect();
             bob::compute_budget(&dep_counts, &durations, mj, build_threads)
@@ -232,12 +228,7 @@ fn print_build_status(
     };
 
     let mut rows: Vec<Vec<String>> = Vec::new();
-    for id in &sorted_ids {
-        let pkg = match id_to_pkg.get(id) {
-            Some(p) => p,
-            None => continue,
-        };
-
+    for pkg in &all_pkgs {
         if !pkg_patterns.is_empty()
             && !pkg_patterns
                 .iter()
@@ -270,8 +261,8 @@ fn print_build_status(
                 "status" => status.to_string(),
                 "reason" => reason.clone(),
                 "multi_version" => multi_version.clone(),
-                "deps" => pkg.dep_count.map(|c| c.to_string()).unwrap_or_else(dash),
-                "weight" => pkg.weight.map(|s| s.to_string()).unwrap_or_else(dash),
+                "deps" => pkg.dep_count.to_string(),
+                "weight" => pkg.weight.to_string(),
                 "cpu" => cpu_times
                     .get(&pkgbase)
                     .map(|ms| bob::format_duration(*ms))
