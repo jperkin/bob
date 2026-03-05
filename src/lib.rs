@@ -124,7 +124,7 @@ pub use build::{
     Build, BuildCounts, BuildReason, BuildResult, BuildSummary, MakeJobs, PkgBuildStats, Stage,
     pkg_up_to_date,
 };
-pub use config::{Config, Options, Pkgsrc, PkgsrcEnv, Sandboxes, SchedulerConfig, WrkObjDir};
+pub use config::{Config, DynamicConfig, Options, Pkgsrc, PkgsrcEnv, Sandboxes, WrkObjDir};
 pub use cpu::{CpuSample, CpuSamplerHandle, start_cpu_sampler};
 pub use db::Database;
 pub use history::{History, HistoryKind, format_duration};

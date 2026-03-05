@@ -28,7 +28,7 @@
 //! - [`pkgsrc`](#pkgsrc-section) - pkgsrc paths and package list (required)
 //! - [`scripts`](#scripts-section) - Build script paths (required)
 //! - [`sandboxes`](#sandboxes-section) - Sandbox configuration (optional)
-//! - [`scheduler`](#scheduler-section) - Scheduler configuration (optional)
+//! - [`dynamic`](#dynamic-section) - Dynamic resource allocation (optional)
 //!
 //! # Options Section
 //!
@@ -469,8 +469,8 @@ pub struct ConfigFile {
     pub sandboxes: Option<Sandboxes>,
     /// The `environment` section.
     pub environment: Option<Environment>,
-    /// The `scheduler` section.
-    pub scheduler: Option<SchedulerConfig>,
+    /// The `dynamic` section.
+    pub dynamic: Option<DynamicConfig>,
 }
 
 /// General build options from the `options` section.
@@ -493,7 +493,7 @@ pub struct Options {
     pub log_level: Option<String>,
 }
 
-/// Scheduler configuration from the `scheduler` section.
+/// Dynamic resource allocation from the `dynamic` section.
 ///
 /// Controls dynamic CPU and disk allocation informed by build history.
 ///
@@ -504,7 +504,7 @@ pub struct Options {
 /// - `wrkobjdir`: Optional automatic WRKOBJDIR selection based on historical
 ///   disk usage, routing large builds to disk and small builds to tmpfs.
 #[derive(Clone, Debug)]
-pub struct SchedulerConfig {
+pub struct DynamicConfig {
     /// Total MAKE_JOBS CPU budget.
     pub jobs: usize,
     /// Optional WRKOBJDIR routing based on historical disk usage.
@@ -771,12 +771,12 @@ impl Config {
     }
 
     pub fn jobs(&self) -> Option<usize> {
-        self.file.scheduler.as_ref().map(|s| s.jobs)
+        self.file.dynamic.as_ref().map(|s| s.jobs)
     }
 
     pub fn wrkobjdir(&self) -> Option<&WrkObjDir> {
         self.file
-            .scheduler
+            .dynamic
             .as_ref()
             .and_then(|s| s.wrkobjdir.as_ref())
     }
@@ -985,14 +985,14 @@ impl Config {
             }
         }
 
-        // Scheduler validation
-        if let Some(sched) = &self.file.scheduler {
-            if sched.jobs == 0 {
-                errors.push("scheduler.jobs must be at least 1".to_string());
+        // Dynamic resource allocation validation
+        if let Some(dyn_cfg) = &self.file.dynamic {
+            if dyn_cfg.jobs == 0 {
+                errors.push("dynamic.jobs must be at least 1".to_string());
             }
-            if let Some(w) = &sched.wrkobjdir {
+            if let Some(w) = &dyn_cfg.wrkobjdir {
                 if w.threshold == 0 {
-                    errors.push("scheduler.wrkobjdir.threshold must be greater than 0".to_string());
+                    errors.push("dynamic.wrkobjdir.threshold must be greater than 0".to_string());
                 }
             }
         }
@@ -1049,8 +1049,8 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
         parse_sandboxes(&globals).map_err(|e| format!("Error parsing sandboxes config: {}", e))?;
     let environment = parse_environment(&globals)
         .map_err(|e| format!("Error parsing environment config: {}", e))?;
-    let scheduler =
-        parse_scheduler(&globals).map_err(|e| format!("Error parsing scheduler config: {}", e))?;
+    let dynamic =
+        parse_dynamic(&globals).map_err(|e| format!("Error parsing dynamic config: {}", e))?;
 
     // Store env function/table in registry if it exists
     let env_key = if let Ok(env_value) = pkgsrc_table.get::<Value>("env") {
@@ -1077,7 +1077,7 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
         scripts,
         sandboxes,
         environment,
-        scheduler,
+        dynamic,
     };
 
     Ok((config, lua_env))
@@ -1172,35 +1172,34 @@ fn parse_size(s: &str) -> Result<u64, String> {
     }
 }
 
-fn parse_scheduler(globals: &Table) -> LuaResult<Option<SchedulerConfig>> {
-    let value: Value = globals.get("scheduler")?;
+fn parse_dynamic(globals: &Table) -> LuaResult<Option<DynamicConfig>> {
+    let value: Value = globals.get("dynamic")?;
     if value.is_nil() {
         return Ok(None);
     }
 
     let table = value
         .as_table()
-        .ok_or_else(|| mlua::Error::runtime("'scheduler' must be a table"))?;
+        .ok_or_else(|| mlua::Error::runtime("'dynamic' must be a table"))?;
 
     const KNOWN_KEYS: &[&str] = &["jobs", "wrkobjdir"];
-    warn_unknown_keys(table, "scheduler", KNOWN_KEYS);
+    warn_unknown_keys(table, "dynamic", KNOWN_KEYS);
 
     let jobs: usize = table
         .get("jobs")
-        .map_err(|_| mlua::Error::runtime("scheduler.jobs is required"))?;
+        .map_err(|_| mlua::Error::runtime("dynamic.jobs is required"))?;
 
     let wrkobjdir = match table.get::<Value>("wrkobjdir")? {
         Value::Nil => None,
         Value::Table(t) => {
             const WRK_KEYS: &[&str] = &["tmpfs", "disk", "threshold"];
-            warn_unknown_keys(&t, "scheduler.wrkobjdir", WRK_KEYS);
+            warn_unknown_keys(&t, "dynamic.wrkobjdir", WRK_KEYS);
 
             let tmpfs = PathBuf::from(get_required_string(&t, "tmpfs")?);
             let disk = PathBuf::from(get_required_string(&t, "disk")?);
             let threshold_str = get_required_string(&t, "threshold")?;
-            let threshold = parse_size(&threshold_str).map_err(|e| {
-                mlua::Error::runtime(format!("scheduler.wrkobjdir.threshold: {}", e))
-            })?;
+            let threshold = parse_size(&threshold_str)
+                .map_err(|e| mlua::Error::runtime(format!("dynamic.wrkobjdir.threshold: {}", e)))?;
 
             Some(WrkObjDir {
                 tmpfs,
@@ -1208,10 +1207,10 @@ fn parse_scheduler(globals: &Table) -> LuaResult<Option<SchedulerConfig>> {
                 threshold,
             })
         }
-        _ => return Err(mlua::Error::runtime("scheduler.wrkobjdir must be a table")),
+        _ => return Err(mlua::Error::runtime("dynamic.wrkobjdir must be a table")),
     };
 
-    Ok(Some(SchedulerConfig { jobs, wrkobjdir }))
+    Ok(Some(DynamicConfig { jobs, wrkobjdir }))
 }
 
 fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {

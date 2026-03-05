@@ -2273,7 +2273,7 @@ impl Build {
         /*
          * Build wrkobjdir map from historical disk usage.
          *
-         * If scheduler.wrkobjdir is configured, look up each package's
+         * If dynamic.wrkobjdir is configured, look up each package's
          * most recent disk usage and route large builds to disk.
          * Packages with no history default to disk (safe choice
          * since tmpfs is bounded and we cannot yet restart).
