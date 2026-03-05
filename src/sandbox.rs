@@ -273,7 +273,7 @@ impl Sandbox {
      * inherited unchanged.  If a section is present, `clear` defaults to
      * true and only explicitly configured variables are available.
      */
-    fn apply_environment(&self, cmd: &mut Command) {
+    pub fn apply_environment(&self, cmd: &mut Command) {
         let Some(env) = self.config.environment() else {
             return;
         };
@@ -433,6 +433,14 @@ impl Sandbox {
         }
         ids.sort();
         Ok(ids)
+    }
+
+    /**
+     * Return a sandbox ID that does not collide with any existing sandbox.
+     */
+    pub fn next_available_id(&self) -> Result<usize> {
+        let ids = self.discover_sandboxes()?;
+        Ok(ids.last().map_or(0, |max| max + 1))
     }
 
     /**
@@ -1034,6 +1042,9 @@ impl Sandbox {
         let output = if chroot {
             let mut c = Command::new("/usr/sbin/chroot");
             self.apply_environment(&mut c);
+            for (key, val) in self.config.script_env(None) {
+                c.env(key, val);
+            }
             c.arg(&sandbox_path)
                 .arg("/bin/sh")
                 .arg("-c")
@@ -1046,6 +1057,9 @@ impl Sandbox {
         } else {
             let mut c = Command::new("/bin/sh");
             self.apply_environment(&mut c);
+            for (key, val) in self.config.script_env(None) {
+                c.env(key, val);
+            }
             c.arg("-c")
                 .arg(cmd)
                 .env("bob_sandbox_path", &sandbox_path)
@@ -1291,18 +1305,10 @@ impl SandboxScope {
      * On error or interrupt, newly created sandboxes are rolled back but
      * previously existing sandboxes remain (they'll be cleaned up on drop).
      */
-    pub fn ensure(&mut self, n: usize) -> Result<()> {
+    pub fn ensure(&mut self, n: usize) -> Result<bool> {
         if !self.sandbox.enabled() || n <= self.count {
-            return Ok(());
+            return Ok(false);
         }
-        let to_create = n - self.count;
-        if to_create == 1 {
-            print!("Creating sandbox...");
-        } else {
-            print!("Creating {} sandboxes...", to_create);
-        }
-        let _ = std::io::stdout().flush();
-        let start = Instant::now();
         let results: Vec<(usize, Result<()>)> = (self.count..n)
             .into_par_iter()
             .map(|i| (i, self.sandbox.create(i)))
@@ -1329,7 +1335,6 @@ impl SandboxScope {
             }
         }
         if let Some(e) = first_error {
-            println!();
             for i in &sandbox_ids {
                 if let Err(destroy_err) = self.sandbox.destroy(*i) {
                     eprintln!("Warning: failed to destroy sandbox {}: {}", i, destroy_err);
@@ -1337,9 +1342,8 @@ impl SandboxScope {
             }
             return Err(e);
         }
-        println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
         self.count = n;
-        Ok(())
+        Ok(true)
     }
 
     /// Access the underlying sandbox for operations.
@@ -1350,6 +1354,11 @@ impl SandboxScope {
     /// Return whether sandboxes are enabled.
     pub fn enabled(&self) -> bool {
         self.sandbox.enabled()
+    }
+
+    /// Return the number of sandboxes currently managed.
+    pub fn count(&self) -> usize {
+        self.count
     }
 
     /// Access the run state flag.
