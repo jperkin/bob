@@ -133,6 +133,6 @@ pub use pkgstate::{PackageCounts, PackageState, PackageStateKind};
 pub use report::write_html_report;
 pub use sandbox::Sandbox;
 pub use scan::{ResolvedPackage, Scan, ScanResult, ScanSummary};
-pub use scheduler::{Scheduler, compute_budget};
+pub use scheduler::{Scheduler, compute_budget, critical_path_scores, transitive_dependent_counts};
 pub use state::RunState;
 pub use summary::generate_pkg_summary;

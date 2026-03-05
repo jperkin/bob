@@ -1918,3 +1918,60 @@ fn depgraph_precomputed_jobs_dump() {
         }
     }
 }
+
+/**
+ * Verify that the dep_count tiebreaker orders packages correctly within
+ * each critical-path score tier: higher dep_count first.
+ */
+#[test]
+fn dep_count_breaks_score_tie() {
+    let g = load_depgraph();
+    let scores = bob::critical_path_scores(&g.incoming, &g.reverse_deps, |_| 100);
+    let dep_counts = bob::transitive_dependent_counts(&g.incoming, &g.reverse_deps);
+
+    let mut sched = Scheduler::new(
+        g.incoming.clone(),
+        g.reverse_deps.clone(),
+        HashMap::new(),
+        HashSet::new(),
+        HashSet::new(),
+    );
+
+    let mut order: Vec<String> = Vec::new();
+    loop {
+        match sched.poll() {
+            Poll::Ready(Some(pkg)) => {
+                sched.mark_success(&pkg);
+                order.push(pkg);
+            }
+            _ => break,
+        }
+    }
+
+    /*
+     * Within each contiguous run of same-score packages in the dispatch
+     * order, dep_count must be non-increasing.
+     */
+    let mut i = 0;
+    while i < order.len() {
+        let score = scores.get(&order[i]).copied().unwrap_or(0);
+        let mut j = i;
+        while j < order.len() && scores.get(&order[j]).copied().unwrap_or(0) == score {
+            j += 1;
+        }
+        for k in i..j.saturating_sub(1) {
+            let dc_a = dep_counts.get(&order[k]).copied().unwrap_or(0);
+            let dc_b = dep_counts.get(&order[k + 1]).copied().unwrap_or(0);
+            assert!(
+                dc_a >= dc_b,
+                "score={}: {} (deps={}) before {} (deps={})",
+                score,
+                order[k],
+                dc_a,
+                order[k + 1],
+                dc_b
+            );
+        }
+        i = j;
+    }
+}

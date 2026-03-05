@@ -17,26 +17,13 @@
 /*!
  * Build scheduling using critical-path ordering.
  *
- * Each package is scored by the longest chain of dependents below it
- * (the critical path), not the total number of dependents.  This
- * distinction matters because fan-out is parallelisable but chain
- * depth is not.
- *
- * For example, given two independent roots with equal build weights:
- *
- * ```text
- *     A          X
- *     |         /|\
- *     B        C D E
- *     |
- *     F
- * ```
- *
- * A naive sum-of-dependents score picks X first (4 total packages in
- * its subtree vs 3 in A's).  But with two or more workers, C/D/E all
- * build in parallel -- X's subtree only takes two serial steps.  A's
- * subtree is three steps deep (A, B, F) and cannot be parallelised,
- * so starting A first produces a shorter overall build.
+ * Packages are prioritised first by **critical-path depth** -- the
+ * longest weighted chain of dependents below them -- and then by
+ * **transitive dependent count** as a tiebreaker.  The depth-first
+ * ordering ensures long sequential tails are started as early as
+ * possible; the dependent-count tiebreaker ensures that among
+ * equal-depth packages, those that unlock the most parallel work
+ * are built first.
  *
  * Critical-path scores are precomputed once at construction using a
  * reverse-topological traversal.  A ready set of packages whose
@@ -64,13 +51,21 @@ impl std::fmt::Debug for MakeJobsResponder {
 
 /**
  * Sort key for ready packages: highest critical-path score first,
- * then lexicographically by name for determinism.
+ * then most transitive dependents first, then lexicographically by
+ * name for determinism.
  *
- * `Reverse` wrapping on score gives descending order in BTreeSet.
+ * The `dep_count` field breaks ties among packages with equal
+ * critical-path scores by preferring packages that unlock more
+ * downstream builds.  This matters most with uniform weights (no
+ * build history) where many packages share the same depth-based
+ * score.
+ *
+ * `Reverse` wrapping gives descending order in BTreeSet.
  */
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct ReadyKey<K: Ord> {
     score: std::cmp::Reverse<usize>,
+    dep_count: std::cmp::Reverse<usize>,
     pkg: K,
 }
 
@@ -87,6 +82,7 @@ pub struct Scheduler<K: Ord> {
     reverse_deps: HashMap<K, HashSet<K>>,
     ready: BTreeSet<ReadyKey<K>>,
     scores: HashMap<K, usize>,
+    dep_counts: HashMap<K, usize>,
     running: HashSet<K>,
     done: HashSet<K>,
     failed: HashSet<K>,
@@ -192,13 +188,16 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
         let scores = critical_path_scores(&incoming, &reverse_deps, |pkg| {
             weights.get(pkg).copied().unwrap_or(100)
         });
+        let dep_counts = transitive_dependent_counts(&incoming, &reverse_deps);
 
         let mut ready = BTreeSet::new();
         for (pkg, deps) in &incoming {
             if deps.is_empty() {
                 let score = scores.get(pkg).copied().unwrap_or(0);
+                let dc = dep_counts.get(pkg).copied().unwrap_or(0);
                 ready.insert(ReadyKey {
                     score: std::cmp::Reverse(score),
+                    dep_count: std::cmp::Reverse(dc),
                     pkg: pkg.clone(),
                 });
             }
@@ -209,6 +208,7 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
             reverse_deps,
             ready,
             scores,
+            dep_counts,
             running: HashSet::new(),
             done,
             failed,
@@ -253,8 +253,10 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
                 if let Some(deps) = self.incoming.get_mut(dependent) {
                     if deps.remove(pkg) && deps.is_empty() {
                         let score = self.scores.get(dependent).copied().unwrap_or(0);
+                        let dc = self.dep_counts.get(dependent).copied().unwrap_or(0);
                         self.ready.insert(ReadyKey {
                             score: std::cmp::Reverse(score),
+                            dep_count: std::cmp::Reverse(dc),
                             pkg: dependent.clone(),
                         });
                     }
@@ -297,8 +299,10 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
         for pkg in broken {
             self.incoming.remove(&pkg);
             let score = self.scores.get(&pkg).copied().unwrap_or(0);
+            let dc = self.dep_counts.get(&pkg).copied().unwrap_or(0);
             self.ready.remove(&ReadyKey {
                 score: std::cmp::Reverse(score),
+                dep_count: std::cmp::Reverse(dc),
                 pkg: pkg.clone(),
             });
             self.failed.insert(pkg.clone());
@@ -397,13 +401,12 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
      * (computed from `self.reverse_deps`).
      */
     pub fn init_budget(&mut self, max_jobs: usize, build_threads: usize) {
-        let dep_counts = self.transitive_dependent_counts();
         let fair_share = max_jobs / build_threads.max(1);
 
         let mut scores: Vec<(K, f64)> = Vec::new();
         for pkg in self.incoming.keys().chain(self.running.iter()) {
             let duration = self.weights.get(pkg).copied().unwrap_or(0) as f64;
-            let deps = dep_counts.get(pkg).copied().unwrap_or(0) as f64;
+            let deps = self.dep_counts.get(pkg).copied().unwrap_or(0) as f64;
 
             let score = duration.max(1.0).powf(DURATION_EXP) * (1.0 + deps).powf(IMPORTANCE_EXP);
             scores.push((pkg.clone(), score));
@@ -446,10 +449,6 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
             locked: HashMap::new(),
             excluded: HashSet::new(),
         });
-    }
-
-    fn transitive_dependent_counts(&self) -> HashMap<K, usize> {
-        transitive_dependent_counts(&self.incoming, &self.reverse_deps)
     }
 
     /**
@@ -614,7 +613,7 @@ where
  *
  * Uses per-node BFS through the reverse_deps graph.
  */
-fn transitive_dependent_counts<K>(
+pub fn transitive_dependent_counts<K>(
     incoming: &HashMap<K, HashSet<K>>,
     reverse_deps: &HashMap<K, HashSet<K>>,
 ) -> HashMap<K, usize>
@@ -655,7 +654,7 @@ where
  * dependents) are processed first, then packages whose dependents have
  * all been scored.
  */
-fn critical_path_scores<K>(
+pub fn critical_path_scores<K>(
     incoming: &HashMap<K, HashSet<K>>,
     reverse_deps: &HashMap<K, HashSet<K>>,
     weight: impl Fn(&K) -> usize,
