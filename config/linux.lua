@@ -76,15 +76,6 @@ pkgsrc = {
     --     "**/config.log",
     --     "**/meson-log.txt",
     -- },
-
-    -- Set environment variables for each build.  The pkg object allows you to
-    -- perform powerful matching against data from the scan to set variables
-    -- on a per-package basis.  Ensure you set variables in mk.conf using ?=
-    -- to allow these overrides to take effect.
-    env = function(pkg)
-        local env = {}
-        return env
-    end,
 }
 
 -- These scripts are executed during sandbox creation and destruction, as well
