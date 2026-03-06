@@ -88,6 +88,32 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, info_span, warn};
 
+/**
+ * Extension trait to place a child process in its own session.
+ *
+ * Calling `.setsid()` detaches the child from the controlling terminal,
+ * preventing build tools (e.g. pax) from writing to `/dev/tty`.  This
+ * registers a `pre_exec` hook, which forces Rust to use `fork+exec`
+ * instead of `posix_spawn`.  On illumos `fork()` suspends all threads,
+ * so only use this when terminal isolation is required (builds, not
+ * scans).
+ */
+pub trait CommandSetsid {
+    fn new_session(&mut self) -> &mut Self;
+}
+
+impl CommandSetsid for Command {
+    fn new_session(&mut self) -> &mut Self {
+        unsafe {
+            self.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        self
+    }
+}
+
 /*
  * The libc crate does not expose wait4() on illumos, but it is available
  * in libc as a wrapper around waitid().  Declare it here.
@@ -291,6 +317,11 @@ impl Sandbox {
     /**
      * Create a Command that runs in the sandbox (via chroot) if enabled,
      * or directly if sandboxes are disabled.
+     *
+     * The returned command uses `posix_spawn` where available.  Call
+     * [`.new_session()`](CommandSetsid::new_session) on the result to place the
+     * child in a new session (prevents `/dev/tty` access by build tools,
+     * but forces `fork+exec` which is expensive on illumos).
      */
     pub fn command(&self, id: usize, cmd: &Path) -> Command {
         let mut c = if self.enabled() {
@@ -301,12 +332,6 @@ impl Sandbox {
             Command::new(cmd)
         };
         self.apply_environment(&mut c);
-        unsafe {
-            c.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
         c
     }
 
@@ -523,6 +548,7 @@ impl Sandbox {
         stdin_data: Option<&str>,
     ) -> Result<Child> {
         let mut cmd = self.command(id, script);
+        cmd.new_session();
         cmd.current_dir("/");
 
         for (key, val) in envs {
@@ -556,6 +582,7 @@ impl Sandbox {
         envs: Vec<(String, String)>,
     ) -> Result<Child> {
         let mut cmd = self.command(id, Path::new("/bin/sh"));
+        cmd.new_session();
         cmd.current_dir("/").arg("-s");
 
         for (key, val) in envs {

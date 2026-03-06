@@ -43,7 +43,7 @@
 //! - `clean` - Clean up build artifacts
 
 use crate::config::PkgsrcEnv;
-use crate::sandbox::{SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
+use crate::sandbox::{CommandSetsid, SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
 use crate::scan::ResolvedPackage;
 use crate::scheduler::{MakeJobsResponder, PackageNode, Scheduler};
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
@@ -918,6 +918,7 @@ impl<'a> PkgBuilder<'a> {
                 .session
                 .sandbox
                 .command(self.sandbox_id, Path::new("/bin/sh"))
+                .new_session()
                 .arg("-c")
                 .arg(&shell_cmd)
                 .stdout(Stdio::piped())
@@ -998,6 +999,7 @@ impl<'a> PkgBuilder<'a> {
         match run_as {
             RunAs::Root => {
                 let mut command = self.session.sandbox.command(self.sandbox_id, cmd);
+                command.new_session();
                 command.args(args);
                 self.apply_envs(&mut command, extra_envs);
                 let mut child = command
@@ -1021,6 +1023,7 @@ impl<'a> PkgBuilder<'a> {
                     .session
                     .sandbox
                     .command(self.sandbox_id, Path::new("su"));
+                command.new_session();
                 command.arg(user).arg("-c").arg(&inner_cmd);
                 self.apply_envs(&mut command, extra_envs);
                 let mut child = command
@@ -1039,6 +1042,7 @@ impl<'a> PkgBuilder<'a> {
             .session
             .sandbox
             .command(self.sandbox_id, self.session.config.make());
+        cmd.new_session();
         self.apply_envs(&mut cmd, &[]);
 
         let work_log = self.logdir.join("work.log");
@@ -1490,6 +1494,7 @@ impl<'a> MakeQuery<'a> {
             .session
             .sandbox
             .command(self.sandbox_id, self.session.config.make());
+        cmd.new_session();
         cmd.arg("-C")
             .arg(&pkgdir)
             .arg("show-var")
@@ -1522,6 +1527,7 @@ impl<'a> MakeQuery<'a> {
             .session
             .sandbox
             .command(self.sandbox_id, self.session.config.make());
+        cmd.new_session();
         cmd.arg("-C")
             .arg(&pkgdir)
             .arg("show-vars")
@@ -1830,6 +1836,7 @@ impl PackageBuild {
             .session
             .sandbox
             .command(self.sandbox_id, self.session.config.make());
+        cmd.new_session();
         cmd.arg("-C").arg(&pkgdir).arg("clean");
         for (key, value) in envs {
             cmd.env(key, value);
