@@ -157,17 +157,17 @@ fn print_build_status(
     let need_multi = cols.contains(&"multi_version");
     let mut all_pkgs = db.get_all_package_status(need_multi)?;
 
-    let mut sched = db.get_scheduling_data()?;
+    let graph = db.get_scheduling_graph()?;
+    let (tw_vec, dc_vec) = bob::scheduling_weights_indexed(&graph.weights, &graph.rdeps);
 
-    let cpu_times = db.cpu_time_by_pkg_all();
-    for (pkgname, node) in &mut sched.packages {
-        let base = pkgsrc::PkgName::new(pkgname).pkgbase().to_string();
-        if let Some(&ct) = cpu_times.get(&base) {
-            node.cpu_time = ct;
-        }
+    let mut total_weights: HashMap<String, usize> = HashMap::with_capacity(graph.names.len());
+    let mut dep_counts: HashMap<String, usize> = HashMap::with_capacity(graph.names.len());
+    for (i, name) in graph.names.iter().enumerate() {
+        total_weights.insert(name.clone(), tw_vec[i]);
+        dep_counts.insert(name.clone(), dc_vec[i]);
     }
 
-    let (total_weights, dep_counts) = bob::scheduling_weights(&sched.packages, &sched.reverse_deps);
+    let cpu_times = db.cpu_time_by_pkg_all();
 
     bob::sort_by_build_priority(
         &mut all_pkgs,

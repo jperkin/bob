@@ -79,7 +79,8 @@ pub use report::write_html_report;
 pub use sandbox::Sandbox;
 pub use scan::{ResolvedPackage, Scan, ScanResult, ScanSummary};
 pub use scheduler::{
-    PackageNode, Scheduler, compute_budget, scheduling_weights, sort_by_build_priority,
+    PackageNode, Scheduler, compute_budget, scheduling_weights, scheduling_weights_indexed,
+    sort_by_build_priority,
 };
 pub use state::RunState;
 pub use summary::generate_pkg_summary;

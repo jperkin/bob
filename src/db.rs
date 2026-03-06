@@ -107,6 +107,18 @@ pub struct SchedulingData {
 }
 
 /**
+ * Integer-indexed dependency graph for fast weight computation.
+ *
+ * Returned by [`Database::get_scheduling_graph`].  Package names
+ * are stored once in `names` and all graph edges use dense indices.
+ */
+pub struct SchedulingGraph {
+    pub names: Vec<String>,
+    pub weights: Vec<usize>,
+    pub rdeps: Vec<Vec<usize>>,
+}
+
+/**
  * Lightweight package row without full scan data.
  *
  * Use [`Database::get_full_scan_index`] when the complete
@@ -881,15 +893,21 @@ impl Database {
 
         let mut packages: HashMap<String, PackageNode<String>> = HashMap::new();
         let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut id_to_name: HashMap<i64, String> = HashMap::new();
 
         let mut stmt = self
             .conn
-            .prepare("SELECT p.pkgname, p.pbulk_weight FROM packages p")?;
+            .prepare("SELECT id, pkgname, pbulk_weight FROM packages")?;
         let pkg_rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i32>(2)?,
+            ))
         })?;
         for row in pkg_rows {
-            let (pkgname, pw) = row?;
+            let (id, pkgname, pw) = row?;
+            id_to_name.insert(id, pkgname.clone());
             packages.insert(
                 pkgname.clone(),
                 PackageNode {
@@ -901,26 +919,80 @@ impl Database {
             reverse_deps.entry(pkgname).or_default();
         }
 
-        let mut stmt = self.conn.prepare(
-            "SELECT p1.pkgname, p2.pkgname
-             FROM resolved_depends rd
-             JOIN packages p1 ON rd.package_id = p1.id
-             JOIN packages p2 ON rd.depends_on_id = p2.id",
-        )?;
-        let dep_rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT package_id, depends_on_id FROM resolved_depends")?;
+        let dep_rows =
+            stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
         for row in dep_rows {
-            let (pkg, dep) = row?;
-            if let Some(node) = packages.get_mut(&pkg) {
-                node.deps.insert(dep.clone());
+            let (pkg_id, dep_id) = row?;
+            if let (Some(pkg), Some(dep)) = (id_to_name.get(&pkg_id), id_to_name.get(&dep_id)) {
+                if let Some(node) = packages.get_mut(pkg) {
+                    node.deps.insert(dep.clone());
+                }
+                reverse_deps
+                    .entry(dep.clone())
+                    .or_default()
+                    .insert(pkg.clone());
             }
-            reverse_deps.entry(dep).or_default().insert(pkg);
         }
 
         Ok(SchedulingData {
             packages,
             reverse_deps,
+        })
+    }
+
+    /**
+     * Load the dependency graph as integer-indexed arrays.
+     *
+     * Returns a [`SchedulingGraph`] with dense indices, avoiding all
+     * intermediate string allocation for edges.
+     */
+    pub fn get_scheduling_graph(&self) -> Result<SchedulingGraph> {
+        let mut names: Vec<String> = Vec::new();
+        let mut weights: Vec<usize> = Vec::new();
+        let mut id_to_idx: HashMap<i64, usize> = HashMap::new();
+
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, pkgname, pbulk_weight FROM packages")?;
+        let pkg_rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i32>(2)?,
+            ))
+        })?;
+        for row in pkg_rows {
+            let (id, pkgname, pw) = row?;
+            let idx = names.len();
+            id_to_idx.insert(id, idx);
+            names.push(pkgname);
+            weights.push(pw as usize);
+        }
+
+        let n = names.len();
+        let mut rdeps: Vec<Vec<usize>> = vec![Vec::new(); n];
+
+        let mut stmt = self
+            .conn
+            .prepare("SELECT package_id, depends_on_id FROM resolved_depends")?;
+        let dep_rows =
+            stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
+        for row in dep_rows {
+            let (pkg_id, dep_id) = row?;
+            if let (Some(&pkg_idx), Some(&dep_idx)) =
+                (id_to_idx.get(&pkg_id), id_to_idx.get(&dep_id))
+            {
+                rdeps[dep_idx].push(pkg_idx);
+            }
+        }
+
+        Ok(SchedulingGraph {
+            names,
+            weights,
+            rdeps,
         })
     }
 

@@ -591,20 +591,13 @@ pub fn sort_by_build_priority<T>(
     cpu_time: impl Fn(&T) -> u64,
     name: impl Fn(&T) -> &str,
 ) {
-    items.sort_by(|a, b| {
-        let ka = ReadyKey {
-            total_weight: std::cmp::Reverse(total_weight(a)),
-            dep_count: std::cmp::Reverse(dep_count(a)),
-            cpu_time: std::cmp::Reverse(cpu_time(a)),
-            pkg: name(a),
-        };
-        let kb = ReadyKey {
-            total_weight: std::cmp::Reverse(total_weight(b)),
-            dep_count: std::cmp::Reverse(dep_count(b)),
-            cpu_time: std::cmp::Reverse(cpu_time(b)),
-            pkg: name(b),
-        };
-        ka.cmp(&kb)
+    items.sort_by_cached_key(|item| {
+        (
+            std::cmp::Reverse(total_weight(item)),
+            std::cmp::Reverse(dep_count(item)),
+            std::cmp::Reverse(cpu_time(item)),
+            name(item).to_string(),
+        )
     });
 }
 
@@ -661,8 +654,8 @@ where
  * - **dep_count**: number of unique transitive dependents.
  *
  * Uses an indexed BFS for performance: packages are mapped to dense
- * integer IDs, the graph is stored as `Vec<Vec<usize>>`, and the
- * visited set is a flat `Vec<bool>` cleared between iterations.
+ * integer IDs, the graph is stored as `Vec<Vec<usize>>`, and a
+ * generation counter avoids clearing the visited set between iterations.
  */
 pub fn scheduling_weights<K>(
     packages: &HashMap<K, PackageNode<K>>,
@@ -707,21 +700,44 @@ where
         }
     }
 
+    let (tw_vec, dc_vec) = scheduling_weights_indexed(&weights, &rdeps_indexed);
+
     let mut total_weights: HashMap<K, usize> = HashMap::with_capacity(n);
     let mut dep_counts: HashMap<K, usize> = HashMap::with_capacity(n);
-    let mut visited = vec![false; n];
+    for (i, &pkg) in pkg_list.iter().enumerate() {
+        total_weights.insert(pkg.clone(), tw_vec[i]);
+        dep_counts.insert(pkg.clone(), dc_vec[i]);
+    }
+
+    (total_weights, dep_counts)
+}
+
+/**
+ * Compute scheduling weights from pre-indexed graph data.
+ *
+ * Returns parallel vectors of (total_weight, dep_count) for each node.
+ */
+pub fn scheduling_weights_indexed(
+    weights: &[usize],
+    rdeps_indexed: &[Vec<usize>],
+) -> (Vec<usize>, Vec<usize>) {
+    let n = weights.len();
+    let mut total_weights = vec![0usize; n];
+    let mut dep_counts = vec![0usize; n];
+    let mut visit_gen = vec![0u32; n];
+    let mut epoch = 0u32;
     let mut queue: VecDeque<usize> = VecDeque::new();
 
-    for (i, &pkg) in pkg_list.iter().enumerate() {
-        visited.iter_mut().for_each(|v| *v = false);
+    for i in 0..n {
+        epoch += 1;
         queue.clear();
 
         let mut weight_sum = weights[i];
         let mut count = 0usize;
 
         for &r in &rdeps_indexed[i] {
-            if !visited[r] {
-                visited[r] = true;
+            if visit_gen[r] != epoch {
+                visit_gen[r] = epoch;
                 queue.push_back(r);
             }
         }
@@ -729,15 +745,15 @@ where
             weight_sum += weights[node];
             count += 1;
             for &r in &rdeps_indexed[node] {
-                if !visited[r] {
-                    visited[r] = true;
+                if visit_gen[r] != epoch {
+                    visit_gen[r] = epoch;
                     queue.push_back(r);
                 }
             }
         }
 
-        total_weights.insert(pkg.clone(), weight_sum);
-        dep_counts.insert(pkg.clone(), count);
+        total_weights[i] = weight_sum;
+        dep_counts[i] = count;
     }
 
     (total_weights, dep_counts)
