@@ -128,6 +128,32 @@ unsafe extern "C" {
     ) -> libc::pid_t;
 }
 
+/// Prepare the mount destination directory by creating it if needed.
+pub(crate) fn prepare_mount_dest(dest: &Path) -> Result<()> {
+    fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))
+}
+
+/// Execute a mount command with standard process group isolation.
+///
+/// Creates the destination directory, builds a `Command` from the given
+/// path and arguments, runs it in its own process group, and returns the
+/// exit status.
+pub(crate) fn run_mount_cmd(
+    cmd: &str,
+    args: &[&str],
+    dest: &Path,
+) -> Result<Option<ExitStatus>> {
+    prepare_mount_dest(dest)?;
+    Ok(Some(
+        Command::new(cmd)
+            .args(args)
+            .arg(dest)
+            .process_group(0)
+            .status()
+            .context(format!("Unable to execute {}", cmd))?,
+    ))
+}
+
 /// How often to check the shutdown flag while waiting for something else.
 /// This determines the maximum latency between Ctrl+C and response.
 /// 100ms provides responsive feel without excessive polling overhead.

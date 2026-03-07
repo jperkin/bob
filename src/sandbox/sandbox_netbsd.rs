@@ -14,32 +14,36 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-use crate::sandbox::Sandbox;
+use crate::sandbox::{self, Sandbox};
 use anyhow::{Context, bail};
-use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitStatus};
 use tracing::{debug, info, warn};
 
 impl Sandbox {
+    /// Mount using a NetBSD mount command: `<cmd> [opts] [source] <dest>`.
+    fn mount_with(
+        cmd: &str,
+        source: Option<&str>,
+        dest: &Path,
+        opts: &[&str],
+    ) -> anyhow::Result<Option<ExitStatus>> {
+        let mut args: Vec<&str> = opts.to_vec();
+        if let Some(src) = source {
+            args.push(src);
+        }
+        sandbox::run_mount_cmd(cmd, &args, dest)
+    }
+
     pub fn mount_bindfs(
         &self,
         src: &Path,
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
-        let cmd = "/sbin/mount_null";
-        Ok(Some(
-            Command::new(cmd)
-                .args(opts)
-                .arg(src)
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        let src_str = src.to_string_lossy();
+        Self::mount_with("/sbin/mount_null", Some(&src_str), dest, opts)
     }
 
     /*
@@ -60,17 +64,7 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
-        let cmd = "/sbin/mount_fdesc";
-        Ok(Some(
-            Command::new(cmd)
-                .args(opts)
-                .arg("fdesc")
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        Self::mount_with("/sbin/mount_fdesc", Some("fdesc"), dest, opts)
     }
 
     pub fn mount_nfs(
@@ -79,17 +73,8 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
-        let cmd = "/sbin/mount_nfs";
-        Ok(Some(
-            Command::new(cmd)
-                .args(opts)
-                .arg(src)
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        let src_str = src.to_string_lossy();
+        Self::mount_with("/sbin/mount_nfs", Some(&src_str), dest, opts)
     }
 
     pub fn mount_procfs(
@@ -98,17 +83,7 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
-        let cmd = "/sbin/mount_procfs";
-        Ok(Some(
-            Command::new(cmd)
-                .args(opts)
-                .arg("/proc")
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        Self::mount_with("/sbin/mount_procfs", Some("/proc"), dest, opts)
     }
 
     pub fn mount_tmpfs(
@@ -117,17 +92,7 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
-        let cmd = "/sbin/mount_tmpfs";
-        Ok(Some(
-            Command::new(cmd)
-                .args(opts)
-                .arg("tmpfs")
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        Self::mount_with("/sbin/mount_tmpfs", Some("tmpfs"), dest, opts)
     }
 
     /*

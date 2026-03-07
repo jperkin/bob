@@ -14,9 +14,8 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-use crate::sandbox::Sandbox;
+use crate::sandbox::{self, Sandbox};
 use anyhow::{Context, bail};
-use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
@@ -40,17 +39,11 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
         let cmd = self.config.bindfs();
-        Ok(Some(
-            Command::new(cmd)
-                .args(opts)
-                .arg(src)
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        let src_str = src.to_string_lossy();
+        let mut args: Vec<&str> = opts.to_vec();
+        args.push(&src_str);
+        sandbox::run_mount_cmd(cmd, &args, dest)
     }
 
     pub fn mount_devfs(
@@ -59,17 +52,9 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
-        let cmd = "/sbin/mount_devfs";
-        Ok(Some(
-            Command::new(cmd)
-                .arg("devfs")
-                .args(opts)
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        let mut args = vec!["devfs"];
+        args.extend(opts.iter().copied());
+        sandbox::run_mount_cmd("/sbin/mount_devfs", &args, dest)
     }
 
     pub fn mount_fdfs(
@@ -87,17 +72,10 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
-        let cmd = "/sbin/mount_nfs";
-        Ok(Some(
-            Command::new(cmd)
-                .args(opts)
-                .arg(src)
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        let src_str = src.to_string_lossy();
+        let mut args: Vec<&str> = opts.to_vec();
+        args.push(&src_str);
+        sandbox::run_mount_cmd("/sbin/mount_nfs", &args, dest)
     }
 
     pub fn mount_procfs(
@@ -115,16 +93,7 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
-        let cmd = "/sbin/mount_tmpfs";
-        Ok(Some(
-            Command::new(cmd)
-                .args(opts)
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        sandbox::run_mount_cmd("/sbin/mount_tmpfs", opts, dest)
     }
 
     /*

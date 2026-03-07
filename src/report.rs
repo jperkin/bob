@@ -79,6 +79,22 @@ struct FailedPackageInfo<'a> {
     failed_log: Option<String>,
 }
 
+/// Format a build duration as a human-readable string.
+fn format_duration(secs: u64) -> String {
+    if secs >= 60 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}s", secs)
+    }
+}
+
+/// Format a pkgpath for display, returning empty string if absent.
+fn format_pkgpath(pkgpath: Option<&PkgPath>) -> String {
+    pkgpath
+        .map(|p| p.as_path().display().to_string())
+        .unwrap_or_default()
+}
+
 /// Read the failed phase from the .stage file in the log directory.
 fn read_failed_phase(log_dir: &Path) -> Option<String> {
     let stage_file = log_dir.join(".stage");
@@ -538,12 +554,7 @@ fn write_failed_section(
 
         for info in failed_info {
             let pkg_name = info.result.pkgname.pkgname();
-            let pkgpath = info
-                .result
-                .pkgpath
-                .as_ref()
-                .map(|p| p.as_path().display().to_string())
-                .unwrap_or_default();
+            let pkgpath = format_pkgpath(info.result.pkgpath.as_ref());
 
             let breaks_class = if info.breaks_count > 0 {
                 "breaks-count"
@@ -552,11 +563,7 @@ fn write_failed_section(
             };
 
             let dur_secs = info.result.build_stats.duration.as_secs();
-            let duration = if dur_secs >= 60 {
-                format!("{}m {}s", dur_secs / 60, dur_secs % 60)
-            } else {
-                format!("{}s", dur_secs)
-            };
+            let duration = format_duration(dur_secs);
 
             // Package name links to the failed log if available
             let pkg_link = match &info.failed_log {
@@ -625,11 +632,7 @@ fn write_skipped_section(file: &mut fs::File, skipped: &[&BuildResult]) -> Resul
                 state if state.is_skip() => (state.status(), state.to_string()),
                 _ => continue,
             };
-            let pkgpath = result
-                .pkgpath
-                .as_ref()
-                .map(|p| p.as_path().display().to_string())
-                .unwrap_or_default();
+            let pkgpath = format_pkgpath(result.pkgpath.as_ref());
             writeln!(
                 file,
                 "    <tr><td>{}</td><td>{}</td><td>{}</td><td class=\"reason\">{}</td></tr>",
@@ -678,17 +681,9 @@ fn write_success_section(
 
         for result in succeeded {
             let pkg_name = result.pkgname.pkgname();
-            let pkgpath = result
-                .pkgpath
-                .as_ref()
-                .map(|p| p.as_path().display().to_string())
-                .unwrap_or_default();
+            let pkgpath = format_pkgpath(result.pkgpath.as_ref());
             let dur_secs = result.build_stats.duration.as_secs();
-            let duration = if dur_secs >= 60 {
-                format!("{}m {}s", dur_secs / 60, dur_secs % 60)
-            } else {
-                format!("{}s", dur_secs)
-            };
+            let duration = format_duration(dur_secs);
 
             let log_dir = logdir.join(pkg_name);
             let phase_links = generate_phase_links(pkg_name, &log_dir, None);

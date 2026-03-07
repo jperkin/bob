@@ -14,37 +14,47 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-use crate::sandbox::Sandbox;
+use crate::sandbox::{self, Sandbox};
 use anyhow::Context;
-use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use tracing::{debug, info, warn};
 
 impl Sandbox {
+    /// Mount using `/bin/mount -t <fstype> [opts] <source> <dest>`.
+    fn mount_fs(
+        fstype: &str,
+        source: &str,
+        dest: &Path,
+        opts: &[&str],
+    ) -> anyhow::Result<Option<ExitStatus>> {
+        let mut args = vec!["-t", fstype];
+        args.extend(opts.iter().copied());
+        args.push(source);
+        sandbox::run_mount_cmd("/bin/mount", &args, dest)
+    }
+
+    /// Mount using `/bin/mount -o <opts_str> <source> <dest>`.
+    fn mount_bind(
+        source: &str,
+        dest: &Path,
+        opts: &[&str],
+    ) -> anyhow::Result<Option<ExitStatus>> {
+        let mut mount_opts = vec!["bind"];
+        mount_opts.extend(opts.iter().copied());
+        let opts_str = mount_opts.join(",");
+        sandbox::run_mount_cmd("/bin/mount", &["-o", &opts_str, source], dest)
+    }
+
     pub fn mount_bindfs(
         &self,
         src: &Path,
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
-        let cmd = "/bin/mount";
-        // Build mount options: start with "bind", add any user-specified opts
-        let mut mount_opts = vec!["bind"];
-        mount_opts.extend(opts.iter().copied());
-        let opts_str = mount_opts.join(",");
-        Ok(Some(
-            Command::new(cmd)
-                .arg("-o")
-                .arg(&opts_str)
-                .arg(src)
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        let src_str = src.to_string_lossy();
+        Self::mount_bind(&src_str, dest, opts)
     }
 
     pub fn mount_devfs(
@@ -53,19 +63,7 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
-        let cmd = "/bin/mount";
-        Ok(Some(
-            Command::new(cmd)
-                .arg("-t")
-                .arg("devtmpfs")
-                .args(opts)
-                .arg("devtmpfs")
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        Self::mount_fs("devtmpfs", "devtmpfs", dest, opts)
     }
 
     pub fn mount_fdfs(
@@ -74,22 +72,7 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
-        let cmd = "/bin/mount";
-        // Build mount options: start with "bind", add any user-specified opts
-        let mut mount_opts = vec!["bind"];
-        mount_opts.extend(opts.iter().copied());
-        let opts_str = mount_opts.join(",");
-        Ok(Some(
-            Command::new(cmd)
-                .arg("-o")
-                .arg(&opts_str)
-                .arg("/dev/fd")
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        Self::mount_bind("/dev/fd", dest, opts)
     }
 
     pub fn mount_nfs(
@@ -98,19 +81,8 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
-        let cmd = "/bin/mount";
-        Ok(Some(
-            Command::new(cmd)
-                .arg("-t")
-                .arg("nfs")
-                .args(opts)
-                .arg(src)
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        let src_str = src.to_string_lossy();
+        Self::mount_fs("nfs", &src_str, dest, opts)
     }
 
     pub fn mount_procfs(
@@ -119,19 +91,7 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
-        let cmd = "/bin/mount";
-        Ok(Some(
-            Command::new(cmd)
-                .arg("-t")
-                .arg("proc")
-                .args(opts)
-                .arg("proc")
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        Self::mount_fs("proc", "proc", dest, opts)
     }
 
     pub fn mount_tmpfs(
@@ -140,28 +100,23 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
+        sandbox::prepare_mount_dest(dest)?;
         let cmd = "/bin/mount";
         let mut args = vec!["-t", "tmpfs"];
-        // Convert opts to mount -o style if they look like size options
         let mut mount_opts: Vec<String> = vec![];
         for opt in opts {
             if opt.starts_with("size=") || opt.starts_with("mode=") {
                 mount_opts.push(opt.to_string());
             }
         }
+        let opts_str = mount_opts.join(",");
         if !mount_opts.is_empty() {
             args.push("-o");
+            args.push(&opts_str);
         }
-        let opts_str = mount_opts.join(",");
         Ok(Some(
             Command::new(cmd)
                 .args(&args)
-                .arg(if !mount_opts.is_empty() {
-                    &opts_str
-                } else {
-                    ""
-                })
                 .arg("tmpfs")
                 .arg(dest)
                 .process_group(0)

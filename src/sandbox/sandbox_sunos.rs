@@ -14,34 +14,35 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-use crate::sandbox::Sandbox;
+use crate::sandbox::{self, Sandbox};
 use anyhow::{Context, bail};
-use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use tracing::{debug, info, warn};
 
 impl Sandbox {
+    /// Mount using `/sbin/mount -F <fstype> [opts] <source> <dest>`.
+    fn mount_fs(
+        fstype: &str,
+        source: &str,
+        dest: &Path,
+        opts: &[&str],
+    ) -> anyhow::Result<Option<ExitStatus>> {
+        let mut args = vec!["-F", fstype];
+        args.extend(opts.iter().copied());
+        args.push(source);
+        sandbox::run_mount_cmd("/sbin/mount", &args, dest)
+    }
+
     pub fn mount_bindfs(
         &self,
         src: &Path,
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
-        let cmd = "/sbin/mount";
-        Ok(Some(
-            Command::new(cmd)
-                .arg("-F")
-                .arg("lofs")
-                .args(opts)
-                .arg(src)
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        let src_str = src.to_string_lossy();
+        Self::mount_fs("lofs", &src_str, dest, opts)
     }
 
     pub fn mount_devfs(
@@ -59,19 +60,7 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
-        let cmd = "/sbin/mount";
-        Ok(Some(
-            Command::new(cmd)
-                .arg("-F")
-                .arg("fd")
-                .args(opts)
-                .arg("fd")
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        Self::mount_fs("fd", "fd", dest, opts)
     }
 
     pub fn mount_nfs(
@@ -80,19 +69,8 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
-        let cmd = "/sbin/mount";
-        Ok(Some(
-            Command::new(cmd)
-                .arg("-F")
-                .arg("nfs")
-                .args(opts)
-                .arg(src)
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        let src_str = src.to_string_lossy();
+        Self::mount_fs("nfs", &src_str, dest, opts)
     }
 
     pub fn mount_procfs(
@@ -101,19 +79,7 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
-        let cmd = "/sbin/mount";
-        Ok(Some(
-            Command::new(cmd)
-                .arg("-F")
-                .arg("proc")
-                .args(opts)
-                .arg("/proc")
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        Self::mount_fs("proc", "/proc", dest, opts)
     }
 
     pub fn mount_tmpfs(
@@ -122,19 +88,7 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
-        let cmd = "/sbin/mount";
-        Ok(Some(
-            Command::new(cmd)
-                .arg("-F")
-                .arg("tmpfs")
-                .args(opts)
-                .arg("swap")
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        Self::mount_fs("tmpfs", "swap", dest, opts)
     }
 
     /*
