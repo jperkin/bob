@@ -28,12 +28,15 @@ use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
 use tracing::error;
 
+use indexmap::IndexMap;
+use pkgsrc::PkgName;
+
 use bob::Interrupted;
 use bob::build::{self, Build};
 use bob::config::Config;
 use bob::db::Database;
 use bob::sandbox::SandboxScope;
-use bob::scan::{ScanResult, ScanSummary};
+use bob::scan::{ResolvedPackage, ScanResult, ScanSummary};
 
 /**
  * Check in advance whether packages are up-to-date, or a reason why they
@@ -235,10 +238,51 @@ pub fn check_up_to_date(
 }
 
 /**
+ * Execute a build from resolved packages.
+ *
+ * This is the single entry point for running builds.  Both the `build`
+ * and `rebuild` commands use this function.
+ */
+pub fn execute_build(
+    config: &Config,
+    db: &Database,
+    state: &bob::RunState,
+    buildable: IndexMap<PkgName, ResolvedPackage>,
+    scope: SandboxScope,
+) -> Result<build::BuildSummary> {
+    let pkgsrc_env = db
+        .load_pkgsrc_env()
+        .context("PkgsrcEnv not cached - try 'bob clean' first")?;
+
+    let mut build = Build::new(config, pkgsrc_env, scope, buildable);
+    build.load_cached_from_db(db)?;
+
+    tracing::debug!("Calling build.start()");
+    let build_start_time = std::time::Instant::now();
+    let summary = build.start(state, db)?;
+    tracing::debug!(
+        elapsed_ms = build_start_time.elapsed().as_millis(),
+        "build.start() returned"
+    );
+
+    /*
+     * Check if we were interrupted.  All builds that completed before
+     * the interrupt have already been saved to the database inside
+     * build.start().  When stopping, in-progress builds ran to
+     * completion; during shutdown they were killed and discarded.
+     */
+    if state.interrupted() {
+        return Err(Interrupted.into());
+    }
+
+    Ok(summary)
+}
+
+/**
  * Run a build from scan results, including skipped and scan-failed packages
  * in the returned summary.
  *
- * This wraps the core build engine with the additional context from scan
+ * This wraps [`execute_build`] with the additional context from scan
  * resolution: packages that were skipped (PKG_SKIP_REASON, PKG_FAIL_REASON,
  * unresolved deps) and packages that failed to scan are included in the
  * summary for complete reporting.
@@ -254,35 +298,12 @@ pub fn run_build_with(
         bail!("No packages to build");
     }
 
-    let buildable: indexmap::IndexMap<_, _> = scan_result
+    let buildable: IndexMap<_, _> = scan_result
         .buildable()
         .map(|p| (p.pkgname().clone(), p.clone()))
         .collect();
 
-    let pkgsrc_env = db
-        .load_pkgsrc_env()
-        .context("PkgsrcEnv not cached - try 'bob clean' first")?;
-
-    let mut build = Build::new(config, pkgsrc_env, scope, buildable);
-    build.load_cached_from_db(db)?;
-
-    tracing::debug!("Calling build.start()");
-    let build_start_time = std::time::Instant::now();
-    let mut summary = build.start(state, db)?;
-    tracing::debug!(
-        elapsed_ms = build_start_time.elapsed().as_millis(),
-        "build.start() returned"
-    );
-
-    /*
-     * Check if we were interrupted.  All builds that completed before
-     * the interrupt have already been saved to the database inside
-     * build.start().  When stopping, in-progress builds ran to
-     * completion; during shutdown they were killed and discarded.
-     */
-    if state.interrupted() {
-        return Err(Interrupted.into());
-    }
+    let mut summary = execute_build(config, db, state, buildable, scope)?;
 
     for pkg in scan_result.packages.iter() {
         match pkg {

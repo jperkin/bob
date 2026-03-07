@@ -19,7 +19,7 @@ use bob::Init;
 use bob::Interrupted;
 use bob::PackageStateKind;
 use bob::RunState;
-use bob::build::{self, Build};
+use bob::build;
 use bob::config::Config;
 use bob::db::Database;
 use bob::logging;
@@ -128,46 +128,6 @@ impl BuildRunner {
         }
 
         Ok(())
-    }
-
-    /**
-     * Execute a build from resolved packages and run post-build steps.
-     *
-     * Shared by the build and rebuild commands: loads cached results,
-     * runs the build, and generates pkg_summary on success.
-     */
-    fn run_build(
-        &self,
-        buildable: indexmap::IndexMap<pkgsrc::PkgName, bob::scan::ResolvedPackage>,
-        scope: SandboxScope,
-    ) -> Result<build::BuildSummary> {
-        let pkgsrc_env = self
-            .db
-            .load_pkgsrc_env()
-            .context("PkgsrcEnv not cached - try 'bob clean' first")?;
-
-        let mut build = Build::new(&self.config, pkgsrc_env, scope, buildable);
-        build.load_cached_from_db(&self.db)?;
-
-        tracing::debug!("Calling build.start()");
-        let build_start_time = std::time::Instant::now();
-        let summary = build.start(&self.state, &self.db)?;
-        tracing::debug!(
-            elapsed_ms = build_start_time.elapsed().as_millis(),
-            "build.start() returned"
-        );
-
-        /*
-         * Check if we were interrupted.  All builds that completed before
-         * the interrupt have already been saved to the database inside
-         * build.start().  When stopping, in-progress builds ran to
-         * completion; during shutdown they were killed and discarded.
-         */
-        if self.state.interrupted() {
-            return Err(Interrupted.into());
-        }
-
-        Ok(summary)
     }
 
     /**
@@ -399,6 +359,28 @@ fn format_error(e: &anyhow::Error) -> String {
         .join(": ")
 }
 
+/**
+ * Load cached scan data and resolve dependencies.
+ *
+ * Shared preamble for util commands that need resolved scan results
+ * from the database (print-dep-graph, print-presolve).
+ */
+fn resolve_cached_scan(
+    config: &Config,
+    db: &Database,
+) -> Result<bob::scan::ScanSummary> {
+    let count = db.count_packages()?;
+    if count == 0 {
+        bail!("No cached scan data found. Run 'bob scan' first.");
+    }
+
+    let mut scan = Scan::new(config);
+    scan.init_from_db(db)?;
+
+    let scan_data = db.get_all_scan_data()?;
+    scan.resolve(scan_data)
+}
+
 fn run() -> Result<()> {
     let args = Args::parse();
 
@@ -488,7 +470,13 @@ fn run() -> Result<()> {
             )?;
             let sandbox = Sandbox::new(&runner.config);
             let scope = SandboxScope::new(sandbox, runner.state.clone());
-            let summary = runner.run_build(buildable, scope)?;
+            let summary = cmd::build::execute_build(
+                &runner.config,
+                &runner.db,
+                &runner.state,
+                buildable,
+                scope,
+            )?;
             runner.update_pkg_summary(&prior, &summary);
         }
         Cmd::Report => {
@@ -555,17 +543,7 @@ fn run() -> Result<()> {
         } => {
             let config = Config::load(args.config.as_deref())?;
             let db = Database::open(config.dbdir())?;
-
-            let count = db.count_packages()?;
-            if count == 0 {
-                bail!("No cached scan data found. Run 'bob scan' first.");
-            }
-
-            let mut scan = Scan::new(&config);
-            scan.init_from_db(&db)?;
-
-            let scan_data = db.get_all_scan_data()?;
-            let result = scan.resolve(scan_data)?;
+            let result = resolve_cached_scan(&config, &db)?;
 
             // Build DAG output
             let mut edges: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -605,17 +583,7 @@ fn run() -> Result<()> {
         } => {
             let config = Config::load(args.config.as_deref())?;
             let db = Database::open(config.dbdir())?;
-
-            let count = db.count_packages()?;
-            if count == 0 {
-                bail!("No cached scan data found. Run 'bob scan' first.");
-            }
-
-            let mut scan = Scan::new(&config);
-            scan.init_from_db(&db)?;
-
-            let scan_data = db.get_all_scan_data()?;
-            let result = scan.resolve(scan_data)?;
+            let result = resolve_cached_scan(&config, &db)?;
 
             // Print unresolved dependency errors
             let errors: Vec<_> = result.errors().collect();

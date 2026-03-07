@@ -22,10 +22,9 @@ use regex::Regex;
 use serde_json;
 
 use bob::db::{Database, PackageStatusRow};
-use bob::try_println;
 use bob::{PackageState, PackageStateKind};
 
-use super::OutputFormat;
+use super::{ColumnDef, OutputFormat, render_output, resolve_columns};
 
 fn parse_status(s: &str) -> Result<PackageStateKind, String> {
     s.parse().map_err(|_| format!("unknown status '{}'", s))
@@ -103,7 +102,7 @@ fn print_build_status(
     max_jobs: Option<usize>,
     build_threads: usize,
 ) -> Result<()> {
-    let all_cols = [
+    let all_cols: &[&str] = &[
         "pkgname",
         "pkgpath",
         "status",
@@ -114,40 +113,23 @@ fn print_build_status(
         "cpu",
         "jobs",
     ];
-    let default_cols = ["pkgname", "status", "reason"];
-    let cols: Vec<&str> = if columns.is_some() {
-        columns
-            .map(|c| c.iter().map(|s| s.as_str()).collect())
-            .unwrap_or_default()
-    } else if long {
-        all_cols.to_vec()
-    } else {
-        default_cols.to_vec()
-    };
+    let default_cols: &[&str] = &["pkgname", "status", "reason"];
+    let cols = resolve_columns(columns, long, all_cols, default_cols)?;
 
-    for col in &cols {
-        if !all_cols.contains(col) {
-            bail!(
-                "Unknown column '{}'. Valid columns: {}",
-                col,
-                all_cols.join(", ")
-            );
-        }
+    fn status_col_def<'a>(name: &'a str) -> ColumnDef<'a> {
+        let mut def = ColumnDef::new(name);
+        def.max_width = match name {
+            "pkgname" => Some(40),
+            "pkgpath" => Some(35),
+            "deps" => Some(6),
+            "weight" => Some(8),
+            "cpu" => Some(8),
+            "jobs" => Some(4),
+            _ => None,
+        };
+        def.right_align = matches!(name, "deps" | "weight" | "cpu" | "jobs");
+        def
     }
-
-    let max_width = |col: &str| -> usize {
-        match col {
-            "pkgname" => 40,
-            "pkgpath" => 35,
-            "deps" => 6,
-            "weight" => 8,
-            "cpu" => 8,
-            "jobs" => 4,
-            _ => usize::MAX,
-        }
-    };
-
-    let right_align = |col: &str| -> bool { matches!(col, "deps" | "weight" | "cpu" | "jobs") };
 
     let pkg_patterns: Vec<Regex> = pkg_filters
         .iter()
@@ -302,88 +284,6 @@ fn print_build_status(
         return Ok(());
     }
 
-    match format {
-        OutputFormat::Table => {
-            let widths: Vec<usize> = cols
-                .iter()
-                .enumerate()
-                .map(|(i, &col)| {
-                    let header_len = col.len();
-                    let max_data = rows.iter().map(|r| r[i].len()).max().unwrap_or(0);
-                    header_len.max(max_data).min(max_width(col))
-                })
-                .collect();
-
-            if !no_header {
-                let header: Vec<String> = cols
-                    .iter()
-                    .zip(&widths)
-                    .map(|(&col, &w)| {
-                        if right_align(col) {
-                            format!("{:>width$}", col.to_uppercase(), width = w)
-                        } else {
-                            format!("{:<width$}", col.to_uppercase(), width = w)
-                        }
-                    })
-                    .collect();
-                if !try_println(header.join("  ").trim_end()) {
-                    return Ok(());
-                }
-            }
-
-            for row in &rows {
-                let values: Vec<String> = cols
-                    .iter()
-                    .enumerate()
-                    .zip(&widths)
-                    .map(|((i, &col), &w)| {
-                        if right_align(col) {
-                            format!("{:>width$}", row[i], width = w)
-                        } else {
-                            format!("{:<width$}", row[i], width = w)
-                        }
-                    })
-                    .collect();
-                if !try_println(values.join("  ").trim_end()) {
-                    break;
-                }
-            }
-        }
-        OutputFormat::Csv => {
-            if !no_header && !try_println(&cols.join(",")) {
-                return Ok(());
-            }
-            for row in &rows {
-                let values: Vec<String> = row
-                    .iter()
-                    .map(|v| {
-                        if v.contains(',') || v.contains('"') {
-                            format!("\"{}\"", v.replace('"', "\"\""))
-                        } else {
-                            v.clone()
-                        }
-                    })
-                    .collect();
-                if !try_println(&values.join(",")) {
-                    break;
-                }
-            }
-        }
-        OutputFormat::Json => {
-            let array: Vec<serde_json::Map<String, serde_json::Value>> = rows
-                .iter()
-                .map(|row| {
-                    cols.iter()
-                        .enumerate()
-                        .map(|(i, &col)| {
-                            (col.to_string(), serde_json::Value::String(row[i].clone()))
-                        })
-                        .collect()
-                })
-                .collect();
-            try_println(&serde_json::to_string_pretty(&array)?);
-        }
-    }
-
-    Ok(())
+    let col_defs: Vec<ColumnDef> = cols.iter().map(|&c| status_col_def(c)).collect();
+    render_output(format, &col_defs, &rows, no_header)
 }

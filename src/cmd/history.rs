@@ -17,12 +17,10 @@
 use anyhow::{Result, bail};
 use clap::Args;
 use regex::Regex;
-use serde_json;
 
 use bob::db::Database;
-use bob::try_println;
 
-use super::OutputFormat;
+use super::{ColumnDef, OutputFormat, render_output, resolve_columns};
 
 #[derive(Debug, Args)]
 pub struct HistoryArgs {
@@ -67,26 +65,9 @@ fn print_history(
     package: Option<&str>,
 ) -> Result<()> {
     let all_cols = bob::HistoryKind::all_names();
+    let all_col_refs: Vec<&str> = all_cols.iter().map(|s| s.as_str()).collect();
     let default_cols = bob::HistoryKind::default_names();
-    let cols: Vec<&str> = if columns.is_some() {
-        columns
-            .map(|c| c.iter().map(|s| s.as_str()).collect())
-            .unwrap_or_default()
-    } else if long {
-        all_cols.iter().map(|s| s.as_str()).collect()
-    } else {
-        default_cols
-    };
-
-    for col in &cols {
-        if !all_cols.iter().any(|c| c == col) {
-            bail!(
-                "Unknown column '{}'. Valid columns: {}",
-                col,
-                all_cols.join(", ")
-            );
-        }
-    }
+    let cols = resolve_columns(columns, long, &all_col_refs, &default_cols)?;
 
     let pattern = package
         .map(|p| Regex::new(p).map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", p, e)))
@@ -111,83 +92,11 @@ fn print_history(
         }
     };
 
-    match format {
-        OutputFormat::Table => {
-            let rows: Vec<Vec<String>> = records
-                .iter()
-                .map(|rec| cols.iter().map(|&col| format_val(rec, col)).collect())
-                .collect();
+    let rows: Vec<Vec<String>> = records
+        .iter()
+        .map(|rec| cols.iter().map(|&col| format_val(rec, col)).collect())
+        .collect();
 
-            let widths: Vec<usize> = cols
-                .iter()
-                .enumerate()
-                .map(|(i, col)| {
-                    let header_len = col.len();
-                    let max_data = rows.iter().map(|r| r[i].len()).max().unwrap_or(0);
-                    header_len.max(max_data)
-                })
-                .collect();
-
-            if !no_header {
-                let header: Vec<String> = cols
-                    .iter()
-                    .zip(&widths)
-                    .map(|(&col, &w)| format!("{:<width$}", col.to_uppercase(), width = w))
-                    .collect();
-                if !try_println(header.join("  ").trim_end()) {
-                    return Ok(());
-                }
-            }
-
-            for row in &rows {
-                let values: Vec<String> = row
-                    .iter()
-                    .zip(&widths)
-                    .map(|(val, &w)| format!("{:<width$}", val, width = w))
-                    .collect();
-                if !try_println(values.join("  ").trim_end()) {
-                    break;
-                }
-            }
-        }
-        OutputFormat::Csv => {
-            if !no_header && !try_println(&cols.join(",")) {
-                return Ok(());
-            }
-            for rec in &records {
-                let values: Vec<String> = cols
-                    .iter()
-                    .map(|&col| {
-                        let v = format_val(rec, col);
-                        if v.contains(',') || v.contains('"') {
-                            format!("\"{}\"", v.replace('"', "\"\""))
-                        } else {
-                            v
-                        }
-                    })
-                    .collect();
-                if !try_println(&values.join(",")) {
-                    break;
-                }
-            }
-        }
-        OutputFormat::Json => {
-            let array: Vec<serde_json::Map<String, serde_json::Value>> = records
-                .iter()
-                .map(|rec| {
-                    cols.iter()
-                        .map(|&col| {
-                            (
-                                col.to_string(),
-                                serde_json::Value::String(format_val(rec, col)),
-                            )
-                        })
-                        .collect()
-                })
-                .collect();
-            try_println(&serde_json::to_string_pretty(&array)?);
-        }
-    }
-
-    Ok(())
+    let col_defs: Vec<ColumnDef> = cols.iter().map(|&c| ColumnDef::new(c)).collect();
+    render_output(format, &col_defs, &rows, no_header)
 }

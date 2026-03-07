@@ -233,57 +233,7 @@ impl History {
      * [`Stage`] per-stage duration columns.
      */
     pub fn format_col(&self, name: &str) -> String {
-        let fmt_dur = |d: Duration| format_duration(d.as_millis() as u64);
-        let dash = || "-".to_string();
-
-        if let Some(stage_name) = name.strip_prefix(CPU_PREFIX) {
-            if let Some(stage) = Stage::VARIANTS.iter().find(|s| s.into_str() == stage_name) {
-                return self
-                    .stage_cpu_times
-                    .iter()
-                    .find(|(st, _)| st == stage)
-                    .map(|(_, d)| fmt_dur(*d))
-                    .unwrap_or_else(dash);
-            }
-        }
-
-        if let Some(stage) = Stage::VARIANTS.iter().find(|s| s.into_str() == name) {
-            return self
-                .stage_durations
-                .iter()
-                .find(|(st, _)| st == stage)
-                .map(|(_, d)| fmt_dur(*d))
-                .unwrap_or_else(dash);
-        }
-
-        let col = HistoryKind::VARIANTS
-            .iter()
-            .find(|c| <&str>::from(*c) == name)
-            .expect("column already validated");
-        match col {
-            HistoryKind::Timestamp => format_timestamp(self.timestamp),
-            HistoryKind::Pkgpath => self.pkgpath.clone(),
-            HistoryKind::Pkgname => self.pkgname.clone(),
-            HistoryKind::Outcome => self.outcome.status().to_string(),
-            HistoryKind::Stage => {
-                if self.outcome == PackageState::Success {
-                    dash()
-                } else {
-                    self.stage
-                        .map(|s| s.into_str().to_string())
-                        .unwrap_or_else(dash)
-                }
-            }
-            HistoryKind::MakeJobs => {
-                if self.make_jobs == 0 {
-                    dash()
-                } else {
-                    self.make_jobs.to_string()
-                }
-            }
-            HistoryKind::Duration => fmt_dur(self.duration),
-            HistoryKind::DiskUsage => self.disk_usage.map(format_size).unwrap_or_else(dash),
-        }
+        self.format_col_impl(name, false)
     }
 
     /**
@@ -294,7 +244,17 @@ impl History {
      * to [`format_col`](Self::format_col).
      */
     pub fn format_col_raw(&self, name: &str) -> String {
-        let fmt_dur = |d: Duration| d.as_millis().to_string();
+        self.format_col_impl(name, true)
+    }
+
+    fn format_col_impl(&self, name: &str, raw: bool) -> String {
+        let fmt_dur = |d: Duration| {
+            if raw {
+                d.as_millis().to_string()
+            } else {
+                format_duration(d.as_millis() as u64)
+            }
+        };
         let dash = || "-".to_string();
 
         if let Some(stage_name) = name.strip_prefix(CPU_PREFIX) {
@@ -322,7 +282,13 @@ impl History {
             .find(|c| <&str>::from(*c) == name)
             .expect("column already validated");
         match col {
-            HistoryKind::Timestamp => self.timestamp.to_string(),
+            HistoryKind::Timestamp => {
+                if raw {
+                    self.timestamp.to_string()
+                } else {
+                    format_timestamp(self.timestamp)
+                }
+            }
             HistoryKind::Pkgpath => self.pkgpath.clone(),
             HistoryKind::Pkgname => self.pkgname.clone(),
             HistoryKind::Outcome => self.outcome.status().to_string(),
@@ -343,7 +309,13 @@ impl History {
                 }
             }
             HistoryKind::Duration => fmt_dur(self.duration),
-            HistoryKind::DiskUsage => self.disk_usage.map(|b| b.to_string()).unwrap_or_else(dash),
+            HistoryKind::DiskUsage => {
+                if raw {
+                    self.disk_usage.map(|b| b.to_string()).unwrap_or_else(dash)
+                } else {
+                    self.disk_usage.map(format_size).unwrap_or_else(dash)
+                }
+            }
         }
     }
 }
