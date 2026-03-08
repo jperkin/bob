@@ -1606,6 +1606,7 @@ impl Scan {
         let start = std::time::Instant::now();
         let scan_data = db.get_all_scan_data()?;
         let result = self.resolve(scan_data)?;
+        db.store_resolved_selection(&result)?;
         db.store_resolved_deps(&result)?;
         db.store_scan_skipped(&result)?;
         println!(" done ({:.1}s)", start.elapsed().as_secs_f32());

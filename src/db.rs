@@ -88,7 +88,7 @@ fn history_schema() -> String {
 /**
  * Schema version for bob.db - update when schema changes.
  */
-const SCHEMA_VERSION: i32 = 20260305;
+const SCHEMA_VERSION: i32 = 20260307;
 
 /**
  * Schema version for history.db - update when history schema changes.
@@ -340,6 +340,7 @@ impl Database {
                  skip_reason TEXT,
                  fail_reason TEXT,
                  build_reason TEXT,
+                 selected INTEGER NOT NULL DEFAULT 0,
                  is_bootstrap INTEGER DEFAULT 0,
                  pbulk_weight INTEGER DEFAULT 100,
                  scan_data TEXT
@@ -594,14 +595,16 @@ impl Database {
                     json_extract(p.scan_data, '$.MULTI_VERSION'),
                     b.outcome, b.outcome_detail
              FROM packages p
-             LEFT JOIN builds b ON b.package_id = p.id"
+             LEFT JOIN builds b ON b.package_id = p.id
+             WHERE p.selected = 1"
         } else {
             "SELECT p.id, p.pkgname, p.pkgpath, p.skip_reason,
                     p.fail_reason, p.build_reason,
                     NULL,
                     b.outcome, b.outcome_detail
              FROM packages p
-             LEFT JOIN builds b ON b.package_id = p.id"
+             LEFT JOIN builds b ON b.package_id = p.id
+             WHERE p.selected = 1"
         };
         let mut stmt = self.conn.prepare(sql)?;
 
@@ -628,7 +631,8 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight,
                     json_extract(scan_data, '$.MULTI_VERSION')
-             FROM packages WHERE skip_reason IS NULL AND fail_reason IS NULL",
+             FROM packages
+             WHERE selected = 1 AND skip_reason IS NULL AND fail_reason IS NULL",
         )?;
 
         let rows = stmt.query_map([], PackageRow::from_row)?;
@@ -818,6 +822,28 @@ impl Database {
     }
 
     /**
+     * Mark which scanned packages participated in the latest resolution.
+     *
+     * Scan results may cache additional package rows that are not part of the
+     * current resolved package set. Status/scheduling queries should ignore
+     * those rows and only operate on the packages emitted by the most recent
+     * resolve step.
+     */
+    pub fn store_resolved_selection(&self, summary: &crate::scan::ScanSummary) -> Result<()> {
+        let tx = self.transaction()?;
+        self.conn.execute("UPDATE packages SET selected = 0", [])?;
+        let mut stmt = self
+            .conn
+            .prepare("UPDATE packages SET selected = 1 WHERE pkgname = ?1")?;
+        for pkg in &summary.packages {
+            let Some(pkgname) = pkg.pkgname() else { continue };
+            stmt.execute([pkgname.pkgname()])?;
+        }
+        drop(stmt);
+        tx.commit()
+    }
+
+    /**
      * Store resolved dependencies in batch.
      */
     fn store_resolved_dependencies_batch(&self, deps: &[(i64, i64)]) -> Result<()> {
@@ -897,7 +923,7 @@ impl Database {
 
         let mut stmt = self
             .conn
-            .prepare("SELECT id, pkgname, pbulk_weight FROM packages")?;
+            .prepare("SELECT id, pkgname, pbulk_weight FROM packages WHERE selected = 1")?;
         let pkg_rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
@@ -956,7 +982,7 @@ impl Database {
 
         let mut stmt = self
             .conn
-            .prepare("SELECT id, pkgname, pbulk_weight FROM packages")?;
+            .prepare("SELECT id, pkgname, pbulk_weight FROM packages WHERE selected = 1")?;
         let pkg_rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,

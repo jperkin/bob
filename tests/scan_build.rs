@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::process::Command;
 use tempfile::TempDir;
 
 struct PkgDef<'a> {
@@ -149,6 +150,7 @@ impl TestHarness {
             "pkgsrc/test/also-base",
             "pkgsrc/test/top",
             "pkgsrc/test/multi",
+            "pkgsrc/test/dual",
             "pkgsrc/test/skip-me",
             "pkgsrc/test/dep-skip",
             "pkgsrc/test/fail-me",
@@ -200,7 +202,7 @@ show-subdir-var:
     fn write_category_makefile(&self) -> Result<()> {
         let content = "\
 show-subdir-var:
-\t@echo \"base mid also-base top multi skip-me dep-skip fail-me dep-fail bad-dep build-fail dep-bfail fail-checksum fail-at-build fail-install fail-package chain-a chain-b chain-c chain-d\"
+\t@echo \"base mid also-base top multi dual skip-me dep-skip fail-me dep-fail bad-dep build-fail dep-bfail fail-checksum fail-at-build fail-install fail-package chain-a chain-b chain-c chain-d\"
 ";
         fs::write(self.pkgsrc().join("test/Makefile"), content)?;
         Ok(())
@@ -280,6 +282,45 @@ show-vars:
         for pkg in &packages {
             self.write_pkg_makefile(pkg)?;
         }
+        self.write_dual_variant_makefile()?;
+        Ok(())
+    }
+
+    fn write_dual_variant_makefile(&self) -> Result<()> {
+        let content = "\
+PKGNAME=py314-dual-1.0
+
+pbulk-index:
+\t@printf 'PKGNAME=py27-dual-1.0\\nALL_DEPENDS=\\nPKG_SKIP_REASON=\\nPKG_FAIL_REASON=\\nNO_BIN_ON_FTP=\\nRESTRICTED=\\nCATEGORIES=test\\nMAINTAINER=test@example.com\\nUSE_DESTDIR=yes\\nBOOTSTRAP_PKG=\\nUSERGROUP_PHASE=\\nSCAN_DEPENDS=\\nMULTI_VERSION=PYTHON_VERSION_REQD=27\\n'
+\t@printf 'PKGNAME=py314-dual-1.0\\nALL_DEPENDS=\\nPKG_SKIP_REASON=\\nPKG_FAIL_REASON=\\nNO_BIN_ON_FTP=\\nRESTRICTED=\\nCATEGORIES=test\\nMAINTAINER=test@example.com\\nUSE_DESTDIR=yes\\nBOOTSTRAP_PKG=\\nUSERGROUP_PHASE=\\nSCAN_DEPENDS=\\nMULTI_VERSION=PYTHON_VERSION_REQD=314\\n'
+
+clean checksum configure all stage-install create-usergroup:
+\t@true
+
+stage-package-create:
+\t@mkdir -p ${.CURDIR}/pkg
+\t@case \"${PYTHON_VERSION_REQD}\" in \\\n\
+\t27) pkgname=py27-dual-1.0 ;; \\\n\
+\t*) pkgname=py314-dual-1.0 ;; \\\n\
+\tesac; \\\n\
+\td=$$(mktemp -d) && \\\n\
+\tprintf '@name %s\\n' \"$$pkgname\" > \"$$d/+CONTENTS\" && \\\n\
+\tprintf 'Test package\\n' > \"$$d/+COMMENT\" && \\\n\
+\tprintf 'Test package description\\n' > \"$$d/+DESC\" && \\\n\
+\tprintf '0\\n' > \"$$d/+SIZE_PKG\" && \\\n\
+\tprintf 'BUILD_DATE=%s\\nCATEGORIES=test\\nMACHINE_ARCH=x86_64\\nOPSYS=Test\\nOS_VERSION=1.0\\nPKGPATH=test/dual\\nPKGTOOLS_VERSION=20210710\\n' \\\n\
+\t\"$$(date '+%Y-%m-%d %H:%M:%S %z')\" > \"$$d/+BUILD_INFO\" && \\\n\
+\t(cd \"$$d\" && COPYFILE_DISABLE=1 tar czf \"${.CURDIR}/pkg/$$pkgname.tgz\" \\\n\
+\t+CONTENTS +COMMENT +DESC +SIZE_PKG +BUILD_INFO) && \\\n\
+\trm -rf \"$$d\"
+
+show-var:
+\t@case \"${VARNAME}:${PYTHON_VERSION_REQD}\" in \\\n\
+\tSTAGE_PKGFILE:27) echo \"${.CURDIR}/pkg/py27-dual-1.0.tgz\" ;; \\\n\
+\tSTAGE_PKGFILE:*) echo \"${.CURDIR}/pkg/py314-dual-1.0.tgz\" ;; \\\n\
+\tesac
+";
+        fs::write(self.pkgsrc().join("test/dual/Makefile"), content)?;
         Ok(())
     }
 
@@ -458,13 +499,14 @@ fn test_full_tree_scan() -> Result<()> {
 
     let c = result.counts();
 
-    // 15 buildable: base, mid, also-base, top, multi, build-fail, dep-bfail,
+    // 17 buildable: base, mid, also-base, top, multi, py27-dual, py314-dual,
+    //   build-fail, dep-bfail,
     //   fail-checksum, fail-at-build, fail-install, fail-package,
     //   chain-a, chain-b, chain-c, chain-d
     assert_eq!(
         c.buildable,
-        15,
-        "expected 15 buildable, got {} (total packages: {})",
+        17,
+        "expected 17 buildable, got {} (total packages: {})",
         c.buildable,
         result.packages.len()
     );
@@ -490,8 +532,8 @@ fn test_full_tree_scan() -> Result<()> {
     // 1 unresolved: bad-dep (depends on nonexistent)
     assert_eq!(c.states[Unresolved], 1, "expected 1 unresolved");
 
-    // Total should be 20
-    assert_eq!(result.packages.len(), 20, "expected 20 total packages");
+    // Total should be 22
+    assert_eq!(result.packages.len(), 22, "expected 22 total packages");
 
     // Verify specific skip reasons
     for pkg in &result.packages {
@@ -636,10 +678,10 @@ fn test_full_build() -> Result<()> {
 
     let bc = build_result.counts();
 
-    // 5 success: base, mid, also-base, top, multi
+    // 7 success: base, mid, also-base, top, multi, py27-dual, py314-dual
     assert_eq!(
-        bc.states[Success], 5,
-        "expected 5 successful builds, got {}",
+        bc.states[Success], 7,
+        "expected 7 successful builds, got {}",
         bc.states[Success]
     );
 
@@ -742,7 +784,7 @@ fn test_scan_database_caching() -> Result<()> {
 
     // Run first scan
     let result1 = h.run_scan()?;
-    assert_eq!(result1.packages.len(), 20);
+    assert_eq!(result1.packages.len(), 22);
 
     // Create a new scan and check database caching
     let config = h.load_config()?;
@@ -751,8 +793,8 @@ fn test_scan_database_caching() -> Result<()> {
     let (cached_count, _pending) = scan2.init_from_db(&db)?;
 
     assert_eq!(
-        cached_count, 20,
-        "second scan should find 20 cached packages, got {}",
+        cached_count, 21,
+        "second scan should find 21 cached package paths, got {}",
         cached_count
     );
 
@@ -767,7 +809,7 @@ fn test_scan_database_caching() -> Result<()> {
     let result2 = scan2.resolve_with_report(&db, false)?;
     assert_eq!(
         result2.packages.len(),
-        20,
+        22,
         "cached resolve should produce same result"
     );
 
@@ -865,17 +907,17 @@ fn test_scan_resume() -> Result<()> {
     scan2.start(&db, &mut scope2)?;
     let result = scan2.resolve_with_report(&db, false)?;
 
-    // Final result should have at least 20 packages.  The scanner may
+    // Final result should have at least 22 packages.  The scanner may
     // also discover test/nonexistent (from bad-dep's dependency) and
-    // record it as a ScanFail, giving 21.
+    // record it as a ScanFail, giving 23.
     assert!(
-        result.packages.len() >= 20,
-        "resumed scan should produce at least 20 packages, got {}",
+        result.packages.len() >= 22,
+        "resumed scan should produce at least 22 packages, got {}",
         result.packages.len()
     );
 
     let c = result.counts();
-    assert_eq!(c.buildable, 15, "expected 15 buildable after resume");
+    assert_eq!(c.buildable, 17, "expected 17 buildable after resume");
 
     Ok(())
 }
@@ -929,7 +971,7 @@ fn test_cached_build_resume() -> Result<()> {
     let mut build2 = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
 
     let cached = build2.load_cached_from_db(&db)?;
-    assert_eq!(cached, 15, "expected 15 cached results, got {}", cached);
+    assert_eq!(cached, 17, "expected 17 cached results, got {}", cached);
 
     let result2 = build2.start(&state, &db)?;
     assert!(
@@ -1184,7 +1226,7 @@ pbulk-index:
     // Update category Makefile to include scan-fail
     let cat_content = "\
 show-subdir-var:
-\t@echo \"base mid also-base top multi skip-me dep-skip fail-me dep-fail bad-dep build-fail dep-bfail fail-checksum fail-at-build fail-install fail-package chain-a chain-b chain-c chain-d scan-fail\"
+\t@echo \"base mid also-base top multi dual skip-me dep-skip fail-me dep-fail bad-dep build-fail dep-bfail fail-checksum fail-at-build fail-install fail-package chain-a chain-b chain-c chain-d scan-fail\"
 ";
     fs::write(h.pkgsrc().join("test/Makefile"), cat_content)?;
 
@@ -1192,7 +1234,7 @@ show-subdir-var:
     let c = result.counts();
 
     assert_eq!(c.scanfail, 1, "expected 1 scanfail, got {}", c.scanfail);
-    assert_eq!(c.buildable, 15, "buildable count should remain 15");
+    assert_eq!(c.buildable, 17, "buildable count should remain 17");
 
     let scan_fail_found = result.packages.iter().any(|p| {
         matches!(p, bob::ScanResult::ScanFail { .. })
@@ -1542,7 +1584,7 @@ fn test_build_resume_no_new_work() -> Result<()> {
 
     // First full scan + build
     let (_, scan_result, first_build) = run_scan_and_build(&h)?;
-    assert_eq!(first_build.counts().states[Success], 5);
+    assert_eq!(first_build.counts().states[Success], 7);
 
     // Second build with same config - should produce no new results
     let config = h.load_config()?;
@@ -1558,7 +1600,7 @@ fn test_build_resume_no_new_work() -> Result<()> {
     let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
 
     let cached = build.load_cached_from_db(&db)?;
-    assert_eq!(cached, 15, "all 15 buildable should be cached");
+    assert_eq!(cached, 17, "all 17 buildable should be cached");
 
     let result = build.start(&state, &db)?;
     assert!(
@@ -1618,7 +1660,7 @@ pkgsrc = {{
     let build_result = build.start(&state, &db)?;
 
     let bc = build_result.counts();
-    assert_eq!(bc.states[Success], 5, "expected 5 successful builds");
+    assert_eq!(bc.states[Success], 7, "expected 7 successful builds");
     assert_eq!(bc.states[Failed], 6, "expected 6 failed builds");
     assert_eq!(bc.states[IndirectFailed], 4, "expected 4 indirect-failed");
 
@@ -1632,7 +1674,7 @@ fn test_rebuild_after_clear() -> Result<()> {
 
     // First build
     let (db, scan_result, first) = run_scan_and_build(&h)?;
-    assert_eq!(first.counts().states[Success], 5);
+    assert_eq!(first.counts().states[Success], 7);
 
     // Clear all build results
     let cleared = db.clear_builds()?;
@@ -1656,8 +1698,8 @@ fn test_rebuild_after_clear() -> Result<()> {
     let rebuild_result = build.start(&state, &db)?;
     assert_eq!(
         rebuild_result.counts().states[Success],
-        5,
-        "rebuild should succeed for same 5 packages"
+        7,
+        "rebuild should succeed for same 7 packages"
     );
 
     Ok(())
@@ -1746,6 +1788,191 @@ fn test_multi_version_package() -> Result<()> {
     // Verify the package file exists
     let tgz = h.packages_dir().join("All").join("py313-multi-1.0.tgz");
     assert!(tgz.exists(), "py313-multi package should exist");
+
+    Ok(())
+}
+
+/// Verify that a single pkgpath emitting multiple scan records is fully
+/// resolved and that every variant reaches a persisted build outcome.
+#[test]
+fn test_multi_version_multiple_records_build_all_variants() -> Result<()> {
+    let h = TestHarness::new()?;
+    let config = h.load_config()?;
+    let db = h.open_db()?;
+    let state = h.run_state();
+    let sandbox = Sandbox::new(&config);
+    let mut scope = SandboxScope::new(sandbox, state.clone());
+
+    let mut scan = Scan::new(&config);
+    scan.init_from_db(&db)?;
+    scan.start(&db, &mut scope)?;
+    let scan_result = scan.resolve_with_report(&db, false)?;
+
+    let dual_pkgs: Vec<_> = scan_result
+        .buildable()
+        .filter(|p| p.pkgpath.as_path().to_string_lossy() == "test/dual")
+        .map(|p| p.pkgname().pkgname().to_string())
+        .collect();
+    assert_eq!(
+        dual_pkgs,
+        vec!["py27-dual-1.0".to_string(), "py314-dual-1.0".to_string()],
+        "expected both dual variants in resolved buildable set"
+    );
+
+    let scanpkgs = scan_result
+        .buildable()
+        .map(|p| (p.pkgname().clone(), p.clone()))
+        .collect();
+    let pkgsrc_env = h.pkgsrc_env();
+    let build_sandbox = Sandbox::new(&config);
+    let build_scope = SandboxScope::new(build_sandbox, state.clone());
+    let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
+    let build_result = build.start(&state, &db)?;
+
+    for pkgname in ["py27-dual-1.0", "py314-dual-1.0"] {
+        let built = build_result
+            .results
+            .iter()
+            .find(|r| r.pkgname.pkgname() == pkgname);
+        assert!(built.is_some(), "{pkgname} should be in build results");
+        assert!(
+            matches!(built.map(|r| &r.state), Some(PackageState::Success)),
+            "{pkgname} should build successfully"
+        );
+        assert!(
+            h.packages_dir().join("All").join(format!("{pkgname}.tgz")).exists(),
+            "{pkgname} package file should exist"
+        );
+    }
+
+    let all_status = db.get_all_package_status(true)?;
+    let lingering_pending: Vec<_> = all_status
+        .into_iter()
+        .filter(|p| p.pkgpath == "test/dual" && p.build_outcome.is_none() && p.build_reason.is_none())
+        .map(|p| p.pkgname)
+        .collect();
+    assert!(
+        lingering_pending.is_empty(),
+        "dual variants should not remain blank pending: {:?}",
+        lingering_pending
+    );
+
+    Ok(())
+}
+
+/// Verify that a fresh scan against already-built multi-version package files
+/// records them as up-to-date instead of leaving them as blank pending rows.
+#[test]
+fn test_cli_scan_marks_multi_version_variants_up_to_date() -> Result<()> {
+    let h = TestHarness::new()?;
+    run_scan_and_build(&h)?;
+
+    let db_path = h.dbdir().join("bob.db");
+    if db_path.exists() {
+        fs::remove_file(&db_path)?;
+    }
+
+    let bob = env!("CARGO_BIN_EXE_bob");
+    let scan = Command::new(bob)
+        .arg("-c")
+        .arg(h.config_path())
+        .arg("scan")
+        .output()?;
+    assert!(
+        scan.status.success(),
+        "bob scan failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&scan.stdout),
+        String::from_utf8_lossy(&scan.stderr)
+    );
+
+    let status = Command::new(bob)
+        .arg("-c")
+        .arg(h.config_path())
+        .arg("status")
+        .output()?;
+    assert!(
+        status.status.success(),
+        "bob status failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let db = h.open_db()?;
+    for pkgname in ["py27-dual-1.0", "py314-dual-1.0"] {
+        let pkg = db
+            .get_package_by_name(pkgname)?
+            .unwrap_or_else(|| panic!("{pkgname} missing from database"));
+        let result = db
+            .get_build_result(pkg.id)?
+            .unwrap_or_else(|| panic!("{pkgname} missing build result"));
+        assert!(
+            matches!(result.state, PackageState::UpToDate),
+            "{pkgname} should be up-to-date after cli scan, got {:?}",
+            result.state
+        );
+    }
+
+    let status_stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        !status_stdout.contains("py27-dual-1.0"),
+        "py27-dual should not remain visible in status output:\n{status_stdout}"
+    );
+    assert!(
+        !status_stdout.contains("py314-dual-1.0"),
+        "py314-dual should not remain visible in status output:\n{status_stdout}"
+    );
+
+    Ok(())
+}
+
+/// Verify that cached scan rows outside the latest resolved package set do not
+/// leak into status, scheduling, or rebuild queries.
+#[test]
+fn test_unselected_packages_are_hidden_from_status_queries() -> Result<()> {
+    let h = TestHarness::new()?;
+    let (db, _, _) = run_scan_and_build(&h)?;
+
+    let extra: pkgsrc::ScanIndex = "\
+PKGNAME=extra-1.0
+PKG_LOCATION=test/extra
+ALL_DEPENDS=
+PKG_SKIP_REASON=
+PKG_FAIL_REASON=
+NO_BIN_ON_FTP=
+RESTRICTED=
+CATEGORIES=test
+MAINTAINER=test@example.com
+USE_DESTDIR=yes
+BOOTSTRAP_PKG=
+USERGROUP_PHASE=
+SCAN_DEPENDS=
+"
+    .parse()?;
+    db.store_package("test/extra", &extra)?;
+
+    let status_rows = db.get_all_package_status(true)?;
+    assert!(
+        !status_rows.iter().any(|p| p.pkgname == "extra-1.0"),
+        "unselected package should not appear in status rows"
+    );
+
+    let buildable = db.get_buildable_packages()?;
+    assert!(
+        !buildable.iter().any(|p| p.pkgname == "extra-1.0"),
+        "unselected package should not appear in buildable rows"
+    );
+
+    let loaded = db.load_resolved_packages()?;
+    assert!(
+        !loaded.iter().any(|p| p.pkgname().pkgname() == "extra-1.0"),
+        "unselected package should not appear in resolved rebuild set"
+    );
+
+    let graph = db.get_scheduling_graph()?;
+    assert!(
+        !graph.names.iter().any(|name| name == "extra-1.0"),
+        "unselected package should not appear in scheduling graph"
+    );
 
     Ok(())
 }

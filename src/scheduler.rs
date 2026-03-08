@@ -304,7 +304,11 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
             }
         }
         while let Some(badpkg) = to_check.pop() {
-            if broken.contains(&badpkg) {
+            if broken.contains(&badpkg)
+                || self.done.contains(&badpkg)
+                || self.failed.contains(&badpkg)
+                || !self.total_weights.contains_key(&badpkg)
+            {
                 continue;
             }
             if let Some(dependents) = self.reverse_deps.get(&badpkg) {
@@ -318,12 +322,18 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
         let mut indirect: Vec<K> = Vec::with_capacity(broken.len());
         for pkg in broken {
             self.incoming.remove(&pkg);
-            self.ready.remove(&ReadyKey {
-                total_weight: std::cmp::Reverse(self.total_weights[&pkg]),
-                dep_count: std::cmp::Reverse(self.dep_counts[&pkg]),
-                cpu_time: std::cmp::Reverse(self.cpu_times[&pkg]),
-                pkg: pkg.clone(),
-            });
+            if let (Some(&total_weight), Some(&dep_count), Some(&cpu_time)) = (
+                self.total_weights.get(&pkg),
+                self.dep_counts.get(&pkg),
+                self.cpu_times.get(&pkg),
+            ) {
+                self.ready.remove(&ReadyKey {
+                    total_weight: std::cmp::Reverse(total_weight),
+                    dep_count: std::cmp::Reverse(dep_count),
+                    cpu_time: std::cmp::Reverse(cpu_time),
+                    pkg: pkg.clone(),
+                });
+            }
             self.failed.insert(pkg.clone());
             indirect.push(pkg);
         }
@@ -911,6 +921,32 @@ mod tests {
         assert_eq!(sched.poll(), Poll::Ready(Some(pkg("aaa"))));
         assert_eq!(sched.poll(), Poll::Ready(Some(pkg("bbb"))));
         assert_eq!(sched.poll(), Poll::Ready(Some(pkg("ccc"))));
+    }
+
+    #[test]
+    fn mark_failure_ignores_reverse_deps_outside_live_graph() {
+        let mut packages: HashMap<String, PackageNode<String>> = HashMap::new();
+        packages.insert(
+            pkg("dep"),
+            PackageNode {
+                deps: HashSet::new(),
+                pbulk_weight: 100,
+                cpu_time: 0,
+            },
+        );
+
+        let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
+        reverse_deps
+            .entry(pkg("dep"))
+            .or_default()
+            .insert(pkg("cached-dependent"));
+        reverse_deps.entry(pkg("cached-dependent")).or_default();
+
+        let done = [pkg("cached-dependent")].into_iter().collect();
+        let mut sched = Scheduler::new(packages, reverse_deps, done, HashSet::new());
+
+        let indirect = sched.mark_failure(&pkg("dep"));
+        assert!(indirect.is_empty(), "cached dependents should be ignored");
     }
 
     /**
