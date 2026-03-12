@@ -385,17 +385,26 @@ enum UtilCmd {
     ///
     /// Reads a dependency graph file (one "dep -> dependent" edge per line)
     /// and simulates a build with the given number of workers.  Without
-    /// --timings each package takes one time unit; with --timings packages
-    /// take the duration specified in the file.
+    /// --history each package takes one time unit; with --history, build
+    /// durations are estimated from historical data and MAKE_JOBS are
+    /// allocated by historical CPU time.
+    ///
+    /// Generate a history file with: bob history --raw --format csv
     SimulateBuild {
         /// Dependency graph file (use "-" for stdin)
         file: PathBuf,
         /// Number of workers
         #[arg(short, long, default_value = "4")]
         workers: usize,
-        /// Per-package timings file ("pkgname duration" per line)
-        #[arg(short, long)]
-        timings: Option<PathBuf>,
+        /// Total MAKE_JOBS budget
+        #[arg(short = 'j', long)]
+        jobs: Option<usize>,
+        /// Build history CSV (generate with: bob history --raw --format csv)
+        #[arg(long)]
+        history: Option<PathBuf>,
+        /// Force uniform MAKE_JOBS allocation (baseline comparison)
+        #[arg(long)]
+        uniform: bool,
     },
 }
 
@@ -552,7 +561,7 @@ fn run() -> Result<()> {
         Cmd::Status { args: status_args } => {
             let config = Config::load(args.config.as_deref())?;
             let db = Database::open(config.dbdir())?;
-            cmd::status::run(&db, status_args, config.jobs(), config.build_threads())?;
+            cmd::status::run(&db, &config, status_args)?;
         }
         Cmd::History { args: history_args } => {
             let config = Config::load(args.config.as_deref())?;
@@ -624,10 +633,12 @@ fn run() -> Result<()> {
                 UtilCmd::SimulateBuild {
                     file,
                     workers,
-                    timings,
+                    jobs,
+                    history,
+                    uniform,
                 },
         } => {
-            cmd::simulate::run(&file, workers, timings.as_deref())?;
+            cmd::simulate::run(&file, workers, jobs, history.as_deref(), uniform)?;
         }
         Cmd::Util {
             cmd: UtilCmd::PrintPresolve { output },

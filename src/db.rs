@@ -71,12 +71,13 @@ fn history_schema() -> String {
         .map(|v| {
             let name: &str = v.into();
             let sql = match v {
-                HistoryKind::Pkgpath | HistoryKind::Pkgname => "TEXT NOT NULL",
+                HistoryKind::Pkgpath | HistoryKind::Pkgname | HistoryKind::Pkgbase => {
+                    "TEXT NOT NULL"
+                }
                 HistoryKind::Outcome => "INTEGER NOT NULL REFERENCES outcome_types(id)",
                 HistoryKind::Stage => "INTEGER REFERENCES stage_types(id)",
-                HistoryKind::MakeJobs | HistoryKind::Duration | HistoryKind::Timestamp => {
-                    "INTEGER NOT NULL"
-                }
+                HistoryKind::Duration | HistoryKind::Timestamp => "INTEGER NOT NULL",
+                HistoryKind::MakeJobs => "INTEGER",
                 HistoryKind::DiskUsage => "INTEGER",
             };
             format!("{name} {sql}")
@@ -88,35 +89,12 @@ fn history_schema() -> String {
 /**
  * Schema version for bob.db - update when schema changes.
  */
-const SCHEMA_VERSION: i32 = 20260307;
+const SCHEMA_VERSION: i32 = 20260317;
 
 /**
  * Schema version for history.db - update when history schema changes.
  */
-const HISTORY_SCHEMA_VERSION: i32 = 20260303;
-
-/**
- * Dependency graph and per-package scheduling data.
- *
- * Returned by [`Database::get_scheduling_data`] for computing
- * scheduling weights and transitive dependent counts.
- */
-pub struct SchedulingData {
-    pub packages: HashMap<String, crate::scheduler::PackageNode<String>>,
-    pub reverse_deps: HashMap<String, HashSet<String>>,
-}
-
-/**
- * Integer-indexed dependency graph for fast weight computation.
- *
- * Returned by [`Database::get_scheduling_graph`].  Package names
- * are stored once in `names` and all graph edges use dense indices.
- */
-pub struct SchedulingGraph {
-    pub names: Vec<String>,
-    pub weights: Vec<usize>,
-    pub rdeps: Vec<Vec<usize>>,
-}
+const HISTORY_SCHEMA_VERSION: i32 = 20260319;
 
 /**
  * Lightweight package row without full scan data.
@@ -253,6 +231,11 @@ impl Database {
         &self.dbdir
     }
 
+    /** Borrow the underlying database connection. */
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
     /**
      * Begin a transaction, returning an RAII guard that rolls back on
      * drop unless explicitly committed.
@@ -343,6 +326,7 @@ impl Database {
                  selected INTEGER NOT NULL DEFAULT 0,
                  is_bootstrap INTEGER DEFAULT 0,
                  pbulk_weight INTEGER DEFAULT 100,
+                 make_jobs_safe INTEGER NOT NULL DEFAULT 1,
                  scan_data TEXT
              );
 
@@ -417,6 +401,11 @@ impl Database {
             .as_ref()
             .and_then(|s| s.parse().ok())
             .unwrap_or(100);
+        let make_jobs_safe = index
+            .make_jobs_safe
+            .as_ref()
+            .map(|v| !v.eq_ignore_ascii_case("no"))
+            .unwrap_or(true);
 
         let scan_data = serde_json::to_string(index)?;
 
@@ -424,8 +413,8 @@ impl Database {
             let mut stmt = self.conn.prepare_cached(
                 "INSERT OR REPLACE INTO packages
                  (pkgname, pkgpath, skip_reason, fail_reason,
-                  is_bootstrap, pbulk_weight, scan_data)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                  is_bootstrap, pbulk_weight, make_jobs_safe, scan_data)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
             stmt.execute(params![
                 pkgname,
@@ -434,6 +423,7 @@ impl Database {
                 fail_reason,
                 is_bootstrap,
                 pbulk_weight,
+                make_jobs_safe,
                 scan_data
             ])?;
         }
@@ -836,7 +826,9 @@ impl Database {
             .conn
             .prepare("UPDATE packages SET selected = 1 WHERE pkgname = ?1")?;
         for pkg in &summary.packages {
-            let Some(pkgname) = pkg.pkgname() else { continue };
+            let Some(pkgname) = pkg.pkgname() else {
+                continue;
+            };
             stmt.execute([pkgname.pkgname()])?;
         }
         drop(stmt);
@@ -905,121 +897,6 @@ impl Database {
             deps.entry(pkg).or_default().push(dep);
         }
         Ok(deps)
-    }
-
-    /**
-     * Get dependency graph and per-package scheduling data.
-     *
-     * Returns [`SchedulingData`] suitable for passing to the
-     * scheduler's [`scheduling_weights`](crate::scheduling_weights)
-     * function.
-     */
-    pub fn get_scheduling_data(&self) -> Result<SchedulingData> {
-        use crate::scheduler::PackageNode;
-
-        let mut packages: HashMap<String, PackageNode<String>> = HashMap::new();
-        let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut id_to_name: HashMap<i64, String> = HashMap::new();
-
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, pkgname, pbulk_weight FROM packages WHERE selected = 1")?;
-        let pkg_rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i32>(2)?,
-            ))
-        })?;
-        for row in pkg_rows {
-            let (id, pkgname, pw) = row?;
-            id_to_name.insert(id, pkgname.clone());
-            packages.insert(
-                pkgname.clone(),
-                PackageNode {
-                    deps: HashSet::new(),
-                    pbulk_weight: pw as usize,
-                    cpu_time: 0,
-                },
-            );
-            reverse_deps.entry(pkgname).or_default();
-        }
-
-        let mut stmt = self
-            .conn
-            .prepare("SELECT package_id, depends_on_id FROM resolved_depends")?;
-        let dep_rows =
-            stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
-        for row in dep_rows {
-            let (pkg_id, dep_id) = row?;
-            if let (Some(pkg), Some(dep)) = (id_to_name.get(&pkg_id), id_to_name.get(&dep_id)) {
-                if let Some(node) = packages.get_mut(pkg) {
-                    node.deps.insert(dep.clone());
-                }
-                reverse_deps
-                    .entry(dep.clone())
-                    .or_default()
-                    .insert(pkg.clone());
-            }
-        }
-
-        Ok(SchedulingData {
-            packages,
-            reverse_deps,
-        })
-    }
-
-    /**
-     * Load the dependency graph as integer-indexed arrays.
-     *
-     * Returns a [`SchedulingGraph`] with dense indices, avoiding all
-     * intermediate string allocation for edges.
-     */
-    pub fn get_scheduling_graph(&self) -> Result<SchedulingGraph> {
-        let mut names: Vec<String> = Vec::new();
-        let mut weights: Vec<usize> = Vec::new();
-        let mut id_to_idx: HashMap<i64, usize> = HashMap::new();
-
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, pkgname, pbulk_weight FROM packages WHERE selected = 1")?;
-        let pkg_rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i32>(2)?,
-            ))
-        })?;
-        for row in pkg_rows {
-            let (id, pkgname, pw) = row?;
-            let idx = names.len();
-            id_to_idx.insert(id, idx);
-            names.push(pkgname);
-            weights.push(pw as usize);
-        }
-
-        let n = names.len();
-        let mut rdeps: Vec<Vec<usize>> = vec![Vec::new(); n];
-
-        let mut stmt = self
-            .conn
-            .prepare("SELECT package_id, depends_on_id FROM resolved_depends")?;
-        let dep_rows =
-            stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
-        for row in dep_rows {
-            let (pkg_id, dep_id) = row?;
-            if let (Some(&pkg_idx), Some(&dep_idx)) =
-                (id_to_idx.get(&pkg_id), id_to_idx.get(&dep_id))
-            {
-                rdeps[dep_idx].push(pkg_idx);
-            }
-        }
-
-        Ok(SchedulingGraph {
-            names,
-            weights,
-            rdeps,
-        })
     }
 
     /**
@@ -1752,7 +1629,7 @@ impl Database {
     /**
      * Get the history database connection, opening it on first use.
      */
-    fn history_conn(&self) -> Result<&Connection> {
+    pub(crate) fn history_conn(&self) -> Result<&Connection> {
         if let Some(conn) = self.history_conn.get() {
             return Ok(conn);
         }
@@ -1768,52 +1645,7 @@ impl Database {
      */
     pub fn record_history(&self, rec: &crate::History) -> Result<()> {
         let conn = self.history_conn()?;
-        let cols: Vec<&str> = HistoryKind::VARIANTS.iter().map(<&str>::from).collect();
-        let placeholders: String = (1..=cols.len())
-            .map(|i| format!("?{}", i))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "INSERT INTO build_history ({}) VALUES ({})",
-            cols.join(", "),
-            placeholders,
-        );
-        let dur_ms = |d: Duration| d.as_millis() as i64;
-        conn.execute(
-            &sql,
-            params![
-                rec.timestamp,
-                rec.pkgpath,
-                rec.pkgname,
-                rec.outcome.db_id(),
-                rec.stage.map(|s| s as i32),
-                rec.make_jobs as i64,
-                dur_ms(rec.duration),
-                rec.disk_usage.map(|s| s as i64),
-            ],
-        )?;
-        let history_id = conn.last_insert_rowid();
-        if !rec.stage_durations.is_empty() {
-            let mut stmt = conn.prepare_cached(
-                "INSERT INTO wall_times \
-                     (history_id, stage, duration) \
-                 VALUES (?1, ?2, ?3)",
-            )?;
-            for &(stage, duration) in &rec.stage_durations {
-                stmt.execute(params![history_id, stage as i32, dur_ms(duration)])?;
-            }
-        }
-        if !rec.stage_cpu_times.is_empty() {
-            let mut stmt = conn.prepare_cached(
-                "INSERT INTO cpu_times \
-                     (history_id, stage, duration) \
-                 VALUES (?1, ?2, ?3)",
-            )?;
-            for &(stage, duration) in &rec.stage_cpu_times {
-                stmt.execute(params![history_id, stage as i32, dur_ms(duration)])?;
-            }
-        }
-        Ok(())
+        record_history_to(conn, rec)
     }
 
     /**
@@ -1834,11 +1666,12 @@ impl Database {
                 row.get::<_, i64>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
-                row.get::<_, i32>(4)?,
-                row.get::<_, Option<i32>>(5)?,
-                row.get::<_, i64>(6)? as usize,
-                row.get::<_, i64>(7)?,
-                row.get::<_, Option<i64>>(8)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i32>(5)?,
+                row.get::<_, Option<i32>>(6)?,
+                row.get::<_, Option<i64>>(7)?.map(|v| v as usize),
+                row.get::<_, i64>(8)?,
+                row.get::<_, Option<i64>>(9)?,
             ))
         })?;
 
@@ -1850,6 +1683,7 @@ impl Database {
                 timestamp,
                 pkgpath,
                 pkgname,
+                pkgbase,
                 outcome_id,
                 stage_id,
                 make_jobs,
@@ -1873,6 +1707,7 @@ impl Database {
                 timestamp,
                 pkgpath,
                 pkgname,
+                pkgbase,
                 outcome,
                 stage,
                 make_jobs,
@@ -1940,12 +1775,8 @@ impl Database {
      * Accepts `(pkgpath, pkgbase)` pairs to correctly handle
      * MULTI_VERSION packages where a single pkgpath produces multiple
      * packages (e.g., py312-foo and py313-foo from devel/py-foo).
-     * Matching on pkgbase rather than full pkgname means version
-     * bumps still match (py313-foo-1.2 data used for py313-foo-1.3).
      *
-     * Returns a map of pkgbase to duration in milliseconds.  Used as
-     * weights for critical-path scheduling: packages with longer
-     * build times get higher priority to start early.
+     * Returns a map of pkgbase to duration in milliseconds.
      *
      * Returns an empty map on error or if no history exists.
      */
@@ -1964,19 +1795,15 @@ impl Database {
 
         let dur: &str = HistoryKind::Duration.into();
         let out: &str = HistoryKind::Outcome.into();
-        let pkgname_col: &str = HistoryKind::Pkgname.into();
+        let pkgbase_col: &str = HistoryKind::Pkgbase.into();
+        let pkgpath_col: &str = HistoryKind::Pkgpath.into();
         let success_outcome = PackageStateKind::Success as i32;
 
-        /*
-         * Each (pkgpath, pkgbase) pair needs two parameters: the
-         * pkgpath for exact match and the pkgbase as a LIKE prefix.
-         * We use LIKE pkgbase || '-%' to match any version.
-         */
         let mut conditions = Vec::with_capacity(pkgs.len());
         for i in 0..pkgs.len() {
             let p = i * 2 + 1;
             conditions.push(format!(
-                "(h.pkgpath = ?{} AND h.{pkgname_col} LIKE ?{} || '-%')",
+                "(h.{pkgpath_col} = ?{} AND h.{pkgbase_col} = ?{})",
                 p,
                 p + 1
             ));
@@ -1988,19 +1815,19 @@ impl Database {
 
         let sql = format!(
             "WITH matched AS ( \
-                 SELECT h.pkgpath, h.{pkgname_col}, h.{dur}, \
+                 SELECT h.{pkgpath_col}, h.{pkgbase_col}, h.{dur}, \
                         h.{jobs}, h.id, \
                         ROW_NUMBER() OVER ( \
-                            PARTITION BY h.pkgpath, h.{pkgname_col} \
+                            PARTITION BY h.{pkgpath_col}, h.{pkgbase_col} \
                             ORDER BY h.id DESC \
                         ) AS rn \
                  FROM build_history h \
                  WHERE ({where_clause}) \
                    AND h.{out} = {success_outcome} \
              ) \
-             SELECT m.pkgpath, m.{pkgname_col}, \
+             SELECT m.{pkgbase_col}, \
                     COALESCE(wt.duration, m.{dur}) \
-                        * MAX(m.{jobs}, 1) \
+                        * COALESCE(m.{jobs}, 1) \
              FROM matched m \
              LEFT JOIN wall_times wt ON wt.history_id = m.id \
                   AND wt.stage = {build_stage} \
@@ -2026,7 +1853,7 @@ impl Database {
             }
         };
         let rows = match stmt.query_map(param_refs.as_slice(), |row| {
-            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         }) {
             Ok(r) => r,
             Err(e) => {
@@ -2037,8 +1864,7 @@ impl Database {
 
         let mut result = HashMap::new();
         for row in rows.flatten() {
-            let (pkgname, ms) = row;
-            let pkgbase = PkgName::new(&pkgname).pkgbase().to_string();
+            let (pkgbase, ms) = row;
             result.insert(pkgbase, ms as u64);
         }
         result
@@ -2068,14 +1894,15 @@ impl Database {
 
         let du: &str = HistoryKind::DiskUsage.into();
         let out: &str = HistoryKind::Outcome.into();
-        let pkgname_col: &str = HistoryKind::Pkgname.into();
+        let pkgbase_col: &str = HistoryKind::Pkgbase.into();
+        let pkgpath_col: &str = HistoryKind::Pkgpath.into();
         let success_outcome = PackageStateKind::Success as i32;
 
         let mut conditions = Vec::with_capacity(pkgs.len());
         for i in 0..pkgs.len() {
             let p = i * 2 + 1;
             conditions.push(format!(
-                "(h.pkgpath = ?{} AND h.{pkgname_col} LIKE ?{} || '-%')",
+                "(h.{pkgpath_col} = ?{} AND h.{pkgbase_col} = ?{})",
                 p,
                 p + 1
             ));
@@ -2084,9 +1911,9 @@ impl Database {
 
         let sql = format!(
             "WITH matched AS ( \
-                 SELECT h.{pkgname_col}, h.{du}, \
+                 SELECT h.{pkgbase_col}, h.{du}, \
                         ROW_NUMBER() OVER ( \
-                            PARTITION BY h.pkgpath, h.{pkgname_col} \
+                            PARTITION BY h.{pkgpath_col}, h.{pkgbase_col} \
                             ORDER BY h.id DESC \
                         ) AS rn \
                  FROM build_history h \
@@ -2094,7 +1921,7 @@ impl Database {
                    AND h.{out} = {success_outcome} \
                    AND h.{du} IS NOT NULL \
              ) \
-             SELECT {pkgname_col}, {du} FROM matched WHERE rn = 1",
+             SELECT {pkgbase_col}, {du} FROM matched WHERE rn = 1",
         );
 
         let params: Vec<Box<dyn rusqlite::ToSql>> = pkgs
@@ -2127,8 +1954,7 @@ impl Database {
 
         let mut result = HashMap::new();
         for row in rows.flatten() {
-            let (pkgname, size) = row;
-            let pkgbase = PkgName::new(&pkgname).pkgbase().to_string();
+            let (pkgbase, size) = row;
             result.insert(pkgbase, size as u64);
         }
         result
@@ -2155,24 +1981,25 @@ impl Database {
 
         let dur: &str = HistoryKind::Duration.into();
         let out: &str = HistoryKind::Outcome.into();
-        let pkgname_col: &str = HistoryKind::Pkgname.into();
+        let pkgbase_col: &str = HistoryKind::Pkgbase.into();
+        let pkgpath_col: &str = HistoryKind::Pkgpath.into();
         let success_outcome = PackageStateKind::Success as i32;
         let build_stage = Stage::Build as i32;
         let jobs: &str = HistoryKind::MakeJobs.into();
 
         let sql = format!(
             "WITH matched AS ( \
-                 SELECT h.{pkgname_col}, h.{dur}, h.{jobs}, h.id, \
+                 SELECT h.{pkgbase_col}, h.{dur}, h.{jobs}, h.id, \
                         ROW_NUMBER() OVER ( \
-                            PARTITION BY h.pkgpath, h.{pkgname_col} \
+                            PARTITION BY h.{pkgpath_col}, h.{pkgbase_col} \
                             ORDER BY h.id DESC \
                         ) AS rn \
                  FROM build_history h \
                  WHERE h.{out} = {success_outcome} \
              ) \
-             SELECT m.{pkgname_col}, \
+             SELECT m.{pkgbase_col}, \
                     COALESCE(wt.duration, m.{dur}) \
-                        * MAX(m.{jobs}, 1) \
+                        * COALESCE(m.{jobs}, 1) \
              FROM matched m \
              LEFT JOIN wall_times wt ON wt.history_id = m.id \
                   AND wt.stage = {build_stage} \
@@ -2198,72 +2025,7 @@ impl Database {
 
         let mut result = HashMap::new();
         for row in rows.flatten() {
-            let (pkgname, ms) = row;
-            let pkgbase = PkgName::new(&pkgname).pkgbase().to_string();
-            result.insert(pkgbase, ms as u64);
-        }
-        result
-    }
-
-    /**
-     * Query the most recent successful build's CPU time for all packages.
-     *
-     * Like [`cpu_time_by_pkg`] but without filtering.
-     *
-     * Returns a map of pkgbase to CPU duration in milliseconds.
-     */
-    pub fn cpu_time_by_pkg_all(&self) -> HashMap<String, u64> {
-        let conn = match self.history_conn() {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(error = %e, "cpu_time_by_pkg_all: failed to open history db");
-                return HashMap::new();
-            }
-        };
-
-        let out: &str = HistoryKind::Outcome.into();
-        let pkgname_col: &str = HistoryKind::Pkgname.into();
-        let success_outcome = PackageStateKind::Success as i32;
-        let build_stage = Stage::Build as i32;
-
-        let sql = format!(
-            "WITH matched AS ( \
-                 SELECT h.{pkgname_col}, h.id, \
-                        ROW_NUMBER() OVER ( \
-                            PARTITION BY h.pkgpath, h.{pkgname_col} \
-                            ORDER BY h.id DESC \
-                        ) AS rn \
-                 FROM build_history h \
-                 WHERE h.{out} = {success_outcome} \
-             ) \
-             SELECT m.{pkgname_col}, ct.duration \
-             FROM matched m \
-             JOIN cpu_times ct ON ct.history_id = m.id \
-                  AND ct.stage = {build_stage} \
-             WHERE m.rn = 1",
-        );
-
-        let mut stmt = match conn.prepare(&sql) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(error = %e, "cpu_time_by_pkg_all: failed to prepare query");
-                return HashMap::new();
-            }
-        };
-        let rows = match stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        }) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(error = %e, "cpu_time_by_pkg_all: query failed");
-                return HashMap::new();
-            }
-        };
-
-        let mut result = HashMap::new();
-        for row in rows.flatten() {
-            let (pkgname, ms) = row;
-            let pkgbase = PkgName::new(&pkgname).pkgbase().to_string();
+            let (pkgbase, ms) = row;
             result.insert(pkgbase, ms as u64);
         }
         result
@@ -2350,62 +2112,358 @@ fn open_history_conn(dbdir: &Path) -> Result<Connection> {
     )?;
 
     if !has_schema {
-        conn.execute_batch(&format!(
-            "CREATE TABLE schema_version (version INTEGER NOT NULL);
-             INSERT INTO schema_version (version) VALUES ({});
-
-             CREATE TABLE outcome_types (
-                 id INTEGER PRIMARY KEY,
-                 name TEXT UNIQUE NOT NULL
-             );
-             INSERT INTO outcome_types (id, name) VALUES {outcome_types};
-
-             CREATE TABLE stage_types (
-                 id INTEGER PRIMARY KEY,
-                 name TEXT UNIQUE NOT NULL
-             );
-             INSERT INTO stage_types (id, name) VALUES {stages};
-
-             CREATE TABLE build_history (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 {history_columns}
-             );
-
-             CREATE INDEX idx_history_pkgpath
-                 ON build_history(pkgpath);
-             CREATE INDEX idx_history_pkgpath_outcome
-                 ON build_history(pkgpath, outcome);
-             CREATE INDEX idx_history_timestamp
-                 ON build_history(timestamp);
-
-             CREATE TABLE wall_times (
-                 history_id INTEGER NOT NULL
-                     REFERENCES build_history(id) ON DELETE CASCADE,
-                 stage INTEGER NOT NULL REFERENCES stage_types(id),
-                 duration INTEGER NOT NULL,
-                 PRIMARY KEY (history_id, stage)
-             );
-
-             CREATE TABLE cpu_times (
-                 history_id INTEGER NOT NULL
-                     REFERENCES build_history(id) ON DELETE CASCADE,
-                 stage INTEGER NOT NULL REFERENCES stage_types(id),
-                 duration INTEGER NOT NULL,
-                 PRIMARY KEY (history_id, stage)
-             );
-
-             CREATE TABLE cpu_usage (
-                 timestamp INTEGER NOT NULL,
-                 user_pct INTEGER NOT NULL,
-                 sys_pct INTEGER NOT NULL
-             );
-             CREATE INDEX idx_cpu_timestamp ON cpu_usage(timestamp);",
-            HISTORY_SCHEMA_VERSION,
-            outcome_types = PackageState::db_values(),
-            stages = stage_values(),
-            history_columns = history_schema(),
-        ))?;
+        create_history_schema(&conn)?;
     }
 
     Ok(conn)
+}
+
+/**
+ * Create the history database schema.
+ *
+ * Applies all table and index definitions to the given connection.
+ * Used by [`open_history_conn`] for new databases and by tests
+ * that need an in-memory history database.
+ */
+pub(crate) fn create_history_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(&format!(
+        "CREATE TABLE schema_version (version INTEGER NOT NULL);
+         INSERT INTO schema_version (version) VALUES ({});
+
+         CREATE TABLE outcome_types (
+             id INTEGER PRIMARY KEY,
+             name TEXT UNIQUE NOT NULL
+         );
+         INSERT INTO outcome_types (id, name) VALUES {outcome_types};
+
+         CREATE TABLE stage_types (
+             id INTEGER PRIMARY KEY,
+             name TEXT UNIQUE NOT NULL
+         );
+         INSERT INTO stage_types (id, name) VALUES {stages};
+
+         CREATE TABLE build_history (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             {history_columns}
+         );
+
+         CREATE INDEX idx_history_pkgpath
+             ON build_history(pkgpath);
+         CREATE INDEX idx_history_pkgpath_pkgbase
+             ON build_history(pkgpath, pkgbase);
+         CREATE INDEX idx_history_pkgpath_outcome
+             ON build_history(pkgpath, outcome);
+         CREATE INDEX idx_history_timestamp
+             ON build_history(timestamp);
+
+         CREATE TABLE wall_times (
+             history_id INTEGER NOT NULL
+                 REFERENCES build_history(id) ON DELETE CASCADE,
+             stage INTEGER NOT NULL REFERENCES stage_types(id),
+             duration INTEGER NOT NULL,
+             PRIMARY KEY (history_id, stage)
+         );
+
+         CREATE TABLE cpu_times (
+             history_id INTEGER NOT NULL
+                 REFERENCES build_history(id) ON DELETE CASCADE,
+             stage INTEGER NOT NULL REFERENCES stage_types(id),
+             duration INTEGER NOT NULL,
+             PRIMARY KEY (history_id, stage)
+         );
+
+         CREATE TABLE cpu_usage (
+             timestamp INTEGER NOT NULL,
+             user_pct INTEGER NOT NULL,
+             sys_pct INTEGER NOT NULL
+         );
+         CREATE INDEX idx_cpu_timestamp ON cpu_usage(timestamp);",
+        HISTORY_SCHEMA_VERSION,
+        outcome_types = PackageState::db_values(),
+        stages = stage_values(),
+        history_columns = history_schema(),
+    ))?;
+    Ok(())
+}
+
+/**
+ * Insert a build record into the history database.
+ *
+ * Writes to `build_history`, `wall_times`, and `cpu_times`.
+ * Used by [`Database::record_history`] and by tests that need
+ * to populate an in-memory history database.
+ */
+pub(crate) fn record_history_to(conn: &Connection, rec: &crate::History) -> Result<()> {
+    let cols: Vec<&str> = HistoryKind::VARIANTS.iter().map(<&str>::from).collect();
+    let placeholders: String = (1..=cols.len())
+        .map(|i| format!("?{}", i))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "INSERT INTO build_history ({}) VALUES ({})",
+        cols.join(", "),
+        placeholders,
+    );
+    let dur_ms = |d: Duration| d.as_millis() as i64;
+    conn.execute(
+        &sql,
+        params![
+            rec.timestamp,
+            rec.pkgpath,
+            rec.pkgname,
+            rec.pkgbase,
+            rec.outcome.db_id(),
+            rec.stage.map(|s| s as i32),
+            rec.make_jobs.map(|j| j as i64),
+            dur_ms(rec.duration),
+            rec.disk_usage.map(|s| s as i64),
+        ],
+    )?;
+    let history_id = conn.last_insert_rowid();
+    if !rec.stage_durations.is_empty() {
+        let mut stmt = conn.prepare_cached(
+            "INSERT INTO wall_times \
+                 (history_id, stage, duration) \
+             VALUES (?1, ?2, ?3)",
+        )?;
+        for &(stage, duration) in &rec.stage_durations {
+            stmt.execute(params![history_id, stage as i32, dur_ms(duration)])?;
+        }
+    }
+    if !rec.stage_cpu_times.is_empty() {
+        let mut stmt = conn.prepare_cached(
+            "INSERT INTO cpu_times \
+                 (history_id, stage, duration) \
+             VALUES (?1, ?2, ?3)",
+        )?;
+        for &(stage, duration) in &rec.stage_cpu_times {
+            stmt.execute(params![history_id, stage as i32, dur_ms(duration)])?;
+        }
+    }
+    Ok(())
+}
+
+/*
+ * Scheduler query support.
+ *
+ * Used by `Scheduler::new` to construct the dependency graph from the
+ * build database, and by `jobs::make_jobs_from_db` and the scheduler
+ * itself to query historical build-stage timing data from history.db.
+ */
+
+/**
+ * Selected package row from the build database.
+ */
+pub(crate) struct SelectedPackage {
+    pub id: i64,
+    pub pkgname: PkgName,
+    pub pkgpath: String,
+    pub pbulk_weight: usize,
+    pub make_jobs_safe: bool,
+}
+
+/**
+ * Query all selected packages from the build database.
+ */
+pub(crate) fn query_selected_packages(conn: &Connection) -> Result<Vec<SelectedPackage>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, pkgname, pkgpath, pbulk_weight, make_jobs_safe \
+         FROM packages WHERE selected = 1",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(SelectedPackage {
+            id: row.get(0)?,
+            pkgname: PkgName::from(row.get::<_, String>(1)?),
+            pkgpath: row.get(2)?,
+            pbulk_weight: row.get::<_, i32>(3)? as usize,
+            make_jobs_safe: row.get::<_, bool>(4)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+/**
+ * Query all resolved dependency edges from the build database.
+ *
+ * Returns `(package_id, depends_on_id)` pairs.
+ */
+pub(crate) fn query_resolved_deps(conn: &Connection) -> Result<Vec<(i64, i64)>> {
+    let mut stmt = conn.prepare("SELECT package_id, depends_on_id FROM resolved_depends")?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+/**
+ * Historical build-stage CPU timing for a single package.
+ *
+ * The value is in milliseconds and covers only the build stage
+ * (not configure, install, package, etc.).
+ */
+pub(crate) struct BuildStageTiming {
+    pub cpu_ms: u64,
+}
+
+/**
+ * Query build-stage wall time and CPU time for all packages.
+ *
+ * Returns the most recent successful build's timing data for the
+ * build stage, keyed by `(pkgpath, pkgbase)`.  This compound key
+ * ensures correct matching across version bumps (pkgbase strips
+ * the version) while disambiguating packages that share a pkgbase
+ * but live under different pkgpaths (e.g. `databases/mysql80-client`
+ * vs `databases/mysql57-client`).
+ */
+pub(crate) fn query_build_stage_timings(
+    conn: &Connection,
+) -> HashMap<(String, String), BuildStageTiming> {
+    let out: &str = HistoryKind::Outcome.into();
+    let pkgbase_col: &str = HistoryKind::Pkgbase.into();
+    let pkgpath_col: &str = HistoryKind::Pkgpath.into();
+    let success_outcome = PackageStateKind::Success as i32;
+    let build_stage = Stage::Build as i32;
+
+    let sql = format!(
+        "WITH matched AS ( \
+             SELECT h.{pkgpath_col}, h.{pkgbase_col}, h.id, \
+                    ROW_NUMBER() OVER ( \
+                        PARTITION BY h.{pkgpath_col}, h.{pkgbase_col} \
+                        ORDER BY h.id DESC \
+                    ) AS rn \
+             FROM build_history h \
+             WHERE h.{out} = {success_outcome} \
+         ) \
+         SELECT m.{pkgpath_col}, m.{pkgbase_col}, ct.duration \
+         FROM matched m \
+         JOIN cpu_times ct ON ct.history_id = m.id \
+              AND ct.stage = {build_stage} \
+         WHERE m.rn = 1",
+    );
+
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, "query_build_stage_timings: failed to prepare query");
+            return HashMap::new();
+        }
+    };
+    let rows = match stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "query_build_stage_timings: query failed");
+            return HashMap::new();
+        }
+    };
+
+    let mut result = HashMap::new();
+    for row in rows.flatten() {
+        let (pkgpath, pkgbase, cpu_ms) = row;
+        result.insert(
+            (pkgpath, pkgbase),
+            BuildStageTiming {
+                cpu_ms: cpu_ms as u64,
+            },
+        );
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build::Stage;
+
+    fn test_history_db() -> Connection {
+        let conn = Connection::open_in_memory().expect("failed to open in-memory db");
+        create_history_schema(&conn).expect("failed to create schema");
+        conn
+    }
+
+    fn insert_build(conn: &Connection, pkgpath: &str, pkgname: &str, wall_ms: u64, cpu_ms: u64) {
+        use crate::{History, PackageState};
+        use std::time::Duration;
+
+        let rec = History {
+            timestamp: 0,
+            pkgpath: pkgpath.to_string(),
+            pkgname: pkgname.to_string(),
+            pkgbase: PkgName::new(pkgname).pkgbase().to_string(),
+            outcome: PackageState::Success,
+            stage: None,
+            make_jobs: Some(1),
+            duration: Duration::ZERO,
+            disk_usage: None,
+            stage_durations: vec![(Stage::Build, Duration::from_millis(wall_ms))],
+            stage_cpu_times: vec![(Stage::Build, Duration::from_millis(cpu_ms))],
+        };
+        record_history_to(conn, &rec).expect("failed to insert build");
+    }
+
+    fn key(pkgpath: &str, pkgbase: &str) -> (String, String) {
+        (pkgpath.to_string(), pkgbase.to_string())
+    }
+
+    /** Query returns timings keyed by (pkgpath, pkgbase). */
+    #[test]
+    fn build_stage_timings_basic() {
+        let conn = test_history_db();
+        insert_build(&conn, "devel/cmake", "cmake-3.28.0", 60000, 180000);
+        let timings = query_build_stage_timings(&conn);
+        assert_eq!(timings.len(), 1);
+        let t = &timings[&key("devel/cmake", "cmake")];
+        assert_eq!(t.cpu_ms, 180000);
+    }
+
+    /** Most recent build wins when multiple exist for a pkgpath. */
+    #[test]
+    fn build_stage_timings_latest() {
+        let conn = test_history_db();
+        insert_build(&conn, "devel/cmake", "cmake-3.27.0", 1000, 2000);
+        insert_build(&conn, "devel/cmake", "cmake-3.28.0", 5000, 15000);
+        let timings = query_build_stage_timings(&conn);
+        assert_eq!(timings.len(), 1);
+        let t = &timings[&key("devel/cmake", "cmake")];
+        assert_eq!(t.cpu_ms, 15000);
+    }
+
+    /** Different pkgpaths with same pkgbase are separate entries. */
+    #[test]
+    fn build_stage_timings_pkgpath_disambiguates() {
+        let conn = test_history_db();
+        insert_build(
+            &conn,
+            "databases/mysql80-client",
+            "mysql-client-8.0.1",
+            3000,
+            9000,
+        );
+        insert_build(
+            &conn,
+            "databases/mysql57-client",
+            "mysql-client-5.7.42",
+            2000,
+            4000,
+        );
+        let timings = query_build_stage_timings(&conn);
+        assert_eq!(timings.len(), 2);
+        let t80 = &timings[&key("databases/mysql80-client", "mysql-client")];
+        assert_eq!(t80.cpu_ms, 9000);
+        let t57 = &timings[&key("databases/mysql57-client", "mysql-client")];
+        assert_eq!(t57.cpu_ms, 4000);
+    }
+
+    /** Empty database returns empty map. */
+    #[test]
+    fn build_stage_timings_empty() {
+        let conn = test_history_db();
+        let timings = query_build_stage_timings(&conn);
+        assert!(timings.is_empty());
+    }
 }

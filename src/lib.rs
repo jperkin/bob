@@ -22,6 +22,7 @@ pub mod config;
 pub mod cpu;
 pub mod db;
 pub mod logging;
+pub mod makejobs;
 pub mod report;
 pub mod sandbox;
 pub mod scan;
@@ -66,7 +67,7 @@ impl std::error::Error for Interrupted {}
 
 pub use action::{Action, ActionType, FSType};
 pub use build::{
-    Build, BuildCounts, BuildReason, BuildResult, BuildSummary, MakeJobs, PkgBuildStats, Stage,
+    Build, BuildCounts, BuildReason, BuildResult, BuildSummary, PkgBuildStats, Stage,
     pkg_up_to_date,
 };
 pub use config::{Config, DynamicConfig, Options, Pkgsrc, PkgsrcEnv, Sandboxes, WrkObjDir};
@@ -74,13 +75,11 @@ pub use cpu::{CpuSample, CpuSamplerHandle, start_cpu_sampler};
 pub use db::Database;
 pub use history::{History, HistoryKind, format_duration};
 pub use init::Init;
+pub use makejobs::PkgMakeJobs;
 pub use pkgstate::{PackageCounts, PackageState, PackageStateKind};
 pub use report::write_html_report;
 pub use sandbox::Sandbox;
 pub use scan::{ResolvedPackage, Scan, ScanResult, ScanSummary};
-pub use scheduler::{
-    PackageNode, Scheduler, compute_budget, scheduling_weights, scheduling_weights_indexed,
-    sort_by_build_priority,
-};
+pub use scheduler::{PackageNode, ScheduledPackage, Scheduler};
 pub use state::RunState;
 pub use summary::generate_pkg_summary;

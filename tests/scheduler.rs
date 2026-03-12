@@ -15,6 +15,7 @@
  * increasing total runtime (since the work is more parallelised).
  */
 
+use bob::PackageNode;
 use bob::scheduler::Scheduler;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -115,13 +116,13 @@ fn load_depgraph_zst(path: &str) -> DepGraph {
     }
 }
 
-fn default_packages(g: &DepGraph) -> HashMap<String, bob::PackageNode<String>> {
+fn default_packages(g: &DepGraph) -> HashMap<String, PackageNode<String>> {
     g.incoming
         .iter()
         .map(|(k, deps)| {
             (
                 k.clone(),
-                bob::PackageNode {
+                PackageNode {
                     deps: deps.clone(),
                     pbulk_weight: 100,
                     cpu_time: 0,
@@ -132,12 +133,7 @@ fn default_packages(g: &DepGraph) -> HashMap<String, bob::PackageNode<String>> {
 }
 
 fn new_scheduler(g: &DepGraph) -> Scheduler<String> {
-    Scheduler::new(
-        default_packages(g),
-        g.reverse_deps.clone(),
-        HashSet::new(),
-        HashSet::new(),
-    )
+    Scheduler::from_graph(default_packages(g))
 }
 
 /**
@@ -231,7 +227,7 @@ fn run_build(workers: usize, fail_set: &HashSet<String>) {
                 let pkg = {
                     let mut s = sched.lock().expect("lock poisoned");
                     match s.poll() {
-                        Poll::Ready(Some(p)) => p,
+                        Poll::Ready(Some(sp)) => sp.pkg,
                         Poll::Ready(None) => return,
                         Poll::Pending => {
                             drop(s);
@@ -529,7 +525,7 @@ fn run_make_jobs_sim(
     unsafe_pkgs: &HashSet<String>,
     timings: Option<&HashMap<String, PkgTiming>>,
 ) -> SimResult {
-    let weights = timings.map(|t| weights_from_history(t)).unwrap_or_default();
+    let weights = timings.map(weights_from_history).unwrap_or_default();
     run_sim(&SimConfig {
         build_threads,
         max_jobs,
@@ -553,14 +549,14 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
             loaded
         }
     };
-    let packages: HashMap<String, bob::PackageNode<String>> = g
+    let packages: HashMap<String, PackageNode<String>> = g
         .incoming
         .iter()
         .map(|(k, deps)| {
             let pw = cfg.weights.get(k).copied().unwrap_or(100);
             (
                 k.clone(),
-                bob::PackageNode {
+                PackageNode {
                     deps: deps.clone(),
                     pbulk_weight: pw,
                     cpu_time: 0,
@@ -568,15 +564,7 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
             )
         })
         .collect();
-    let mut sched = Scheduler::new(
-        packages,
-        g.reverse_deps.clone(),
-        HashSet::new(),
-        HashSet::new(),
-    );
-    if cfg.fixed_jobs.is_none() && cfg.jobs_override.is_none() {
-        sched.init_budget(cfg.max_jobs, cfg.build_threads);
-    }
+    let mut sched = Scheduler::from_graph(packages);
     let timings = cfg.timings;
     let unsafe_pkgs = cfg.unsafe_pkgs;
     let max_jobs = cfg.max_jobs;
@@ -594,7 +582,6 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
         phase: usize,
         ticks_left: u32,
         jobs: usize,
-        in_budget: bool,
     }
 
     let mut active: HashMap<String, Active> = HashMap::new();
@@ -609,9 +596,9 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
     /*
      * Compute ticks for a phase given the allocated job count.
      *
-     * With real timings, 1 tick = 1 second.  For parallel phases
-     * (configure, build), Amdahl's law scales the wall time when the
-     * allocated job count differs from the history's MAKE_JOBS:
+     * With real timings, 1 tick = 1 second.  For the build phase,
+     * wall time is scaled when the allocated job count differs from
+     * the history's MAKE_JOBS:
      *
      *   serial_ms = (wall_ms - cpu_ms / history_jobs) / (1 - 1/history_jobs)
      *   parallel_ms = cpu_ms - serial_ms
@@ -655,10 +642,9 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
 
     /*
      * Whether a phase uses MAKE_JOBS or runs single-threaded.
-     * Configure and build both receive MAKE_JOBS; most packages
-     * are serial during configure but some (e.g. cmake) do use
-     * parallel jobs.  Without real timings, both hash-based
-     * phases (0=configure, 1=build) use MAKE_JOBS.
+     * Only the build phase actually uses parallel jobs in practice.
+     * Without real timings, both hash-based phases (0=configure,
+     * 1=build) are modelled as parallel for simplicity.
      */
     let is_parallel_phase = |phase: usize| -> bool {
         if timings.is_some() {
@@ -669,53 +655,42 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
     };
 
     /*
-     * Enter or leave the MAKE_JOBS budget for a package at a phase
-     * boundary.  Returns the core allocation for the new phase.
+     * Determine the core allocation for a phase.
      */
     let fair_share = max_jobs / build_threads.max(1);
-    let enter_phase = |sched: &mut Scheduler<String>,
-                       pkg: &str,
-                       phase: usize,
-                       was_in_budget: bool|
-     -> (usize, bool) {
+    let phase_jobs = |pkg: &str, phase: usize| -> usize {
         let dominated = unsafe_pkgs.contains(pkg);
         if is_parallel_phase(phase) && !dominated {
             if let Some(overrides) = jobs_override {
-                let jobs = overrides.get(pkg).copied().unwrap_or(fair_share);
-                return (jobs, false);
+                return overrides.get(pkg).copied().unwrap_or(fair_share);
             }
             if let Some(fj) = fixed_jobs {
-                (fj, false)
+                fj
             } else {
-                let jobs = sched.request_make_jobs(&String::from(pkg)).unwrap_or(1);
-                (jobs, true)
+                fair_share
             }
         } else {
-            if dominated && !was_in_budget && fixed_jobs.is_none() {
-                sched.exclude_from_budget(&String::from(pkg));
-            }
-            (1, false)
+            1
         }
     };
 
     loop {
         while active.len() < build_threads {
             match sched.poll() {
-                std::task::Poll::Ready(Some(pkg)) => {
+                std::task::Poll::Ready(Some(sp)) => {
                     let first_phase = if timings.is_some() {
                         PHASE_OVERHEAD_PRE
                     } else {
                         0
                     };
-                    let (jobs, in_budget) = enter_phase(&mut sched, &pkg, first_phase, false);
-                    let ticks = get_ticks(&pkg, first_phase, jobs);
+                    let jobs = phase_jobs(&sp.pkg, first_phase);
+                    let ticks = get_ticks(&sp.pkg, first_phase, jobs);
                     active.insert(
-                        pkg,
+                        sp.pkg,
                         Active {
                             phase: first_phase,
                             ticks_left: ticks,
                             jobs,
-                            in_budget,
                         },
                     );
                 }
@@ -742,21 +717,20 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
                 let mut allocs: Vec<String> = active
                     .iter()
                     .map(|(p, a)| {
-                        let w = sched.remaining_depth(p);
                         let short = p
                             .find(|c: char| c.is_ascii_digit())
                             .map(|i| &p[..i.max(1)])
                             .unwrap_or(p)
                             .trim_end_matches('-');
                         if timings.is_some() {
-                            format!("{}={}:{}(w{})", short, a.jobs, phase_char(a.phase), w)
+                            format!("{}={}:{}", short, a.jobs, phase_char(a.phase))
                         } else {
-                            format!("{}={}(w{})", short, a.jobs, w)
+                            format!("{}={}", short, a.jobs)
                         }
                     })
                     .collect();
                 allocs.sort();
-                let pw = sched.pending_weight();
+                let pw = sched.queued_count();
                 let marker = if active.len() < build_threads {
                     "  (draining)"
                 } else {
@@ -801,16 +775,12 @@ fn run_sim(cfg: &SimConfig<'_>) -> SimResult {
         for pkg in finished_phase {
             let a = active.get_mut(&pkg).expect("active");
             let next_phase = a.phase + 1;
-            if a.in_budget {
-                sched.release_make_jobs(&String::from(pkg.as_str()));
-            }
             if next_phase < phase_count {
-                let (jobs, in_budget) = enter_phase(&mut sched, &pkg, next_phase, a.in_budget);
+                let jobs = phase_jobs(&pkg, next_phase);
                 let ticks = get_ticks(&pkg, next_phase, jobs);
                 a.phase = next_phase;
                 a.ticks_left = ticks;
                 a.jobs = jobs;
-                a.in_budget = in_budget;
             } else {
                 done_pkgs.push(pkg);
             }
@@ -979,6 +949,7 @@ fn weights_from_history(timings: &HashMap<String, PkgTiming>) -> HashMap<String,
  * Packages are ranked by score; those above `percentile` get
  * `boost_jobs`, the rest get `base_jobs`.
  */
+#[allow(clippy::too_many_arguments)]
 fn compute_jobs_override(
     pkgs: &HashMap<String, HashSet<String>>,
     timings: &HashMap<String, PkgTiming>,
@@ -1867,150 +1838,44 @@ fn depgraph_multi_failure() {
     run_build(32, &fail_pkgs);
 }
 
-fn transitive_dep_count(
-    pkg: &str,
-    reverse_deps: &HashMap<String, HashSet<String>>,
-    incoming: &HashMap<String, HashSet<String>>,
-) -> usize {
-    let mut visited: HashSet<&str> = HashSet::new();
-    let mut queue: VecDeque<&str> = VecDeque::new();
-    if let Some(rdeps) = reverse_deps.get(pkg) {
-        for r in rdeps {
-            if incoming.contains_key(r.as_str()) && visited.insert(r.as_str()) {
-                queue.push_back(r.as_str());
-            }
-        }
-    }
-    while let Some(p) = queue.pop_front() {
-        if let Some(rdeps) = reverse_deps.get(p) {
-            for r in rdeps {
-                if incoming.contains_key(r.as_str()) && visited.insert(r.as_str()) {
-                    queue.push_back(r.as_str());
-                }
-            }
-        }
-    }
-    visited.len()
-}
-
-#[test]
-fn depgraph_precomputed_jobs_dump() {
-    for (label, depgraph_path, history_path) in [
-        ("mutt", MUTT_DEPGRAPH, MUTT_HISTORY),
-        ("bulk-large", BULK_LARGE_DEPGRAPH, BULK_LARGE_HISTORY),
-    ] {
-        let g = load_depgraph_zst(depgraph_path);
-        let history = load_history(history_path);
-        let weights = weights_from_history(&history.timings);
-
-        let packages: HashMap<String, bob::PackageNode<String>> = g
-            .incoming
-            .iter()
-            .map(|(k, deps)| {
-                let pw = weights.get(k).copied().unwrap_or(100);
-                (
-                    k.clone(),
-                    bob::PackageNode {
-                        deps: deps.clone(),
-                        pbulk_weight: pw,
-                        cpu_time: 0,
-                    },
-                )
-            })
-            .collect();
-        let mut sched = Scheduler::new(
-            packages,
-            g.reverse_deps.clone(),
-            HashSet::new(),
-            HashSet::new(),
-        );
-        sched.init_budget(16, 4);
-
-        let mut rows: Vec<(String, usize, usize, usize)> = Vec::new();
-        for pkg in g.incoming.keys() {
-            let jobs = sched.precomputed_jobs(pkg).unwrap_or(0);
-            let duration = weights.get(pkg).copied().unwrap_or(0);
-            let deps = transitive_dep_count(pkg, &g.reverse_deps, &g.incoming);
-            rows.push((pkg.clone(), jobs, duration, deps));
-        }
-        rows.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
-
-        eprintln!(
-            "\n=== {} precomputed jobs (top 40 of {}) ===",
-            label,
-            rows.len()
-        );
-        eprintln!(
-            "{:<40} {:>4} {:>8} {:>6}",
-            "Package", "Jobs", "Dur(s)", "Deps"
-        );
-        eprintln!("{}", "-".repeat(62));
-        for (pkg, jobs, dur, deps) in rows.iter().take(40) {
-            eprintln!("{:<40} {:>4} {:>8} {:>6}", pkg, jobs, dur, deps);
-        }
-
-        let mut job_dist: HashMap<usize, usize> = HashMap::new();
-        for (_, jobs, _, _) in &rows {
-            *job_dist.entry(*jobs).or_default() += 1;
-        }
-        let mut dist: Vec<(usize, usize)> = job_dist.into_iter().collect();
-        dist.sort();
-        eprintln!("\nJobs distribution:");
-        for (jobs, count) in &dist {
-            eprintln!("  {:>3} jobs: {:>5} packages", jobs, count);
-        }
-    }
-}
-
 /**
  * Verify that the dep_count tiebreaker orders packages correctly within
- * each total_weight tier: higher dep_count first.
+ * each total_pbulk_weight tier: higher dep_count first.
  */
 #[test]
-fn dep_count_breaks_weight_tie() {
+fn dep_count_breaks_pbulk_weight_tie() {
     let g = load_depgraph();
-    let packages = default_packages(g);
-    let (total_weights, dep_counts) = bob::scheduling_weights(&packages, &g.reverse_deps);
+    let mut sched = new_scheduler(g);
 
-    let mut sched = Scheduler::new(
-        packages,
-        g.reverse_deps.clone(),
-        HashSet::new(),
-        HashSet::new(),
-    );
-
-    let mut order: Vec<String> = Vec::new();
-    loop {
-        match sched.poll() {
-            Poll::Ready(Some(pkg)) => {
-                sched.mark_success(&pkg);
-                order.push(pkg);
-            }
-            _ => break,
-        }
+    let mut order: Vec<(String, usize, usize)> = Vec::new();
+    while let Poll::Ready(Some(sp)) = sched.poll() {
+        let tw = sp.total_pbulk_weight;
+        let dc = sp.dep_count;
+        sched.mark_success(&sp.pkg);
+        order.push((sp.pkg, tw, dc));
     }
 
     /*
-     * Within each contiguous run of same-weight packages in the dispatch
-     * order, dep_count must be non-increasing.
+     * Within each contiguous run of same total_pbulk_weight packages in the
+     * dispatch order, dep_count must be non-increasing.
      */
     let mut i = 0;
     while i < order.len() {
-        let tw = total_weights.get(&order[i]).copied().unwrap_or(0);
+        let tw = order[i].1;
         let mut j = i;
-        while j < order.len() && total_weights.get(&order[j]).copied().unwrap_or(0) == tw {
+        while j < order.len() && order[j].1 == tw {
             j += 1;
         }
         for k in i..j.saturating_sub(1) {
-            let dc_a = dep_counts.get(&order[k]).copied().unwrap_or(0);
-            let dc_b = dep_counts.get(&order[k + 1]).copied().unwrap_or(0);
+            let dc_a = order[k].2;
+            let dc_b = order[k + 1].2;
             assert!(
                 dc_a >= dc_b,
-                "weight={}: {} (deps={}) before {} (deps={})",
+                "pbulk_weight={}: {} (deps={}) before {} (deps={})",
                 tw,
-                order[k],
+                order[k].0,
                 dc_a,
-                order[k + 1],
+                order[k + 1].0,
                 dc_b
             );
         }

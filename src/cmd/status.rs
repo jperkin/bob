@@ -23,7 +23,7 @@ use serde_json;
 
 use bob::db::{Database, PackageStatusRow};
 use bob::try_println;
-use bob::{PackageState, PackageStateKind};
+use bob::{Config, PackageState, PackageStateKind, Scheduler};
 
 use super::OutputFormat;
 
@@ -60,17 +60,13 @@ pub struct StatusArgs {
     packages: Vec<String>,
 }
 
-pub fn run(
-    db: &Database,
-    args: StatusArgs,
-    max_jobs: Option<usize>,
-    build_threads: usize,
-) -> Result<()> {
+pub fn run(db: &Database, config: &Config, args: StatusArgs) -> Result<()> {
     if db.count_packages()? == 0 {
         bail!("No packages in database. Run 'bob scan' first.");
     }
     print_build_status(
         db,
+        config,
         &args.statuses,
         args.columns.as_deref(),
         args.no_header,
@@ -78,21 +74,19 @@ pub fn run(
         args.format,
         &args.packages,
         args.all,
-        max_jobs,
-        build_threads,
     )
 }
 
 /**
  * Print package status with selectable columns in build order.
  *
- * Shows packages ordered by effective weight so that packages with the
- * most transitive dependents appear first. Supports filtering by status
- * and package name/path regex.
+ * Uses the scheduler's iterator to get packages in priority order,
+ * then joins with status data from the database for display.
  */
 #[allow(clippy::too_many_arguments)]
 fn print_build_status(
     db: &Database,
+    config: &Config,
     statuses: &[PackageStateKind],
     columns: Option<&[String]>,
     no_header: bool,
@@ -100,8 +94,6 @@ fn print_build_status(
     format: OutputFormat,
     pkg_filters: &[String],
     show_all: bool,
-    max_jobs: Option<usize>,
-    build_threads: usize,
 ) -> Result<()> {
     let all_cols = [
         "pkgname",
@@ -110,7 +102,7 @@ fn print_build_status(
         "reason",
         "multi_version",
         "deps",
-        "weight",
+        "priority",
         "cpu",
         "jobs",
     ];
@@ -140,14 +132,15 @@ fn print_build_status(
             "pkgname" => 40,
             "pkgpath" => 35,
             "deps" => 6,
-            "weight" => 8,
+            "priority" => 8,
             "cpu" => 8,
-            "jobs" => 4,
+            "jobs" => 5,
             _ => usize::MAX,
         }
     };
 
-    let right_align = |col: &str| -> bool { matches!(col, "deps" | "weight" | "cpu" | "jobs") };
+    let right_align =
+        |col: &str| -> bool { matches!(col, "deps" | "priority" | "cpu" | "jobs") };
 
     let pkg_patterns: Vec<Regex> = pkg_filters
         .iter()
@@ -155,52 +148,20 @@ fn print_build_status(
         .collect::<Result<Vec<_>>>()?;
 
     let need_multi = cols.contains(&"multi_version");
-    let mut all_pkgs = db.get_all_package_status(need_multi)?;
+    let status_rows = db.get_all_package_status(need_multi)?;
+    let status_map: HashMap<&str, &PackageStatusRow> = status_rows
+        .iter()
+        .map(|r| (r.pkgname.as_str(), r))
+        .collect();
 
-    let graph = db.get_scheduling_graph()?;
-    let (tw_vec, dc_vec) = bob::scheduling_weights_indexed(&graph.weights, &graph.rdeps);
-
-    let mut total_weights: HashMap<String, usize> = HashMap::with_capacity(graph.names.len());
-    let mut dep_counts: HashMap<String, usize> = HashMap::with_capacity(graph.names.len());
-    for (i, name) in graph.names.iter().enumerate() {
-        total_weights.insert(name.clone(), tw_vec[i]);
-        dep_counts.insert(name.clone(), dc_vec[i]);
+    let mut sched = Scheduler::new(db)?;
+    if let Some(jobs) = config.jobs() {
+        sched.set_allocator(bob::makejobs::Allocator::new(
+            config.build_threads(),
+            jobs,
+        ));
+        sched.allocate_all();
     }
-
-    let cpu_times = db.cpu_time_by_pkg_all();
-
-    bob::sort_by_build_priority(
-        &mut all_pkgs,
-        |p| total_weights.get(&p.pkgname).copied().unwrap_or(0),
-        |p| dep_counts.get(&p.pkgname).copied().unwrap_or(0),
-        |p| {
-            let base = pkgsrc::PkgName::new(&p.pkgname).pkgbase().to_string();
-            cpu_times.get(&base).copied().unwrap_or(0)
-        },
-        |p| &p.pkgname,
-    );
-
-    let precomputed_jobs = if cols.contains(&"jobs") {
-        if let Some(mj) = max_jobs {
-            let hist_durations = db.duration_by_pkg_all();
-            let durations: HashMap<String, usize> = hist_durations
-                .iter()
-                .map(|(k, &v)| (k.clone(), v as usize))
-                .collect();
-            let dc_i64: HashMap<String, i64> = dep_counts
-                .iter()
-                .map(|(k, &v)| {
-                    let base = pkgsrc::PkgName::new(k).pkgbase().to_string();
-                    (base, v as i64)
-                })
-                .collect();
-            bob::compute_budget(&dc_i64, &durations, mj, build_threads)
-        } else {
-            HashMap::new()
-        }
-    } else {
-        HashMap::new()
-    };
 
     let get_status = |pkg: &PackageStatusRow| -> (&'static str, String) {
         if let Some(state) = pkg
@@ -239,7 +200,11 @@ fn print_build_status(
     };
 
     let mut rows: Vec<Vec<String>> = Vec::new();
-    for pkg in &all_pkgs {
+    for sp in sched.iter() {
+        let Some(pkg) = status_map.get(sp.pkg.pkgname()) else {
+            continue;
+        };
+
         if !pkg_patterns.is_empty()
             && !pkg_patterns
                 .iter()
@@ -262,7 +227,6 @@ fn print_build_status(
             .unwrap_or_default();
 
         let dash = || "-".to_string();
-        let pkgbase = pkgsrc::PkgName::new(&pkg.pkgname).pkgbase().to_string();
 
         let row: Vec<String> = cols
             .iter()
@@ -272,23 +236,19 @@ fn print_build_status(
                 "status" => status.to_string(),
                 "reason" => reason.clone(),
                 "multi_version" => multi_version.clone(),
-                "deps" => dep_counts.get(&pkg.pkgname).unwrap_or(&0).to_string(),
-                "weight" => total_weights.get(&pkg.pkgname).unwrap_or(&0).to_string(),
-                "cpu" => cpu_times
-                    .get(&pkgbase)
-                    .map(|ms| bob::format_duration(*ms))
-                    .unwrap_or_else(dash),
-                "jobs" => {
-                    if max_jobs.is_none() {
-                        dash()
+                "deps" => sp.dep_count.to_string(),
+                "priority" => sp.total_pbulk_weight.to_string(),
+                "cpu" => {
+                    if sp.cpu_time > 0 {
+                        bob::format_duration(sp.cpu_time)
                     } else {
-                        let base = pkgsrc::PkgName::new(&pkg.pkgname).pkgbase().to_string();
-                        precomputed_jobs
-                            .get(&base)
-                            .map(|j| j.to_string())
-                            .unwrap_or_else(dash)
+                        dash()
                     }
                 }
+                "jobs" => match sp.make_jobs.allocated() {
+                    Some(n) => n.to_string(),
+                    None => dash(),
+                },
                 _ => String::new(),
             })
             .collect();

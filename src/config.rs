@@ -500,15 +500,15 @@ pub struct Options {
 ///
 /// Controls dynamic CPU and disk allocation informed by build history.
 ///
-/// - `jobs`: Total MAKE_JOBS CPU budget to distribute across concurrent builds.
-///   A value of 1.5x the number of physical cores is recommended: builds spend
-///   significant time in serial phases where allocated cores sit idle, and the
-///   overcommit lets parallel phases of other packages use those cores.
+/// - `jobs`: Total MAKE_JOBS budget to distribute across concurrent builds.
+///   Set this to the number of available CPU threads.  The allocator will
+///   slightly over-allocate to ensure optimal throughput during serial
+///   build phases.
 /// - `wrkobjdir`: Optional automatic WRKOBJDIR selection based on historical
 ///   disk usage, routing large builds to disk and small builds to tmpfs.
 #[derive(Clone, Debug)]
 pub struct DynamicConfig {
-    /// Total MAKE_JOBS CPU budget.
+    /// Total MAKE_JOBS budget.
     pub jobs: usize,
     /// Optional WRKOBJDIR routing based on historical disk usage.
     pub wrkobjdir: Option<WrkObjDir>,

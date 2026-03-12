@@ -1840,7 +1840,10 @@ fn test_multi_version_multiple_records_build_all_variants() -> Result<()> {
             "{pkgname} should build successfully"
         );
         assert!(
-            h.packages_dir().join("All").join(format!("{pkgname}.tgz")).exists(),
+            h.packages_dir()
+                .join("All")
+                .join(format!("{pkgname}.tgz"))
+                .exists(),
             "{pkgname} package file should exist"
         );
     }
@@ -1848,7 +1851,9 @@ fn test_multi_version_multiple_records_build_all_variants() -> Result<()> {
     let all_status = db.get_all_package_status(true)?;
     let lingering_pending: Vec<_> = all_status
         .into_iter()
-        .filter(|p| p.pkgpath == "test/dual" && p.build_outcome.is_none() && p.build_reason.is_none())
+        .filter(|p| {
+            p.pkgpath == "test/dual" && p.build_outcome.is_none() && p.build_reason.is_none()
+        })
         .map(|p| p.pkgname)
         .collect();
     assert!(
@@ -1966,12 +1971,6 @@ SCAN_DEPENDS=
     assert!(
         !loaded.iter().any(|p| p.pkgname().pkgname() == "extra-1.0"),
         "unselected package should not appear in resolved rebuild set"
-    );
-
-    let graph = db.get_scheduling_graph()?;
-    assert!(
-        !graph.names.iter().any(|name| name == "extra-1.0"),
-        "unselected package should not appear in scheduling graph"
     );
 
     Ok(())

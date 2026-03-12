@@ -43,9 +43,10 @@
 //! - `clean` - Clean up build artifacts
 
 use crate::config::PkgsrcEnv;
+use crate::makejobs::PkgMakeJobs;
 use crate::sandbox::{CommandSetsid, SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
 use crate::scan::ResolvedPackage;
-use crate::scheduler::{MakeJobsResponder, PackageNode, Scheduler};
+use crate::scheduler::Scheduler;
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, RunState, Sandbox};
 use crate::{PackageCounts, PackageState};
@@ -404,57 +405,12 @@ pub enum Stage {
 }
 
 /**
- * MAKE_JOBS configuration for a package build.
- */
-#[derive(Clone, Copy, Debug, Default)]
-pub enum MakeJobs {
-    /**
-     * Package has MAKE_JOBS_SAFE=no; parallel make not supported.
-     */
-    #[default]
-    NotSafe,
-    /**
-     * Parallel make with this many jobs.
-     */
-    Jobs(usize),
-}
-
-impl MakeJobs {
-    fn is_safe(&self) -> bool {
-        matches!(self, Self::Jobs(_))
-    }
-
-    /**
-     * Integer representation for storage (0 = not safe).
-     */
-    pub fn count(&self) -> usize {
-        match self {
-            Self::NotSafe => 0,
-            Self::Jobs(n) => *n,
-        }
-    }
-}
-
-impl serde::Serialize for MakeJobs {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_u64(self.count() as u64)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for MakeJobs {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let n = u64::deserialize(d)? as usize;
-        Ok(if n == 0 { Self::NotSafe } else { Self::Jobs(n) })
-    }
-}
-
-/**
  * Metrics captured during a package build.
  */
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct PkgBuildStats {
     /// MAKE_JOBS used for this build.
-    pub make_jobs: MakeJobs,
+    pub make_jobs: PkgMakeJobs,
     /// Last build stage attempted.
     pub stage: Option<Stage>,
     /// Per-stage wall-clock durations.
@@ -516,7 +472,7 @@ struct PkgBuilder<'a> {
     build_user: Option<String>,
     envs: Vec<(String, String)>,
     output_tx: Option<Sender<ChannelCommand>>,
-    make_jobs: MakeJobs,
+    make_jobs: PkgMakeJobs,
     wrkdir: Option<PathBuf>,
 }
 
@@ -527,7 +483,7 @@ impl<'a> PkgBuilder<'a> {
         pkginfo: &'a ResolvedPackage,
         envs: Vec<(String, String)>,
         output_tx: Option<Sender<ChannelCommand>>,
-        make_jobs: MakeJobs,
+        make_jobs: PkgMakeJobs,
         wrkdir: Option<PathBuf>,
     ) -> Self {
         let logdir = session
@@ -625,84 +581,59 @@ impl<'a> PkgBuilder<'a> {
             return Ok(PkgBuildResult::Failed(stats));
         }
 
-        let stage_start = Instant::now();
-        let conf_jobs = self.request_make_jobs();
-        let conf_arg = conf_jobs.map(|j| format!("MAKE_JOBS={}", j));
-        let conf_flag: Vec<&str> = conf_arg.iter().map(|s| s.as_str()).collect();
-        let conf_suffix = if let Some(j) = conf_jobs {
-            format!(" -j{}", j)
-        } else if !self.make_jobs.is_safe() && self.session.config.jobs().is_some() {
-            " -j1*".to_string()
-        } else {
-            String::new()
+        let jobs_suffix = match (self.make_jobs.safe(), self.make_jobs.jobs()) {
+            (false, Some(j)) => format!(" -j{}*", j),
+            (true, Some(j)) => format!(" -j{}", j),
+            (_, None) => bail!("_MAKE_JOBS_N not set"),
         };
+        stats.make_jobs = self.make_jobs;
 
+        let stage_start = Instant::now();
         stats.stage = Some(Stage::Configure);
-        callback.stage(&format!("{}{}", Stage::Configure.into_str(), conf_suffix));
+        callback.stage(Stage::Configure.into_str());
         let configure_log = self.logdir.join("configure.log");
         if !self.run_usergroup_if_needed(Stage::Configure, &pkgdir, &configure_log)? {
-            self.release_make_jobs();
             stats
                 .stage_durations
                 .push((Stage::Configure, stage_start.elapsed()));
             return Ok(PkgBuildResult::Failed(stats));
         }
-        let (ok, cpu_time) = self.run_make_stage_with_flags(
+        let (ok, cpu_time) = self.run_make_stage(
             Stage::Configure,
             &pkgdir,
             &["configure"],
             self.build_run_as(),
             true,
-            &conf_flag,
         )?;
         stats
             .stage_durations
             .push((Stage::Configure, stage_start.elapsed()));
         stats.stage_cpu_times.push((Stage::Configure, cpu_time));
-        self.release_make_jobs();
         if !ok {
             return Ok(PkgBuildResult::Failed(stats));
         }
 
-        // Build — re-request MAKE_JOBS with current remaining weights.
         let build_phase_start = Instant::now();
-        let build_jobs = self.request_make_jobs();
-        if let MakeJobs::Jobs(default) = self.make_jobs {
-            stats.make_jobs = MakeJobs::Jobs(build_jobs.unwrap_or(default));
-        }
-        let build_arg = build_jobs.map(|j| format!("MAKE_JOBS={}", j));
-        let build_flag: Vec<&str> = build_arg.iter().map(|s| s.as_str()).collect();
-        let build_suffix = if let Some(j) = build_jobs {
-            format!(" -j{}", j)
-        } else if !self.make_jobs.is_safe() && self.session.config.jobs().is_some() {
-            " -j1*".to_string()
-        } else {
-            String::new()
-        };
-
         stats.stage = Some(Stage::Build);
-        callback.stage(&format!("{}{}", Stage::Build.into_str(), build_suffix));
+        callback.stage(&format!("{}{}", Stage::Build.into_str(), jobs_suffix));
         let build_log = self.logdir.join("build.log");
         if !self.run_usergroup_if_needed(Stage::Build, &pkgdir, &build_log)? {
             stats
                 .stage_durations
                 .push((Stage::Build, build_phase_start.elapsed()));
-            self.release_make_jobs();
             return Ok(PkgBuildResult::Failed(stats));
         }
-        let (build_ok, cpu_time) = self.run_make_stage_with_flags(
+        let (build_ok, cpu_time) = self.run_make_stage(
             Stage::Build,
             &pkgdir,
             &["all"],
             self.build_run_as(),
             true,
-            &build_flag,
         )?;
         stats
             .stage_durations
             .push((Stage::Build, build_phase_start.elapsed()));
         stats.stage_cpu_times.push((Stage::Build, cpu_time));
-        self.release_make_jobs();
         if !build_ok {
             return Ok(PkgBuildResult::Failed(stats));
         }
@@ -1265,45 +1196,6 @@ impl<'a> PkgBuilder<'a> {
         parts.push("2>&1".to_string());
         parts.join(" ")
     }
-
-    /**
-     * Request MAKE_JOBS from the manager via one-shot channel.
-     *
-     * Sends a [`BuildPhaseEntry`] and blocks for the response.
-     * Returns `None` for packages that don't support parallel make
-     * or when jobs is not configured.
-     */
-    fn request_make_jobs(&self) -> Option<usize> {
-        if !self.make_jobs.is_safe() {
-            return None;
-        }
-        self.session.config.jobs()?;
-        let output_tx = self.output_tx.as_ref()?;
-        let (tx, rx) = mpsc::channel();
-        let _ = output_tx.send(ChannelCommand::BuildPhaseEntry(
-            self.sandbox_id,
-            MakeJobsResponder(tx),
-        ));
-        rx.recv().ok()
-    }
-
-    /**
-     * Release the MAKE_JOBS budget back to the manager.
-     *
-     * No-op for packages that don't support parallel make or when
-     * jobs is not configured.
-     */
-    fn release_make_jobs(&self) {
-        if !self.make_jobs.is_safe() {
-            return;
-        }
-        if self.session.config.jobs().is_none() {
-            return;
-        }
-        if let Some(ref output_tx) = self.output_tx {
-            let _ = output_tx.send(ChannelCommand::BuildPhaseExit(self.sandbox_id));
-        }
-    }
 }
 
 /// Callback adapter that sends build updates through a channel.
@@ -1365,9 +1257,10 @@ impl BuildResult {
             timestamp: self.build_stats.timestamp,
             pkgpath: self.pkgpath.as_ref()?.to_string(),
             pkgname: self.pkgname.pkgname().to_string(),
+            pkgbase: self.pkgname.pkgbase().to_string(),
             outcome: self.state.clone(),
             stage: self.build_stats.stage,
-            make_jobs: self.build_stats.make_jobs.count(),
+            make_jobs: self.build_stats.make_jobs.jobs(),
             duration: self.build_stats.duration,
             disk_usage: self.build_stats.disk_usage,
             stage_durations: self.build_stats.stage_durations.clone(),
@@ -1461,6 +1354,7 @@ struct PackageBuild {
     session: Arc<BuildSession>,
     sandbox_id: usize,
     pkginfo: ResolvedPackage,
+    make_jobs: PkgMakeJobs,
 }
 
 /// Helper for querying bmake variables with the correct environment.
@@ -1582,7 +1476,7 @@ impl<'a> MakeQuery<'a> {
 }
 
 impl PackageBuild {
-    fn build(&self, status_tx: &Sender<ChannelCommand>) -> anyhow::Result<PkgBuildResult> {
+    fn build(&mut self, status_tx: &Sender<ChannelCommand>) -> anyhow::Result<PkgBuildResult> {
         let pkgname = self.pkginfo.index.pkgname.pkgname();
         info!("Starting package build");
 
@@ -1618,22 +1512,8 @@ impl PackageBuild {
 
         let patterns = self.session.config.save_wrkdir_patterns();
 
-        // Query MAKE_JOBS_SAFE, _MAKE_JOBS_N, and WRKDIR in one bmake call
-        let make = MakeQuery::new(&self.session, self.sandbox_id, pkgpath, &pkg_env);
-        let vars = make.vars(&["MAKE_JOBS_SAFE", "_MAKE_JOBS_N", "WRKDIR"]);
-        let make_jobs_safe = vars
-            .get("MAKE_JOBS_SAFE")
-            .map(|v| !v.eq_ignore_ascii_case("no"))
-            .unwrap_or(true);
-        let make_jobs = if make_jobs_safe {
-            let n = vars.get("_MAKE_JOBS_N").and_then(|v| v.parse().ok());
-            MakeJobs::Jobs(n.unwrap_or(1))
-        } else {
-            MakeJobs::NotSafe
-        };
-        let wrkdir = vars.get("WRKDIR").map(|w| make.resolve_path(Path::new(w)));
-
-        // Run pre-build script if defined (always runs)
+        // Run pre-build script if defined (always runs).  The sandbox
+        // is not usable until this completes.
         if !self.session.sandbox.run_pre_build(
             self.sandbox_id,
             &self.session.config,
@@ -1642,6 +1522,26 @@ impl PackageBuild {
             warn!("pre-build script failed");
         }
 
+        if let Some(jobs) = self.make_jobs.allocated() {
+            envs.push(("MAKE_JOBS".to_string(), jobs.to_string()));
+        }
+
+        let env_map: HashMap<String, String> = envs.iter().cloned().collect();
+        let make = MakeQuery::new(&self.session, self.sandbox_id, pkgpath, &env_map);
+        let vars = make.vars(&["_MAKE_JOBS_N", "WRKDIR"]);
+
+        let wrkdir = Some(make.resolve_path(Path::new(
+            vars.get("WRKDIR")
+                .ok_or_else(|| anyhow::anyhow!("failed to query WRKDIR"))?,
+        )));
+
+        let make_jobs_n: usize = vars
+            .get("_MAKE_JOBS_N")
+            .ok_or_else(|| anyhow::anyhow!("failed to query _MAKE_JOBS_N"))?
+            .parse()
+            .map_err(|e| anyhow::anyhow!("failed to parse _MAKE_JOBS_N: {}", e))?;
+        self.make_jobs.set_jobs(make_jobs_n);
+
         // Run the build using PkgBuilder
         let builder = PkgBuilder::new(
             &self.session,
@@ -1649,7 +1549,7 @@ impl PackageBuild {
             &self.pkginfo,
             envs.clone(),
             Some(status_tx.clone()),
-            make_jobs,
+            self.make_jobs,
             wrkdir.clone(),
         );
 
@@ -1684,7 +1584,7 @@ impl PackageBuild {
                     status_tx, pkgname, pkgpath, logdir, patterns, &pkg_env, &envs,
                 );
                 PkgBuildResult::Failed(PkgBuildStats {
-                    make_jobs,
+                    make_jobs: self.make_jobs,
                     disk_usage,
                     ..PkgBuildStats::default()
                 })
@@ -1962,15 +1862,6 @@ enum ChannelCommand {
      * Client reporting output lines from a build.
      */
     OutputLines(usize, Vec<String>),
-    /**
-     * Client entering the build (compilation) phase.
-     * Carries a one-shot responder for the manager to return MAKE_JOBS.
-     */
-    BuildPhaseEntry(usize, MakeJobsResponder),
-    /**
-     * Client exiting the build (compilation) phase.
-     */
-    BuildPhaseExit(usize),
 }
 
 struct BuildJobs {
@@ -1993,12 +1884,11 @@ impl BuildJobs {
      * Recursively mark a package and its dependents as failed.
      */
     fn mark_failure(&mut self, result: BuildResult) {
-        let pkgname = &result.pkgname;
-        trace!(pkgname = %pkgname.pkgname(), "mark_failure called");
+        trace!(pkgname = %result.pkgname.pkgname(), "mark_failure called");
         let start = std::time::Instant::now();
 
-        let indirect = self.scheduler.mark_failure(pkgname);
-        trace!(pkgname = %pkgname.pkgname(), broken_count = indirect.len() + 1, elapsed_ms = start.elapsed().as_millis(), "mark_failure found broken packages");
+        let indirect = self.scheduler.mark_failure(&result.pkgname);
+        trace!(pkgname = %result.pkgname.pkgname(), broken_count = indirect.len() + 1, elapsed_ms = start.elapsed().as_millis(), "mark_failure found broken packages");
 
         let pkgname = result.pkgname.clone();
         self.results.push(result);
@@ -2099,88 +1989,39 @@ impl Build {
 
         let state_flag = state.clone();
 
+        let results: Vec<BuildResult> = Vec::new();
+
+        let mut scheduler = Scheduler::new(db)?;
+
         /*
-         * Populate BuildJobs.
+         * Mark packages that aren't buildable (pre-skipped, pre-failed,
+         * unresolved, etc.) as done in the scheduler so they are never
+         * dispatched.  The scheduler includes all selected packages from
+         * the DB; only the subset in scanpkgs needs building.
          */
-        debug!("Populating BuildJobs from scanpkgs");
-        let mut packages: HashMap<PkgName, PackageNode<PkgName>> = HashMap::new();
-        let mut reverse_deps: HashMap<PkgName, HashSet<PkgName>> = HashMap::new();
-        for (pkgname, index) in &self.scanpkgs {
-            let mut deps: HashSet<PkgName> = HashSet::new();
-            for dep in index.depends() {
-                if !self.scanpkgs.contains_key(dep) {
-                    continue;
-                }
-                deps.insert(dep.clone());
-                reverse_deps
-                    .entry(dep.clone())
-                    .or_default()
-                    .insert(pkgname.clone());
+        let all_pkgs: Vec<PkgName> = scheduler.iter().map(|sp| sp.pkg).collect();
+        for pkg in &all_pkgs {
+            if !self.scanpkgs.contains_key(pkg) {
+                scheduler.mark_success(pkg);
             }
-            trace!(pkgname = %pkgname.pkgname(),
-                deps_count = deps.len(),
-                deps = ?deps.iter().map(|d| d.pkgname()).collect::<Vec<_>>(),
-                "Adding package to incoming build queue"
-            );
-            packages.insert(
-                pkgname.clone(),
-                PackageNode {
-                    deps,
-                    pbulk_weight: index.pbulk_weight(),
-                    cpu_time: 0,
-                },
-            );
         }
 
         /*
-         * Process cached build results.
+         * Apply cached build results to the scheduler.
          */
-        let mut done: HashSet<PkgName> = HashSet::new();
-        let mut failed: HashSet<PkgName> = HashSet::new();
-        let results: Vec<BuildResult> = Vec::new();
         let mut cached_count = 0usize;
-
+        let mut indirect_failed_count = 0usize;
         for (pkgname, result) in &self.cached {
             match result.state {
                 PackageState::Success | PackageState::UpToDate => {
-                    packages.remove(pkgname);
-                    done.insert(pkgname.clone());
-                    for node in packages.values_mut() {
-                        node.deps.remove(pkgname);
-                    }
-                    cached_count += 1;
+                    scheduler.mark_success(pkgname);
                 }
                 _ => {
-                    packages.remove(pkgname);
-                    failed.insert(pkgname.clone());
-                    cached_count += 1;
+                    let indirect = scheduler.mark_failure(pkgname);
+                    indirect_failed_count += indirect.len();
                 }
             }
-        }
-
-        /*
-         * Propagate cached failures: any package in incoming that depends on
-         * a failed package must also be marked as failed.
-         */
-        let mut indirect_failed_count = 0usize;
-        loop {
-            let mut newly_failed: Vec<PkgName> = Vec::new();
-            for (pkgname, node) in &packages {
-                for dep in &node.deps {
-                    if failed.contains(dep) {
-                        newly_failed.push(pkgname.clone());
-                        break;
-                    }
-                }
-            }
-            if newly_failed.is_empty() {
-                break;
-            }
-            indirect_failed_count += newly_failed.len();
-            for pkgname in newly_failed {
-                packages.remove(&pkgname);
-                failed.insert(pkgname);
-            }
+            cached_count += 1;
         }
 
         if cached_count > 0 {
@@ -2188,13 +2029,13 @@ impl Build {
         }
 
         info!(
-            incoming_count = packages.len(),
+            queued_count = scheduler.queued_count(),
             scanpkgs_count = self.scanpkgs.len(),
             cached_count = cached_count,
             "BuildJobs populated"
         );
 
-        if packages.is_empty() {
+        if scheduler.queued_count() == 0 {
             return Ok(BuildSummary {
                 duration: started.elapsed(),
                 results,
@@ -2235,25 +2076,6 @@ impl Build {
             .iter()
             .map(|(p, b)| (p.as_str(), b.as_str()))
             .collect();
-
-        /*
-         * Populate historical CPU time for scheduling tiebreaker.
-         *
-         * Keyed by pkgbase to handle version bumps and
-         * MULTI_VERSION packages.
-         */
-        let hist_cpu = db.cpu_time_by_pkg_all();
-        for (pkgname, node) in &mut packages {
-            if let Some(&ct) = hist_cpu.get(pkgname.pkgbase()) {
-                node.cpu_time = ct;
-            }
-        }
-
-        let mut scheduler = Scheduler::new(packages, reverse_deps, done, failed);
-
-        if let Some(max_jobs) = self.config.jobs() {
-            scheduler.init_budget(max_jobs, self.config.build_threads());
-        }
 
         /*
          * Build wrkobjdir map from historical disk usage.
@@ -2304,6 +2126,13 @@ impl Build {
         } else {
             HashMap::new()
         };
+
+        if let Some(jobs) = self.config.jobs() {
+            scheduler.set_allocator(crate::makejobs::Allocator::new(
+                self.config.build_threads(),
+                jobs,
+            ));
+        }
 
         let logdir = self.config.logdir().clone();
         let jobs = BuildJobs {
@@ -2404,7 +2233,7 @@ impl Build {
                             std::thread::sleep(WORKER_BACKOFF_INTERVAL);
                             continue;
                         }
-                        ChannelCommand::JobData(pkg) => {
+                        ChannelCommand::JobData(mut pkg) => {
                             let pkgname = pkg.pkginfo.index.pkgname.clone();
                             let pkgpath = pkg.pkginfo.pkgpath.clone();
                             let span = info_span!(
@@ -2515,8 +2344,6 @@ impl Build {
             // Track which thread is building which package
             let mut thread_packages: HashMap<usize, PkgName> = HashMap::new();
 
-            let build_threads = session.config.build_threads();
-
             loop {
                 if state_for_manager.is_shutdown() {
                     let was_first = if let Ok(mut p) = progress_clone.lock() {
@@ -2566,16 +2393,16 @@ impl Build {
                     ChannelCommand::ClientReady(c) => {
                         let client = clients.get(&c).expect("client not in map");
                         match jobs.scheduler.poll() {
-                            Poll::Ready(Some(pkg)) => {
-                                let pkginfo = jobs.scanpkgs.get(&pkg).expect("pkg not in scanpkgs");
+                            Poll::Ready(Some(sp)) => {
+                                let pkginfo =
+                                    jobs.scanpkgs.get(&sp.pkg).expect("pkg not in scanpkgs");
 
-                                // Update thread progress
-                                thread_packages.insert(c, pkg.clone());
+                                thread_packages.insert(c, sp.pkg.clone());
                                 if let Ok(mut p) = progress_clone.lock() {
                                     p.clear_output_buffer(c);
-                                    p.state_mut().set_worker_active(c, pkg.pkgname());
+                                    p.state_mut().set_worker_active(c, sp.pkg.pkgname());
                                     if p.is_plain() {
-                                        let _ = p.print_status("Building", pkg.pkgname());
+                                        let _ = p.print_status("Building", sp.pkg.pkgname());
                                     }
                                     let _ = p.render();
                                 }
@@ -2585,6 +2412,7 @@ impl Build {
                                         session: Arc::clone(&session),
                                         sandbox_id: c,
                                         pkginfo: pkginfo.clone(),
+                                        make_jobs: sp.make_jobs,
                                     })));
                             }
                             Poll::Ready(None) => {
@@ -2619,8 +2447,6 @@ impl Build {
                             .find(|(_, p)| *p == &pkgname)
                             .map(|(t, _)| *t);
 
-                        jobs.scheduler.release_make_jobs(&pkgname);
-
                         if let Some(r) = jobs.results.last() {
                             let _ = completed_tx.send(r.clone());
                         }
@@ -2641,15 +2467,6 @@ impl Build {
                         if let Some(sid) = sid {
                             thread_packages.remove(&sid);
                         }
-
-                        let free_slots = build_threads.saturating_sub(thread_packages.len());
-                        let reserved: usize = jobs
-                            .scheduler
-                            .peek_ready(free_slots)
-                            .iter()
-                            .map(|_| jobs.scheduler.fair_share())
-                            .sum();
-                        jobs.scheduler.set_reserved(reserved);
                     }
                     ChannelCommand::JobFailed(result) => {
                         let pkgname = result.pkgname.clone();
@@ -2661,8 +2478,6 @@ impl Build {
                             .iter()
                             .find(|(_, p)| *p == &pkgname)
                             .map(|(t, _)| *t);
-
-                        jobs.scheduler.release_make_jobs(&pkgname);
 
                         for r in jobs.results.iter().skip(results_before) {
                             let _ = completed_tx.send(r.clone());
@@ -2694,15 +2509,6 @@ impl Build {
                         if let Some(sid) = sid {
                             thread_packages.remove(&sid);
                         }
-
-                        let free_slots = build_threads.saturating_sub(thread_packages.len());
-                        let reserved: usize = jobs
-                            .scheduler
-                            .peek_ready(free_slots)
-                            .iter()
-                            .map(|_| jobs.scheduler.fair_share())
-                            .sum();
-                        jobs.scheduler.set_reserved(reserved);
                     }
                     ChannelCommand::StageUpdate(tid, stage) => {
                         if let Ok(mut p) = progress_clone.lock() {
@@ -2719,38 +2525,10 @@ impl Build {
                             }
                         }
                     }
-                    ChannelCommand::BuildPhaseEntry(sid, responder) => {
-                        let pkg = thread_packages.get(&sid);
-                        let jobs_val = pkg
-                            .and_then(|p| {
-                                let free_slots =
-                                    build_threads.saturating_sub(thread_packages.len());
-                                let reserved: usize = jobs
-                                    .scheduler
-                                    .peek_ready(free_slots)
-                                    .iter()
-                                    .map(|_| jobs.scheduler.fair_share())
-                                    .sum();
-                                jobs.scheduler.set_reserved(reserved);
-                                jobs.scheduler.request_make_jobs(p)
-                            })
-                            .unwrap_or(1);
-                        let _ = responder.0.send(jobs_val);
-                    }
-                    ChannelCommand::BuildPhaseExit(sid) => {
-                        if let Some(pkg) = thread_packages.get(&sid) {
-                            jobs.scheduler.release_make_jobs(pkg);
-                        }
-                        let free_slots = build_threads.saturating_sub(thread_packages.len());
-                        let reserved: usize = jobs
-                            .scheduler
-                            .peek_ready(free_slots)
-                            .iter()
-                            .map(|_| jobs.scheduler.fair_share())
-                            .sum();
-                        jobs.scheduler.set_reserved(reserved);
-                    }
-                    _ => {}
+                    ChannelCommand::ComeBackLater
+                    | ChannelCommand::JobData(_)
+                    | ChannelCommand::Quit
+                    | ChannelCommand::Shutdown => {}
                 }
             }
 

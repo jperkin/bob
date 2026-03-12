@@ -25,33 +25,115 @@ use bob::try_println;
 use bob::{PackageNode, Scheduler};
 
 /**
- * Load per-package timings from a file.
+ * Per-package timing profile loaded from a history CSV.
  *
- * Each line is `pkgname duration` where duration is a positive integer.
- * Blank lines are skipped.
+ * Phases:
+ *   overhead_pre  = pre-clean + depends + checksum (serial)
+ *   configure     = configure stage (serial)
+ *   build         = build stage (parallel, scales with jobs)
+ *   overhead_post = install + package + deinstall + clean (serial)
  */
-fn load_timings(path: &Path) -> Result<HashMap<String, usize>> {
+struct PkgProfile {
+    overhead_pre_ms: u64,
+    configure_wall_ms: u64,
+    build_cpu_ms: u64,
+    build_wall_ms: u64,
+    overhead_post_ms: u64,
+    hist_jobs: u64,
+    make_jobs_safe: bool,
+}
+
+impl PkgProfile {
+    /**
+     * Phase durations in seconds: [overhead_pre, configure, build, overhead_post].
+     *
+     * Only the build phase scales with jobs.
+     * All other phases are serial.
+     */
+    fn phase_durations(&self, jobs: usize) -> [usize; 4] {
+        let build_ms = Self::estimate_build_time(
+            self.build_cpu_ms,
+            self.build_wall_ms,
+            self.hist_jobs,
+            jobs.max(1) as u64,
+        );
+        [
+            (self.overhead_pre_ms / 1000).max(1) as usize,
+            (self.configure_wall_ms / 1000).max(1) as usize,
+            (build_ms / 1000).max(1) as usize,
+            (self.overhead_post_ms / 1000).max(1) as usize,
+        ]
+    }
+
+    fn estimate_build_time(cpu_ms: u64, wall_ms: u64, hist_jobs: u64, target_jobs: u64) -> u64 {
+        if wall_ms == 0 || cpu_ms == 0 {
+            return wall_ms;
+        }
+        let ratio = cpu_ms as f64 / wall_ms as f64;
+        if ratio <= 1.0 {
+            return wall_ms;
+        }
+        let parallel_at_hist = cpu_ms / hist_jobs.max(1);
+        let serial = wall_ms.saturating_sub(parallel_at_hist);
+        serial + cpu_ms / target_jobs
+    }
+}
+
+/**
+ * Load detailed per-package profiles from a history CSV.
+ *
+ * Accepts plain CSV or zstd-compressed CSV (detected by .zst extension).
+ */
+fn load_history(path: &Path) -> Result<HashMap<String, PkgProfile>> {
     let file =
         std::fs::File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
-    let reader = std::io::BufReader::new(file);
-    let mut timings = HashMap::new();
+    let buf = std::io::BufReader::new(file);
+    let reader: Box<dyn BufRead> = if path.extension().map(|e| e == "zst").unwrap_or(false) {
+        let decoder = zstd::Decoder::new(buf)
+            .with_context(|| format!("Failed to decompress {}", path.display()))?;
+        Box::new(std::io::BufReader::new(decoder))
+    } else {
+        Box::new(buf)
+    };
+    let mut result = HashMap::new();
+    let parse = |s: &str| -> u64 { s.parse::<u64>().unwrap_or(0) };
     for line in reader.lines() {
-        let line = line.context("Failed to read timings line")?;
-        let line = line.trim();
-        if line.is_empty() {
+        let line = line.context("Failed to read history line")?;
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 22 || fields[0] == "timestamp" {
             continue;
         }
-        let Some((name, dur)) = line.split_once(' ') else {
-            bail!("malformed timings line: {}", line);
+        if fields[3] != "success" {
+            continue;
+        }
+        let pkgname = fields[2].to_string();
+        let make_jobs_safe = fields[5] != "-";
+        let hist_jobs = if make_jobs_safe {
+            fields[5].parse::<u64>().unwrap_or(1)
+        } else {
+            1
         };
-        let dur: usize = dur
-            .trim()
-            .parse()
-            .with_context(|| format!("invalid duration in: {}", line))?;
-        timings.insert(name.to_string(), dur);
+        let overhead_pre_ms = parse(fields[8]) + parse(fields[9]) + parse(fields[10]);
+        let overhead_post_ms =
+            parse(fields[13]) + parse(fields[14]) + parse(fields[15]) + parse(fields[16]);
+        result.insert(
+            pkgname,
+            PkgProfile {
+                overhead_pre_ms,
+                configure_wall_ms: parse(fields[11]),
+                build_cpu_ms: parse(fields[21]),
+                build_wall_ms: parse(fields[12]),
+                overhead_post_ms,
+                hist_jobs,
+                make_jobs_safe,
+            },
+        );
     }
-    Ok(timings)
+    Ok(result)
 }
+
+const PHASE_BUILD: usize = 2;
+const PHASE_COUNT: usize = 4;
 
 /**
  * Simulate a parallel build and report scheduling efficiency.
@@ -59,14 +141,22 @@ fn load_timings(path: &Path) -> Result<HashMap<String, usize>> {
  * Reads a dependency graph in edge format (`dep -> dependent`, one per
  * line) and runs an event-driven simulation with `workers` workers.
  *
- * Without timings, each package takes one time unit (lockstep).  With
- * a timings file, packages take the specified duration and the
- * simulation advances to each completion event.
+ * Without `--history` each package takes one time unit.  With
+ * `--history`, build durations are estimated from historical CPU and
+ * wall times, and jobs are allocated using the same algorithm as
+ * `bob build`.
  *
- * Per-event output shows the time, idle worker count, and the packages
- * dispatched at that time.  A summary line is printed to stderr.
+ * Use `--uniform` to force equal allocation for baseline comparison.
+ *
+ * Generate a history file with: `bob history --raw --format csv`
  */
-pub fn run(file: &Path, workers: usize, timings_path: Option<&Path>) -> Result<()> {
+pub fn run(
+    file: &Path,
+    workers: usize,
+    jobs: Option<usize>,
+    history_path: Option<&Path>,
+    uniform: bool,
+) -> Result<()> {
     if workers == 0 {
         bail!("workers must be at least 1");
     }
@@ -74,14 +164,19 @@ pub fn run(file: &Path, workers: usize, timings_path: Option<&Path>) -> Result<(
     let reader: Box<dyn BufRead> = if file == Path::new("-") {
         Box::new(std::io::BufReader::new(std::io::stdin()))
     } else {
-        Box::new(std::io::BufReader::new(
-            std::fs::File::open(file)
-                .with_context(|| format!("Failed to open {}", file.display()))?,
-        ))
+        let f = std::fs::File::open(file)
+            .with_context(|| format!("Failed to open {}", file.display()))?;
+        let buf = std::io::BufReader::new(f);
+        if file.extension().map(|e| e == "zst").unwrap_or(false) {
+            let decoder = zstd::Decoder::new(buf)
+                .with_context(|| format!("Failed to decompress {}", file.display()))?;
+            Box::new(std::io::BufReader::new(decoder))
+        } else {
+            Box::new(buf)
+        }
     };
 
     let mut packages: HashMap<String, PackageNode<String>> = HashMap::new();
-    let mut reverse_deps: HashMap<String, HashSet<String>> = HashMap::new();
     for line in reader.lines() {
         let line = line.context("Failed to read line")?;
         let line = line.trim();
@@ -107,44 +202,77 @@ pub fn run(file: &Path, workers: usize, timings_path: Option<&Path>) -> Result<(
                 pbulk_weight: 100,
                 cpu_time: 0,
             });
-        reverse_deps
-            .entry(dep.to_string())
-            .or_default()
-            .insert(dependent.to_string());
-        reverse_deps.entry(dependent.to_string()).or_default();
     }
 
-    let timings = match timings_path {
-        Some(path) => load_timings(path)?,
+    let history = match history_path {
+        Some(path) => load_history(path)?,
         None => HashMap::new(),
     };
-    let duration = |pkg: &str| -> usize { timings.get(pkg).copied().unwrap_or(1) };
 
     let pkg_count = packages.len();
-    let mut sched = Scheduler::new(packages, reverse_deps, HashSet::new(), HashSet::new());
+    let mut sched = Scheduler::from_graph(packages);
+    for (pkg, profile) in &history {
+        if !profile.make_jobs_safe {
+            sched.set_make_jobs_unsafe(pkg);
+        }
+        if !uniform && profile.build_cpu_ms > 0 {
+            sched.set_pkg_cpu_history(pkg, profile.build_cpu_ms as usize);
+        }
+    }
+    if let Some(mj) = jobs {
+        sched.set_allocator(bob::makejobs::Allocator::new(workers, mj));
+    }
 
-    /*
-     * Event-driven simulation with explicit worker slots.  Each slot
-     * holds the package name and completion time, or None if idle.
-     * At each event we complete all workers finishing at that time,
-     * dispatch new work to idle slots, and print the full worker state.
-     */
-    let mut slots: Vec<Option<(String, usize)>> = vec![None; workers];
+    struct Slot {
+        pkg: String,
+        phase: usize,
+        phase_end: usize,
+        phases: [usize; PHASE_COUNT],
+        jobs: usize,
+    }
+
+    impl Slot {
+        fn active_jobs(&self) -> usize {
+            if self.phase == PHASE_BUILD {
+                self.jobs
+            } else {
+                1
+            }
+        }
+    }
+
+    let mut slots: Vec<Option<Slot>> = (0..workers).map(|_| None).collect();
     let mut time = 0usize;
     let mut total_busy = 0usize;
+    let mut total_job_seconds = 0usize;
+    let mut peak_jobs = 0usize;
+    let mut overalloc_seconds = 0usize;
     let mut printing = true;
 
     loop {
+        let mut state_changed = false;
+
         /*
-         * Complete all workers finishing at the current time.
+         * Advance completed phases.  If a slot finishes its current
+         * phase, move to the next.  If all phases are done, the
+         * package is complete.
          */
-        let mut changed = false;
         for slot in slots.iter_mut() {
-            if let Some((ref pkg, t)) = *slot {
-                if t == time {
-                    sched.mark_success(pkg);
-                    *slot = None;
-                    changed = true;
+            let done = if let Some(ref s) = *slot {
+                s.phase_end == time && s.phase + 1 >= PHASE_COUNT
+            } else {
+                false
+            };
+            if done {
+                let s = slot.take().expect("slot");
+                sched.mark_success(&s.pkg);
+                state_changed = true;
+                continue;
+            }
+            if let Some(ref mut s) = *slot {
+                while s.phase_end == time && s.phase + 1 < PHASE_COUNT {
+                    s.phase += 1;
+                    s.phase_end = time + s.phases[s.phase];
                 }
             }
         }
@@ -152,38 +280,80 @@ pub fn run(file: &Path, workers: usize, timings_path: Option<&Path>) -> Result<(
         /*
          * Dispatch new packages to idle worker slots.
          */
-        for slot in slots.iter_mut() {
-            if slot.is_none() {
-                if let Poll::Ready(Some(pkg)) = sched.poll() {
-                    let d = duration(&pkg);
-                    total_busy += d;
-                    *slot = Some((pkg, time + d));
-                    changed = true;
-                }
-            }
+        loop {
+            let idle = slots.iter().position(|s| s.is_none());
+            let Some(idx) = idle else { break };
+            let Poll::Ready(Some(sp)) = sched.poll() else {
+                break;
+            };
+
+            let jobs = sp.make_jobs.allocated().unwrap_or(1);
+
+            let phases = if let Some(p) = history.get(&sp.pkg) {
+                p.phase_durations(jobs)
+            } else {
+                [0, 0, 1, 0]
+            };
+
+            let total_d: usize = phases.iter().sum();
+            total_busy += total_d;
+
+            let first_phase_dur = phases[0];
+            slots[idx] = Some(Slot {
+                pkg: sp.pkg,
+                phase: 0,
+                phase_end: time + first_phase_dur,
+                phases,
+                jobs,
+            });
+            state_changed = true;
         }
 
-        if printing && changed {
-            let active: Vec<&str> = slots
+        if state_changed && printing {
+            let mut active: Vec<(&str, usize)> = slots
                 .iter()
-                .filter_map(|s| s.as_ref().map(|(name, _)| name.as_str()))
+                .filter_map(|s| s.as_ref().map(|s| (s.pkg.as_str(), s.jobs)))
                 .collect();
+            active.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+            let total_jobs: usize = active.iter().map(|(_, c)| c).sum();
+            let pkgs: String = active
+                .iter()
+                .map(|(name, jobs)| format!("{}({})", name, jobs))
+                .collect::<Vec<_>>()
+                .join(" ");
             printing = try_println(&format!(
-                "{:>14}  {:>2}/{}  {}",
+                "{:>14}  {:>2}/{}  ({:>2}): {}",
                 format_hms(time),
                 active.len(),
                 workers,
-                active.join(", ")
+                total_jobs,
+                pkgs,
             ));
         }
 
+        /*
+         * Track core-seconds for actual core demand.
+         */
         let next_time = slots
             .iter()
-            .filter_map(|s| s.as_ref().map(|(_, t)| *t))
+            .filter_map(|s| s.as_ref().map(|s| s.phase_end))
             .min();
         let Some(next_time) = next_time else {
             break;
         };
+        let dt = next_time - time;
+        let current_jobs: usize = slots
+            .iter()
+            .filter_map(|s| s.as_ref())
+            .map(|s| s.active_jobs())
+            .sum();
+        total_job_seconds += dt * current_jobs;
+        peak_jobs = peak_jobs.max(current_jobs);
+        if let Some(mj) = jobs {
+            if current_jobs > mj {
+                overalloc_seconds += dt;
+            }
+        }
         time = next_time;
     }
 
@@ -193,14 +363,29 @@ pub fn run(file: &Path, workers: usize, timings_path: Option<&Path>) -> Result<(
     } else {
         0.0
     };
+    let job_utilisation = if time > 0 {
+        let mj = jobs.unwrap_or(workers);
+        100.0 * total_job_seconds as f64 / (time * mj) as f64
+    } else {
+        0.0
+    };
+    let overalloc_pct = if time > 0 {
+        100.0 * overalloc_seconds as f64 / time as f64
+    } else {
+        0.0
+    };
     eprintln!();
     eprintln!(
-        "{} packages, {} workers, wall {}, work {}, {:.1}% utilisation",
+        "{} packages, {} workers, wall {}, work {}, \
+         {:.1}% worker util, {:.1}% job util, peak {} jobs, {:.1}% time over-allocated",
         pkg_count,
         workers,
         format_hms(time),
         format_hms(total_busy),
-        utilisation
+        utilisation,
+        job_utilisation,
+        peak_jobs,
+        overalloc_pct,
     );
 
     Ok(())

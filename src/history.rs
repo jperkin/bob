@@ -60,6 +60,8 @@ pub enum HistoryKind {
     Pkgpath,
     #[strum(message = "Package name and version", props(default = "true"))]
     Pkgname,
+    #[strum(message = "Package name without version")]
+    Pkgbase,
     #[strum(message = "Build result", props(default = "true"))]
     Outcome,
     #[strum(
@@ -167,9 +169,10 @@ pub struct History {
     pub timestamp: i64,
     pub pkgpath: String,
     pub pkgname: String,
+    pub pkgbase: String,
     pub outcome: PackageState,
     pub stage: Option<Stage>,
-    pub make_jobs: usize,
+    pub make_jobs: Option<usize>,
     pub duration: Duration,
     pub disk_usage: Option<u64>,
     /// Per-stage wall-clock durations.
@@ -264,6 +267,7 @@ impl History {
             HistoryKind::Timestamp => format_timestamp(self.timestamp),
             HistoryKind::Pkgpath => self.pkgpath.clone(),
             HistoryKind::Pkgname => self.pkgname.clone(),
+            HistoryKind::Pkgbase => self.pkgbase.clone(),
             HistoryKind::Outcome => self.outcome.status().to_string(),
             HistoryKind::Stage => {
                 if self.outcome == PackageState::Success {
@@ -275,11 +279,7 @@ impl History {
                 }
             }
             HistoryKind::MakeJobs => {
-                if self.make_jobs == 0 {
-                    dash()
-                } else {
-                    self.make_jobs.to_string()
-                }
+                self.make_jobs.map(|j| j.to_string()).unwrap_or_else(dash)
             }
             HistoryKind::Duration => fmt_dur(self.duration),
             HistoryKind::DiskUsage => self.disk_usage.map(format_size).unwrap_or_else(dash),
@@ -325,6 +325,7 @@ impl History {
             HistoryKind::Timestamp => self.timestamp.to_string(),
             HistoryKind::Pkgpath => self.pkgpath.clone(),
             HistoryKind::Pkgname => self.pkgname.clone(),
+            HistoryKind::Pkgbase => self.pkgbase.clone(),
             HistoryKind::Outcome => self.outcome.status().to_string(),
             HistoryKind::Stage => {
                 if self.outcome == PackageState::Success {
@@ -336,11 +337,7 @@ impl History {
                 }
             }
             HistoryKind::MakeJobs => {
-                if self.make_jobs == 0 {
-                    dash()
-                } else {
-                    self.make_jobs.to_string()
-                }
+                self.make_jobs.map(|j| j.to_string()).unwrap_or_else(dash)
             }
             HistoryKind::Duration => fmt_dur(self.duration),
             HistoryKind::DiskUsage => self.disk_usage.map(|b| b.to_string()).unwrap_or_else(dash),
