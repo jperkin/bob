@@ -357,6 +357,8 @@ pub struct Scan {
     /// Initial pkgpaths from limited_list (for deferred dependency discovery).
     /// Only set for non-full-tree scans.
     initial_pkgpaths: HashSet<PkgPath>,
+    /// Verbosity level for resolution warnings (0=quiet, 1=location, 2=multi).
+    verbosity: u8,
 }
 
 impl Scan {
@@ -380,7 +382,12 @@ impl Scan {
             scan_failures: Vec::new(),
             pkgsrc_env: None,
             initial_pkgpaths: HashSet::new(),
+            verbosity: 0,
         }
+    }
+
+    pub fn set_verbosity(&mut self, v: u8) {
+        self.verbosity = v;
     }
 
     pub fn add(&mut self, pkgpath: &PkgPath) {
@@ -1429,6 +1436,19 @@ impl Scan {
 
         let pkgnames: Vec<PkgName> = self.packages.keys().cloned().collect();
         let pkgbase_map = Self::build_pkgbase_map(&pkgnames);
+        let verbosity = self.verbosity;
+        let pkg_locations: HashMap<PkgName, PkgPath> = if verbosity >= 1 {
+            self.packages
+                .iter()
+                .filter_map(|(name, idx)| {
+                    idx.pkg_location
+                        .as_ref()
+                        .map(|loc| (name.clone(), loc.clone()))
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
         let mut match_cache: HashMap<Depend, PkgName> = HashMap::new();
         let is_satisfied = |deps: &[PkgName], pattern: &pkgsrc::Pattern| {
             deps.iter()
@@ -1463,6 +1483,21 @@ impl Scan {
                         continue;
                     }
 
+                    if verbosity >= 2 {
+                        let candidates =
+                            Self::find_candidates(depend, &pkgbase_map, pkgnames.iter());
+                        if candidates.len() > 1 {
+                            for c in &candidates {
+                                eprintln!(
+                                    "Multiple matches for dependency {} of package {}: {}",
+                                    depend.pattern().pattern(),
+                                    pkg.pkgname.pkgname(),
+                                    c.pkgname()
+                                );
+                            }
+                        }
+                    }
+
                     match Self::find_best_match(depend, &pkgbase_map, &pkgnames) {
                         Err(e) => {
                             let reason = format!(
@@ -1477,6 +1512,19 @@ impl Scan {
                             }
                         }
                         Ok(Some(pkgname)) => {
+                            if verbosity >= 1 {
+                                if let Some(loc) = pkg_locations.get(pkgname) {
+                                    if *loc != *depend.pkgpath() {
+                                        eprintln!(
+                                            "Best matching {} differs from location {} for dependency {} of package {}",
+                                            pkgname.pkgname(),
+                                            depend.pkgpath(),
+                                            depend.pattern().pattern(),
+                                            pkg.pkgname.pkgname()
+                                        );
+                                    }
+                                }
+                            }
                             if !is_satisfied(pkg_depends, depend.pattern())
                                 && !pkg_depends.contains(pkgname)
                             {

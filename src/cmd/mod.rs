@@ -5,6 +5,7 @@ pub mod rebuild;
 pub mod sandbox;
 pub mod simulate;
 pub mod status;
+pub mod util;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum OutputFormat {

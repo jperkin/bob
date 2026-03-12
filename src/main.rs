@@ -363,6 +363,24 @@ enum UtilCmd {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Resolve dependencies from a pscan file (standalone, no database)
+    ///
+    /// Reads a pscan file produced by 'bmake pbulk-index' and resolves
+    /// dependency patterns to specific package versions, producing
+    /// presolve output compatible with pbulk-resolve.
+    Presolve {
+        /// Path to the pscan file (use "-" for stdin)
+        file: PathBuf,
+        /// Output file (defaults to stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Strict mode: exit with error if any dependency is unresolved
+        #[arg(short, long)]
+        strict: bool,
+        /// Increase verbosity (-v: location mismatches, -vv: multiple matches)
+        #[arg(short, long, action = clap::ArgAction::Count)]
+        verbose: u8,
+    },
     /// Simulate a parallel build and show scheduling efficiency
     ///
     /// Reads a dependency graph file (one "dep -> dependent" edge per line)
@@ -589,6 +607,17 @@ fn run() -> Result<()> {
             } else {
                 print!("{}", out);
             }
+        }
+        Cmd::Util {
+            cmd:
+                UtilCmd::Presolve {
+                    file,
+                    output,
+                    strict,
+                    verbose,
+                },
+        } => {
+            cmd::util::presolve(&file, output.as_ref(), strict, verbose)?;
         }
         Cmd::Util {
             cmd:
