@@ -341,8 +341,9 @@ impl LuaEnv {
                         idx.all_depends
                             .as_ref()
                             .map(|deps| {
-                                deps.iter()
-                                    .map(|d| d.pkgpath().as_path().display().to_string())
+                                deps.depends()
+                                    .filter_map(|d| d.ok())
+                                    .map(|d| d.pkgpath().to_string())
                                     .collect::<Vec<_>>()
                                     .join(" ")
                             })

@@ -46,7 +46,7 @@ use anyhow::{Context, Result, bail};
 use crossterm::event;
 use indexmap::IndexMap;
 use petgraph::graphmap::DiGraphMap;
-use pkgsrc::{Depend, PkgName, PkgPath, ScanIndex};
+use pkgsrc::{Pattern, PatternCache, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Write};
@@ -1150,9 +1150,23 @@ impl Scan {
                     continue;
                 };
 
-                for depend in all_deps {
-                    let candidates =
-                        Self::find_candidates(depend, &pkgbase_map, available_pkgnames.iter());
+                for depend in all_deps.depends() {
+                    let depend = match depend {
+                        Ok(d) => d,
+                        Err(e) => {
+                            warn!(
+                                pkg = %pkg.pkgname.pkgname(),
+                                error = %e,
+                                "Malformed dependency"
+                            );
+                            continue;
+                        }
+                    };
+                    let candidates = Self::find_candidates(
+                        depend.pattern(),
+                        &pkgbase_map,
+                        available_pkgnames.iter(),
+                    );
 
                     if candidates.is_empty() {
                         let dep_path = depend.pkgpath();
@@ -1200,20 +1214,20 @@ impl Scan {
      * iteration over all packages for patterns without a pkgbase (e.g., `p5-*`).
      */
     fn find_candidates<'a>(
-        depend: &Depend,
+        pattern: &Pattern,
         pkgbase_map: &HashMap<&str, Vec<&'a PkgName>>,
         all_pkgnames: impl Iterator<Item = &'a PkgName>,
     ) -> Vec<&'a PkgName> {
-        if let Some(base) = depend.pattern().pkgbase() {
+        if let Some(base) = pattern.pkgbase() {
             pkgbase_map.get(base).map_or(Vec::new(), |v| {
                 v.iter()
-                    .filter(|c| depend.pattern().matches(c.pkgname()))
+                    .filter(|c| pattern.matches(c.pkgname()))
                     .copied()
                     .collect()
             })
         } else {
             all_pkgnames
-                .filter(|c| depend.pattern().matches(c.pkgname()))
+                .filter(|c| pattern.matches(c.pkgname()))
                 .collect()
         }
     }
@@ -1221,38 +1235,32 @@ impl Scan {
     /**
      * Find the best matching package for a dependency pattern.
      *
-     * Finds candidates and selects the best match according to pbulk's
-     * version comparison rules.
+     * Uses pkgbase for efficient lookup when available, falling back
+     * to all packages for patterns without a known base.  Matching
+     * and version comparison are handled by `best_match_pbulk`.
      *
      * Returns:
      * - `Ok(Some(pkgname))` - best matching package found
      * - `Ok(None)` - no candidates match the pattern
-     * - `Err(e)` - pattern comparison error (malformed version)
+     * - `Err(e)` - version comparison error (malformed version)
      */
     fn find_best_match<'a>(
-        depend: &Depend,
+        pattern: &Pattern,
         pkgbase_map: &HashMap<&str, Vec<&'a PkgName>>,
         pkgnames: &'a [PkgName],
-    ) -> Result<Option<&'a PkgName>, pkgsrc::PatternError> {
-        let candidates = Self::find_candidates(depend, pkgbase_map, pkgnames.iter());
-
-        let mut best: Option<&PkgName> = None;
-        for candidate in candidates {
-            best = match best {
-                None => Some(candidate),
-                Some(current) => {
-                    match depend
-                        .pattern()
-                        .best_match_pbulk(current.pkgname(), candidate.pkgname())
-                    {
-                        Ok(Some(m)) if m == candidate.pkgname() => Some(candidate),
-                        Ok(_) => Some(current),
-                        Err(e) => return Err(e),
-                    }
+    ) -> Result<Option<&'a str>, pkgsrc::PatternError> {
+        let mut best = None;
+        if let Some(pkgbase) = pattern.pkgbase() {
+            if let Some(candidates) = pkgbase_map.get(pkgbase) {
+                for candidate in candidates {
+                    best = pattern.best_match_pbulk(best, candidate.pkgname())?;
                 }
-            };
+            }
+        } else {
+            for candidate in pkgnames {
+                best = pattern.best_match_pbulk(best, candidate.pkgname())?;
+            }
         }
-
         Ok(best)
     }
 
@@ -1449,8 +1457,9 @@ impl Scan {
         } else {
             HashMap::new()
         };
-        let mut match_cache: HashMap<Depend, PkgName> = HashMap::new();
-        let is_satisfied = |deps: &[PkgName], pattern: &pkgsrc::Pattern| {
+        let mut match_cache: HashMap<String, PkgName> = HashMap::new();
+        let mut patterns = PatternCache::with_capacity(pkgnames.len());
+        let is_satisfied = |deps: &[PkgName], pattern: &Pattern| {
             deps.iter()
                 .any(|existing| pattern.matches(existing.pkgname()))
         };
@@ -1473,11 +1482,38 @@ impl Scan {
                 };
                 let pkg_depends = depends.get_mut(&pkg.pkgname).unwrap();
 
-                for depend in all_deps.iter() {
-                    if let Some(pkgname) = match_cache.get(depend) {
-                        if !is_satisfied(pkg_depends, depend.pattern())
-                            && !pkg_depends.contains(pkgname)
-                        {
+                for dep in all_deps.iter() {
+                    let dep = match dep {
+                        Ok(d) => d,
+                        Err(e) => {
+                            warn!(
+                                pkg = %pkg.pkgname.pkgname(),
+                                error = %e,
+                                "Malformed dependency"
+                            );
+                            continue;
+                        }
+                    };
+
+                    let pattern = match patterns.compile(dep.pattern()) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            let reason = format!(
+                                "{}: pattern error for {}: {}",
+                                pkg.pkgname.pkgname(),
+                                dep.pattern(),
+                                e
+                            );
+                            if !skip_reasons.contains_key(&pkg.pkgname) {
+                                skip_reasons
+                                    .insert(pkg.pkgname.clone(), PackageState::PreFailed(reason));
+                            }
+                            continue;
+                        }
+                    };
+
+                    if let Some(pkgname) = match_cache.get(dep.pattern()) {
+                        if !is_satisfied(pkg_depends, pattern) && !pkg_depends.contains(pkgname) {
                             pkg_depends.push(pkgname.clone());
                         }
                         continue;
@@ -1485,12 +1521,12 @@ impl Scan {
 
                     if verbosity >= 2 {
                         let candidates =
-                            Self::find_candidates(depend, &pkgbase_map, pkgnames.iter());
+                            Self::find_candidates(pattern, &pkgbase_map, pkgnames.iter());
                         if candidates.len() > 1 {
                             for c in &candidates {
                                 eprintln!(
                                     "Multiple matches for dependency {} of package {}: {}",
-                                    depend.pattern().pattern(),
+                                    dep.pattern(),
                                     pkg.pkgname.pkgname(),
                                     c.pkgname()
                                 );
@@ -1498,12 +1534,12 @@ impl Scan {
                         }
                     }
 
-                    match Self::find_best_match(depend, &pkgbase_map, &pkgnames) {
+                    match Self::find_best_match(pattern, &pkgbase_map, &pkgnames) {
                         Err(e) => {
                             let reason = format!(
-                                "{}: pattern error for {}: {}",
+                                "{}: version comparison error for {}: {}",
                                 pkg.pkgname.pkgname(),
-                                depend.pattern().pattern(),
+                                dep.pattern(),
                                 e
                             );
                             if !skip_reasons.contains_key(&pkg.pkgname) {
@@ -1511,39 +1547,41 @@ impl Scan {
                                     .insert(pkg.pkgname.clone(), PackageState::PreFailed(reason));
                             }
                         }
-                        Ok(Some(pkgname)) => {
+                        Ok(Some(best)) => {
+                            let pkgname = PkgName::new(best);
                             if verbosity >= 1 {
-                                if let Some(loc) = pkg_locations.get(pkgname) {
-                                    if *loc != *depend.pkgpath() {
-                                        eprintln!(
-                                            "Best matching {} differs from location {} for dependency {} of package {}",
-                                            pkgname.pkgname(),
-                                            depend.pkgpath(),
-                                            depend.pattern().pattern(),
-                                            pkg.pkgname.pkgname()
-                                        );
+                                if let Some(loc) = pkg_locations.get(&pkgname) {
+                                    if let Ok(dep_path) = PkgPath::new(dep.pkgpath()) {
+                                        if *loc != dep_path {
+                                            eprintln!(
+                                                "Best matching {} differs from location {} for dependency {} of package {}",
+                                                best,
+                                                dep_path,
+                                                dep.pattern(),
+                                                pkg.pkgname.pkgname()
+                                            );
+                                        }
                                     }
                                 }
                             }
-                            if !is_satisfied(pkg_depends, depend.pattern())
-                                && !pkg_depends.contains(pkgname)
+                            if !is_satisfied(pkg_depends, pattern)
+                                && !pkg_depends.contains(&pkgname)
                             {
                                 pkg_depends.push(pkgname.clone());
                             }
-                            match_cache.insert(depend.clone(), pkgname.clone());
-                            if use_active_filter && !active.contains(pkgname) {
+                            match_cache.insert(dep.pattern().to_string(), pkgname.clone());
+                            if use_active_filter && !active.contains(&pkgname) {
                                 active.insert(pkgname.clone());
                                 new_active = true;
                             }
                         }
                         Ok(None) => {
-                            let pattern = depend.pattern().pattern();
                             let fail_reason =
-                                format!("\"could not resolve dependency \"{}\"\"", pattern);
+                                format!("\"could not resolve dependency \"{}\"\"", dep.pattern());
                             pkg.pkg_fail_reason = Some(fail_reason);
                             let msg = format!(
                                 "No match found for dependency {} of package {}",
-                                pattern,
+                                dep.pattern(),
                                 pkg.pkgname.pkgname()
                             );
                             match skip_reasons.get_mut(&pkg.pkgname) {

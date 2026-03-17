@@ -446,11 +446,11 @@ impl Database {
                 "INSERT OR IGNORE INTO depends (package_id, depend_pattern, depend_pkgpath)
                  VALUES (?1, ?2, ?3)",
             )?;
-            for dep in deps {
+            for dep in deps.depends().flatten() {
                 stmt.execute(params![
                     package_id,
                     dep.pattern().pattern(),
-                    dep.pkgpath().to_string()
+                    dep.pkgpath().as_str()
                 ])?;
             }
         }
