@@ -369,9 +369,9 @@ impl Sandbox {
         }
         let sandbox = self.path(id);
         if sandbox.exists() {
-            let span = info_span!("kill_processes", sandbox_id = id);
+            let span = info_span!("kill_processes_for_path", sandbox_id = id);
             let _guard = span.enter();
-            self.kill_processes(&sandbox);
+            self.kill_processes_for_path(&sandbox);
         }
     }
 
@@ -718,7 +718,7 @@ impl Sandbox {
          * Per-mount killing already happened in reverse_actions(), but this
          * catches anything that slipped through.
          */
-        self.kill_processes(&sandbox);
+        self.kill_processes_for_path(&sandbox);
         /*
          * Remove all sandbox contents EXCEPT .bob.  If removal fails due to
          * unexpected files, the .bob marker remains and the sandbox can still
@@ -1147,6 +1147,7 @@ impl Sandbox {
         let Some(sandbox) = &self.config.sandboxes() else {
             bail!("Internal error: trying to reverse actions when sandboxes disabled.");
         };
+        self.kill_processes_for_path(&self.path(id));
         for action in sandbox.actions.iter().rev() {
             let action_type = action.action_type()?;
             // dest defaults to src if not specified
@@ -1244,7 +1245,7 @@ impl Sandbox {
                      * Kill any processes using this mount point before
                      * attempting to unmount.
                      */
-                    self.kill_processes_for_path(&mntdest);
+                    self.kill_processes_for_mount(&mntdest);
 
                     /*
                      * Unmount the filesystem.  Check return codes and bail on

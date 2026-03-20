@@ -175,31 +175,36 @@ impl Sandbox {
     }
 
     /**
-     * Kill processes using a specific mount point.
+     * Kill all processes using a mount point so it can be unmounted.
      *
-     * Uses fuser -ck (BSD mount point mode + kill) to identify and kill
-     * processes using the mount point.
+     * Uses `fstat -f` which restricts to the filesystem mounted at
+     * the given path.
      */
-    pub fn kill_processes_for_path(&self, path: &Path) {
+    pub fn kill_processes_for_mount(&self, path: &Path) {
         for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
-            let output = Command::new("fuser")
-                .arg("-c")
+            let output = Command::new("fstat")
+                .arg("-f")
                 .arg(path)
                 .process_group(0)
                 .output();
-
             let Ok(out) = output else { return };
 
             let stdout = String::from_utf8_lossy(&out.stdout);
-            if stdout.split_whitespace().next().is_none() {
+            let pids: Vec<&str> = stdout
+                .lines()
+                .skip(1)
+                .filter_map(|line| line.split_whitespace().nth(2))
+                .collect();
+
+            if pids.is_empty() {
                 return;
             }
 
             debug!(path = %path.display(), "Killing processes for mount");
 
-            let _ = Command::new("fuser")
-                .arg("-ck")
-                .arg(path)
+            let _ = Command::new("kill")
+                .arg("-9")
+                .args(&pids)
                 .stderr(std::process::Stdio::null())
                 .process_group(0)
                 .status();
@@ -209,8 +214,12 @@ impl Sandbox {
         }
     }
 
-    /// Kill all processes with open file handles within a sandbox path.
-    pub fn kill_processes(&self, sandbox: &Path) {
+    /**
+     * Kill all processes with open references under a directory path.
+     *
+     * Uses `fstat` to find processes using files under the directory.
+     */
+    pub fn kill_processes_for_path(&self, sandbox: &Path) {
         for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
             // Use fstat to find processes using files under the sandbox
             // Use process_group(0) to isolate from terminal signals

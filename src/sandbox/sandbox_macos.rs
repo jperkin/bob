@@ -205,12 +205,12 @@ impl Sandbox {
     }
 
     /**
-     * Kill processes using a specific mount point.
+     * Kill all processes using a mount point so it can be unmounted.
      *
-     * Uses fuser -c (mount point mode on BSD) to identify processes, filters
-     * out processes in PROCESS_SKIP_LIST, then kills the remaining processes.
+     * Uses `fuser -c` which operates on the mount point's filesystem.
+     * Filters against PROCESS_SKIP_LIST to avoid killing system daemons.
      */
-    pub fn kill_processes_for_path(&self, path: &Path) {
+    pub fn kill_processes_for_mount(&self, path: &Path) {
         for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
             let output = Command::new("fuser")
                 .arg("-c")
@@ -290,8 +290,12 @@ impl Sandbox {
             .collect()
     }
 
-    /// Kill all processes with open file handles within a sandbox path.
-    pub fn kill_processes(&self, sandbox: &Path) {
+    /**
+     * Kill all processes with open references under a directory path.
+     *
+     * Uses `lsof +D` which recursively scans the directory for open files.
+     */
+    pub fn kill_processes_for_path(&self, sandbox: &Path) {
         for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
             // Use lsof to find processes using files under the sandbox
             // Use process_group(0) to isolate from terminal signals

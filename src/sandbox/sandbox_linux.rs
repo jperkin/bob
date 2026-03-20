@@ -211,49 +211,23 @@ impl Sandbox {
     }
 
     /**
-     * Kill processes using a specific mount point.
+     * Kill all processes using a mount point so it can be unmounted.
      *
-     * Uses fuser -km (Linux mount point mode + kill) to identify and kill
-     * processes using the mount point.
+     * Linux `fuser -m` operates at the device level which is unsafe
+     * for bind mounts, so we use the same procfs path scan as
+     * `kill_processes_for_path`.
      */
-    pub fn kill_processes_for_path(&self, path: &Path) {
-        for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
-            let output = Command::new("fuser")
-                .arg("-m")
-                .arg(path)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .process_group(0)
-                .output();
-
-            let Ok(out) = output else { return };
-
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            if stdout.split_whitespace().next().is_none() {
-                return;
-            }
-
-            debug!(path = %path.display(), "Killing processes for mount");
-
-            let _ = Command::new("fuser")
-                .arg("-km")
-                .arg(path)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .process_group(0)
-                .status();
-
-            let delay_ms = super::KILL_PROCESSES_INITIAL_DELAY_MS << iteration;
-            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-        }
+    pub fn kill_processes_for_mount(&self, path: &Path) {
+        self.kill_processes_for_path(path);
     }
 
-    /// Kill all processes with open file handles within a sandbox path.
-    ///
-    /// Uses procfs to scan all processes for file descriptors, cwd, or root
-    /// that point into the sandbox directory. This is more thorough than
-    /// `fuser` which only checks the exact path, not files within subdirs.
-    pub fn kill_processes(&self, sandbox: &Path) {
+    /**
+     * Kill all processes with open references under a directory path.
+     *
+     * Uses procfs to scan all processes for file descriptors, cwd, or
+     * root that point into the directory.
+     */
+    pub fn kill_processes_for_path(&self, sandbox: &Path) {
         for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
             let mut killed: Vec<i32> = Vec::new();
 

@@ -181,12 +181,11 @@ impl Sandbox {
     }
 
     /**
-     * Kill processes using a specific mount point.
+     * Kill all processes using a mount point so it can be unmounted.
      *
-     * Uses fuser -ck (illumos mount point mode + kill) to identify and kill
-     * processes using the mount point.
+     * Uses `fuser -c` which operates on the mount point's filesystem.
      */
-    pub fn kill_processes_for_path(&self, path: &Path) {
+    pub fn kill_processes_for_mount(&self, path: &Path) {
         for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
             let output = Command::new("fuser")
                 .arg("-c")
@@ -218,8 +217,12 @@ impl Sandbox {
         }
     }
 
-    /// Kill all processes with open file handles within a sandbox path.
-    pub fn kill_processes(&self, sandbox: &Path) {
+    /**
+     * Kill all processes with open references under a directory path.
+     *
+     * Uses `fuser` (without `-c`) which matches by path, not filesystem.
+     */
+    pub fn kill_processes_for_path(&self, sandbox: &Path) {
         for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
             // Query fuser first to get PIDs for logging
             let output = Command::new("fuser")
