@@ -509,7 +509,7 @@ pub struct Options {
 #[derive(Clone, Debug)]
 pub struct DynamicConfig {
     /// Total MAKE_JOBS budget.
-    pub jobs: usize,
+    pub jobs: Option<usize>,
     /// Optional WRKOBJDIR routing based on historical disk usage.
     pub wrkobjdir: Option<WrkObjDir>,
 }
@@ -776,7 +776,7 @@ impl Config {
     }
 
     pub fn jobs(&self) -> Option<usize> {
-        self.file.dynamic.as_ref().map(|s| s.jobs)
+        self.file.dynamic.as_ref().and_then(|s| s.jobs)
     }
 
     pub fn wrkobjdir(&self) -> Option<&WrkObjDir> {
@@ -1002,7 +1002,7 @@ impl Config {
 
         // Dynamic resource allocation validation
         if let Some(dyn_cfg) = &self.file.dynamic {
-            if dyn_cfg.jobs == 0 {
+            if dyn_cfg.jobs == Some(0) {
                 errors.push("dynamic.jobs must be at least 1".to_string());
             }
             if let Some(w) = &dyn_cfg.wrkobjdir {
@@ -1221,9 +1221,7 @@ fn parse_dynamic(globals: &Table) -> LuaResult<Option<DynamicConfig>> {
     const KNOWN_KEYS: &[&str] = &["jobs", "wrkobjdir"];
     warn_unknown_keys(table, "dynamic", KNOWN_KEYS);
 
-    let jobs: usize = table
-        .get("jobs")
-        .map_err(|_| mlua::Error::runtime("dynamic.jobs is required"))?;
+    let jobs: Option<usize> = table.get("jobs").ok();
 
     let wrkobjdir = match table.get::<Value>("wrkobjdir")? {
         Value::Nil => None,
