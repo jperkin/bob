@@ -125,12 +125,12 @@ sandboxes = {
         -- Configure build user home directory if enabled.  Bob automatically
         -- sets bob_build_user* variables when the build user is configured,
         -- and the scripts are executed with 'set -eu', so these should be safe.
-        { action = "cmd", chroot = true, ifset = "pkgsrc.build_user",
+        { action = "cmd", ifset = "pkgsrc.build_user",
           create = [[
-                mkdir -p ${bob_build_user_home}
-                chown ${bob_build_user} ${bob_build_user_home}
+                mkdir -p ${bob_sandbox_path}${bob_build_user_home}
+                chown ${bob_build_user} ${bob_sandbox_path}${bob_build_user_home}
           ]],
-          destroy = "rm -rf ${bob_build_user_home}" },
+          destroy = "rm -rf ${bob_sandbox_path}${bob_build_user_home}" },
 
         -- It is recommended to mount pkgsrc read-only, but you will first need
         -- to configure DISTDIR, PACKAGES, and WRKOBJDIR to other directories.
