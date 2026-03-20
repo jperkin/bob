@@ -253,7 +253,11 @@ mod tests {
     fn sole_builder_gets_all_jobs() {
         for &(w, c) in &[(4, 16), (7, 10), (24, 32)] {
             let alloc = Allocator::new(w, c);
-            assert_eq!(alloc.assign(Some(1000), true), c, "w={w} c={c} with history");
+            assert_eq!(
+                alloc.assign(Some(1000), true),
+                c,
+                "w={w} c={c} with history"
+            );
             assert_eq!(alloc.assign(None, true), c, "w={w} c={c} no history");
         }
     }
@@ -263,11 +267,7 @@ mod tests {
         for &(w, c, fair) in &[(4, 16, 4), (7, 10, 2), (24, 32, 2)] {
             let alloc = Allocator::new(w, c);
             for i in 0..w {
-                assert_eq!(
-                    alloc.assign(None, false),
-                    fair,
-                    "w={w} c={c} worker {i}"
-                );
+                assert_eq!(alloc.assign(None, false), fair, "w={w} c={c} worker {i}");
             }
         }
     }
@@ -277,22 +277,33 @@ mod tests {
         /* w=4 c=16: min=2, max=6 */
         let times = [100, 1_000, 10_000, 100_000];
         let alloc = calibrated(4, 16, &times);
-        let assigned: Vec<usize> = times.iter().map(|&v| alloc.assign(Some(v), false)).collect();
+        let assigned: Vec<usize> = times
+            .iter()
+            .map(|&v| alloc.assign(Some(v), false))
+            .collect();
         assert_eq!(assigned, [2, 3, 5, 6], "w=4 c=16");
 
         /* w=7 c=10: min=2, max=3 (narrow range) */
         let times = [100, 300, 1_000, 3_000, 10_000, 30_000, 100_000];
         let alloc = calibrated(7, 10, &times);
-        let assigned: Vec<usize> = times.iter().map(|&v| alloc.assign(Some(v), false)).collect();
+        let assigned: Vec<usize> = times
+            .iter()
+            .map(|&v| alloc.assign(Some(v), false))
+            .collect();
         assert_eq!(assigned, [2, 2, 3, 3, 3, 4, 4], "w=7 c=10");
 
         /* w=24 c=32: min=2, max=10 (wide range, doubling times) */
         let times: Vec<usize> = (0..24).map(|i| 100 * (1 << i)).collect();
         let alloc = calibrated(24, 32, &times);
-        let assigned: Vec<usize> = times.iter().map(|&v| alloc.assign(Some(v), false)).collect();
+        let assigned: Vec<usize> = times
+            .iter()
+            .map(|&v| alloc.assign(Some(v), false))
+            .collect();
         assert_eq!(
             assigned,
-            [2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 7, 7, 7, 8, 8, 8, 9, 9, 9, 10, 10],
+            [
+                2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 7, 7, 7, 8, 8, 8, 9, 9, 9, 10, 10
+            ],
             "w=24 c=32"
         );
     }
@@ -358,6 +369,10 @@ mod tests {
     #[test]
     fn max_jobs_clamped_to_total() {
         let alloc = calibrated(1, 3, &[100, 100_000]);
-        assert_eq!(alloc.assign(Some(100_000), false), 3, "max clamped to total");
+        assert_eq!(
+            alloc.assign(Some(100_000), false),
+            3,
+            "max clamped to total"
+        );
     }
 }

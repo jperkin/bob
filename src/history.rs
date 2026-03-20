@@ -278,9 +278,7 @@ impl History {
                         .unwrap_or_else(dash)
                 }
             }
-            HistoryKind::MakeJobs => {
-                self.make_jobs.map(|j| j.to_string()).unwrap_or_else(dash)
-            }
+            HistoryKind::MakeJobs => self.make_jobs.map(|j| j.to_string()).unwrap_or_else(dash),
             HistoryKind::Duration => fmt_dur(self.duration),
             HistoryKind::DiskUsage => self.disk_usage.map(format_size).unwrap_or_else(dash),
         }
@@ -336,9 +334,7 @@ impl History {
                         .unwrap_or_else(dash)
                 }
             }
-            HistoryKind::MakeJobs => {
-                self.make_jobs.map(|j| j.to_string()).unwrap_or_else(dash)
-            }
+            HistoryKind::MakeJobs => self.make_jobs.map(|j| j.to_string()).unwrap_or_else(dash),
             HistoryKind::Duration => fmt_dur(self.duration),
             HistoryKind::DiskUsage => self.disk_usage.map(|b| b.to_string()).unwrap_or_else(dash),
         }

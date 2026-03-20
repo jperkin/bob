@@ -290,11 +290,7 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
                         }
                     }
                 }
-                let make_jobs = self
-                    .pkg_make_jobs
-                    .get(&pkg)
-                    .copied()
-                    .unwrap_or_default();
+                let make_jobs = self.pkg_make_jobs.get(&pkg).copied().unwrap_or_default();
 
                 Poll::Ready(Some(ScheduledPackage {
                     total_pbulk_weight: self.total_pbulk_weights[&pkg],
@@ -401,11 +397,7 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
             dep_count: self.dep_counts[pkg],
             pbulk_weight: self.pbulk_weights[pkg],
             cpu_time: self.cpu_times[pkg],
-            make_jobs: self
-                .pkg_make_jobs
-                .get(pkg)
-                .copied()
-                .unwrap_or_default(),
+            make_jobs: self.pkg_make_jobs.get(pkg).copied().unwrap_or_default(),
         })
     }
 
@@ -421,7 +413,8 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
 
     /** Mark a package as not supporting parallel make. */
     pub fn set_make_jobs_unsafe(&mut self, pkg: &K) {
-        self.pkg_make_jobs.insert(pkg.clone(), makejobs::PkgMakeJobs::new(false));
+        self.pkg_make_jobs
+            .insert(pkg.clone(), makejobs::PkgMakeJobs::new(false));
     }
 
     /** Set the allocator for MAKE_JOBS allocation. */

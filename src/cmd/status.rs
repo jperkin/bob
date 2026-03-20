@@ -139,8 +139,7 @@ fn print_build_status(
         }
     };
 
-    let right_align =
-        |col: &str| -> bool { matches!(col, "deps" | "priority" | "cpu" | "jobs") };
+    let right_align = |col: &str| -> bool { matches!(col, "deps" | "priority" | "cpu" | "jobs") };
 
     let pkg_patterns: Vec<Regex> = pkg_filters
         .iter()
@@ -156,10 +155,7 @@ fn print_build_status(
 
     let mut sched = Scheduler::new(db)?;
     if let Some(jobs) = config.jobs() {
-        sched.set_allocator(bob::makejobs::Allocator::new(
-            config.build_threads(),
-            jobs,
-        ));
+        sched.set_allocator(bob::makejobs::Allocator::new(config.build_threads(), jobs));
         sched.allocate_all();
     }
 

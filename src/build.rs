@@ -623,13 +623,8 @@ impl<'a> PkgBuilder<'a> {
                 .push((Stage::Build, build_phase_start.elapsed()));
             return Ok(PkgBuildResult::Failed(stats));
         }
-        let (build_ok, cpu_time) = self.run_make_stage(
-            Stage::Build,
-            &pkgdir,
-            &["all"],
-            self.build_run_as(),
-            true,
-        )?;
+        let (build_ok, cpu_time) =
+            self.run_make_stage(Stage::Build, &pkgdir, &["all"], self.build_run_as(), true)?;
         stats
             .stage_durations
             .push((Stage::Build, build_phase_start.elapsed()));
@@ -1550,10 +1545,12 @@ impl PackageBuild {
         let make = MakeQuery::new(&self.session, self.sandbox_id, pkgpath, &env_map);
         let vars = make.vars(&["_MAKE_JOBS_N", "WRKDIR"]);
 
-        let wrkdir = Some(make.resolve_path(Path::new(
-            vars.get("WRKDIR")
-                .ok_or_else(|| anyhow::anyhow!("failed to query WRKDIR"))?,
-        )));
+        let wrkdir = Some(
+            make.resolve_path(Path::new(
+                vars.get("WRKDIR")
+                    .ok_or_else(|| anyhow::anyhow!("failed to query WRKDIR"))?,
+            )),
+        );
 
         /* _MAKE_JOBS_N can be empty, e.g. if NO_BUILD=yes */
         if let Some(n) = vars.get("_MAKE_JOBS_N").and_then(|v| v.parse().ok()) {
