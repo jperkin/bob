@@ -584,7 +584,7 @@ impl<'a> PkgBuilder<'a> {
         let jobs_suffix = match (self.make_jobs.safe(), self.make_jobs.jobs()) {
             (false, Some(j)) => format!(" -j{}*", j),
             (true, Some(j)) => format!(" -j{}", j),
-            (_, None) => bail!("_MAKE_JOBS_N not set"),
+            (_, None) => String::new(),
         };
         stats.make_jobs = self.make_jobs;
 
@@ -1555,12 +1555,10 @@ impl PackageBuild {
                 .ok_or_else(|| anyhow::anyhow!("failed to query WRKDIR"))?,
         )));
 
-        let make_jobs_n: usize = vars
-            .get("_MAKE_JOBS_N")
-            .ok_or_else(|| anyhow::anyhow!("failed to query _MAKE_JOBS_N"))?
-            .parse()
-            .map_err(|e| anyhow::anyhow!("failed to parse _MAKE_JOBS_N: {}", e))?;
-        self.make_jobs.set_jobs(make_jobs_n);
+        /* _MAKE_JOBS_N can be empty, e.g. if NO_BUILD=yes */
+        if let Some(n) = vars.get("_MAKE_JOBS_N").and_then(|v| v.parse().ok()) {
+            self.make_jobs.set_jobs(n);
+        }
 
         // Run the build using PkgBuilder
         let builder = PkgBuilder::new(
