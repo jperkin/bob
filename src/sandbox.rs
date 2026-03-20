@@ -1032,10 +1032,30 @@ impl Sandbox {
                             chroot = action.chroot(),
                             "Running create command"
                         );
-                        self.run_action_cmd(id, create_cmd, action.chroot())?
-                    } else {
-                        None
+                        if let Some(out) =
+                            self.run_action_cmd(id, create_cmd, action.chroot())?
+                        {
+                            if !out.status.success() {
+                                let stderr = String::from_utf8_lossy(&out.stderr);
+                                let stderr = stderr.trim();
+                                if stderr.is_empty() {
+                                    bail!(
+                                        "create command failed (exit code {}): {}",
+                                        out.status.code().map_or("signal".to_string(), |c| c.to_string()),
+                                        create_cmd,
+                                    );
+                                } else {
+                                    bail!(
+                                        "create command failed (exit code {}): {}\n{}",
+                                        out.status.code().map_or("signal".to_string(), |c| c.to_string()),
+                                        create_cmd,
+                                        stderr,
+                                    );
+                                }
+                            }
+                        }
                     }
+                    None
                 }
                 ActionType::Symlink => {
                     let src = action
@@ -1071,7 +1091,11 @@ impl Sandbox {
             };
             if let Some(s) = status {
                 if !s.success() {
-                    bail!("Sandbox action failed");
+                    bail!(
+                        "Sandbox action failed (sandbox {}, exit code {:?})",
+                        id,
+                        s.code().map_or("signal".to_string(), |c| c.to_string()),
+                    );
                 }
             }
         }
@@ -1095,7 +1119,7 @@ impl Sandbox {
         id: usize,
         cmd: &str,
         chroot: bool,
-    ) -> Result<Option<std::process::ExitStatus>> {
+    ) -> Result<Option<std::process::Output>> {
         let sandbox_path = self.path(id);
         let output = if chroot {
             let mut c = Command::new("/usr/sbin/chroot");
@@ -1129,18 +1153,7 @@ impl Sandbox {
             c.output()?
         };
 
-        if !output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stdout.is_empty() {
-                warn!(cmd, stdout = %stdout.trim(), "Action command output");
-            }
-            if !stderr.is_empty() {
-                warn!(cmd, stderr = %stderr.trim(), "Action command error");
-            }
-        }
-
-        Ok(Some(output.status))
+        Ok(Some(output))
     }
 
     fn reverse_actions(&self, id: usize) -> anyhow::Result<()> {
@@ -1159,17 +1172,33 @@ impl Sandbox {
             match action_type {
                 ActionType::Cmd => {
                     if let Some(destroy_cmd) = action.destroy_cmd() {
+                        let chroot = action.chroot();
                         debug!(
                             sandbox = id,
                             action = "cmd",
                             cmd = destroy_cmd,
-                            chroot = action.chroot(),
+                            chroot,
                             "Running destroy command"
                         );
-                        let status = self.run_action_cmd(id, destroy_cmd, action.chroot())?;
-                        if let Some(s) = status {
-                            if !s.success() {
-                                bail!("Failed to run destroy command: exit code {:?}", s.code());
+                        let output = self.run_action_cmd(id, destroy_cmd, chroot)?;
+                        if let Some(out) = output {
+                            if !out.status.success() {
+                                let stderr = String::from_utf8_lossy(&out.stderr);
+                                let stderr = stderr.trim();
+                                if stderr.is_empty() {
+                                    bail!(
+                                        "destroy command failed (exit code {}): {}",
+                                        out.status.code().map_or("signal".to_string(), |c| c.to_string()),
+                                        destroy_cmd,
+                                    );
+                                } else {
+                                    bail!(
+                                        "destroy command failed (exit code {}): {}\n{}",
+                                        out.status.code().map_or("signal".to_string(), |c| c.to_string()),
+                                        destroy_cmd,
+                                        stderr,
+                                    );
+                                }
                             }
                         }
                     }
