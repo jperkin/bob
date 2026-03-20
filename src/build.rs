@@ -1399,11 +1399,18 @@ impl<'a> MakeQuery<'a> {
             cmd.env(key, value);
         }
 
-        cmd.stderr(Stdio::null());
+        cmd.stderr(Stdio::piped());
 
         let output = cmd.output().ok()?;
 
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(
+                status = ?output.status.code(),
+                stderr = %stderr.trim(),
+                name,
+                "show-var failed"
+            );
             return None;
         }
 
@@ -1431,11 +1438,24 @@ impl<'a> MakeQuery<'a> {
             cmd.env(key, value);
         }
 
-        cmd.stderr(Stdio::null());
+        cmd.stderr(Stdio::piped());
 
         let output = match cmd.output() {
             Ok(o) if o.status.success() => o,
-            _ => return HashMap::new(),
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                warn!(
+                    status = ?o.status.code(),
+                    stderr = %stderr.trim(),
+                    ?names,
+                    "show-vars failed"
+                );
+                return HashMap::new();
+            }
+            Err(e) => {
+                warn!(error = %e, ?names, "show-vars exec error");
+                return HashMap::new();
+            }
         };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
