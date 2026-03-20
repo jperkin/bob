@@ -516,16 +516,18 @@ pub struct DynamicConfig {
 
 /// WRKOBJDIR routing configuration.
 ///
-/// Packages whose historical disk usage exceeds `threshold` build in `disk`;
-/// everything else builds in `tmpfs`.
+/// When both `tmpfs` and `disk` are set with a `threshold`, packages
+/// whose historical disk usage exceeds `threshold` build in `disk`
+/// and everything else builds in `tmpfs`.  When only one path is set,
+/// all builds use that path.
 #[derive(Clone, Debug)]
 pub struct WrkObjDir {
     /// Fast (tmpfs) WRKOBJDIR for builds under threshold.
-    pub tmpfs: PathBuf,
+    pub tmpfs: Option<PathBuf>,
     /// Disk-backed WRKOBJDIR for large builds.
-    pub disk: PathBuf,
-    /// Size threshold in bytes.
-    pub threshold: u64,
+    pub disk: Option<PathBuf>,
+    /// Size threshold in bytes for routing between tmpfs and disk.
+    pub threshold: Option<u64>,
 }
 
 /// pkgsrc-related configuration from the `pkgsrc` section.
@@ -1006,8 +1008,17 @@ impl Config {
                 errors.push("dynamic.jobs must be at least 1".to_string());
             }
             if let Some(w) = &dyn_cfg.wrkobjdir {
-                if w.threshold == 0 {
-                    errors.push("dynamic.wrkobjdir.threshold must be greater than 0".to_string());
+                if w.tmpfs.is_none() && w.disk.is_none() {
+                    errors.push(
+                        "dynamic.wrkobjdir requires at least one of tmpfs or disk".to_string(),
+                    );
+                }
+                if w.tmpfs.is_some() && w.disk.is_some() && w.threshold.is_none() {
+                    errors.push(
+                        "dynamic.wrkobjdir.threshold is required when both \
+                         tmpfs and disk are set"
+                            .to_string(),
+                    );
                 }
             }
         }
@@ -1229,11 +1240,14 @@ fn parse_dynamic(globals: &Table) -> LuaResult<Option<DynamicConfig>> {
             const WRK_KEYS: &[&str] = &["tmpfs", "disk", "threshold"];
             warn_unknown_keys(&t, "dynamic.wrkobjdir", WRK_KEYS);
 
-            let tmpfs = PathBuf::from(get_required_string(&t, "tmpfs")?);
-            let disk = PathBuf::from(get_required_string(&t, "disk")?);
-            let threshold_str = get_required_string(&t, "threshold")?;
-            let threshold = parse_size(&threshold_str)
-                .map_err(|e| mlua::Error::runtime(format!("dynamic.wrkobjdir.threshold: {}", e)))?;
+            let tmpfs: Option<PathBuf> = t.get::<String>("tmpfs").ok().map(PathBuf::from);
+            let disk: Option<PathBuf> = t.get::<String>("disk").ok().map(PathBuf::from);
+            let threshold: Option<u64> = match t.get::<String>("threshold") {
+                Ok(s) => Some(parse_size(&s).map_err(|e| {
+                    mlua::Error::runtime(format!("dynamic.wrkobjdir.threshold: {}", e))
+                })?),
+                Err(_) => None,
+            };
 
             Some(WrkObjDir {
                 tmpfs,

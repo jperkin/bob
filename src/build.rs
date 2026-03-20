@@ -2101,43 +2101,55 @@ impl Build {
          * since tmpfs is bounded and we cannot yet restart).
          */
         let wrkobjdir_map: HashMap<PkgName, PathBuf> = if let Some(w) = self.config.wrkobjdir() {
-            let usage = db.disk_usage_by_pkg(&pkg_refs);
-            debug!(
-                total_packages = pkg_pairs.len(),
-                history_entries = usage.len(),
-                threshold = w.threshold,
-                "WRKOBJDIR disk usage query results"
-            );
-            let mut map = HashMap::new();
-            let mut tmpfs_count = 0usize;
-            let mut disk_count = 0usize;
-            for (pkgname, idx) in &self.scanpkgs {
-                let pkgpath = idx.pkgpath.to_string();
-                let dir = match usage.get(pkgname.pkgbase()) {
-                    Some(&size) if size <= w.threshold => {
-                        debug!(%pkgname, %pkgpath, size, "wrkobjdir: tmpfs (under threshold)");
-                        tmpfs_count += 1;
-                        &w.tmpfs
+            match (&w.tmpfs, &w.disk, w.threshold) {
+                (Some(tmpfs), Some(disk), Some(threshold)) => {
+                    let usage = db.disk_usage_by_pkg(&pkg_refs);
+                    debug!(
+                        total_packages = pkg_pairs.len(),
+                        history_entries = usage.len(),
+                        threshold,
+                        "WRKOBJDIR disk usage query results"
+                    );
+                    let mut map = HashMap::new();
+                    let mut tmpfs_count = 0usize;
+                    let mut disk_count = 0usize;
+                    for (pkgname, idx) in &self.scanpkgs {
+                        let pkgpath = idx.pkgpath.to_string();
+                        let dir = match usage.get(pkgname.pkgbase()) {
+                            Some(&size) if size <= threshold => {
+                                debug!(%pkgname, %pkgpath, size, "wrkobjdir: tmpfs");
+                                tmpfs_count += 1;
+                                tmpfs
+                            }
+                            Some(&size) => {
+                                debug!(%pkgname, %pkgpath, size, "wrkobjdir: disk");
+                                disk_count += 1;
+                                disk
+                            }
+                            None => {
+                                debug!(%pkgname, %pkgpath, "wrkobjdir: disk (no history)");
+                                disk_count += 1;
+                                disk
+                            }
+                        };
+                        map.insert(pkgname.clone(), dir.clone());
                     }
-                    Some(&size) => {
-                        debug!(%pkgname, %pkgpath, size, "wrkobjdir: disk (over threshold)");
-                        disk_count += 1;
-                        &w.disk
+                    info!(
+                        tmpfs = tmpfs_count,
+                        disk = disk_count,
+                        "WRKOBJDIR routing from build history"
+                    );
+                    map
+                }
+                (Some(dir), None, _) | (None, Some(dir), _) => {
+                    let mut map = HashMap::new();
+                    for pkgname in self.scanpkgs.keys() {
+                        map.insert(pkgname.clone(), dir.clone());
                     }
-                    None => {
-                        debug!(%pkgname, %pkgpath, "wrkobjdir: disk (no history)");
-                        disk_count += 1;
-                        &w.disk
-                    }
-                };
-                map.insert(pkgname.clone(), dir.clone());
+                    map
+                }
+                _ => HashMap::new(),
             }
-            info!(
-                tmpfs = tmpfs_count,
-                disk = disk_count,
-                "WRKOBJDIR routing from build history"
-            );
-            map
         } else {
             HashMap::new()
         };
