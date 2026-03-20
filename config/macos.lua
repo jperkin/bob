@@ -129,13 +129,15 @@ sandboxes = {
         -- Configure build user directories if enabled.  Bob automatically
         -- sets bob_build_user* variables when the build user is configured,
         -- and the scripts are executed with 'set -eu', so these should be safe.
-        { action = "cmd", chroot = true, ifset = "pkgsrc.build_user",
+        { action = "cmd", ifset = "pkgsrc.build_user",
           create = [[
-                tempdir=$(su ${bob_build_user} -c 'getconf DARWIN_USER_TEMP_DIR')
-                mkdir -p ${bob_build_user_home} ${tempdir}
-                chown -R ${bob_build_user} ${bob_build_user_home} ${tempdir}
+                tempdir=$(sudo -u ${bob_build_user} getconf DARWIN_USER_TEMP_DIR)
+                for dir in ${bob_build_user_home} ${tempdir}; do \
+                        mkdir -p ${bob_sandbox_path}${dir}
+                        chown ${bob_build_user} ${bob_sandbox_path}${dir}
+                done
           ]],
-          destroy = "rm -rf ${bob_build_user_home}" },
+          destroy = "rm -rf ${bob_sandbox_path}${bob_build_user_home}" },
 
         -- It is recommended to mount pkgsrc read-only, but you will first need
         -- to configure DISTDIR, PACKAGES, and WRKOBJDIR to other directories.
