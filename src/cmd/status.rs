@@ -143,7 +143,10 @@ fn print_build_status(
 
     let pkg_patterns: Vec<Regex> = pkg_filters
         .iter()
-        .map(|p| Regex::new(p).map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", p, e)))
+        .map(|p| {
+            Regex::new(&format!("(?i){}", p))
+                .map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", p, e))
+        })
         .collect::<Result<Vec<_>>>()?;
 
     let need_multi = cols.contains(&"multi_version");

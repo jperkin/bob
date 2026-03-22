@@ -183,7 +183,7 @@ fn print_build_tree(
 
     // Determine package set
     let packages: HashSet<String> = if let Some(pattern) = package {
-        let re = Regex::new(pattern)
+        let re = Regex::new(&format!("(?i){}", pattern))
             .map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", pattern, e))?;
 
         let matches: Vec<&str> = pkgname_to_pkgpath

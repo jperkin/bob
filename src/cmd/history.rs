@@ -89,7 +89,10 @@ fn print_history(
     }
 
     let pattern = package
-        .map(|p| Regex::new(p).map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", p, e)))
+        .map(|p| {
+            Regex::new(&format!("(?i){}", p))
+                .map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", p, e))
+        })
         .transpose()?;
 
     let records = db.query_history(pattern.as_ref())?;
