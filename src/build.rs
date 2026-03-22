@@ -2074,38 +2074,19 @@ impl Build {
         }
 
         /*
-         * Build (pkgpath, pkgbase) pairs for history queries.
-         *
-         * We key on both pkgpath and pkgbase to correctly handle
-         * MULTI_VERSION packages where a single pkgpath produces
-         * multiple packages (e.g., py312-foo and py313-foo from
-         * devel/py-foo).  Matching on pkgbase (not full pkgname)
-         * allows version bumps to still hit cached history data.
-         */
-        let pkg_pairs: Vec<(String, String)> = self
-            .scanpkgs
-            .iter()
-            .map(|(pkgname, idx)| (idx.pkgpath.to_string(), pkgname.pkgbase().to_string()))
-            .collect();
-        let pkg_refs: Vec<(&str, &str)> = pkg_pairs
-            .iter()
-            .map(|(p, b)| (p.as_str(), b.as_str()))
-            .collect();
-
-        /*
          * Build wrkobjdir map from historical disk usage.
          *
          * If dynamic.wrkobjdir is configured, look up each package's
          * most recent disk usage and route large builds to disk.
-         * Packages with no history default to disk (safe choice
-         * since tmpfs is bounded and we cannot yet restart).
+         * Packages with no history or a recent failure default to
+         * disk (safe choice since tmpfs is bounded).
          */
         let wrkobjdir_map: HashMap<PkgName, PathBuf> = if let Some(w) = self.config.wrkobjdir() {
             match (&w.tmpfs, &w.disk, w.threshold) {
                 (Some(tmpfs), Some(disk), Some(threshold)) => {
-                    let usage = db.disk_usage_by_pkg(&pkg_refs);
+                    let usage = db.disk_usage_by_pkg_all();
                     debug!(
-                        total_packages = pkg_pairs.len(),
+                        total_packages = self.scanpkgs.len(),
                         history_entries = usage.len(),
                         threshold,
                         "WRKOBJDIR disk usage query results"

@@ -1765,132 +1765,26 @@ impl Database {
         Ok(results)
     }
 
+
     /**
-     * Return the average build-phase duration for a package, based on
-     * successful builds only.
+     * Query disk usage for all packages from build history.
+     *
+     * For each (pkgpath, pkgbase) finds the most recent build.  If that
+     * build was successful and has recorded disk usage, it is included
+     * in the result.  If the most recent build failed, the package is
+     * excluded so that it routes to the safe (disk) default.
+     *
+     * Returns a map of pkgbase to disk usage in bytes.
+     * Returns an empty map on error.
      */
-    /**
-     * Query the most recent successful build duration per package.
-     *
-     * Accepts `(pkgpath, pkgbase)` pairs to correctly handle
-     * MULTI_VERSION packages where a single pkgpath produces multiple
-     * packages (e.g., py312-foo and py313-foo from devel/py-foo).
-     *
-     * Returns a map of pkgbase to duration in milliseconds.
-     *
-     * Returns an empty map on error or if no history exists.
-     */
-    pub fn duration_by_pkg(&self, pkgs: &[(&str, &str)]) -> HashMap<String, u64> {
+    pub fn disk_usage_by_pkg_all(&self) -> HashMap<String, u64> {
         let conn = match self.history_conn() {
             Ok(c) => c,
             Err(e) => {
-                warn!(error = %e, "duration_by_pkg: failed to open history db");
+                warn!(error = %e, "disk_usage_by_pkg_all: failed to open history db");
                 return HashMap::new();
             }
         };
-
-        if pkgs.is_empty() {
-            return HashMap::new();
-        }
-
-        let dur: &str = HistoryKind::Duration.into();
-        let out: &str = HistoryKind::Outcome.into();
-        let pkgbase_col: &str = HistoryKind::Pkgbase.into();
-        let pkgpath_col: &str = HistoryKind::Pkgpath.into();
-        let success_outcome = PackageStateKind::Success as i32;
-
-        let mut conditions = Vec::with_capacity(pkgs.len());
-        for i in 0..pkgs.len() {
-            let p = i * 2 + 1;
-            conditions.push(format!(
-                "(h.{pkgpath_col} = ?{} AND h.{pkgbase_col} = ?{})",
-                p,
-                p + 1
-            ));
-        }
-        let where_clause = conditions.join(" OR ");
-
-        let build_stage = Stage::Build as i32;
-        let jobs: &str = HistoryKind::MakeJobs.into();
-
-        let sql = format!(
-            "WITH matched AS ( \
-                 SELECT h.{pkgpath_col}, h.{pkgbase_col}, h.{dur}, \
-                        h.{jobs}, h.id, \
-                        ROW_NUMBER() OVER ( \
-                            PARTITION BY h.{pkgpath_col}, h.{pkgbase_col} \
-                            ORDER BY h.id DESC \
-                        ) AS rn \
-                 FROM build_history h \
-                 WHERE ({where_clause}) \
-                   AND h.{out} = {success_outcome} \
-             ) \
-             SELECT m.{pkgbase_col}, \
-                    COALESCE(wt.duration, m.{dur}) \
-                        * COALESCE(m.{jobs}, 1) \
-             FROM matched m \
-             LEFT JOIN wall_times wt ON wt.history_id = m.id \
-                  AND wt.stage = {build_stage} \
-             WHERE m.rn = 1",
-        );
-
-        let params: Vec<Box<dyn rusqlite::ToSql>> = pkgs
-            .iter()
-            .flat_map(|(pkgpath, pkgbase)| {
-                vec![
-                    Box::new(pkgpath.to_string()) as Box<dyn rusqlite::ToSql>,
-                    Box::new(pkgbase.to_string()) as Box<dyn rusqlite::ToSql>,
-                ]
-            })
-            .collect();
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| &**p).collect();
-
-        let mut stmt = match conn.prepare(&sql) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(error = %e, "duration_by_pkg: failed to prepare query");
-                return HashMap::new();
-            }
-        };
-        let rows = match stmt.query_map(param_refs.as_slice(), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        }) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(error = %e, "duration_by_pkg: query failed");
-                return HashMap::new();
-            }
-        };
-
-        let mut result = HashMap::new();
-        for row in rows.flatten() {
-            let (pkgbase, ms) = row;
-            result.insert(pkgbase, ms as u64);
-        }
-        result
-    }
-
-    /**
-     * Query the most recent successful build's disk usage per package.
-     *
-     * Accepts `(pkgpath, pkgbase)` pairs to correctly handle
-     * MULTI_VERSION packages.  See [`duration_by_pkg`] for details.
-     *
-     * Returns a map of pkgbase to disk usage in bytes.  Packages with
-     * no recorded disk usage are omitted.  Returns an empty map on error.
-     */
-    pub fn disk_usage_by_pkg(&self, pkgs: &[(&str, &str)]) -> HashMap<String, u64> {
-        let conn = match self.history_conn() {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(error = %e, "disk_usage_by_pkg: failed to open history db");
-                return HashMap::new();
-            }
-        };
-
-        if pkgs.is_empty() {
-            return HashMap::new();
-        }
 
         let du: &str = HistoryKind::DiskUsage.into();
         let out: &str = HistoryKind::Outcome.into();
@@ -1898,56 +1792,34 @@ impl Database {
         let pkgpath_col: &str = HistoryKind::Pkgpath.into();
         let success_outcome = PackageStateKind::Success as i32;
 
-        let mut conditions = Vec::with_capacity(pkgs.len());
-        for i in 0..pkgs.len() {
-            let p = i * 2 + 1;
-            conditions.push(format!(
-                "(h.{pkgpath_col} = ?{} AND h.{pkgbase_col} = ?{})",
-                p,
-                p + 1
-            ));
-        }
-        let where_clause = conditions.join(" OR ");
-
         let sql = format!(
-            "WITH matched AS ( \
-                 SELECT h.{pkgbase_col}, h.{du}, \
+            "WITH latest AS ( \
+                 SELECT h.{pkgbase_col}, h.{du}, h.{out}, \
                         ROW_NUMBER() OVER ( \
                             PARTITION BY h.{pkgpath_col}, h.{pkgbase_col} \
                             ORDER BY h.id DESC \
                         ) AS rn \
                  FROM build_history h \
-                 WHERE ({where_clause}) \
-                   AND h.{out} = {success_outcome} \
-                   AND h.{du} IS NOT NULL \
              ) \
-             SELECT {pkgbase_col}, {du} FROM matched WHERE rn = 1",
+             SELECT {pkgbase_col}, {du} FROM latest \
+             WHERE rn = 1 \
+               AND {out} = {success_outcome} \
+               AND {du} IS NOT NULL",
         );
-
-        let params: Vec<Box<dyn rusqlite::ToSql>> = pkgs
-            .iter()
-            .flat_map(|(pkgpath, pkgbase)| {
-                vec![
-                    Box::new(pkgpath.to_string()) as Box<dyn rusqlite::ToSql>,
-                    Box::new(pkgbase.to_string()) as Box<dyn rusqlite::ToSql>,
-                ]
-            })
-            .collect();
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| &**p).collect();
 
         let mut stmt = match conn.prepare(&sql) {
             Ok(s) => s,
             Err(e) => {
-                warn!(error = %e, "disk_usage_by_pkg: failed to prepare query");
+                warn!(error = %e, "disk_usage_by_pkg_all: failed to prepare query");
                 return HashMap::new();
             }
         };
-        let rows = match stmt.query_map(param_refs.as_slice(), |row| {
+        let rows = match stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         }) {
             Ok(r) => r,
             Err(e) => {
-                warn!(error = %e, "disk_usage_by_pkg: query failed");
+                warn!(error = %e, "disk_usage_by_pkg_all: query failed");
                 return HashMap::new();
             }
         };
@@ -1962,11 +1834,6 @@ impl Database {
 
     /**
      * Query the most recent successful build duration for all packages.
-     *
-     * Like [`duration_by_pkg`] but without filtering -- retrieves data
-     * for every package in the history database.  Much faster when the
-     * caller needs data for most or all packages (avoids building a
-     * massive OR-clause).
      *
      * Returns a map of pkgbase to duration in milliseconds.
      */
