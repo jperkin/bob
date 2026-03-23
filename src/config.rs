@@ -1268,6 +1268,7 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         "basedir",
         "bootstrap",
         "build_user",
+        "build_user_home",
         "cachevars",
         "env",
         "logdir",
