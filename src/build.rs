@@ -1499,14 +1499,11 @@ impl PackageBuild {
 
         let logdir = self.session.config.logdir();
 
-        // Get env vars from Lua config for wrkdir saving and build environment
-        let pkg_env = match self.session.config.get_pkg_env(&self.pkginfo) {
-            Ok(env) => env,
-            Err(e) => {
-                error!(error = %e, "Failed to get env from Lua config");
-                HashMap::new()
-            }
-        };
+        let pkg_env = self
+            .session
+            .config
+            .get_pkg_env(&self.pkginfo)
+            .map_err(|e| anyhow::anyhow!("Lua env config error: {e}"))?;
 
         let mut envs = self
             .session
