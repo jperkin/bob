@@ -142,31 +142,19 @@ impl Sandbox {
     ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
         let cmd = "/bin/mount";
-        let mut args = vec!["-t", "tmpfs"];
-        // Convert opts to mount -o style if they look like size options
-        let mut mount_opts: Vec<String> = vec![];
-        for opt in opts {
-            if opt.starts_with("size=") || opt.starts_with("mode=") {
-                mount_opts.push(opt.to_string());
-            }
-        }
+        let mut c = Command::new(cmd);
+        c.args(["-t", "tmpfs"]);
+        let mount_opts: Vec<&str> = opts
+            .iter()
+            .filter(|o| o.starts_with("size=") || o.starts_with("mode="))
+            .copied()
+            .collect();
         if !mount_opts.is_empty() {
-            args.push("-o");
+            c.args(["-o", &mount_opts.join(",")]);
         }
-        let opts_str = mount_opts.join(",");
+        c.arg("tmpfs").arg(dest).process_group(0);
         Ok(Some(
-            Command::new(cmd)
-                .args(&args)
-                .arg(if !mount_opts.is_empty() {
-                    &opts_str
-                } else {
-                    ""
-                })
-                .arg("tmpfs")
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
+            c.status().context(format!("Unable to execute {}", cmd))?,
         ))
     }
 
