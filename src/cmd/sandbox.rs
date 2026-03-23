@@ -102,7 +102,11 @@ fn exec(config: &Config) -> Result<()> {
     })();
     let pkgsrc_env = PkgsrcEnv::fetch(config, &sandbox, id).ok();
     let envs = config.script_env(pkgsrc_env.as_ref());
-    sandbox.run_post_build(id, config, envs)?;
+    match sandbox.run_post_build(id, config, envs) {
+        Ok(true) => {}
+        Ok(false) => eprintln!("Warning: post-build script failed"),
+        Err(e) => eprintln!("Warning: post-build script error: {e}"),
+    }
     print!("Destroying sandbox...");
     let _ = std::io::stdout().flush();
     let start = Instant::now();
