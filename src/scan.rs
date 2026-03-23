@@ -667,8 +667,14 @@ impl Scan {
         // Note: finished_title is unused since we print our own summary
         let total_count = self.initial_cached + self.incoming.len();
         let progress = Arc::new(Mutex::new(
-            MultiProgress::new("Scanning", "", total_count, self.config.scan_threads())
-                .context("Failed to initialize progress display")?,
+            MultiProgress::new(
+                "Scanning",
+                "",
+                total_count,
+                self.config.scan_threads(),
+                self.config.tui(),
+            )
+            .context("Failed to initialize progress display")?,
         ));
 
         // Mark cached packages in progress display

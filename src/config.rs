@@ -494,6 +494,8 @@ pub struct Options {
     pub strict_scan: Option<bool>,
     /// Log level: "trace", "debug", "info", "warn", or "error".
     pub log_level: Option<String>,
+    /// Enable TUI progress display (default: true). Set to false for plain output.
+    pub tui: Option<bool>,
 }
 
 /// Dynamic resource allocation from the `dynamic` section.
@@ -824,6 +826,14 @@ impl Config {
         &self.log_level
     }
 
+    pub fn tui(&self) -> bool {
+        self.file
+            .options
+            .as_ref()
+            .and_then(|o| o.tui)
+            .unwrap_or(true)
+    }
+
     pub fn dbdir(&self) -> &PathBuf {
         &self.dbdir
     }
@@ -1124,6 +1134,7 @@ fn parse_options(globals: &Table) -> LuaResult<Option<Options>> {
         "dbdir",
         "log_level",
         "scan_threads",
+        "tui",
         "strict_scan",
     ];
     warn_unknown_keys(table, "options", KNOWN_KEYS);
@@ -1136,6 +1147,7 @@ fn parse_options(globals: &Table) -> LuaResult<Option<Options>> {
         scan_threads: table.get::<Option<usize>>("scan_threads")?,
         strict_scan: table.get::<Option<bool>>("strict_scan")?,
         log_level: table.get::<Option<String>>("log_level")?,
+        tui: table.get::<Option<bool>>("tui")?,
     }))
 }
 

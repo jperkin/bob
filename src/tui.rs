@@ -567,11 +567,12 @@ impl MultiProgress {
         finished_title: &str,
         total: usize,
         num_workers: usize,
+        tui: bool,
     ) -> io::Result<Self> {
         // Calculate height: workers + progress bar
         let height = (num_workers + 1) as u16;
 
-        let is_terminal = io::stdout().is_terminal();
+        let is_terminal = tui && io::stdout().is_terminal();
         let raw_mode = is_terminal && enable_raw_mode().is_ok();
 
         let progress_mode = if raw_mode {

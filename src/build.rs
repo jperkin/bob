@@ -2159,6 +2159,7 @@ impl Build {
                 "Built",
                 self.scanpkgs.len(),
                 self.config.build_threads(),
+                self.config.tui(),
             )
             .context("Failed to initialize progress display")?,
         ));

@@ -454,7 +454,7 @@ options = {{
     build_threads = 2,
     dbdir = \"{dbdir}\",
     scan_threads = 2,
-    progress = \"plain\",
+    tui = false,
 }}
 pkgsrc = {{
     basedir = \"{pkgsrc}\",
@@ -1644,7 +1644,7 @@ options = {{
     build_threads = 1,
     dbdir = \"{dbdir}\",
     scan_threads = 1,
-    progress = \"plain\",
+    tui = false,
 }}
 pkgsrc = {{
     basedir = \"{pkgsrc}\",
