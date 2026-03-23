@@ -1032,22 +1032,24 @@ impl Sandbox {
                             chroot = action.chroot(),
                             "Running create command"
                         );
-                        if let Some(out) =
-                            self.run_action_cmd(id, create_cmd, action.chroot())?
-                        {
+                        if let Some(out) = self.run_action_cmd(id, create_cmd, action.chroot())? {
                             if !out.status.success() {
                                 let stderr = String::from_utf8_lossy(&out.stderr);
                                 let stderr = stderr.trim();
                                 if stderr.is_empty() {
                                     bail!(
                                         "create command failed (exit code {}): {}",
-                                        out.status.code().map_or("signal".to_string(), |c| c.to_string()),
+                                        out.status
+                                            .code()
+                                            .map_or("signal".to_string(), |c| c.to_string()),
                                         create_cmd,
                                     );
                                 } else {
                                     bail!(
                                         "create command failed (exit code {}): {}\n{}",
-                                        out.status.code().map_or("signal".to_string(), |c| c.to_string()),
+                                        out.status
+                                            .code()
+                                            .map_or("signal".to_string(), |c| c.to_string()),
                                         create_cmd,
                                         stderr,
                                     );
@@ -1188,13 +1190,17 @@ impl Sandbox {
                                 if stderr.is_empty() {
                                     bail!(
                                         "destroy command failed (exit code {}): {}",
-                                        out.status.code().map_or("signal".to_string(), |c| c.to_string()),
+                                        out.status
+                                            .code()
+                                            .map_or("signal".to_string(), |c| c.to_string()),
                                         destroy_cmd,
                                     );
                                 } else {
                                     bail!(
                                         "destroy command failed (exit code {}): {}\n{}",
-                                        out.status.code().map_or("signal".to_string(), |c| c.to_string()),
+                                        out.status
+                                            .code()
+                                            .map_or("signal".to_string(), |c| c.to_string()),
                                         destroy_cmd,
                                         stderr,
                                     );

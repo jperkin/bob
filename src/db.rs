@@ -1765,7 +1765,6 @@ impl Database {
         Ok(results)
     }
 
-
     /**
      * Query disk usage for all packages from build history.
      *
