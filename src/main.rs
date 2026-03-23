@@ -505,14 +505,17 @@ fn run() -> Result<()> {
         } => {
             let runner = BuildRunner::new(args.config.as_deref())?;
             let prior = runner.db.get_successful_packages().unwrap_or_default();
-            let buildable = cmd::rebuild::prepare(
+            let Some(buildable) = cmd::rebuild::prepare(
                 &runner.db,
                 cmd::rebuild::RebuildArgs {
                     all,
                     only,
                     packages,
                 },
-            )?;
+            )?
+            else {
+                return Ok(());
+            };
             let sandbox = Sandbox::new(&runner.config);
             let scope = SandboxScope::new(sandbox, runner.state.clone());
             let summary = runner.run_build(buildable, scope)?;

@@ -45,8 +45,13 @@ pub struct RebuildArgs {
  * Prepare rebuild targets: collect packages, expand dependents, clear
  * cached build results, and return the filtered buildable set.
  */
-pub fn prepare(db: &Database, args: RebuildArgs) -> Result<IndexMap<PkgName, ResolvedPackage>> {
-    let targets = collect_targets(db, &args)?;
+pub fn prepare(
+    db: &Database,
+    args: RebuildArgs,
+) -> Result<Option<IndexMap<PkgName, ResolvedPackage>>> {
+    let Some(targets) = collect_targets(db, &args)? else {
+        return Ok(None);
+    };
 
     let mut to_rebuild: HashSet<String> = targets.iter().cloned().collect();
 
@@ -81,24 +86,24 @@ pub fn prepare(db: &Database, args: RebuildArgs) -> Result<IndexMap<PkgName, Res
         bail!("No buildable packages found");
     }
 
-    Ok(buildable)
+    Ok(Some(buildable))
 }
 
 /**
  * Collect target packages to rebuild based on command arguments.
  */
-fn collect_targets(db: &Database, args: &RebuildArgs) -> Result<Vec<String>> {
+fn collect_targets(db: &Database, args: &RebuildArgs) -> Result<Option<Vec<String>>> {
     if args.all {
         if !args.packages.is_empty() {
             bail!("Cannot specify packages with --all");
         }
         let failed = db.get_failed_packages()?;
         if failed.is_empty() {
-            println!("All packages up-to-date");
-            std::process::exit(0);
+            println!("No failed packages to rebuild");
+            return Ok(None);
         }
         println!("Found {} failed package(s) to rebuild", failed.len());
-        return Ok(failed);
+        return Ok(Some(failed));
     }
 
     if args.packages.is_empty() {
@@ -120,7 +125,7 @@ fn collect_targets(db: &Database, args: &RebuildArgs) -> Result<Vec<String>> {
             result.push(pkg.clone());
         }
     }
-    Ok(result)
+    Ok(Some(result))
 }
 
 /**
