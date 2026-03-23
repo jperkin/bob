@@ -551,12 +551,7 @@ fn run() -> Result<()> {
         Cmd::Db { sql } => {
             let config = Config::load(args.config.as_deref())?;
             let db = Database::open(config.dbdir())?;
-
-            let Some(sql) = sql else {
-                bail!("SQL command required");
-            };
-
-            db.execute_raw(&sql)?;
+            cmd::db::run(&db, sql)?;
         }
         Cmd::Status { args: status_args } => {
             let config = Config::load(args.config.as_deref())?;
