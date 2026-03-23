@@ -389,7 +389,7 @@ enum UtilCmd {
     /// durations are estimated from historical data and MAKE_JOBS are
     /// allocated by historical CPU time.
     ///
-    /// Generate a history file with: bob history --raw --format csv
+    /// Generate a history file with: bob history -l --raw --format csv
     SimulateBuild {
         /// Dependency graph file (use "-" for stdin)
         file: PathBuf,
@@ -399,7 +399,7 @@ enum UtilCmd {
         /// Total MAKE_JOBS budget
         #[arg(short = 'j', long)]
         jobs: Option<usize>,
-        /// Build history CSV (generate with: bob history --raw --format csv)
+        /// Build history CSV (generate with: bob history -l --raw --format csv)
         #[arg(long)]
         history: Option<PathBuf>,
         /// Force uniform MAKE_JOBS allocation (baseline comparison)

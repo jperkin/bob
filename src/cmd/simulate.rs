@@ -22,7 +22,7 @@ use std::task::Poll;
 use anyhow::{Context, Result, bail};
 
 use bob::try_println;
-use bob::{PackageNode, Scheduler};
+use bob::{HistoryKind, PackageNode, Scheduler, Stage};
 
 /**
  * Per-package timing profile loaded from a history CSV.
@@ -79,6 +79,12 @@ impl PkgProfile {
     }
 }
 
+fn col(cols: &HashMap<String, usize>, name: &str) -> Result<usize> {
+    cols.get(name)
+        .copied()
+        .with_context(|| format!("Missing column '{name}' in history CSV"))
+}
+
 /**
  * Load detailed per-package profiles from a history CSV.
  *
@@ -95,34 +101,64 @@ fn load_history(path: &Path) -> Result<HashMap<String, PkgProfile>> {
     } else {
         Box::new(buf)
     };
+    let mut lines = reader.lines();
+
+    let header = lines
+        .next()
+        .context("Empty history file")?
+        .context("Failed to read header")?;
+    let cols: HashMap<String, usize> = header
+        .split(',')
+        .enumerate()
+        .map(|(i, name)| (name.to_string(), i))
+        .collect();
+
+    let pkgname = col(&cols, HistoryKind::Pkgname.into())?;
+    let outcome = col(&cols, HistoryKind::Outcome.into())?;
+    let make_jobs = col(&cols, HistoryKind::MakeJobs.into())?;
+    let pre_clean = col(&cols, Stage::PreClean.into_str())?;
+    let depends = col(&cols, Stage::Depends.into_str())?;
+    let checksum = col(&cols, Stage::Checksum.into_str())?;
+    let configure = col(&cols, Stage::Configure.into_str())?;
+    let build = col(&cols, Stage::Build.into_str())?;
+    let install = col(&cols, Stage::Install.into_str())?;
+    let package = col(&cols, Stage::Package.into_str())?;
+    let deinstall = col(&cols, Stage::Deinstall.into_str())?;
+    let clean = col(&cols, Stage::Clean.into_str())?;
+    let cpu_build = col(&cols, &format!("cpu:{}", Stage::Build.into_str()))?;
+
+    let ncols = cols.len();
     let mut result = HashMap::new();
     let parse = |s: &str| -> u64 { s.parse::<u64>().unwrap_or(0) };
-    for line in reader.lines() {
+    for line in lines {
         let line = line.context("Failed to read history line")?;
         let fields: Vec<&str> = line.split(',').collect();
-        if fields.len() < 22 || fields[0] == "timestamp" {
+        if fields.len() != ncols {
             continue;
         }
-        if fields[3] != "success" {
+        if fields[outcome] != "success" {
             continue;
         }
-        let pkgname = fields[2].to_string();
-        let make_jobs_safe = fields[5] != "-";
+        let pkg = fields[pkgname].to_string();
+        let make_jobs_safe = fields[make_jobs] != "-";
         let hist_jobs = if make_jobs_safe {
-            fields[5].parse::<u64>().unwrap_or(1)
+            fields[make_jobs].parse::<u64>().unwrap_or(1)
         } else {
             1
         };
-        let overhead_pre_ms = parse(fields[8]) + parse(fields[9]) + parse(fields[10]);
-        let overhead_post_ms =
-            parse(fields[13]) + parse(fields[14]) + parse(fields[15]) + parse(fields[16]);
+        let overhead_pre_ms =
+            parse(fields[pre_clean]) + parse(fields[depends]) + parse(fields[checksum]);
+        let overhead_post_ms = parse(fields[install])
+            + parse(fields[package])
+            + parse(fields[deinstall])
+            + parse(fields[clean]);
         result.insert(
-            pkgname,
+            pkg,
             PkgProfile {
                 overhead_pre_ms,
-                configure_wall_ms: parse(fields[11]),
-                build_cpu_ms: parse(fields[21]),
-                build_wall_ms: parse(fields[12]),
+                configure_wall_ms: parse(fields[configure]),
+                build_cpu_ms: parse(fields[cpu_build]),
+                build_wall_ms: parse(fields[build]),
                 overhead_post_ms,
                 hist_jobs,
                 make_jobs_safe,
@@ -148,7 +184,7 @@ const PHASE_COUNT: usize = 4;
  *
  * Use `--uniform` to force equal allocation for baseline comparison.
  *
- * Generate a history file with: `bob history --raw --format csv`
+ * Generate a history file with: `bob history -l --raw --format csv`
  */
 pub fn run(
     file: &Path,
