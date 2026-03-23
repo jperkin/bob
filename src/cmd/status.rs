@@ -190,7 +190,7 @@ fn print_build_status(
         if !statuses.is_empty() {
             return statuses.iter().any(|f| <&str>::from(f) == status);
         }
-        if show_all {
+        if show_all || !pkg_patterns.is_empty() {
             return true;
         }
         let success: &str = PackageStateKind::Success.into();
