@@ -319,6 +319,14 @@ show-var:
 \tSTAGE_PKGFILE:27) echo \"${.CURDIR}/pkg/py27-dual-1.0.tgz\" ;; \\\n\
 \tSTAGE_PKGFILE:*) echo \"${.CURDIR}/pkg/py314-dual-1.0.tgz\" ;; \\\n\
 \tesac
+
+show-vars:
+\t@for v in ${VARNAMES}; do \\\n\
+\t  case \"$$v\" in \\\n\
+\t    WRKDIR) echo \"${.CURDIR}/work\" ;; \\\n\
+\t    *) echo ;; \\\n\
+\t  esac; \\\n\
+\tdone
 ";
         fs::write(self.pkgsrc().join("test/dual/Makefile"), content)?;
         Ok(())
@@ -408,6 +416,17 @@ show-var:
                  \"${{.CURDIR}}/pkg/{pkgname}.tgz\" ;; esac",
                 pkgname = pkg.pkgname,
             ));
+
+            sections.push(
+                "\nshow-vars:\n\
+                 \t@for v in ${VARNAMES}; do \\\n\
+                 \t  case \"$$v\" in \\\n\
+                 \t    WRKDIR) echo \"${.CURDIR}/work\" ;; \\\n\
+                 \t    *) echo ;; \\\n\
+                 \t  esac; \\\n\
+                 \tdone"
+                    .to_string(),
+            );
 
             sections.join("\n")
         } else {
