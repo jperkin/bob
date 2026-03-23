@@ -1131,11 +1131,11 @@ fn parse_options(globals: &Table) -> LuaResult<Option<Options>> {
     let dbdir: Option<PathBuf> = table.get::<Option<String>>("dbdir")?.map(PathBuf::from);
 
     Ok(Some(Options {
-        build_threads: table.get("build_threads").ok(),
+        build_threads: table.get::<Option<usize>>("build_threads")?,
         dbdir,
-        scan_threads: table.get("scan_threads").ok(),
-        strict_scan: table.get("strict_scan").ok(),
-        log_level: table.get("log_level").ok(),
+        scan_threads: table.get::<Option<usize>>("scan_threads")?,
+        strict_scan: table.get::<Option<bool>>("strict_scan")?,
+        log_level: table.get::<Option<String>>("log_level")?,
     }))
 }
 
@@ -1232,7 +1232,7 @@ fn parse_dynamic(globals: &Table) -> LuaResult<Option<DynamicConfig>> {
     const KNOWN_KEYS: &[&str] = &["jobs", "wrkobjdir"];
     warn_unknown_keys(table, "dynamic", KNOWN_KEYS);
 
-    let jobs: Option<usize> = table.get("jobs").ok();
+    let jobs: Option<usize> = table.get::<Option<usize>>("jobs")?;
 
     let wrkobjdir = match table.get::<Value>("wrkobjdir")? {
         Value::Nil => None,
@@ -1240,14 +1240,16 @@ fn parse_dynamic(globals: &Table) -> LuaResult<Option<DynamicConfig>> {
             const WRK_KEYS: &[&str] = &["tmpfs", "disk", "threshold"];
             warn_unknown_keys(&t, "dynamic.wrkobjdir", WRK_KEYS);
 
-            let tmpfs: Option<PathBuf> = t.get::<String>("tmpfs").ok().map(PathBuf::from);
-            let disk: Option<PathBuf> = t.get::<String>("disk").ok().map(PathBuf::from);
-            let threshold: Option<u64> = match t.get::<String>("threshold") {
-                Ok(s) => Some(parse_size(&s).map_err(|e| {
-                    mlua::Error::runtime(format!("dynamic.wrkobjdir.threshold: {}", e))
-                })?),
-                Err(_) => None,
-            };
+            let tmpfs: Option<PathBuf> = t.get::<Option<String>>("tmpfs")?.map(PathBuf::from);
+            let disk: Option<PathBuf> = t.get::<Option<String>>("disk")?.map(PathBuf::from);
+            let threshold: Option<u64> = t
+                .get::<Option<String>>("threshold")?
+                .map(|s| {
+                    parse_size(&s).map_err(|e| {
+                        mlua::Error::runtime(format!("dynamic.wrkobjdir.threshold: {}", e))
+                    })
+                })
+                .transpose()?;
 
             Some(WrkObjDir {
                 tmpfs,
