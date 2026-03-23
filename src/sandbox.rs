@@ -557,6 +557,8 @@ impl Sandbox {
 
         if stdin_data.is_some() {
             cmd.stdin(Stdio::piped());
+        } else {
+            cmd.stdin(Stdio::null());
         }
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());

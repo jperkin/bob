@@ -847,6 +847,7 @@ impl<'a> PkgBuilder<'a> {
                 .new_session()
                 .arg("-c")
                 .arg(&shell_cmd)
+                .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .spawn()
@@ -929,6 +930,7 @@ impl<'a> PkgBuilder<'a> {
                 command.args(args);
                 self.apply_envs(&mut command, extra_envs);
                 let mut child = command
+                    .stdin(Stdio::null())
                     .stdout(Stdio::from(log))
                     .stderr(Stdio::from(log_err))
                     .spawn()
@@ -953,6 +955,7 @@ impl<'a> PkgBuilder<'a> {
                 command.arg(user).arg("-c").arg(&inner_cmd);
                 self.apply_envs(&mut command, extra_envs);
                 let mut child = command
+                    .stdin(Stdio::null())
                     .stdout(Stdio::from(log))
                     .stderr(Stdio::from(log_err))
                     .spawn()
