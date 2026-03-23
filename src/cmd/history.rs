@@ -17,12 +17,10 @@
 use anyhow::{Result, bail};
 use clap::Args;
 use regex::Regex;
-use serde_json;
 
 use bob::db::Database;
-use bob::try_println;
 
-use super::OutputFormat;
+use super::{Col, Formatter, OutputFormat};
 
 #[derive(Debug, Args)]
 pub struct HistoryArgs {
@@ -66,24 +64,25 @@ fn print_history(
     format: OutputFormat,
     package: Option<&str>,
 ) -> Result<()> {
-    let all_cols = bob::HistoryKind::all_names();
+    let all_cols = bob::HistoryKind::all_columns();
     let default_cols = bob::HistoryKind::default_names();
     let cols: Vec<&str> = if columns.is_some() {
         columns
             .map(|c| c.iter().map(|s| s.as_str()).collect())
             .unwrap_or_default()
     } else if long {
-        all_cols.iter().map(|s| s.as_str()).collect()
+        all_cols.iter().map(|(s, _)| s.as_str()).collect()
     } else {
         default_cols
     };
 
     for col in &cols {
-        if !all_cols.iter().any(|c| c == col) {
+        if !all_cols.iter().any(|(c, _)| c == col) {
+            let names: Vec<&str> = all_cols.iter().map(|(n, _)| n.as_str()).collect();
             bail!(
                 "Unknown column '{}'. Valid columns: {}",
                 col,
-                all_cols.join(", ")
+                names.join(", ")
             );
         }
     }
@@ -106,91 +105,29 @@ fn print_history(
         return Ok(());
     }
 
-    let format_val = |rec: &bob::History, col: &str| -> String {
-        if raw {
-            rec.format_col_raw(col)
-        } else {
-            rec.format_col(col)
-        }
-    };
+    let fmt_cols: Vec<Col> = cols
+        .iter()
+        .map(|&name| {
+            let (_, align) = all_cols.iter().find(|(n, _)| n == name).expect("validated");
+            Col::new(name, *align)
+        })
+        .collect();
 
-    match format {
-        OutputFormat::Table => {
-            let rows: Vec<Vec<String>> = records
-                .iter()
-                .map(|rec| cols.iter().map(|&col| format_val(rec, col)).collect())
-                .collect();
-
-            let widths: Vec<usize> = cols
-                .iter()
-                .enumerate()
-                .map(|(i, col)| {
-                    let header_len = col.len();
-                    let max_data = rows.iter().map(|r| r[i].len()).max().unwrap_or(0);
-                    header_len.max(max_data)
-                })
-                .collect();
-
-            if !no_header {
-                let header: Vec<String> = cols
-                    .iter()
-                    .zip(&widths)
-                    .map(|(&col, &w)| format!("{:<width$}", col.to_uppercase(), width = w))
-                    .collect();
-                if !try_println(header.join("  ").trim_end()) {
-                    return Ok(());
+    let mut fmt = Formatter::new(fmt_cols);
+    for rec in &records {
+        let row = cols
+            .iter()
+            .map(|&col| {
+                if raw {
+                    rec.format_col_raw(col)
+                } else {
+                    rec.format_col(col)
                 }
-            }
-
-            for row in &rows {
-                let values: Vec<String> = row
-                    .iter()
-                    .zip(&widths)
-                    .map(|(val, &w)| format!("{:<width$}", val, width = w))
-                    .collect();
-                if !try_println(values.join("  ").trim_end()) {
-                    break;
-                }
-            }
-        }
-        OutputFormat::Csv => {
-            if !no_header && !try_println(&cols.join(",")) {
-                return Ok(());
-            }
-            for rec in &records {
-                let values: Vec<String> = cols
-                    .iter()
-                    .map(|&col| {
-                        let v = format_val(rec, col);
-                        if v.contains(',') || v.contains('"') {
-                            format!("\"{}\"", v.replace('"', "\"\""))
-                        } else {
-                            v
-                        }
-                    })
-                    .collect();
-                if !try_println(&values.join(",")) {
-                    break;
-                }
-            }
-        }
-        OutputFormat::Json => {
-            let array: Vec<serde_json::Map<String, serde_json::Value>> = records
-                .iter()
-                .map(|rec| {
-                    cols.iter()
-                        .map(|&col| {
-                            (
-                                col.to_string(),
-                                serde_json::Value::String(format_val(rec, col)),
-                            )
-                        })
-                        .collect()
-                })
-                .collect();
-            try_println(&serde_json::to_string_pretty(&array)?);
-        }
+            })
+            .collect();
+        fmt.push(row);
     }
+    fmt.print(format, no_header);
 
     Ok(())
 }

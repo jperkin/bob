@@ -27,8 +27,8 @@ use std::time::Duration;
 
 use strum::{EnumMessage, EnumProperty, VariantArray};
 
-use crate::PackageState;
 use crate::build::Stage;
+use crate::{ColumnAlign, PackageState};
 
 /// Prefix for selecting CPU time instead of wall time for a stage.
 const CPU_PREFIX: &str = "cpu:";
@@ -69,15 +69,23 @@ pub enum HistoryKind {
         props(default = "true")
     )]
     Stage,
-    #[strum(message = "MAKE_JOBS used", props(default = "true"))]
+    #[strum(message = "MAKE_JOBS used", props(default = "true", align = "right"))]
     MakeJobs,
-    #[strum(message = "Total wall-clock duration", props(default = "true"))]
+    #[strum(
+        message = "Total wall-clock duration",
+        props(default = "true", align = "right")
+    )]
     Duration,
-    #[strum(message = "WRKDIR size at end of build")]
+    #[strum(message = "WRKDIR size at end of build", props(align = "right"))]
     DiskUsage,
     #[strum(message = "WRKOBJDIR type (tmpfs or disk)")]
     Wrkobjdir,
 }
+
+/**
+ * Alignment from per-variant `align` props.
+ */
+impl crate::ColumnAlign for HistoryKind {}
 
 impl HistoryKind {
     /// Whether this column is shown by default.
@@ -85,17 +93,20 @@ impl HistoryKind {
         self.get_str("default").is_some()
     }
 
-    /// All valid column names: fixed columns, per-stage wall times,
-    /// and per-stage CPU times (via `cpu:` prefix).
-    pub fn all_names() -> Vec<String> {
+    /// All valid column names with alignment.
+    pub fn all_columns() -> Vec<(String, crate::Align)> {
         Self::VARIANTS
             .iter()
-            .map(|v| <&str>::from(v).to_string())
-            .chain(Stage::VARIANTS.iter().map(|s| s.into_str().to_string()))
+            .map(|v| (<&str>::from(v).to_string(), v.align()))
             .chain(
                 Stage::VARIANTS
                     .iter()
-                    .map(|s| format!("{CPU_PREFIX}{}", s.into_str())),
+                    .map(|s| (s.into_str().to_string(), s.align())),
+            )
+            .chain(
+                Stage::VARIANTS
+                    .iter()
+                    .map(|s| (format!("{CPU_PREFIX}{}", s.into_str()), s.align())),
             )
             .collect()
     }
@@ -106,7 +117,7 @@ impl HistoryKind {
         let mut names: Vec<&'static str> = Self::VARIANTS
             .iter()
             .filter(|c| c.is_default())
-            .map(<&str>::from)
+            .map(|v| v.into())
             .collect();
         if let Some(pos) = names.iter().position(|&n| n == duration) {
             names.insert(pos, Stage::Build.into_str());
@@ -116,8 +127,8 @@ impl HistoryKind {
 
     /// Generate the `after_long_help` text for `bob history`.
     pub fn after_help() -> String {
-        let all_names = Self::all_names();
-        let max_name = all_names.iter().map(|n| n.len()).max().unwrap_or(0);
+        let all_cols = Self::all_columns();
+        let max_name = all_cols.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
 
         let mut help = String::from("Columns:\n");
         for col in Self::VARIANTS {

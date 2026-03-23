@@ -38,6 +38,30 @@ mod tui;
 use std::io::{self, Write};
 
 /**
+ * Column alignment for tabular output.
+ */
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Align {
+    #[default]
+    Left,
+    Right,
+}
+
+/**
+ * Column alignment, driven by the strum `align` prop.
+ *
+ * Default to left alignment.
+ */
+pub trait ColumnAlign: strum::EnumProperty {
+    fn align(&self) -> Align {
+        match self.get_str("align") {
+            Some("right") => Align::Right,
+            _ => Align::Left,
+        }
+    }
+}
+
+/**
  * Write a line to stdout, returning false on broken pipe.
  *
  * Use this in loops to gracefully handle SIGPIPE (e.g., when piped to `head`).

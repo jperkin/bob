@@ -385,6 +385,7 @@ pub fn pkg_up_to_date(
     Eq,
     serde::Serialize,
     serde::Deserialize,
+    strum::EnumProperty,
     strum::FromRepr,
     strum::IntoStaticStr,
     strum::VariantArray,
@@ -402,6 +403,15 @@ pub enum Stage {
     Package = 7,
     Deinstall = 8,
     Clean = 9,
+}
+
+/**
+ * All stage columns are durations, so always right-aligned.
+ */
+impl crate::ColumnAlign for Stage {
+    fn align(&self) -> crate::Align {
+        crate::Align::Right
+    }
 }
 
 /**

@@ -547,7 +547,9 @@ impl WrkObjDir {
     }
 }
 
-/// A resolved WRKOBJDIR assignment for a single package.
+/**
+ * A resolved WRKOBJDIR assignment for a single package.
+ */
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, strum::Display, strum::EnumString)]
 #[strum(serialize_all = "snake_case")]
 pub enum WrkObjKind {
