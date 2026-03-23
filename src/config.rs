@@ -1305,11 +1305,32 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
     let pkgpaths: Option<Vec<PkgPath>> = match pkgsrc.get::<Value>("pkgpaths")? {
         Value::Nil => None,
         Value::Table(t) => {
-            let paths: Vec<PkgPath> = t
-                .sequence_values::<String>()
-                .filter_map(|r| r.ok())
-                .filter_map(|s| PkgPath::new(&s).ok())
-                .collect();
+            let mut paths = Vec::new();
+            for (i, val) in t.sequence_values::<Value>().enumerate() {
+                let val = val.map_err(|e| {
+                    mlua::Error::runtime(format!("pkgsrc.pkgpaths[{}]: {}", i + 1, e))
+                })?;
+                let Value::String(s) = val else {
+                    return Err(mlua::Error::runtime(format!(
+                        "pkgsrc.pkgpaths[{}]: expected string",
+                        i + 1
+                    )));
+                };
+                let s = s.to_str().map_err(|e| {
+                    mlua::Error::runtime(format!("pkgsrc.pkgpaths[{}]: {}", i + 1, e))
+                })?;
+                match PkgPath::new(&s) {
+                    Ok(p) => paths.push(p),
+                    Err(e) => {
+                        return Err(mlua::Error::runtime(format!(
+                            "pkgsrc.pkgpaths[{}]: invalid pkgpath '{}': {}",
+                            i + 1,
+                            s,
+                            e
+                        )));
+                    }
+                }
+            }
             if paths.is_empty() { None } else { Some(paths) }
         }
         _ => None,
@@ -1486,4 +1507,81 @@ fn parse_environment(globals: &Table) -> LuaResult<Option<Environment>> {
         inherit,
         set,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load_config(lua_src: &str) -> Result<Config, String> {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let path = dir.path().join("config.lua");
+        std::fs::write(&path, lua_src).map_err(|e| e.to_string())?;
+        Config::load(Some(&path)).map_err(|e| e.to_string())
+    }
+
+    const MINIMAL: &str = r#"
+        pkgsrc = {
+            basedir = "/usr/pkgsrc",
+            make = "/usr/bin/make",
+        }
+    "#;
+
+    fn with_options(options: &str) -> String {
+        format!("{MINIMAL}\noptions = {{ {options} }}")
+    }
+
+    fn with_dynamic(dynamic: &str) -> String {
+        format!("{MINIMAL}\ndynamic = {{ {dynamic} }}")
+    }
+
+    #[test]
+    fn options_valid_types() {
+        let cfg = load_config(&with_options("build_threads = 4, scan_threads = 2"));
+        assert!(cfg.is_ok());
+        let cfg = cfg.ok();
+        assert_eq!(cfg.as_ref().map(|c| c.build_threads()), Some(4));
+        assert_eq!(cfg.as_ref().map(|c| c.scan_threads()), Some(2));
+    }
+
+    #[test]
+    fn options_wrong_type_errors() {
+        let cfg = load_config(&with_options("build_threads = \"eight\""));
+        assert!(cfg.is_err(), "expected error, got: {:?}", cfg);
+    }
+
+    #[test]
+    fn options_missing_is_default() {
+        let cfg = load_config(MINIMAL);
+        assert!(cfg.is_ok());
+        let cfg = cfg.ok();
+        assert_eq!(cfg.as_ref().map(|c| c.build_threads()), Some(1));
+    }
+
+    #[test]
+    fn dynamic_jobs_wrong_type_errors() {
+        let cfg = load_config(&with_dynamic("jobs = \"lots\""));
+        assert!(cfg.is_err(), "expected error, got: {:?}", cfg);
+    }
+
+    #[test]
+    fn pkgpaths_valid() {
+        let lua = format!("{MINIMAL}\npkgsrc.pkgpaths = {{ \"devel/cmake\", \"lang/rust\" }}");
+        let cfg = load_config(&lua);
+        assert!(cfg.is_ok(), "expected ok, got: {:?}", cfg);
+    }
+
+    #[test]
+    fn pkgpaths_invalid_errors() {
+        let lua = format!("{MINIMAL}\npkgsrc.pkgpaths = {{ \"mail\" }}");
+        let cfg = load_config(&lua);
+        assert!(cfg.is_err(), "expected error, got: {:?}", cfg);
+    }
+
+    #[test]
+    fn pkgpaths_wrong_type_errors() {
+        let lua = format!("{MINIMAL}\npkgsrc.pkgpaths = {{ 42 }}");
+        let cfg = load_config(&lua);
+        assert!(cfg.is_err(), "expected error, got: {:?}", cfg);
+    }
 }
