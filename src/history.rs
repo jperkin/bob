@@ -75,6 +75,8 @@ pub enum HistoryKind {
     Duration,
     #[strum(message = "WRKDIR size at end of build")]
     DiskUsage,
+    #[strum(message = "WRKOBJDIR type (tmpfs or disk)")]
+    Wrkobjdir,
 }
 
 impl HistoryKind {
@@ -175,6 +177,8 @@ pub struct History {
     pub make_jobs: Option<usize>,
     pub duration: Duration,
     pub disk_usage: Option<u64>,
+    /// WRKOBJDIR type used for this build.
+    pub wrkobjdir: Option<crate::config::WrkObjKind>,
     /// Per-stage wall-clock durations.
     pub stage_durations: Vec<(Stage, Duration)>,
     /// Per-stage CPU time (user+sys from wait4).
@@ -281,6 +285,11 @@ impl History {
             HistoryKind::MakeJobs => self.make_jobs.map(|j| j.to_string()).unwrap_or_else(dash),
             HistoryKind::Duration => fmt_dur(self.duration),
             HistoryKind::DiskUsage => self.disk_usage.map(format_size).unwrap_or_else(dash),
+            HistoryKind::Wrkobjdir => self
+                .wrkobjdir
+                .as_ref()
+                .map(|k| k.to_string())
+                .unwrap_or_else(dash),
         }
     }
 
@@ -337,6 +346,11 @@ impl History {
             HistoryKind::MakeJobs => self.make_jobs.map(|j| j.to_string()).unwrap_or_else(dash),
             HistoryKind::Duration => fmt_dur(self.duration),
             HistoryKind::DiskUsage => self.disk_usage.map(|b| b.to_string()).unwrap_or_else(dash),
+            HistoryKind::Wrkobjdir => self
+                .wrkobjdir
+                .as_ref()
+                .map(|k| k.to_string())
+                .unwrap_or_else(dash),
         }
     }
 }

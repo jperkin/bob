@@ -532,6 +532,37 @@ pub struct WrkObjDir {
     pub threshold: Option<u64>,
 }
 
+impl WrkObjDir {
+    /// Route a package to tmpfs or disk based on historical disk usage.
+    pub fn route(&self, disk_usage: Option<u64>) -> Option<WrkObjKind> {
+        match (&self.tmpfs, &self.disk, self.threshold) {
+            (Some(tmpfs), Some(disk), Some(threshold)) => match disk_usage {
+                Some(size) if size <= threshold => Some(WrkObjKind::Tmpfs(tmpfs.clone())),
+                _ => Some(WrkObjKind::Disk(disk.clone())),
+            },
+            (Some(dir), None, _) => Some(WrkObjKind::Tmpfs(dir.clone())),
+            (None, Some(dir), _) => Some(WrkObjKind::Disk(dir.clone())),
+            _ => None,
+        }
+    }
+}
+
+/// A resolved WRKOBJDIR assignment for a single package.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, strum::Display, strum::EnumString)]
+#[strum(serialize_all = "snake_case")]
+pub enum WrkObjKind {
+    Tmpfs(PathBuf),
+    Disk(PathBuf),
+}
+
+impl WrkObjKind {
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Tmpfs(p) | Self::Disk(p) => p,
+        }
+    }
+}
+
 /// pkgsrc-related configuration from the `pkgsrc` section.
 ///
 /// # Required Fields

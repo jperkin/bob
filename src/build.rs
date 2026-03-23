@@ -42,7 +42,7 @@
 //! - `deinstall` - Test package removal (non-bootstrap only)
 //! - `clean` - Clean up build artifacts
 
-use crate::config::PkgsrcEnv;
+use crate::config::{PkgsrcEnv, WrkObjKind};
 use crate::makejobs::PkgMakeJobs;
 use crate::sandbox::{CommandSetsid, SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
 use crate::scan::ResolvedPackage;
@@ -419,6 +419,8 @@ pub struct PkgBuildStats {
     pub stage_cpu_times: Vec<(Stage, Duration)>,
     /// WRKDIR size in bytes, measured before clean.
     pub disk_usage: Option<u64>,
+    /// WRKOBJDIR type used for this build.
+    pub wrkobjdir: Option<WrkObjKind>,
     /// Wall-clock duration for the entire build.
     pub duration: Duration,
     /// Unix epoch when the build started.
@@ -460,7 +462,7 @@ struct BuildSession {
     pkgsrc_env: PkgsrcEnv,
     sandbox: Sandbox,
     state: RunState,
-    wrkobjdir_map: HashMap<PkgName, PathBuf>,
+    wrkobjdir_map: HashMap<PkgName, WrkObjKind>,
 }
 
 /// Package builder that executes build stages.
@@ -1261,6 +1263,7 @@ impl BuildResult {
             make_jobs: self.build_stats.make_jobs.jobs(),
             duration: self.build_stats.duration,
             disk_usage: self.build_stats.disk_usage,
+            wrkobjdir: self.build_stats.wrkobjdir.clone(),
             stage_durations: self.build_stats.stage_durations.clone(),
             stage_cpu_times: self.build_stats.stage_cpu_times.clone(),
         })
@@ -1515,11 +1518,16 @@ impl PackageBuild {
 
         // Inject scheduler-computed WRKOBJDIR unless the user's env
         // function already set it (user overrides win).
-        if !pkg_env.contains_key("WRKOBJDIR") {
-            if let Some(wrkobjdir) = self.session.wrkobjdir_map.get(&self.pkginfo.index.pkgname) {
-                envs.push(("WRKOBJDIR".to_string(), wrkobjdir.display().to_string()));
+        let wrkobjdir_kind = if !pkg_env.contains_key("WRKOBJDIR") {
+            if let Some(kind) = self.session.wrkobjdir_map.get(&self.pkginfo.index.pkgname) {
+                envs.push(("WRKOBJDIR".to_string(), kind.path().display().to_string()));
+                Some(kind)
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
         for (key, value) in &pkg_env {
             envs.push((key.clone(), value.clone()));
@@ -1578,15 +1586,18 @@ impl PackageBuild {
             let w = wrkdir.as_ref()?;
             fs_extra::dir::get_size(w).ok()
         };
+        let wrkobjdir = wrkobjdir_kind.cloned();
 
         let result = match result {
-            Ok(r @ PkgBuildResult::Success(_)) => {
+            Ok(PkgBuildResult::Success(mut stats)) => {
                 info!("Package build completed successfully");
-                r
+                stats.wrkobjdir = wrkobjdir;
+                PkgBuildResult::Success(stats)
             }
             Ok(PkgBuildResult::Failed(mut stats)) => {
                 error!("Package build failed");
                 stats.disk_usage = measure_wrkdir();
+                stats.wrkobjdir = wrkobjdir;
                 self.cleanup_after_failure(status_tx, pkgname, pkgpath, logdir, patterns, &envs);
                 PkgBuildResult::Failed(stats)
             }
@@ -1597,6 +1608,7 @@ impl PackageBuild {
                 PkgBuildResult::Failed(PkgBuildStats {
                     make_jobs: self.make_jobs,
                     disk_usage,
+                    wrkobjdir,
                     ..PkgBuildStats::default()
                 })
             }
@@ -2076,56 +2088,21 @@ impl Build {
          * Packages with no history or a recent failure default to
          * disk (safe choice since tmpfs is bounded).
          */
-        let wrkobjdir_map: HashMap<PkgName, PathBuf> = if let Some(w) = self.config.wrkobjdir() {
-            match (&w.tmpfs, &w.disk, w.threshold) {
-                (Some(tmpfs), Some(disk), Some(threshold)) => {
-                    let usage = db.disk_usage_by_pkg_all();
-                    debug!(
-                        total_packages = self.scanpkgs.len(),
-                        history_entries = usage.len(),
-                        threshold,
-                        "WRKOBJDIR disk usage query results"
-                    );
-                    let mut map = HashMap::new();
-                    let mut tmpfs_count = 0usize;
-                    let mut disk_count = 0usize;
-                    for (pkgname, idx) in &self.scanpkgs {
-                        let pkgpath = idx.pkgpath.to_string();
-                        let dir = match usage.get(pkgname.pkgbase()) {
-                            Some(&size) if size <= threshold => {
-                                debug!(%pkgname, %pkgpath, size, "wrkobjdir: tmpfs");
-                                tmpfs_count += 1;
-                                tmpfs
-                            }
-                            Some(&size) => {
-                                debug!(%pkgname, %pkgpath, size, "wrkobjdir: disk");
-                                disk_count += 1;
-                                disk
-                            }
-                            None => {
-                                debug!(%pkgname, %pkgpath, "wrkobjdir: disk (no history)");
-                                disk_count += 1;
-                                disk
-                            }
-                        };
-                        map.insert(pkgname.clone(), dir.clone());
-                    }
-                    info!(
-                        tmpfs = tmpfs_count,
-                        disk = disk_count,
-                        "WRKOBJDIR routing from build history"
-                    );
-                    map
+        let wrkobjdir_map: HashMap<PkgName, WrkObjKind> = if let Some(w) = self.config.wrkobjdir() {
+            let usage = db.disk_usage_by_pkg_all();
+            debug!(
+                total_packages = self.scanpkgs.len(),
+                history_entries = usage.len(),
+                "WRKOBJDIR disk usage query results"
+            );
+            let mut map = HashMap::new();
+            for pkgname in self.scanpkgs.keys() {
+                let du = usage.get(pkgname.pkgbase()).copied();
+                if let Some(kind) = w.route(du) {
+                    map.insert(pkgname.clone(), kind);
                 }
-                (Some(dir), None, _) | (None, Some(dir), _) => {
-                    let mut map = HashMap::new();
-                    for pkgname in self.scanpkgs.keys() {
-                        map.insert(pkgname.clone(), dir.clone());
-                    }
-                    map
-                }
-                _ => HashMap::new(),
             }
+            map
         } else {
             HashMap::new()
         };

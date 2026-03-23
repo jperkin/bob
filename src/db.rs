@@ -79,6 +79,7 @@ fn history_schema() -> String {
                 HistoryKind::Duration | HistoryKind::Timestamp => "INTEGER NOT NULL",
                 HistoryKind::MakeJobs => "INTEGER",
                 HistoryKind::DiskUsage => "INTEGER",
+                HistoryKind::Wrkobjdir => "TEXT",
             };
             format!("{name} {sql}")
         })
@@ -94,7 +95,7 @@ const SCHEMA_VERSION: i32 = 20260317;
 /**
  * Schema version for history.db - update when history schema changes.
  */
-const HISTORY_SCHEMA_VERSION: i32 = 20260319;
+const HISTORY_SCHEMA_VERSION: i32 = 20260323;
 
 /**
  * Lightweight package row without full scan data.
@@ -1672,6 +1673,7 @@ impl Database {
                 row.get::<_, Option<i64>>(7)?.map(|v| v as usize),
                 row.get::<_, i64>(8)?,
                 row.get::<_, Option<i64>>(9)?,
+                row.get::<_, Option<String>>(10)?,
             ))
         })?;
 
@@ -1689,6 +1691,7 @@ impl Database {
                 make_jobs,
                 duration,
                 disk_usage,
+                wrkobjdir,
             ) = row?;
             if let Some(re) = pattern {
                 if !re.is_match(&pkgpath) && !re.is_match(&pkgname) {
@@ -1713,6 +1716,7 @@ impl Database {
                 make_jobs,
                 duration: Duration::from_millis(duration as u64),
                 disk_usage: disk_usage.map(|s| s as u64),
+                wrkobjdir: wrkobjdir.and_then(|s| s.parse().ok()),
                 stage_durations: Vec::new(),
                 stage_cpu_times: Vec::new(),
             });
@@ -2083,6 +2087,7 @@ pub(crate) fn record_history_to(conn: &Connection, rec: &crate::History) -> Resu
             rec.make_jobs.map(|j| j as i64),
             dur_ms(rec.duration),
             rec.disk_usage.map(|s| s as i64),
+            rec.wrkobjdir.as_ref().map(|k| k.to_string()),
         ],
     )?;
     let history_id = conn.last_insert_rowid();
@@ -2266,6 +2271,7 @@ mod tests {
             make_jobs: Some(1),
             duration: Duration::ZERO,
             disk_usage: None,
+            wrkobjdir: None,
             stage_durations: vec![(Stage::Build, Duration::from_millis(wall_ms))],
             stage_cpu_times: vec![(Stage::Build, Duration::from_millis(cpu_ms))],
         };

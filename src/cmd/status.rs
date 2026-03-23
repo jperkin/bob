@@ -105,6 +105,7 @@ fn print_build_status(
         "priority",
         "cpu",
         "jobs",
+        "wrkobjdir",
     ];
     let default_cols = ["pkgname", "status", "reason"];
     let cols: Vec<&str> = if columns.is_some() {
@@ -135,6 +136,7 @@ fn print_build_status(
             "priority" => 8,
             "cpu" => 8,
             "jobs" => 5,
+            "wrkobjdir" => 9,
             _ => usize::MAX,
         }
     };
@@ -161,6 +163,26 @@ fn print_build_status(
         sched.set_allocator(bob::makejobs::Allocator::new(config.build_threads(), jobs));
         sched.allocate_all();
     }
+
+    let wrkobjdir_map: HashMap<&str, String> = if cols.contains(&"wrkobjdir") {
+        if let Some(w) = config.wrkobjdir() {
+            let usage = db.disk_usage_by_pkg_all();
+            status_rows
+                .iter()
+                .filter_map(|r| {
+                    let du = usage
+                        .get(pkgsrc::PkgName::new(&r.pkgname).pkgbase())
+                        .copied();
+                    w.route(du)
+                        .map(|kind| (r.pkgname.as_str(), kind.to_string()))
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        }
+    } else {
+        HashMap::new()
+    };
 
     let get_status = |pkg: &PackageStatusRow| -> (&'static str, String) {
         if let Some(state) = pkg
@@ -244,6 +266,10 @@ fn print_build_status(
                         dash()
                     }
                 }
+                "wrkobjdir" => wrkobjdir_map
+                    .get(pkg.pkgname.as_str())
+                    .cloned()
+                    .unwrap_or_else(dash),
                 "jobs" => match sp.make_jobs.allocated() {
                     Some(n) => n.to_string(),
                     None => dash(),
