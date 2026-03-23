@@ -1587,17 +1587,13 @@ impl PackageBuild {
             Ok(PkgBuildResult::Failed(mut stats)) => {
                 error!("Package build failed");
                 stats.disk_usage = measure_wrkdir();
-                self.cleanup_after_failure(
-                    status_tx, pkgname, pkgpath, logdir, patterns, &pkg_env, &envs,
-                );
+                self.cleanup_after_failure(status_tx, pkgname, pkgpath, logdir, patterns, &envs);
                 PkgBuildResult::Failed(stats)
             }
             Err(e) => {
                 error!(error = %e, "Package build error");
                 let disk_usage = measure_wrkdir();
-                self.cleanup_after_failure(
-                    status_tx, pkgname, pkgpath, logdir, patterns, &pkg_env, &envs,
-                );
+                self.cleanup_after_failure(status_tx, pkgname, pkgpath, logdir, patterns, &envs);
                 PkgBuildResult::Failed(PkgBuildStats {
                     make_jobs: self.make_jobs,
                     disk_usage,
@@ -1627,7 +1623,6 @@ impl PackageBuild {
      * will perform its own cleanup, while this one handles saving useful
      * logs from the build, etc.
      */
-    #[allow(clippy::too_many_arguments)]
     fn cleanup_after_failure(
         &self,
         status_tx: &Sender<ChannelCommand>,
@@ -1635,7 +1630,6 @@ impl PackageBuild {
         pkgpath: &PkgPath,
         logdir: &Path,
         patterns: &[String],
-        pkg_env: &HashMap<String, String>,
         envs: &[(String, String)],
     ) {
         let _ = status_tx.send(ChannelCommand::StageUpdate(
@@ -1659,7 +1653,7 @@ impl PackageBuild {
          */
         if !patterns.is_empty() {
             let save_start = Instant::now();
-            self.save_wrkdir_files(pkgname, pkgpath, logdir, patterns, pkg_env);
+            self.save_wrkdir_files(pkgname, pkgpath, logdir, patterns, envs);
             trace!(
                 elapsed_ms = save_start.elapsed().as_millis(),
                 "save_wrkdir_files completed"
@@ -1684,9 +1678,10 @@ impl PackageBuild {
         pkgpath: &PkgPath,
         logdir: &Path,
         patterns: &[String],
-        pkg_env: &HashMap<String, String>,
+        envs: &[(String, String)],
     ) {
-        let make = MakeQuery::new(&self.session, self.sandbox_id, pkgpath, pkg_env);
+        let env_map: HashMap<String, String> = envs.iter().cloned().collect();
+        let make = MakeQuery::new(&self.session, self.sandbox_id, pkgpath, &env_map);
 
         // Get WRKDIR
         let wrkdir = match make.wrkdir() {
