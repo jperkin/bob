@@ -79,6 +79,12 @@ struct FailedPackageInfo<'a> {
     failed_log: Option<String>,
 }
 
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 /// Read the failed phase from the .stage file in the log directory.
 fn read_failed_phase(log_dir: &Path) -> Option<String> {
     let stage_file = log_dir.join(".stage");
@@ -633,10 +639,10 @@ fn write_skipped_section(file: &mut fs::File, skipped: &[&BuildResult]) -> Resul
             writeln!(
                 file,
                 "    <tr><td>{}</td><td>{}</td><td>{}</td><td class=\"reason\">{}</td></tr>",
-                result.pkgname.pkgname(),
-                pkgpath,
+                escape_html(result.pkgname.pkgname()),
+                escape_html(&pkgpath),
                 status,
-                reason
+                escape_html(&reason)
             )?;
         }
 
@@ -725,16 +731,11 @@ fn write_scanfail_section(file: &mut fs::File, scanfail: &[(PkgPath, String)]) -
     writeln!(file, "    <tbody>")?;
 
     for (pkgpath, error_msg) in scanfail {
-        let path_str = pkgpath.as_path().display().to_string();
-        // Escape HTML in error message
-        let error = error_msg
-            .replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;");
         writeln!(
             file,
             "    <tr><td>{}</td><td class=\"reason\">{}</td></tr>",
-            path_str, error
+            escape_html(&pkgpath.as_path().display().to_string()),
+            escape_html(error_msg)
         )?;
     }
 
