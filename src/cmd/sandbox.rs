@@ -90,6 +90,7 @@ fn exec(config: &Config) -> Result<()> {
         let mut cmd = Command::new("/usr/sbin/chroot");
         cmd.arg(sandbox.path(id)).arg("/bin/sh").arg("-i");
         sandbox.apply_environment(&mut cmd);
+        cmd.env("PS1", format!("sandbox:{} $PWD# ", id));
         cmd.stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
