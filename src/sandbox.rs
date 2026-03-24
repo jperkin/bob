@@ -201,7 +201,7 @@ pub fn wait_output_with_shutdown(child: Child, state: &RunState) -> Result<Outpu
     loop {
         if state.is_shutdown() {
             unsafe {
-                libc::kill(pid as i32, libc::SIGKILL);
+                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
             }
             let _ = rx.recv();
             bail!("Interrupted by shutdown");
@@ -692,6 +692,7 @@ impl Sandbox {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .process_group(0)
             .spawn()
             .map_err(Into::into)
     }
