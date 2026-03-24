@@ -15,14 +15,17 @@
  */
 
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, BufWriter, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use pkgsrc::ScanIndex;
 
 use bob::PackageStateKind;
+use bob::config::Config;
+use bob::db::Database;
 use bob::scan::Scan;
+use bob::try_println;
 
 pub fn presolve(file: &PathBuf, output: Option<&PathBuf>, strict: bool, verbose: u8) -> Result<()> {
     let reader: Box<dyn std::io::BufRead> = if file.as_os_str() == "-" {
@@ -84,6 +87,61 @@ pub fn presolve(file: &PathBuf, output: Option<&PathBuf>, strict: bool, verbose:
         );
     } else {
         print!("{}", out);
+    }
+
+    Ok(())
+}
+
+pub fn print_presolve(config: &Config, output: Option<&PathBuf>, sort: bool) -> Result<()> {
+    let db = Database::open(config.dbdir())?;
+
+    let count = db.count_packages()?;
+    if count == 0 {
+        bail!("No cached scan data found. Run 'bob scan' first.");
+    }
+
+    let mut scan = Scan::new(config);
+    scan.init_from_db(&db)?;
+
+    let scan_data = db.get_all_scan_data()?;
+    let mut result = scan.resolve(scan_data)?;
+
+    let errors: Vec<_> = result.errors().collect();
+    if !errors.is_empty() {
+        eprintln!("Unresolved dependencies:\n  {}", errors.join("\n  "));
+    }
+
+    if sort {
+        result
+            .packages
+            .sort_by(|a, b| a.pkgname().cmp(&b.pkgname()));
+    }
+
+    if let Some(path) = output {
+        let mut w = BufWriter::new(File::create(path)?);
+        for pkg in &result.packages {
+            write!(w, "{pkg}")?;
+        }
+        w.flush()?;
+        let c = result.counts();
+        let s = &c.states;
+        let skipped = s[PackageStateKind::PreSkipped]
+            + s[PackageStateKind::PreFailed]
+            + s[PackageStateKind::Unresolved];
+        eprintln!(
+            "Wrote {} buildable, {} skipped to {}",
+            c.buildable,
+            skipped,
+            path.display()
+        );
+    } else {
+        for pkg in &result.packages {
+            for line in pkg.to_string().lines() {
+                if !try_println(line) {
+                    return Ok(());
+                }
+            }
+        }
     }
 
     Ok(())

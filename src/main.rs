@@ -356,6 +356,9 @@ enum UtilCmd {
         /// Output file (defaults to stdout)
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Sort output by package name
+        #[arg(short, long)]
+        sort: bool,
     },
     /// Output the resolved dependency graph from cached scan data
     PrintDepGraph {
@@ -639,51 +642,10 @@ fn run() -> Result<()> {
             cmd::simulate::run(&file, workers, jobs, history.as_deref(), uniform)?;
         }
         Cmd::Util {
-            cmd: UtilCmd::PrintPresolve { output },
+            cmd: UtilCmd::PrintPresolve { output, sort },
         } => {
             let config = Config::load(args.config.as_deref())?;
-            let db = Database::open(config.dbdir())?;
-
-            let count = db.count_packages()?;
-            if count == 0 {
-                bail!("No cached scan data found. Run 'bob scan' first.");
-            }
-
-            let mut scan = Scan::new(&config);
-            scan.init_from_db(&db)?;
-
-            let scan_data = db.get_all_scan_data()?;
-            let result = scan.resolve(scan_data)?;
-
-            // Print unresolved dependency errors
-            let errors: Vec<_> = result.errors().collect();
-            if !errors.is_empty() {
-                eprintln!("Unresolved dependencies:\n  {}", errors.join("\n  "));
-            }
-
-            // Build presolve output in original order
-            let mut out = String::new();
-            for pkg in &result.packages {
-                out.push_str(&pkg.to_string());
-            }
-
-            // Write to file or stdout
-            if let Some(path) = output {
-                std::fs::write(&path, &out)?;
-                let c = result.counts();
-                let s = &c.states;
-                let skipped = s[PackageStateKind::PreSkipped]
-                    + s[PackageStateKind::PreFailed]
-                    + s[PackageStateKind::Unresolved];
-                println!(
-                    "Wrote {} buildable, {} skipped to {}",
-                    c.buildable,
-                    skipped,
-                    path.display()
-                );
-            } else {
-                print!("{}", out);
-            }
+            cmd::util::print_presolve(&config, output.as_ref(), sort)?;
         }
         Cmd::Util {
             cmd: UtilCmd::ImportScan { file },
