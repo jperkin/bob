@@ -1,5 +1,36 @@
 # Changelog
 
+## Version 0.9.0 (2026-03-25)
+
+* Support for dynamic `MAKE_JOBS` and `WRKOBJDIR` based on historical build
+  data.  `MAKE_JOBS` is tuned based on previous CPU usage (i.e. bigger builds
+  get higher allocations), and WRKOBJDIR routes to disk or tmpfs based on a
+  selected threshold and previous successful WRKDIR sizes.
+
+* New `bob history` command to show per-build metrics from a persistent
+  historical build database.
+
+* Move `bob sandbox` and `bob status` back to top-level commands as they are
+  used so frequently.  New `bob sandbox exec` command for interactive build
+  sessions inside a temporary sandbox.
+
+* Many minor improvements, consistent argument support, and output format
+  support for all commands.
+
+* New `bob util presolve` command for quick comparisons with `pbulk-resolve`.
+  Updating to newer pkgsrc-rs also improves dependency resolution performance,
+  bob now being 70x faster than pbulk for a full tree resolution.
+
+* Ctrl-C now supports graceful shutdown on first signal, with in-progress
+  builds allowed to finish before exiting.  A second subsequent Ctrl-C will
+  proceed to an interrupted shutdown.
+
+* Generate `pkg_summary.zst`, stop generating `FILE_CKSUM` entries (slows down
+  generation and is currently unused, can be added back in future if required).
+
+* Significant number of minor tweaks, bug fixes, reliability improvements, and
+  performance optimisations.
+
 ## Version 0.8.1 (2026-02-06)
 
 * Fix output ordering of `bob list status` to ensure it is identical to build
