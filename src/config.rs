@@ -202,7 +202,7 @@ impl PkgsrcEnv {
     ///
     /// This must be called after sandbox 0 is created if sandboxes are enabled,
     /// since bmake may only exist inside the sandbox.
-    pub fn fetch(config: &Config, sandbox: &Sandbox, id: usize) -> Result<Self> {
+    pub fn fetch(config: &Config, sandbox: &Sandbox, id: Option<usize>) -> Result<Self> {
         const REQUIRED_VARS: &[&str] = &[
             "PACKAGES",
             "PKG_DBDIR",

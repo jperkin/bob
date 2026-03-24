@@ -75,14 +75,13 @@ fn exec(config: &Config) -> Result<()> {
     if !sandbox.enabled() {
         bail!("No sandboxes configured");
     }
-    let id = sandbox.next_available_id()?;
     print!("Creating sandbox...");
     let _ = std::io::stdout().flush();
     let start = Instant::now();
-    sandbox.create(id)?;
+    let id = sandbox.claim_id()?;
     let basic_envs = config.script_env(None);
     let result = (|| -> Result<()> {
-        if !sandbox.run_pre_build(id, config, basic_envs)? {
+        if !sandbox.run_pre_build(Some(id), config, basic_envs)? {
             println!(" failed ({:.1}s)", start.elapsed().as_secs_f32());
             bail!("pre-build script failed");
         }
@@ -100,9 +99,9 @@ fn exec(config: &Config) -> Result<()> {
         }
         Ok(())
     })();
-    let pkgsrc_env = PkgsrcEnv::fetch(config, &sandbox, id).ok();
+    let pkgsrc_env = PkgsrcEnv::fetch(config, &sandbox, Some(id)).ok();
     let envs = config.script_env(pkgsrc_env.as_ref());
-    match sandbox.run_post_build(id, config, envs) {
+    match sandbox.run_post_build(Some(id), config, envs) {
         Ok(true) => {}
         Ok(false) => eprintln!("Warning: post-build script failed"),
         Err(e) => eprintln!("Warning: post-build script error: {e}"),

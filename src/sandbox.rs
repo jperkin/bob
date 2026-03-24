@@ -277,13 +277,14 @@ impl Sandbox {
      * child in a new session (prevents `/dev/tty` access by build tools,
      * but forces `fork+exec` which is expensive on illumos).
      */
-    pub fn command(&self, id: usize, cmd: &Path) -> Command {
-        let mut c = if self.enabled() {
-            let mut c = Command::new("/usr/sbin/chroot");
-            c.arg(self.path(id)).arg(cmd);
-            c
-        } else {
-            Command::new(cmd)
+    pub fn command(&self, id: Option<usize>, cmd: &Path) -> Command {
+        let mut c = match id {
+            Some(id) => {
+                let mut c = Command::new("/usr/sbin/chroot");
+                c.arg(self.path(id)).arg(cmd);
+                c
+            }
+            None => Command::new(cmd),
         };
         self.apply_environment(&mut c);
         c
@@ -317,10 +318,8 @@ impl Sandbox {
      * Kill all processes in a sandbox by id.
      * This is used for graceful shutdown on Ctrl+C.
      */
-    pub fn kill_processes_by_id(&self, id: usize) {
-        if !self.enabled() {
-            return;
-        }
+    pub fn kill_processes_by_id(&self, id: Option<usize>) {
+        let Some(id) = id else { return };
         let sandbox = self.path(id);
         if sandbox.exists() {
             let span = info_span!("kill_processes", sandbox_id = id);
@@ -515,12 +514,6 @@ impl Sandbox {
         self.bobmarker(id).join("completed")
     }
 
-    fn create_marker(&self, id: usize) -> Result<()> {
-        let path = self.bobmarker(id);
-        fs::create_dir(&path).with_context(|| format!("Failed to create {}", path.display()))?;
-        Ok(())
-    }
-
     fn mark_complete(&self, id: usize) -> Result<()> {
         let path = self.completedpath(id);
         fs::create_dir(&path).with_context(|| format!("Failed to create {}", path.display()))?;
@@ -570,35 +563,56 @@ impl Sandbox {
     }
 
     /**
-     * Return a sandbox ID that does not collide with any existing sandbox.
+     * Claim the next available sandbox ID.
      */
-    pub fn next_available_id(&self) -> Result<usize> {
-        let ids = self.discover_sandboxes()?;
-        Ok(ids.last().map_or(0, |max| max + 1))
+    pub fn claim_id(&self) -> Result<usize> {
+        let mut candidate = 0;
+        loop {
+            if self.create(candidate)? {
+                return Ok(candidate);
+            }
+            candidate += 1;
+        }
+    }
+
+    pub fn claim_ids(&self, n: usize) -> Result<Vec<usize>> {
+        let mut claimed = Vec::with_capacity(n);
+        for _ in 0..n {
+            match self.claim_id() {
+                Ok(id) => claimed.push(id),
+                Err(e) => {
+                    for &id in &claimed {
+                        let _ = self.destroy(id);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Ok(claimed)
     }
 
     /**
      * Create a single sandbox by id.
-     * If the sandbox already exists and is valid (has lock), this is a no-op.
+     *
+     * Atomically claims the ID via the `.bob` marker directory, then
+     * runs configured actions and marks complete.  Returns `Ok(false)`
+     * if the ID is already taken by another process.
      */
-    pub fn create(&self, id: usize) -> Result<()> {
+    pub fn create(&self, id: usize) -> Result<bool> {
         let sandbox = self.path(id);
-        if sandbox.exists() {
-            if self.is_sandbox_complete(id) {
-                return Ok(());
-            }
-            bail!(
-                "Sandbox exists but is incomplete: {}.\n\
-                 Run 'bob sandbox destroy' first.",
-                sandbox.display()
-            );
-        }
         fs::create_dir_all(&sandbox)
             .with_context(|| format!("Failed to create {}", sandbox.display()))?;
-        self.create_marker(id)?;
+        let marker = self.bobmarker(id);
+        match fs::create_dir(&marker) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+            Err(e) => {
+                return Err(e).with_context(|| format!("Failed to create {}", marker.display()));
+            }
+        }
         self.perform_actions(id)?;
         self.mark_complete(id)?;
-        Ok(())
+        Ok(true)
     }
 
     /**
@@ -607,7 +621,7 @@ impl Sandbox {
      */
     pub fn execute(
         &self,
-        id: usize,
+        id: Option<usize>,
         script: &Path,
         envs: Vec<(String, String)>,
         stdin_data: Option<&str>,
@@ -644,7 +658,7 @@ impl Sandbox {
      */
     pub fn execute_script(
         &self,
-        id: usize,
+        id: Option<usize>,
         content: &str,
         envs: Vec<(String, String)>,
     ) -> Result<Child> {
@@ -674,7 +688,7 @@ impl Sandbox {
      */
     pub fn execute_command<I, S>(
         &self,
-        id: usize,
+        id: Option<usize>,
         cmd: &Path,
         args: I,
         envs: Vec<(String, String)>,
@@ -704,7 +718,7 @@ impl Sandbox {
      */
     pub fn run_pre_build(
         &self,
-        id: usize,
+        id: Option<usize>,
         config: &Config,
         envs: Vec<(String, String)>,
     ) -> Result<bool> {
@@ -737,7 +751,7 @@ impl Sandbox {
      */
     pub fn run_post_build(
         &self,
-        id: usize,
+        id: Option<usize>,
         config: &Config,
         envs: Vec<(String, String)>,
     ) -> Result<bool> {
@@ -812,7 +826,7 @@ impl Sandbox {
     }
 
     /**
-     * Create all sandboxes in parallel, rolling back on failure.
+     * Create sandboxes, claiming available IDs.
      */
     pub fn create_all(&self, count: usize) -> Result<()> {
         if count == 1 {
@@ -822,29 +836,7 @@ impl Sandbox {
         }
         let _ = std::io::stdout().flush();
         let start = Instant::now();
-        let results: Vec<(usize, Result<()>)> = (0..count)
-            .into_par_iter()
-            .map(|i| (i, self.create(i)))
-            .collect();
-        let mut first_error: Option<anyhow::Error> = None;
-        let mut sandbox_ids: Vec<usize> = Vec::new();
-        for (i, result) in results {
-            sandbox_ids.push(i);
-            if let Err(e) = result {
-                if first_error.is_none() {
-                    first_error = Some(e.context(format!("sandbox {}", i)));
-                }
-            }
-        }
-        if let Some(e) = first_error {
-            println!();
-            for i in &sandbox_ids {
-                if let Err(destroy_err) = self.destroy(*i) {
-                    eprintln!("Warning: failed to destroy sandbox {}: {}", i, destroy_err);
-                }
-            }
-            return Err(e);
-        }
+        self.claim_ids(count)?;
         println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
         Ok(())
     }
@@ -862,7 +854,7 @@ impl Sandbox {
         let envs = self.config.script_env(None);
         for &id in &sandboxes {
             if self.path(id).exists() {
-                match self.run_post_build(id, &self.config, envs.clone()) {
+                match self.run_post_build(Some(id), &self.config, envs.clone()) {
                     Ok(true) => {}
                     Ok(false) => {
                         warn!("post-build script failed for sandbox {}", id)
@@ -1428,7 +1420,7 @@ impl Sandbox {
 #[derive(Debug)]
 pub struct SandboxScope {
     sandbox: Sandbox,
-    count: usize,
+    owned: Vec<usize>,
     state: RunState,
 }
 
@@ -1441,77 +1433,74 @@ impl SandboxScope {
     pub fn new(sandbox: Sandbox, state: RunState) -> Self {
         Self {
             sandbox,
-            count: 0,
+            owned: Vec::new(),
             state,
         }
     }
 
     /**
-     * Ensure sandboxes 0..n exist.
+     * Ensure at least `n` sandboxes are owned by this scope.
      *
-     * Creates any missing sandboxes in parallel. If sandboxes are disabled
-     * or n <= current count, this is a no-op.
+     * Claims available IDs atomically, skipping any already held by other
+     * processes.  Sets up new sandboxes in parallel.
      *
      * On error or interrupt, newly created sandboxes are rolled back but
-     * previously existing sandboxes remain (they'll be cleaned up on drop).
+     * previously owned sandboxes remain (they'll be cleaned up on drop).
      */
-    pub fn ensure(&mut self, n: usize) -> Result<bool> {
-        if !self.sandbox.enabled() || n <= self.count {
-            return Ok(false);
+    pub fn ensure(&mut self, n: usize) -> Result<&[usize]> {
+        if n <= self.owned.len() {
+            return Ok(&self.owned);
         }
-        let results: Vec<(usize, Result<()>)> = (self.count..n)
-            .into_par_iter()
-            .map(|i| (i, self.sandbox.create(i)))
-            .collect();
-
-        // Check for interrupt - roll back newly created sandboxes
+        let needed = n - self.owned.len();
+        let new_ids = self.sandbox.claim_ids(needed)?;
         if self.state.interrupted() {
-            for (i, result) in &results {
-                if result.is_ok() {
-                    let _ = self.sandbox.destroy(*i);
-                }
+            for &id in &new_ids {
+                let _ = self.sandbox.destroy(id);
             }
             return Err(Interrupted.into());
         }
-
-        let mut first_error: Option<anyhow::Error> = None;
-        let mut sandbox_ids: Vec<usize> = Vec::new();
-        for (i, result) in results {
-            sandbox_ids.push(i);
-            if let Err(e) = result {
-                if first_error.is_none() {
-                    first_error = Some(e.context(format!("sandbox {}", i)));
-                }
-            }
-        }
-        if let Some(e) = first_error {
-            for i in &sandbox_ids {
-                if let Err(destroy_err) = self.sandbox.destroy(*i) {
-                    eprintln!("Warning: failed to destroy sandbox {}: {}", i, destroy_err);
-                }
-            }
-            return Err(e);
-        }
-        self.count = n;
-        Ok(true)
+        self.owned.extend(new_ids);
+        Ok(&self.owned)
     }
 
-    /// Access the underlying sandbox for operations.
+    /**
+     * Return the sandbox IDs owned by this scope.
+     *
+     * Index 0 is the first sandbox allocated, etc.  Use this to map
+     * worker indices to sandbox IDs.
+     */
+    pub fn ids(&self) -> Option<&[usize]> {
+        if self.owned.is_empty() {
+            None
+        } else {
+            Some(&self.owned)
+        }
+    }
+
+    /**
+     * Access the underlying sandbox for operations.
+     */
     pub fn sandbox(&self) -> &Sandbox {
         &self.sandbox
     }
 
-    /// Return whether sandboxes are enabled.
+    /**
+     * Return whether sandboxes are enabled.
+     */
     pub fn enabled(&self) -> bool {
         self.sandbox.enabled()
     }
 
-    /// Return the number of sandboxes currently managed.
+    /**
+     * Return the number of sandboxes currently managed.
+     */
     pub fn count(&self) -> usize {
-        self.count
+        self.owned.len()
     }
 
-    /// Access the run state flag.
+    /**
+     * Access the run state flag.
+     */
     pub fn state(&self) -> &RunState {
         &self.state
     }
@@ -1519,10 +1508,56 @@ impl SandboxScope {
 
 impl Drop for SandboxScope {
     fn drop(&mut self) {
-        if self.sandbox.enabled() && self.count > 0 {
-            if let Err(e) = self.sandbox.destroy_all() {
-                eprintln!("Warning: failed to destroy sandboxes: {}", e);
+        if !self.sandbox.enabled() || self.owned.is_empty() {
+            return;
+        }
+        let envs = self.sandbox.config.script_env(None);
+        for &id in &self.owned {
+            if self.sandbox.path(id).exists() {
+                match self
+                    .sandbox
+                    .run_post_build(Some(id), &self.sandbox.config, envs.clone())
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        warn!("post-build script failed for sandbox {}", id)
+                    }
+                    Err(e) => {
+                        warn!(error = %e, sandbox = id, "post-build script error")
+                    }
+                }
             }
+        }
+        if self.owned.len() == 1 {
+            print!("Destroying sandbox...");
+        } else {
+            print!("Destroying {} sandboxes...", self.owned.len());
+        }
+        let _ = std::io::stdout().flush();
+        let start = Instant::now();
+        let ids = self.owned.clone();
+        let results: Vec<(usize, Result<()>)> = ids
+            .into_par_iter()
+            .map(|id| (id, self.sandbox.destroy(id)))
+            .collect();
+        let mut failed = 0;
+        for (id, result) in results {
+            if let Err(e) = result {
+                if failed == 0 {
+                    println!();
+                }
+                eprintln!("sandbox {}: {:#}", id, e);
+                failed += 1;
+            }
+        }
+        if failed == 0 {
+            println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
+        } else {
+            eprintln!(
+                "Warning: failed to destroy {} sandbox{}",
+                failed,
+                if failed == 1 { "" } else { "es" }
+            );
         }
     }
 }

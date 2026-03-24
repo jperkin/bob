@@ -478,7 +478,8 @@ struct BuildSession {
 /// Package builder that executes build stages.
 struct PkgBuilder<'a> {
     session: &'a BuildSession,
-    sandbox_id: usize,
+    sandbox_id: Option<usize>,
+    worker_id: usize,
     pkginfo: &'a ResolvedPackage,
     logdir: PathBuf,
     build_user: Option<String>,
@@ -489,9 +490,11 @@ struct PkgBuilder<'a> {
 }
 
 impl<'a> PkgBuilder<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         session: &'a BuildSession,
-        sandbox_id: usize,
+        sandbox_id: Option<usize>,
+        worker_id: usize,
         pkginfo: &'a ResolvedPackage,
         envs: Vec<(String, String)>,
         output_tx: Option<Sender<ChannelCommand>>,
@@ -506,6 +509,7 @@ impl<'a> PkgBuilder<'a> {
         Self {
             session,
             sandbox_id,
+            worker_id,
             pkginfo,
             logdir,
             build_user,
@@ -725,13 +729,13 @@ impl<'a> PkgBuilder<'a> {
                 .context("Invalid package file path")?,
         );
         // pkgfile is a path inside the sandbox; prepend sandbox path for host access
-        let host_pkgfile = if self.session.sandbox.enabled() {
-            self.session
+        let host_pkgfile = match self.sandbox_id {
+            Some(id) => self
+                .session
                 .sandbox
-                .path(self.sandbox_id)
-                .join(pkgfile.trim_start_matches('/'))
-        } else {
-            PathBuf::from(&pkgfile)
+                .path(id)
+                .join(pkgfile.trim_start_matches('/')),
+            None => PathBuf::from(&pkgfile),
         };
         fs::copy(&host_pkgfile, &dest)?;
 
@@ -867,7 +871,7 @@ impl<'a> PkgBuilder<'a> {
 
             let stdout = child.stdout.take().unwrap();
             let output_tx = output_tx.clone();
-            let sandbox_id = self.sandbox_id;
+            let worker_id = self.worker_id;
 
             // Spawn thread to read from pipe and tee to file + output channel.
             // Batch lines and throttle sends to reduce channel overhead.
@@ -895,7 +899,7 @@ impl<'a> PkgBuilder<'a> {
                     // Send batch if interval elapsed or batch is large
                     if last_send.elapsed() >= send_interval || batch.len() >= 50 {
                         let _ = output_tx.send(ChannelCommand::OutputLines(
-                            sandbox_id,
+                            worker_id,
                             std::mem::take(&mut batch),
                         ));
                         last_send = Instant::now();
@@ -904,7 +908,7 @@ impl<'a> PkgBuilder<'a> {
 
                 // Send remaining lines
                 if !batch.is_empty() {
-                    let _ = output_tx.send(ChannelCommand::OutputLines(sandbox_id, batch));
+                    let _ = output_tx.send(ChannelCommand::OutputLines(worker_id, batch));
                 }
             });
 
@@ -1363,7 +1367,8 @@ pub struct Build {
 #[derive(Debug)]
 struct PackageBuild {
     session: Arc<BuildSession>,
-    sandbox_id: usize,
+    sandbox_id: Option<usize>,
+    worker_id: usize,
     pkginfo: ResolvedPackage,
     make_jobs: PkgMakeJobs,
 }
@@ -1371,7 +1376,7 @@ struct PackageBuild {
 /// Helper for querying bmake variables with the correct environment.
 struct MakeQuery<'a> {
     session: &'a BuildSession,
-    sandbox_id: usize,
+    sandbox_id: Option<usize>,
     pkgpath: &'a PkgPath,
     env: &'a HashMap<String, String>,
 }
@@ -1379,7 +1384,7 @@ struct MakeQuery<'a> {
 impl<'a> MakeQuery<'a> {
     fn new(
         session: &'a BuildSession,
-        sandbox_id: usize,
+        sandbox_id: Option<usize>,
         pkgpath: &'a PkgPath,
         env: &'a HashMap<String, String>,
     ) -> Self {
@@ -1495,13 +1500,13 @@ impl<'a> MakeQuery<'a> {
     /// Resolve a path to its actual location on the host filesystem.
     /// If sandboxed, prepends the sandbox root path.
     fn resolve_path(&self, path: &Path) -> PathBuf {
-        if self.session.sandbox.enabled() {
-            self.session
+        match self.sandbox_id {
+            Some(id) => self
+                .session
                 .sandbox
-                .path(self.sandbox_id)
-                .join(path.strip_prefix("/").unwrap_or(path))
-        } else {
-            path.to_path_buf()
+                .path(id)
+                .join(path.strip_prefix("/").unwrap_or(path)),
+            None => path.to_path_buf(),
         }
     }
 }
@@ -1579,6 +1584,7 @@ impl PackageBuild {
         let builder = PkgBuilder::new(
             &self.session,
             self.sandbox_id,
+            self.worker_id,
             &self.pkginfo,
             envs.clone(),
             Some(status_tx.clone()),
@@ -1586,11 +1592,11 @@ impl PackageBuild {
             wrkdir.clone(),
         );
 
-        let mut callback = ChannelCallback::new(self.sandbox_id, status_tx);
+        let mut callback = ChannelCallback::new(self.worker_id, status_tx);
         let result = builder.build(&mut callback);
 
         // Clear stage display
-        let _ = status_tx.send(ChannelCommand::StageUpdate(self.sandbox_id, None));
+        let _ = status_tx.send(ChannelCommand::StageUpdate(self.worker_id, None));
 
         let measure_wrkdir = || -> Option<u64> {
             let w = wrkdir.as_ref()?;
@@ -1655,7 +1661,7 @@ impl PackageBuild {
         envs: &[(String, String)],
     ) {
         let _ = status_tx.send(ChannelCommand::StageUpdate(
-            self.sandbox_id,
+            self.worker_id,
             Some("cleanup".to_string()),
         ));
 
@@ -2322,12 +2328,14 @@ impl Build {
             state: state_flag.clone(),
             wrkobjdir_map,
         });
+        let sandbox_ids = self.scope.ids().map(|ids| ids.to_vec());
         let progress_clone = Arc::clone(&progress);
         let state_for_manager = state_flag.clone();
         let (results_tx, results_rx) = mpsc::channel::<Vec<BuildResult>>();
         // Channel for saving results to database as builds complete
         let (completed_tx, completed_rx) = mpsc::channel::<BuildResult>();
         let manager = std::thread::spawn(move || {
+            let sandbox_ids = sandbox_ids;
             let mut clients = clients.clone();
             let mut jobs = jobs;
             let mut announced_interrupt = false;
@@ -2401,7 +2409,8 @@ impl Build {
                                 let _ =
                                     client.send(ChannelCommand::JobData(Box::new(PackageBuild {
                                         session: Arc::clone(&session),
-                                        sandbox_id: c,
+                                        sandbox_id: sandbox_ids.as_ref().map(|ids| ids[c]),
+                                        worker_id: c,
                                         pkginfo: pkginfo.clone(),
                                         make_jobs: sp.make_jobs,
                                     })));

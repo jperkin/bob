@@ -359,6 +359,8 @@ pub struct Scan {
     initial_pkgpaths: HashSet<PkgPath>,
     /// Verbosity level for resolution warnings (0=quiet, 1=location, 2=multi).
     verbosity: u8,
+    /// Sandbox ID allocated by the scope, set by `start()`.
+    sandbox_id: Option<usize>,
 }
 
 impl Scan {
@@ -383,6 +385,7 @@ impl Scan {
             pkgsrc_env: None,
             initial_pkgpaths: HashSet::new(),
             verbosity: 0,
+            sandbox_id: None,
         }
     }
 
@@ -473,7 +476,7 @@ impl Scan {
 
         // Get top-level SUBDIR (categories + USER_ADDITIONAL_PKGS)
         let child = self.sandbox.execute_command(
-            0,
+            self.sandbox_id,
             self.config.make(),
             ["-C", &pkgsrc, "show-subdir-var", "VARNAME=SUBDIR"],
             vec![],
@@ -504,6 +507,7 @@ impl Scan {
         // Process categories in parallel
         let make = self.config.make();
         let sandbox = &self.sandbox;
+        let sandbox_id = self.sandbox_id;
         let discovered: Vec<PkgPath> = pool.install(|| {
             categories
                 .par_iter()
@@ -511,7 +515,7 @@ impl Scan {
                     let workdir = format!("{}/{}", pkgsrc, category);
                     let result = sandbox
                         .execute_command(
-                            0,
+                            sandbox_id,
                             make,
                             [
                                 "-C",
@@ -609,28 +613,28 @@ impl Scan {
          * Only a single sandbox is required, 'make pbulk-index' can safely be
          * run in parallel inside one sandbox.
          *
-         * Ensure sandbox 0 exists. The caller manages overall lifecycle.
+         * Ensure a sandbox exists. The caller manages overall lifecycle.
          */
         if scope.enabled() {
             print!("Creating sandbox...");
             let _ = std::io::stdout().flush();
             let start = Instant::now();
-            scope.ensure(1)?;
-            if !self
-                .sandbox
-                .run_pre_build(0, &self.config, self.config.script_env(None))?
-            {
+            let ids = scope.ensure(1)?;
+            self.sandbox_id = ids.first().copied();
+            if !self.sandbox.run_pre_build(
+                self.sandbox_id,
+                &self.config,
+                self.config.script_env(None),
+            )? {
                 warn!("pre-build script failed");
             }
             println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
-        } else {
-            scope.ensure(1)?;
         }
 
         let env = match db.load_pkgsrc_env() {
             Ok(env) => env,
             Err(_) => {
-                let env = PkgsrcEnv::fetch(&self.config, &self.sandbox, 0)?;
+                let env = PkgsrcEnv::fetch(&self.config, &self.sandbox, self.sandbox_id)?;
                 db.store_pkgsrc_env(&env)?;
                 env
             }
@@ -719,6 +723,7 @@ impl Scan {
         // allowing main thread to mutate self.done, self.incoming, etc.
         let config = &self.config;
         let sandbox = &self.sandbox;
+        let sandbox_id = self.sandbox_id;
         let scan_env = self.scan_env();
 
         /*
@@ -797,6 +802,7 @@ impl Scan {
                             let result = Self::scan_pkgpath_with(
                                 config,
                                 sandbox,
+                                sandbox_id,
                                 pkgpath,
                                 scan_env_ref,
                                 &shutdown_clone,
@@ -985,7 +991,7 @@ impl Scan {
     /// Run post-build script if configured.
     fn run_post_build(&self) -> anyhow::Result<()> {
         if !self.sandbox.run_post_build(
-            0,
+            self.sandbox_id,
             &self.config,
             self.config.script_env(self.pkgsrc_env.as_ref()),
         )? {
@@ -1026,6 +1032,7 @@ impl Scan {
     fn scan_pkgpath_with(
         config: &Config,
         sandbox: &Sandbox,
+        sandbox_id: Option<usize>,
         pkgpath: &PkgPath,
         scan_env: &[(String, String)],
         shutdown: &RunState,
@@ -1040,7 +1047,7 @@ impl Scan {
 
         trace!(%workdir, ?scan_env, "Executing pkg-scan");
         let child = sandbox.execute_command(
-            0,
+            sandbox_id,
             config.make(),
             ["-C", &workdir, "pbulk-index"],
             scan_env.to_vec(),
