@@ -277,7 +277,15 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
      */
     pub fn poll(&mut self) -> Poll<Option<ScheduledPackage<K>>> {
         match self.ready.pop_first() {
-            Some((_, pkg)) => {
+            Some((rank, pkg)) => {
+                tracing::debug!(
+                    %pkg, rank,
+                    weight = self.total_pbulk_weights[&pkg],
+                    deps = self.dep_counts[&pkg],
+                    cpu = self.cpu_times[&pkg],
+                    ready = self.ready.len(),
+                    "poll"
+                );
                 self.incoming.remove(&pkg);
                 self.running.insert(pkg.clone());
 
