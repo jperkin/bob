@@ -19,8 +19,7 @@ use anyhow::{Context, bail};
 use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
-use tracing::{debug, info, warn};
+use std::process::{Command, ExitStatus};
 
 impl Sandbox {
     pub fn mount_bindfs(
@@ -181,123 +180,13 @@ impl Sandbox {
     }
 
     /**
-     * Kill all processes using a mount point so it can be unmounted.
+     * Format process info for a list of PIDs using pargs.
      *
-     * Uses `fuser -c` which operates on the mount point's filesystem.
+     * illumos ps truncates command lines, so pargs is used instead.
      */
-    pub fn kill_processes_for_mount(&self, path: &Path) {
-        for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
-            let output = Command::new("fuser")
-                .arg("-c")
-                .arg(path)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .process_group(0)
-                .output();
-
-            let Ok(out) = output else { return };
-
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            if stdout.split_whitespace().next().is_none() {
-                return;
-            }
-
-            debug!(path = %path.display(), "Killing processes for mount");
-
-            let _ = Command::new("fuser")
-                .arg("-ck")
-                .arg(path)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .process_group(0)
-                .status();
-
-            let delay_ms = super::KILL_PROCESSES_INITIAL_DELAY_MS << iteration;
-            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-        }
-    }
-
-    /**
-     * Kill all processes with open references under a directory path.
-     *
-     * Uses `fuser` (without `-c`) which matches by path, not filesystem.
-     */
-    pub fn kill_processes_for_path(&self, sandbox: &Path) {
-        for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
-            // Query fuser first to get PIDs for logging
-            let output = Command::new("fuser")
-                .arg(sandbox)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .process_group(0)
-                .output();
-
-            // Check if any processes are using the sandbox
-            let has_processes = match &output {
-                Ok(out) => out.status.success(),
-                Err(_) => return,
-            };
-
-            if !has_processes {
-                debug!(retries = iteration, "No processes found in sandbox");
-                return;
-            }
-
-            // Log the PIDs being killed
-            if let Ok(out) = &output {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let pids: Vec<&str> = stdout.split_whitespace().collect();
-                if !pids.is_empty() {
-                    info!(pids = %pids.join(" "), "Killed processes using sandbox");
-                }
-            }
-
-            // Use fuser -k to kill all processes using files under the sandbox
-            // Use process_group(0) to isolate from terminal signals
-            let _ = Command::new("fuser")
-                .arg("-k")
-                .arg(sandbox)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .process_group(0)
-                .status();
-
-            // Give processes a moment to die (exponential backoff)
-            let delay_ms = super::KILL_PROCESSES_INITIAL_DELAY_MS << iteration;
-            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-        }
-        // Get info about remaining processes for the warning
-        let proc_info = self.get_process_info(sandbox);
-        warn!(
-            max_retries = super::KILL_PROCESSES_MAX_RETRIES,
-            remaining = %proc_info,
-            "Gave up killing processes after max retries"
-        );
-    }
-
-    /// Get info about processes using files in a directory.
-    fn get_process_info(&self, sandbox: &Path) -> String {
-        // Get PIDs using fuser
-        let output = Command::new("fuser")
-            .arg(sandbox)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .output();
-        let Ok(out) = output else {
-            return String::from("(failed to query)");
-        };
-
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let pids: Vec<&str> = stdout.split_whitespace().collect();
-
-        if pids.is_empty() {
-            return String::from("(none)");
-        }
-
-        // Use pargs to get full command line (ps truncates on illumos)
+    fn format_process_info(&self, pids: &[String]) -> Option<String> {
         let mut info = Vec::new();
-        for pid in &pids {
+        for pid in pids {
             let pargs_output = Command::new("pargs").arg(pid).process_group(0).output();
             match pargs_output {
                 Ok(out) => {
@@ -313,9 +202,9 @@ impl Sandbox {
             }
         }
         if info.is_empty() {
-            String::from("(none)")
+            None
         } else {
-            info.join(", ")
+            Some(info.join(", "))
         }
     }
 }

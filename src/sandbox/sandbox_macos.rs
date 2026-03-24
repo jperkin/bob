@@ -20,18 +20,7 @@ use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
-use tracing::{debug, info, warn};
-
-/// Processes that should not be killed during sandbox cleanup.
-/// These are system daemons that hold file handles but cannot be killed.
-const PROCESS_SKIP_LIST: &[&str] = &[
-    "kextd",
-    "mds",
-    "mds_stores",
-    "mdworker",
-    "mdworker_shared",
-    "notifyd",
-];
+use tracing::debug;
 
 impl Sandbox {
     pub fn mount_bindfs(
@@ -205,165 +194,62 @@ impl Sandbox {
     }
 
     /**
-     * Kill all processes using a mount point so it can be unmounted.
+     * Find PIDs of processes using files under the sandbox path.
      *
-     * Uses `fuser -c` which operates on the mount point's filesystem.
-     * Filters against PROCESS_SKIP_LIST to avoid killing system daemons.
+     * Uses `fuser` which matches by path, not filesystem.  Filters out
+     * system daemons (Spotlight, notification services, etc.) that hold
+     * file handles but must not be killed.
      */
-    pub fn kill_processes_for_mount(&self, path: &Path) {
-        for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
-            let output = Command::new("fuser")
-                .arg("-c")
-                .arg(path)
-                .process_group(0)
-                .output();
+    pub(super) fn find_pids(&self, sandbox: &Path) -> Vec<String> {
+        const SKIP_LIST: &[&str] = &[
+            "kextd",
+            "mds",
+            "mds_stores",
+            "mdworker",
+            "mdworker_shared",
+            "notifyd",
+        ];
 
-            let Ok(out) = output else { return };
-
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let pids: Vec<&str> = stdout.split_whitespace().collect();
-
-            if pids.is_empty() {
-                return;
-            }
-
-            let pids_to_kill = self.filter_skip_list(&pids);
-
-            if pids_to_kill.is_empty() {
-                debug!(
-                    path = %path.display(),
-                    "All processes in skip list, skipping"
-                );
-                return;
-            }
-
-            debug!(
-                path = %path.display(),
-                pids = %pids_to_kill.join(" "),
-                "Killing processes for mount"
-            );
-
-            let _ = Command::new("kill")
-                .arg("-9")
-                .args(&pids_to_kill)
-                .stderr(std::process::Stdio::null())
-                .process_group(0)
-                .status();
-
-            let delay_ms = super::KILL_PROCESSES_INITIAL_DELAY_MS << iteration;
-            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        let output = Command::new("fuser")
+            .arg(sandbox)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .output();
+        let Ok(out) = output else { return vec![] };
+        if !out.status.success() {
+            return vec![];
         }
-    }
-
-    /**
-     * Filter PIDs, removing any in PROCESS_SKIP_LIST by checking process names.
-     */
-    fn filter_skip_list(&self, pids: &[&str]) -> Vec<String> {
-        if PROCESS_SKIP_LIST.is_empty() {
-            return pids.iter().map(|s| (*s).to_string()).collect();
+        let pids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect();
+        if pids.is_empty() {
+            return vec![];
         }
 
-        let output = Command::new("ps")
+        let ps_output = Command::new("ps")
             .arg("-o")
             .arg("pid=,comm=")
             .arg("-p")
             .arg(pids.join(","))
             .process_group(0)
             .output();
+        let Ok(ps_out) = ps_output else { return pids };
 
-        let Ok(out) = output else {
-            return pids.iter().map(|s| (*s).to_string()).collect();
-        };
-
-        String::from_utf8_lossy(&out.stdout)
+        String::from_utf8_lossy(&ps_out.stdout)
             .lines()
             .filter_map(|line| {
                 let mut parts = line.split_whitespace();
                 let pid = parts.next()?;
                 let comm = parts.next()?;
-                if PROCESS_SKIP_LIST.contains(&comm) {
+                if SKIP_LIST.contains(&comm) {
                     debug!(pid, name = comm, "Skipping protected process");
-                    return None;
+                    None
+                } else {
+                    Some(pid.to_string())
                 }
-                Some(pid.to_string())
             })
             .collect()
-    }
-
-    /**
-     * Kill all processes with open references under a directory path.
-     *
-     * Uses `lsof +D` which recursively scans the directory for open files.
-     */
-    pub fn kill_processes_for_path(&self, sandbox: &Path) {
-        for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
-            // Use lsof to find processes using files under the sandbox
-            // Use process_group(0) to isolate from terminal signals
-            let output = Command::new("lsof")
-                .arg("+D")
-                .arg(sandbox)
-                .process_group(0)
-                .output();
-            let Ok(out) = output else {
-                return;
-            };
-
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            // lsof output: COMMAND PID USER ...
-            // Collect unique PIDs from column 2
-            let pids: Vec<&str> = stdout
-                .lines()
-                .skip(1)
-                .filter_map(|line| line.split_whitespace().nth(1))
-                .collect();
-
-            // No processes found, we're done
-            if pids.is_empty() {
-                debug!(retries = iteration, "No processes found in sandbox");
-                return;
-            }
-
-            info!(pids = %pids.join(" "), "Killed processes using sandbox");
-
-            let _ = Command::new("kill")
-                .arg("-9")
-                .args(&pids)
-                .stderr(std::process::Stdio::null())
-                .process_group(0)
-                .status();
-
-            // Give processes a moment to die (exponential backoff)
-            let delay_ms = super::KILL_PROCESSES_INITIAL_DELAY_MS << iteration;
-            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-        }
-        // Get info about remaining processes for the warning
-        let proc_info = self.get_process_info(sandbox);
-        warn!(
-            max_retries = super::KILL_PROCESSES_MAX_RETRIES,
-            remaining = %proc_info,
-            "Gave up killing processes after max retries"
-        );
-    }
-
-    /// Get info about processes using files in a directory.
-    fn get_process_info(&self, sandbox: &Path) -> String {
-        // Get PIDs using lsof
-        let output = Command::new("lsof")
-            .arg("+D")
-            .arg(sandbox)
-            .process_group(0)
-            .output();
-        let Ok(out) = output else {
-            return String::from("(failed to query)");
-        };
-
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let pids: Vec<&str> = stdout
-            .lines()
-            .skip(1)
-            .filter_map(|line| line.split_whitespace().nth(1))
-            .collect();
-
-        super::format_process_info(&pids)
     }
 }

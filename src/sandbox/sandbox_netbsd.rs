@@ -20,7 +20,6 @@ use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitStatus};
-use tracing::{debug, info, warn};
 
 impl Sandbox {
     pub fn mount_bindfs(
@@ -175,111 +174,20 @@ impl Sandbox {
     }
 
     /**
-     * Kill all processes using a mount point so it can be unmounted.
+     * Find PIDs of processes using files under the sandbox path.
      *
-     * Uses `fstat -f` which restricts to the filesystem mounted at
-     * the given path.
+     * Uses `fstat` which lists processes with open files in the directory.
      */
-    pub fn kill_processes_for_mount(&self, path: &Path) {
-        for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
-            let output = Command::new("fstat")
-                .arg("-f")
-                .arg(path)
-                .process_group(0)
-                .output();
-            let Ok(out) = output else { return };
-
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let pids: Vec<&str> = stdout
-                .lines()
-                .skip(1)
-                .filter_map(|line| line.split_whitespace().nth(2))
-                .collect();
-
-            if pids.is_empty() {
-                return;
-            }
-
-            debug!(path = %path.display(), "Killing processes for mount");
-
-            let _ = Command::new("kill")
-                .arg("-9")
-                .args(&pids)
-                .stderr(std::process::Stdio::null())
-                .process_group(0)
-                .status();
-
-            let delay_ms = super::KILL_PROCESSES_INITIAL_DELAY_MS << iteration;
-            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-        }
-    }
-
-    /**
-     * Kill all processes with open references under a directory path.
-     *
-     * Uses `fstat` to find processes using files under the directory.
-     */
-    pub fn kill_processes_for_path(&self, sandbox: &Path) {
-        for iteration in 0..super::KILL_PROCESSES_MAX_RETRIES {
-            // Use fstat to find processes using files under the sandbox
-            // Use process_group(0) to isolate from terminal signals
-            let output = Command::new("fstat").arg(sandbox).process_group(0).output();
-            let Ok(out) = output else {
-                return;
-            };
-
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            // fstat output: USER CMD PID FD MOUNT ...
-            // Collect unique PIDs from column 3
-            let pids: Vec<&str> = stdout
-                .lines()
-                .skip(1)
-                .filter_map(|line| line.split_whitespace().nth(2))
-                .collect();
-
-            // No processes found, we're done
-            if pids.is_empty() {
-                debug!(retries = iteration, "No processes found in sandbox");
-                return;
-            }
-
-            info!(pids = %pids.join(" "), "Killed processes using sandbox");
-
-            let _ = Command::new("kill")
-                .arg("-9")
-                .args(&pids)
-                .stderr(std::process::Stdio::null())
-                .process_group(0)
-                .status();
-
-            // Give processes a moment to die (exponential backoff)
-            let delay_ms = super::KILL_PROCESSES_INITIAL_DELAY_MS << iteration;
-            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-        }
-        // Get info about remaining processes for the warning
-        let proc_info = self.get_process_info(sandbox);
-        warn!(
-            max_retries = super::KILL_PROCESSES_MAX_RETRIES,
-            remaining = %proc_info,
-            "Gave up killing processes after max retries"
-        );
-    }
-
-    /// Get info about processes using files in a directory.
-    fn get_process_info(&self, sandbox: &Path) -> String {
-        // Get PIDs using fstat
+    pub(super) fn find_pids(&self, sandbox: &Path) -> Vec<String> {
         let output = Command::new("fstat").arg(sandbox).process_group(0).output();
-        let Ok(out) = output else {
-            return String::from("(failed to query)");
-        };
-
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let pids: Vec<&str> = stdout
+        let Ok(out) = output else { return vec![] };
+        // fstat output: USER CMD PID FD MOUNT ...
+        // Extract PIDs from column 3, skipping header.
+        String::from_utf8_lossy(&out.stdout)
             .lines()
             .skip(1)
             .filter_map(|line| line.split_whitespace().nth(2))
-            .collect();
-
-        super::format_process_info(&pids)
+            .map(|s| s.to_string())
+            .collect()
     }
 }

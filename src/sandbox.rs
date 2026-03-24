@@ -139,52 +139,6 @@ pub(crate) const KILL_PROCESSES_MAX_RETRIES: u32 = 5;
 pub(crate) const KILL_PROCESSES_INITIAL_DELAY_MS: u64 = 64;
 
 /**
- * Format process info for a list of PIDs using ps.
- *
- * Used by platform implementations to generate human-readable process info
- * for warnings when processes can't be killed.
- *
- * illumos ps doesn't support getting full argument list (uses pargs instead),
- * and Linux handles this differently by iterating /proc instead.
- */
-#[cfg(any(target_os = "macos", target_os = "netbsd"))]
-pub(crate) fn format_process_info(pids: &[&str]) -> String {
-    use std::process::Command;
-
-    if pids.is_empty() {
-        return String::from("(none)");
-    }
-
-    let ps_output = Command::new("ps")
-        .arg("-ww")
-        .arg("-o")
-        .arg("pid,args")
-        .arg("-p")
-        .arg(pids.join(","))
-        .process_group(0)
-        .output();
-
-    match ps_output {
-        Ok(out) => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .skip(1)
-            .filter_map(|line| {
-                let mut parts = line.split_whitespace();
-                let pid = parts.next()?;
-                let cmd: String = parts.collect::<Vec<_>>().join(" ");
-                Some(format!("pid={} cmd='{}'", pid, cmd))
-            })
-            .collect::<Vec<_>>()
-            .join(", "),
-        Err(_) => pids
-            .iter()
-            .map(|p| format!("pid={}", p))
-            .collect::<Vec<_>>()
-            .join(", "),
-    }
-}
-
-/*
  * Poll for child process exit while checking a run state flag.  If
  * shutdown is requested, kill the child and return an error.  During
  * stop the child is allowed to continue running.
@@ -226,7 +180,7 @@ pub fn wait_with_shutdown(child: &mut Child, state: &RunState) -> Result<(ExitSt
     }
 }
 
-/*
+/**
  * Wait for child process exit while checking a shutdown flag, returning
  * the full output (stdout/stderr).  If shutdown is requested, kill the
  * child and return an error.
@@ -369,9 +323,120 @@ impl Sandbox {
         }
         let sandbox = self.path(id);
         if sandbox.exists() {
-            let span = info_span!("kill_processes_for_path", sandbox_id = id);
+            let span = info_span!("kill_processes", sandbox_id = id);
             let _guard = span.enter();
-            self.kill_processes_for_path(&sandbox);
+            self.kill_processes_by_path(&sandbox);
+        }
+    }
+
+    /**
+     * Kill all processes with open references under a sandbox path.
+     *
+     * Uses platform-specific `find_pids()` to locate processes, then
+     * sends SIGKILL via `kill -9`.  Retries with exponential backoff.
+     */
+    fn kill_processes_by_path(&self, sandbox: &Path) {
+        for iteration in 0..KILL_PROCESSES_MAX_RETRIES {
+            let pids = self.find_pids(sandbox);
+
+            if pids.is_empty() {
+                debug!(retries = iteration, "No processes found in sandbox");
+                return;
+            }
+
+            info!(pids = %pids.join(" "), "Killed processes using sandbox");
+
+            let _ = Command::new("kill")
+                .arg("-9")
+                .args(&pids)
+                .stderr(Stdio::null())
+                .process_group(0)
+                .status();
+
+            let delay_ms = KILL_PROCESSES_INITIAL_DELAY_MS << iteration;
+            std::thread::sleep(Duration::from_millis(delay_ms));
+        }
+        if let Some(proc_info) = self.get_process_info(sandbox) {
+            warn!(
+                max_retries = KILL_PROCESSES_MAX_RETRIES,
+                remaining = %proc_info,
+                "Gave up killing processes after max retries"
+            );
+        } else {
+            warn!(
+                max_retries = KILL_PROCESSES_MAX_RETRIES,
+                "Gave up killing processes after max retries"
+            );
+        }
+    }
+
+    /**
+     * Find PIDs of processes using files under the sandbox path.
+     *
+     * Uses `fuser` which matches by path, not filesystem.
+     * macOS and NetBSD override this in their platform files.
+     */
+    #[cfg(not(any(target_os = "macos", target_os = "netbsd")))]
+    fn find_pids(&self, sandbox: &Path) -> Vec<String> {
+        let output = Command::new("fuser")
+            .arg(sandbox)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .output();
+        let Ok(out) = output else { return vec![] };
+        if !out.status.success() {
+            return vec![];
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /**
+     * Get human-readable info about processes still using the sandbox.
+     */
+    fn get_process_info(&self, sandbox: &Path) -> Option<String> {
+        let pids = self.find_pids(sandbox);
+        self.format_process_info(&pids)
+    }
+
+    /**
+     * Format process info for a list of PIDs using ps.
+     *
+     * illumos overrides this with pargs (ps truncates on illumos).
+     */
+    #[cfg(not(any(target_os = "illumos", target_os = "solaris")))]
+    fn format_process_info(&self, pids: &[String]) -> Option<String> {
+        if pids.is_empty() {
+            return None;
+        }
+        let out = Command::new("ps")
+            .arg("-ww")
+            .arg("-o")
+            .arg("pid,args")
+            .arg("-p")
+            .arg(pids.join(","))
+            .process_group(0)
+            .output()
+            .ok()?;
+
+        let info: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                let pid = parts.next()?;
+                let cmd: String = parts.collect::<Vec<_>>().join(" ");
+                Some(format!("pid={} cmd='{}'", pid, cmd))
+            })
+            .collect();
+
+        if info.is_empty() {
+            None
+        } else {
+            Some(info.join(", "))
         }
     }
 
@@ -715,12 +780,6 @@ impl Sandbox {
             self.remove_empty_hierarchy(&completeddir)?;
         }
         self.reverse_actions(id)?;
-        /*
-         * Kill any remaining processes before removing the sandbox directory.
-         * Per-mount killing already happened in reverse_actions(), but this
-         * catches anything that slipped through.
-         */
-        self.kill_processes_for_path(&sandbox);
         /*
          * Remove all sandbox contents EXCEPT .bob.  If removal fails due to
          * unexpected files, the .bob marker remains and the sandbox can still
@@ -1164,7 +1223,7 @@ impl Sandbox {
         let Some(sandbox) = &self.config.sandboxes() else {
             bail!("Internal error: trying to reverse actions when sandboxes disabled.");
         };
-        self.kill_processes_for_path(&self.path(id));
+        self.kill_processes_by_path(&self.path(id));
         for action in sandbox.actions.iter().rev() {
             let action_type = action.action_type()?;
             // dest defaults to src if not specified
@@ -1277,12 +1336,6 @@ impl Sandbox {
                     if fs::remove_dir(&mntdest).is_ok() {
                         continue;
                     }
-
-                    /*
-                     * Kill any processes using this mount point before
-                     * attempting to unmount.
-                     */
-                    self.kill_processes_for_mount(&mntdest);
 
                     /*
                      * Unmount the filesystem.  Check return codes and bail on
