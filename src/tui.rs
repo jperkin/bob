@@ -692,8 +692,7 @@ impl MultiProgress {
             return Ok(());
         }
         self.terminal.insert_before(1, |buf| {
-            let area = buf.area;
-            buf.set_line(0, 0, &line, area.width);
+            buf.set_line(0, 0, &line, line.width() as u16);
         })?;
         Ok(())
     }
