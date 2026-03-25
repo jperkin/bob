@@ -116,18 +116,19 @@ impl Allocator {
         self.log_range = (max_t.ln() - self.log_min).max(1.0);
     }
 
+    /// Total job budget.
+    pub(crate) fn budget(&self) -> usize {
+        self.jobs
+    }
+
     /**
-     * Compute the job count for a package.
+     * Compute the job count for a package under normal concurrency.
      *
      * Maps `cpu_time` onto the calibrated log scale and interpolates
      * between min_jobs and max_jobs.  Packages with no history
-     * (`None`) get a fair share (jobs / workers).  A sole builder
-     * (nothing else running or ready) gets the entire budget.
+     * (`None`) get a fair share (jobs / workers).
      */
-    pub fn assign(&self, cpu_time: Option<usize>, sole_builder: bool) -> usize {
-        if sole_builder {
-            return self.jobs;
-        }
+    pub fn assign(&self, cpu_time: Option<usize>) -> usize {
         if self.log_range == 0.0 {
             return self.fair;
         }
@@ -250,24 +251,11 @@ mod tests {
     }
 
     #[test]
-    fn sole_builder_gets_all_jobs() {
-        for &(w, c) in &[(4, 16), (7, 10), (24, 32)] {
-            let alloc = Allocator::new(w, c);
-            assert_eq!(
-                alloc.assign(Some(1000), true),
-                c,
-                "w={w} c={c} with history"
-            );
-            assert_eq!(alloc.assign(None, true), c, "w={w} c={c} no history");
-        }
-    }
-
-    #[test]
     fn no_history_gets_fair_share() {
         for &(w, c, fair) in &[(4, 16, 4), (7, 10, 2), (24, 32, 2)] {
             let alloc = Allocator::new(w, c);
             for i in 0..w {
-                assert_eq!(alloc.assign(None, false), fair, "w={w} c={c} worker {i}");
+                assert_eq!(alloc.assign(None), fair, "w={w} c={c} worker {i}");
             }
         }
     }
@@ -277,28 +265,19 @@ mod tests {
         /* w=4 c=16: min=2, max=6 */
         let times = [100, 1_000, 10_000, 100_000];
         let alloc = calibrated(4, 16, &times);
-        let assigned: Vec<usize> = times
-            .iter()
-            .map(|&v| alloc.assign(Some(v), false))
-            .collect();
+        let assigned: Vec<usize> = times.iter().map(|&v| alloc.assign(Some(v))).collect();
         assert_eq!(assigned, [2, 3, 5, 6], "w=4 c=16");
 
         /* w=7 c=10: min=2, max=3 (narrow range) */
         let times = [100, 300, 1_000, 3_000, 10_000, 30_000, 100_000];
         let alloc = calibrated(7, 10, &times);
-        let assigned: Vec<usize> = times
-            .iter()
-            .map(|&v| alloc.assign(Some(v), false))
-            .collect();
+        let assigned: Vec<usize> = times.iter().map(|&v| alloc.assign(Some(v))).collect();
         assert_eq!(assigned, [2, 2, 3, 3, 3, 4, 4], "w=7 c=10");
 
         /* w=24 c=32: min=2, max=10 (wide range, doubling times) */
         let times: Vec<usize> = (0..24).map(|i| 100 * (1 << i)).collect();
         let alloc = calibrated(24, 32, &times);
-        let assigned: Vec<usize> = times
-            .iter()
-            .map(|&v| alloc.assign(Some(v), false))
-            .collect();
+        let assigned: Vec<usize> = times.iter().map(|&v| alloc.assign(Some(v))).collect();
         assert_eq!(
             assigned,
             [
@@ -320,13 +299,13 @@ mod tests {
     #[test]
     fn empty_calibration_returns_fair() {
         let alloc = calibrated(4, 16, &[]);
-        assert_eq!(alloc.assign(Some(5000), false), 4);
+        assert_eq!(alloc.assign(Some(5000)), 4);
     }
 
     #[test]
     fn no_history_after_calibration_returns_fair() {
         let alloc = calibrated(4, 16, &[100, 10_000]);
-        assert_eq!(alloc.assign(None, false), 4);
+        assert_eq!(alloc.assign(None), 4);
     }
 
     #[test]
@@ -362,17 +341,13 @@ mod tests {
     #[test]
     fn jobs_less_than_workers() {
         let alloc = Allocator::new(4, 1);
-        assert_eq!(alloc.assign(None, false), 1, "fair clamped to 1");
-        assert_eq!(alloc.assign(Some(1000), true), 1, "sole builder gets all");
+        assert_eq!(alloc.assign(None), 1, "fair clamped to 1");
+        assert_eq!(alloc.assign(Some(1000)), 1, "clamped to total");
     }
 
     #[test]
     fn max_jobs_clamped_to_total() {
         let alloc = calibrated(1, 3, &[100, 100_000]);
-        assert_eq!(
-            alloc.assign(Some(100_000), false),
-            3,
-            "max clamped to total"
-        );
+        assert_eq!(alloc.assign(Some(100_000)), 3, "max clamped to total");
     }
 }

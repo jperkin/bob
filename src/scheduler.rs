@@ -243,6 +243,7 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
                 ready.insert((priority[pkg], pkg.clone()));
             }
         }
+        incoming.retain(|_, deps| !deps.is_empty());
 
         Self {
             incoming,
@@ -290,12 +291,11 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
                 self.running.insert(pkg.clone());
 
                 let cpu_time = self.pkg_cpu_history.get(&pkg).copied();
-                if let Some(mj) = self.pkg_make_jobs.get_mut(&pkg) {
-                    if mj.safe() {
-                        let sole_builder = self.running.len() == 1 && self.ready.is_empty();
-                        if let Some(ref alloc) = self.allocator {
-                            mj.allocate(alloc.assign(cpu_time, sole_builder));
-                        }
+                let safe = self.pkg_make_jobs.get(&pkg).is_some_and(|mj| mj.safe());
+                if safe {
+                    if let Some(ref alloc) = self.allocator {
+                        let jobs = self.tail_assign(alloc, &pkg, cpu_time);
+                        self.pkg_make_jobs.get_mut(&pkg).unwrap().allocate(jobs);
                     }
                 }
                 let make_jobs = self.pkg_make_jobs.get(&pkg).copied().unwrap_or_default();
@@ -322,20 +322,19 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
      * starts.
      */
     pub fn mark_success(&mut self, pkg: &K) {
-        self.incoming.remove(pkg);
+        self.deschedule(pkg);
         self.running.remove(pkg);
-        if let Some(&rank) = self.priority.get(pkg) {
-            self.ready.remove(&(rank, pkg.clone()));
-        }
         self.done.insert(pkg.clone());
 
-        if let Some(dependents) = self.reverse_deps.get(pkg) {
+        if let Some(dependents) = self.reverse_deps.get(pkg).cloned() {
             for dependent in dependents {
-                if let Some(deps) = self.incoming.get_mut(dependent) {
-                    if deps.remove(pkg) && deps.is_empty() {
-                        let rank = self.priority[dependent];
-                        self.ready.insert((rank, dependent.clone()));
-                    }
+                if let Some(deps) = self.incoming.get_mut(&dependent) {
+                    deps.remove(pkg);
+                }
+                if self.incoming.get(&dependent).is_some_and(HashSet::is_empty) {
+                    self.incoming.remove(&dependent);
+                    let rank = self.priority[&dependent];
+                    self.ready.insert((rank, dependent));
                 }
             }
         }
@@ -349,11 +348,8 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
      * the original).
      */
     pub fn mark_failure(&mut self, pkg: &K) -> Vec<K> {
+        self.deschedule(pkg);
         self.running.remove(pkg);
-        self.incoming.remove(pkg);
-        if let Some(&rank) = self.priority.get(pkg) {
-            self.ready.remove(&(rank, pkg.clone()));
-        }
         self.failed.insert(pkg.clone());
 
         let mut broken: HashSet<K> = HashSet::new();
@@ -381,14 +377,18 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
 
         let mut indirect: Vec<K> = Vec::with_capacity(broken.len());
         for pkg in broken {
-            self.incoming.remove(&pkg);
-            if let Some(&rank) = self.priority.get(&pkg) {
-                self.ready.remove(&(rank, pkg.clone()));
-            }
+            self.deschedule(&pkg);
             self.failed.insert(pkg.clone());
             indirect.push(pkg);
         }
         indirect
+    }
+
+    fn deschedule(&mut self, pkg: &K) {
+        self.incoming.remove(pkg);
+        if let Some(&rank) = self.priority.get(pkg) {
+            self.ready.remove(&(rank, pkg.clone()));
+        }
     }
 
     /**
@@ -411,7 +411,7 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
 
     /** Number of packages not yet dispatched (ready + blocked). */
     pub fn queued_count(&self) -> usize {
-        self.incoming.len()
+        self.ready.len() + self.incoming.len()
     }
 
     /** Set the historical CPU time for a package. */
@@ -423,6 +423,58 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
     pub fn set_make_jobs_unsafe(&mut self, pkg: &K) {
         self.pkg_make_jobs
             .insert(pkg.clone(), makejobs::PkgMakeJobs::new(false));
+    }
+
+    /**
+     * Compute MAKE_JOBS for a package, boosting in the build tail.
+     *
+     * Normal mode: use the allocator's log-scaled assignment.
+     * Sole builder (mid-build, nothing else runnable): full budget.
+     * Tail (no deps left to unblock): split available cores among
+     * remaining packages proportionally to their base allocations
+     * so that heavier packages get a larger share.
+     */
+    fn tail_assign(&self, alloc: &makejobs::Allocator, pkg: &K, cpu_time: Option<usize>) -> usize {
+        let base = alloc.assign(cpu_time);
+
+        if self.running.len() == 1 && self.ready.is_empty() {
+            return alloc.budget();
+        }
+        if !self.incoming.is_empty() {
+            return base;
+        }
+
+        /*
+         * Tail: no packages waiting on dependencies.  Compute the
+         * budget not yet committed to other running packages, then
+         * split it proportionally among this package and the remaining
+         * ready packages using base allocations as weights.
+         */
+        let committed: usize = self
+            .running
+            .iter()
+            .filter(|p| *p != pkg)
+            .filter_map(|p| self.pkg_make_jobs.get(p))
+            .filter_map(|mj| mj.jobs().or(mj.allocated()))
+            .sum();
+        let available = alloc.budget().saturating_sub(committed);
+
+        let ready_weight: usize = self
+            .ready
+            .iter()
+            .map(|(_, p)| {
+                let ct = self.pkg_cpu_history.get(p).copied();
+                alloc.assign(ct)
+            })
+            .sum();
+        let total_weight = base + ready_weight;
+
+        if total_weight == 0 {
+            return available;
+        }
+
+        let scaled = (available as f64 * base as f64 / total_weight as f64).round() as usize;
+        scaled.max(base).min(available)
     }
 
     /** Set the allocator for MAKE_JOBS allocation. */
@@ -445,7 +497,7 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
             for (pkg, mj) in &mut self.pkg_make_jobs {
                 if mj.safe() {
                     let cpu_time = self.pkg_cpu_history.get(pkg).copied();
-                    mj.allocate(alloc.assign(cpu_time, false));
+                    mj.allocate(alloc.assign(cpu_time));
                 }
             }
         }

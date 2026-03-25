@@ -1882,3 +1882,206 @@ fn dep_count_breaks_pbulk_weight_tie() {
         i = j;
     }
 }
+
+/**
+ * Verify proportional tail allocation: three independent packages with
+ * different CPU histories share 32 cores with no idle cores.
+ *
+ *   A (heavy, base=10), B (medium, base=5), C (light, base=2)
+ *   Polled in priority order: A, B, C
+ *   Expected: A=19, B=9, C=4  (total=32)
+ */
+#[test]
+fn tail_proportional_allocation() {
+    use bob::makejobs::Allocator;
+
+    let mut packages = HashMap::new();
+    for name in ["A", "B", "C"] {
+        packages.insert(
+            name.to_string(),
+            PackageNode {
+                deps: HashSet::new(),
+                pbulk_weight: 1,
+                cpu_time: 0,
+            },
+        );
+    }
+
+    let mut sched = Scheduler::from_graph(packages);
+    sched.set_pkg_cpu_history(&"A".to_string(), 100_000);
+    sched.set_pkg_cpu_history(&"B".to_string(), 1_000);
+    sched.set_pkg_cpu_history(&"C".to_string(), 100);
+    sched.set_allocator(Allocator::new(8, 32));
+
+    let mut allocations = Vec::new();
+    for _ in 0..3 {
+        if let Poll::Ready(Some(sp)) = sched.poll() {
+            allocations.push((sp.pkg.clone(), sp.make_jobs.allocated().unwrap_or(0)));
+        }
+    }
+
+    let total: usize = allocations.iter().map(|(_, j)| j).sum();
+    assert_eq!(total, 32, "all cores allocated: {allocations:?}");
+
+    for (pkg, jobs) in &allocations {
+        assert!(
+            *jobs >= 2,
+            "{pkg} should get at least min_jobs: {allocations:?}"
+        );
+    }
+
+    let a = allocations.iter().find(|(p, _)| p == "A").unwrap().1;
+    let b = allocations.iter().find(|(p, _)| p == "B").unwrap().1;
+    let c = allocations.iter().find(|(p, _)| p == "C").unwrap().1;
+    assert!(
+        a > b && b > c,
+        "heavier packages should get more: A={a} B={b} C={c}"
+    );
+}
+
+/**
+ * A sole builder (one running, nothing ready or blocked) gets the
+ * entire budget regardless of its base allocation.
+ */
+#[test]
+fn sole_builder_gets_all_jobs() {
+    use bob::makejobs::Allocator;
+
+    let mut packages = HashMap::new();
+    packages.insert(
+        "only".to_string(),
+        PackageNode {
+            deps: HashSet::new(),
+            pbulk_weight: 1,
+            cpu_time: 0,
+        },
+    );
+
+    let mut sched = Scheduler::from_graph(packages);
+    sched.set_pkg_cpu_history(&"only".to_string(), 100);
+    sched.set_allocator(Allocator::new(8, 32));
+
+    if let Poll::Ready(Some(sp)) = sched.poll() {
+        assert_eq!(
+            sp.make_jobs.allocated(),
+            Some(32),
+            "sole builder should get the entire budget"
+        );
+    } else {
+        panic!("expected a package from poll");
+    }
+}
+
+/**
+ * Tail allocation works when deps are resolved via mark_success.
+ *
+ * Two packages (X, Y) depend on a single dep (D).  D is marked as
+ * success without being polled (simulating a cached package).  X and
+ * Y should then be in tail mode and split the budget proportionally.
+ */
+#[test]
+fn tail_after_mark_success() {
+    use bob::makejobs::Allocator;
+
+    let mut packages = HashMap::new();
+    packages.insert(
+        "D".to_string(),
+        PackageNode {
+            deps: HashSet::new(),
+            pbulk_weight: 1,
+            cpu_time: 0,
+        },
+    );
+    packages.insert(
+        "X".to_string(),
+        PackageNode {
+            deps: HashSet::from(["D".to_string()]),
+            pbulk_weight: 1,
+            cpu_time: 0,
+        },
+    );
+    packages.insert(
+        "Y".to_string(),
+        PackageNode {
+            deps: HashSet::from(["D".to_string()]),
+            pbulk_weight: 1,
+            cpu_time: 0,
+        },
+    );
+
+    let mut sched = Scheduler::from_graph(packages);
+    sched.set_allocator(Allocator::new(8, 32));
+
+    // D is cached -- mark success without polling.
+    sched.mark_success(&"D".to_string());
+
+    // X and Y should now both be in tail mode.
+    let mut allocations = Vec::new();
+    for _ in 0..2 {
+        if let Poll::Ready(Some(sp)) = sched.poll() {
+            allocations.push((sp.pkg.clone(), sp.make_jobs.allocated().unwrap_or(0)));
+        }
+    }
+
+    let total: usize = allocations.iter().map(|(_, j)| j).sum();
+    assert_eq!(total, 32, "all cores allocated: {allocations:?}");
+
+    let x = allocations.iter().find(|(p, _)| p == "X").unwrap().1;
+    let y = allocations.iter().find(|(p, _)| p == "Y").unwrap().1;
+    assert_eq!(x, y, "equal packages should get equal share: X={x} Y={y}");
+}
+
+/**
+ * Tail allocation after mark_success with different CPU histories.
+ *
+ * Three packages (A, B, C) depend on D.  D is cached.  A is heavy,
+ * B is medium, C is light.  The budget should be split proportionally
+ * with no idle cores.
+ */
+#[test]
+fn tail_after_mark_success_weighted() {
+    use bob::makejobs::Allocator;
+
+    let mut packages = HashMap::new();
+    packages.insert(
+        "D".to_string(),
+        PackageNode {
+            deps: HashSet::new(),
+            pbulk_weight: 1,
+            cpu_time: 0,
+        },
+    );
+    for name in ["A", "B", "C"] {
+        packages.insert(
+            name.to_string(),
+            PackageNode {
+                deps: HashSet::from(["D".to_string()]),
+                pbulk_weight: 1,
+                cpu_time: 0,
+            },
+        );
+    }
+
+    let mut sched = Scheduler::from_graph(packages);
+    sched.set_pkg_cpu_history(&"A".to_string(), 100_000);
+    sched.set_pkg_cpu_history(&"B".to_string(), 1_000);
+    sched.set_pkg_cpu_history(&"C".to_string(), 100);
+    sched.set_allocator(Allocator::new(8, 32));
+
+    sched.mark_success(&"D".to_string());
+
+    let mut allocations = Vec::new();
+    for _ in 0..3 {
+        if let Poll::Ready(Some(sp)) = sched.poll() {
+            allocations.push((sp.pkg.clone(), sp.make_jobs.allocated().unwrap_or(0)));
+        }
+    }
+
+    let total: usize = allocations.iter().map(|(_, j)| j).sum();
+    assert_eq!(total, 32, "all cores allocated: {allocations:?}");
+
+    let a = allocations.iter().find(|(p, _)| p == "A").unwrap().1;
+    let b = allocations.iter().find(|(p, _)| p == "B").unwrap().1;
+    let c = allocations.iter().find(|(p, _)| p == "C").unwrap().1;
+    assert_eq!((a, b, c), (19, 9, 4), "A={a} B={b} C={c}");
+}
