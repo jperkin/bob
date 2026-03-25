@@ -2702,3 +2702,107 @@ fn test_pkg_summary_recovered_after_interrupt() -> Result<()> {
 
     Ok(())
 }
+
+/**
+ * Build a package whose `all` target backgrounds a process that holds
+ * stdout open.  Without the orphan-cleanup fix in run_command_logged_with_env,
+ * bob hangs forever on tee_handle.join() waiting for pipe EOF.
+ */
+#[test]
+fn test_build_orphan_stdout() -> Result<()> {
+    let h = TestHarness::new()?;
+
+    // Add the orphan-stdout package to the existing tree.
+    let pkg_dir = h.pkgsrc().join("test/orphan-stdout");
+    fs::create_dir_all(&pkg_dir)?;
+
+    // Overwrite category Makefile to include the new package.
+    let cat_makefile = h.pkgsrc().join("test/Makefile");
+    let existing = fs::read_to_string(&cat_makefile)?;
+    fs::write(
+        &cat_makefile,
+        existing.replace(
+            "chain-a chain-b chain-c chain-d",
+            "chain-a chain-b chain-c chain-d orphan-stdout",
+        ),
+    )?;
+
+    // Makefile whose "all" target backgrounds a process holding stdout.
+    let makefile = "\
+PKGNAME=orphan-stdout-1.0
+
+pbulk-index:
+\t@printf 'PKGNAME=orphan-stdout-1.0\\nALL_DEPENDS=\\nPKG_SKIP_REASON=\\nPKG_FAIL_REASON=\\nNO_BIN_ON_FTP=\\nRESTRICTED=\\nCATEGORIES=test\\nMAINTAINER=test@example.com\\nUSE_DESTDIR=yes\\nBOOTSTRAP_PKG=yes\\nUSERGROUP_PHASE=\\nSCAN_DEPENDS=\\n'
+
+clean checksum configure stage-install create-usergroup:
+\t@true
+
+all:
+\t@sleep 3600 &
+
+stage-package-create:
+\t@mkdir -p ${.CURDIR}/pkg
+\t@d=$$(mktemp -d) && \\\n\
+\tprintf '@name orphan-stdout-1.0\\n' > \"$$d/+CONTENTS\" && \\\n\
+\tprintf 'Test package\\n' > \"$$d/+COMMENT\" && \\\n\
+\tprintf 'Test package description\\n' > \"$$d/+DESC\" && \\\n\
+\tprintf '0\\n' > \"$$d/+SIZE_PKG\" && \\\n\
+\tprintf 'BUILD_DATE=%s\\nCATEGORIES=test\\nMACHINE_ARCH=x86_64\\nOPSYS=Test\\nOS_VERSION=1.0\\nPKGPATH=test/orphan-stdout\\nPKGTOOLS_VERSION=20210710\\n' \
+\"$$(date '+%Y-%m-%d %H:%M:%S %z')\" > \"$$d/+BUILD_INFO\" && \\\n\
+\t(cd \"$$d\" && COPYFILE_DISABLE=1 tar czf \"${.CURDIR}/pkg/orphan-stdout-1.0.tgz\" \
++CONTENTS +COMMENT +DESC +SIZE_PKG +BUILD_INFO) && \\\n\
+\trm -rf \"$$d\"
+
+show-var:
+\t@case \"${VARNAME}\" in STAGE_PKGFILE) echo \"${.CURDIR}/pkg/orphan-stdout-1.0.tgz\" ;; esac
+
+show-vars:
+\t@for v in ${VARNAMES}; do \\\n\
+\t  case \"$$v\" in \\\n\
+\t    WRKDIR) echo \"${.CURDIR}/work\" ;; \\\n\
+\t    *) echo ;; \\\n\
+\t  esac; \\\n\
+\tdone
+";
+    fs::write(pkg_dir.join("Makefile"), makefile)?;
+
+    let config = h.load_config()?;
+    let db = h.open_db()?;
+    let state = h.run_state();
+
+    // Force shutdown after 30s so the test doesn't hang forever if broken.
+    let state_clone = state.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        state_clone.shutdown();
+    });
+
+    // Scan
+    let sandbox = Sandbox::new(&config);
+    let mut scan_scope = SandboxScope::new(sandbox, state.clone());
+    let mut scan = Scan::new(&config);
+    scan.init_from_db(&db)?;
+    scan.start(&db, &mut scan_scope)?;
+    let scan_result = scan.resolve_with_report(&db, false)?;
+
+    // Build only the orphan-stdout package
+    let scanpkgs = scan_result
+        .buildable()
+        .filter(|p| p.pkgpath.as_path().to_string_lossy() == "test/orphan-stdout")
+        .map(|p| (p.pkgname().clone(), p.clone()))
+        .collect();
+
+    let pkgsrc_env = h.pkgsrc_env();
+    let build_sandbox = Sandbox::new(&config);
+    let build_scope = SandboxScope::new(build_sandbox, state.clone());
+    let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
+    let build_result = build.start(&state, &db)?;
+
+    assert_eq!(
+        build_result.counts().states[Success],
+        1,
+        "orphan-stdout package should build successfully"
+    );
+
+    Ok(())
+}

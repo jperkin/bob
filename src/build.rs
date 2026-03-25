@@ -872,6 +872,7 @@ impl<'a> PkgBuilder<'a> {
             let stdout = child.stdout.take().unwrap();
             let output_tx = output_tx.clone();
             let worker_id = self.worker_id;
+            let (tee_done_tx, tee_done_rx) = mpsc::sync_channel::<()>(1);
 
             // Spawn thread to read from pipe and tee to file + output channel.
             // Batch lines and throttle sends to reduce channel overhead.
@@ -910,12 +911,25 @@ impl<'a> PkgBuilder<'a> {
                 if !batch.is_empty() {
                     let _ = output_tx.send(ChannelCommand::OutputLines(worker_id, batch));
                 }
+                let _ = tee_done_tx.send(());
             });
 
             let (status, cpu_time) = wait_with_shutdown(&mut child, &self.session.state)?;
 
-            // Reader thread will exit when pipe closes (process exits)
-            let _ = tee_handle.join();
+            /*
+             * Wait for the tee thread to see pipe EOF.  Normally this is
+             * immediate, but if an orphaned process (or zombie) holds the
+             * pipe open, time out rather than blocking forever.  The
+             * detached thread is cleaned up at exit.
+             */
+            if tee_done_rx.recv_timeout(Duration::from_secs(5)).is_ok() {
+                let _ = tee_handle.join();
+            } else {
+                warn!(
+                    pkg = %self.pkginfo.index.pkgname,
+                    "Tee thread stuck on pipe held by orphaned process, detaching"
+                );
+            }
 
             trace!(?cmd, ?status, "Command completed");
             Ok((status, cpu_time))
