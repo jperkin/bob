@@ -44,8 +44,8 @@ enum StatusCol {
     Priority,
     #[strum(props(max = "8", align = "right"))]
     Cpu,
-    #[strum(props(max = "5", align = "right"))]
-    Jobs,
+    #[strum(props(max = "9", align = "right"))]
+    MakeJobs,
     #[strum(props(max = "9"))]
     Wrkobjdir,
 }
@@ -294,7 +294,7 @@ fn print_build_status(
                     .get(pkg.pkgname.as_str())
                     .cloned()
                     .unwrap_or_else(dash),
-                "jobs" => match sp.make_jobs.allocated() {
+                "make_jobs" => match sp.make_jobs.allocated() {
                     Some(n) => n.to_string(),
                     None => dash(),
                 },
