@@ -2095,8 +2095,7 @@ impl Build {
             });
         }
 
-        // Only create sandboxes when there's actual work to do
-        let n = self.config.build_threads();
+        let n = self.config.build_threads().min(scheduler.queued_count());
         if self.scope.enabled() && n > self.scope.count() {
             let to_create = n - self.scope.count();
             if to_create == 1 {
@@ -2138,10 +2137,7 @@ impl Build {
         };
 
         if let Some(jobs) = self.config.jobs() {
-            scheduler.set_allocator(crate::makejobs::Allocator::new(
-                self.config.build_threads(),
-                jobs,
-            ));
+            scheduler.set_allocator(crate::makejobs::Allocator::new(n, jobs));
         }
 
         let logdir = self.config.logdir().clone();
@@ -2165,7 +2161,7 @@ impl Build {
                 "Building",
                 "Built",
                 self.scanpkgs.len(),
-                self.config.build_threads(),
+                n,
                 self.config.tui(),
             )
             .context("Failed to initialize progress display")?,
@@ -2219,7 +2215,7 @@ impl Build {
          */
         let mut threads = vec![];
         let mut clients: HashMap<usize, Sender<ChannelCommand>> = HashMap::new();
-        for i in 0..self.config.build_threads() {
+        for i in 0..n {
             let (client_tx, client_rx) = mpsc::channel::<ChannelCommand>();
             clients.insert(i, client_tx);
             let manager_tx = manager_tx.clone();
