@@ -21,7 +21,7 @@
 //!
 //! # Configuration File Structure
 //!
-//! A configuration file has six main sections:
+//! A configuration file has seven main sections:
 //!
 //! - [`options`](#options-section) - General build options (optional)
 //! - [`environment`](#environment-section) - Environment variable configuration (optional)
@@ -29,6 +29,7 @@
 //! - [`scripts`](#scripts-section) - Build script paths (required)
 //! - [`sandboxes`](#sandboxes-section) - Sandbox configuration (optional)
 //! - [`dynamic`](#dynamic-section) - Dynamic resource allocation (optional)
+//! - [`publish`](#publish-section) - Remote publishing configuration (optional)
 //!
 //! # Options Section
 //!
@@ -193,6 +194,8 @@ pub struct PkgsrcEnv {
     pub pkg_dbdir: PathBuf,
     /// PKG_REFCOUNT_DBDIR for refcounted files database.
     pub pkg_refcount_dbdir: PathBuf,
+    /// Platform and build metadata from pkgsrc (non-empty values only).
+    pub metadata: HashMap<String, String>,
     /// Cached pkgsrc variables from the `cachevars` config option.
     pub cachevars: HashMap<String, String>,
 }
@@ -211,8 +214,24 @@ impl PkgsrcEnv {
             "PREFIX",
         ];
 
+        const METADATA_VARS: &[&str] = &[
+            "ABI",
+            "CC_VERSION",
+            "LOWER_VARIANT_VERSION",
+            "MACHINE_ARCH",
+            "OPSYS",
+            "OS_VARIANT",
+            "OS_VERSION",
+            "PKGINFODIR",
+            "PKGMANDIR",
+            "PKGSRC_COMPILER",
+            "SYSCONFBASE",
+            "VARBASE",
+        ];
+
         let user_cachevars = config.cachevars();
         let mut all_varnames: Vec<&str> = REQUIRED_VARS.to_vec();
+        all_varnames.extend_from_slice(METADATA_VARS);
         for v in user_cachevars {
             all_varnames.push(v.as_str());
         }
@@ -257,6 +276,15 @@ impl PkgsrcEnv {
             }
         }
 
+        let mut metadata: HashMap<String, String> = HashMap::new();
+        for varname in METADATA_VARS {
+            if let Some(value) = values.get(varname) {
+                if !value.is_empty() {
+                    metadata.insert((*varname).to_string(), (*value).to_string());
+                }
+            }
+        }
+
         let mut cachevars: HashMap<String, String> = HashMap::new();
         for varname in user_cachevars {
             if let Some(value) = values.get(varname.as_str()) {
@@ -272,8 +300,28 @@ impl PkgsrcEnv {
             prefix: PathBuf::from(values["PREFIX"]),
             pkg_dbdir: PathBuf::from(values["PKG_DBDIR"]),
             pkg_refcount_dbdir: PathBuf::from(values["PKG_REFCOUNT_DBDIR"]),
+            metadata,
             cachevars,
         })
+    }
+
+    /// Derive the platform string from metadata variables.
+    ///
+    /// Uses OS_VARIANT if available (e.g., "SmartOS 20241212T000748Z/x86_64"),
+    /// otherwise falls back to OPSYS (e.g., "NetBSD 10.1/x86_64").
+    /// Returns None if the required variables are not available.
+    pub fn platform(&self) -> Option<String> {
+        let arch = self.metadata.get("MACHINE_ARCH")?;
+        if let (Some(variant), Some(version)) = (
+            self.metadata.get("OS_VARIANT"),
+            self.metadata.get("LOWER_VARIANT_VERSION"),
+        ) {
+            Some(format!("{} {}/{}", variant, version, arch))
+        } else {
+            let opsys = self.metadata.get("OPSYS")?;
+            let version = self.metadata.get("OS_VERSION")?;
+            Some(format!("{} {}/{}", opsys, version, arch))
+        }
     }
 }
 
@@ -474,6 +522,8 @@ pub struct ConfigFile {
     pub environment: Option<Environment>,
     /// The `dynamic` section.
     pub dynamic: Option<DynamicConfig>,
+    /// The `publish` section.
+    pub publish: Option<Publish>,
 }
 
 /// General build options from the `options` section.
@@ -563,6 +613,64 @@ impl WrkObjKind {
             Self::Tmpfs(p) | Self::Disk(p) => p,
         }
     }
+}
+
+/// Publishing configuration from the `publish` section.
+///
+/// Controls how binary packages and reports are published to remote servers.
+/// Shared rsync defaults (`rsync`, `rsync_args`) are inherited by sub-sections
+/// unless overridden.
+#[derive(Clone, Debug)]
+pub struct Publish {
+    /// Path to rsync binary (default: "rsync").
+    pub rsync: PathBuf,
+    /// Default rsync arguments (default: "-av --delete-excluded -e ssh").
+    pub rsync_args: String,
+    /// Package publishing configuration.
+    pub packages: Option<PublishPackages>,
+    /// Report publishing configuration.
+    pub report: Option<PublishReport>,
+}
+
+/// Package publishing configuration.
+///
+/// Uses rsync `--link-dest` for space-efficient atomic updates.
+/// Restricted packages (NO_BIN_ON_FTP) are automatically excluded.
+#[derive(Clone, Debug)]
+pub struct PublishPackages {
+    /// Remote hostname.
+    pub host: String,
+    /// Remote user (if unset, relies on ssh config).
+    pub user: Option<String>,
+    /// Remote path to the live published directory (link-dest source).
+    pub linkdest: String,
+    /// Remote path for temporary staging during sync.
+    pub tmpdest: String,
+    /// Minimum successful package count required before publishing.
+    pub minimum: Option<usize>,
+    /// Glob patterns that must match at least one successful package.
+    pub required: Vec<String>,
+    /// Override shared rsync_args for package publishing.
+    pub rsync_args: Option<String>,
+}
+
+/// Report publishing configuration.
+#[derive(Clone, Debug)]
+pub struct PublishReport {
+    /// Remote hostname.
+    pub host: String,
+    /// Remote user (if unset, relies on ssh config).
+    pub user: Option<String>,
+    /// Remote directory path for report upload.
+    pub path: String,
+    /// Public URL where the report is accessible.
+    pub url: Option<String>,
+    /// Override shared rsync_args for report publishing.
+    pub rsync_args: Option<String>,
+    /// Email sender in "Name <addr>" format.
+    pub from: Option<String>,
+    /// Email recipients.
+    pub to: Vec<String>,
 }
 
 /// pkgsrc-related configuration from the `pkgsrc` section.
@@ -847,6 +955,10 @@ impl Config {
         self.file.environment.as_ref()
     }
 
+    pub fn publish(&self) -> Option<&Publish> {
+        self.file.publish.as_ref()
+    }
+
     pub fn bindfs(&self) -> &str {
         self.file
             .sandboxes
@@ -1066,6 +1178,28 @@ impl Config {
             }
         }
 
+        if let Some(publish) = &self.file.publish {
+            if let Some(pkgs) = &publish.packages {
+                if pkgs.host.is_empty() {
+                    errors.push("publish.packages.host must not be empty".to_string());
+                }
+                if pkgs.linkdest.is_empty() {
+                    errors.push("publish.packages.linkdest must not be empty".to_string());
+                }
+                if pkgs.tmpdest.is_empty() {
+                    errors.push("publish.packages.tmpdest must not be empty".to_string());
+                }
+            }
+            if let Some(report) = &publish.report {
+                if report.host.is_empty() {
+                    errors.push("publish.report.host must not be empty".to_string());
+                }
+                if report.path.is_empty() {
+                    errors.push("publish.report.path must not be empty".to_string());
+                }
+            }
+        }
+
         if errors.is_empty() {
             Ok(())
         } else {
@@ -1120,6 +1254,8 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
         .map_err(|e| format!("Error parsing environment config: {}", e))?;
     let dynamic =
         parse_dynamic(&globals).map_err(|e| format!("Error parsing dynamic config: {}", e))?;
+    let publish =
+        parse_publish(&globals).map_err(|e| format!("Error parsing publish config: {}", e))?;
 
     // Store env function/table in registry if it exists
     let env_key = if let Ok(env_value) = pkgsrc_table.get::<Value>("env") {
@@ -1147,6 +1283,7 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
         sandboxes,
         environment,
         dynamic,
+        publish,
     };
 
     Ok((config, lua_env))
@@ -1504,6 +1641,128 @@ fn resolve_lua_var(globals: &Table, path: &str) -> Option<String> {
         Value::Number(n) => Some(n.to_string()),
         _ => None,
     }
+}
+
+fn parse_publish(globals: &Table) -> LuaResult<Option<Publish>> {
+    let value: Value = globals.get("publish")?;
+    if value.is_nil() {
+        return Ok(None);
+    }
+
+    let table = value
+        .as_table()
+        .ok_or_else(|| mlua::Error::runtime("'publish' must be a table"))?;
+
+    const KNOWN_KEYS: &[&str] = &["packages", "report", "rsync", "rsync_args"];
+    warn_unknown_keys(table, "publish", KNOWN_KEYS);
+
+    let rsync: PathBuf = table
+        .get::<Option<String>>("rsync")?
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("rsync"));
+    let rsync_args: String = table
+        .get::<Option<String>>("rsync_args")?
+        .unwrap_or_else(|| "-av --delete-excluded -e ssh".to_string());
+
+    let packages = match table.get::<Value>("packages")? {
+        Value::Nil => None,
+        Value::Table(t) => {
+            const PKG_KEYS: &[&str] = &[
+                "host",
+                "linkdest",
+                "minimum",
+                "required",
+                "rsync_args",
+                "tmpdest",
+                "user",
+            ];
+            warn_unknown_keys(&t, "publish.packages", PKG_KEYS);
+
+            let host: String = t
+                .get::<Option<String>>("host")?
+                .ok_or_else(|| mlua::Error::runtime("publish.packages.host is required"))?;
+            let user: Option<String> = t.get::<Option<String>>("user")?;
+            let linkdest: String = t
+                .get::<Option<String>>("linkdest")?
+                .ok_or_else(|| mlua::Error::runtime("publish.packages.linkdest is required"))?;
+            let tmpdest: String = t
+                .get::<Option<String>>("tmpdest")?
+                .ok_or_else(|| mlua::Error::runtime("publish.packages.tmpdest is required"))?;
+            let minimum: Option<usize> = t.get::<Option<usize>>("minimum")?;
+            let required: Vec<String> = match t.get::<Value>("required")? {
+                Value::Nil => Vec::new(),
+                Value::Table(r) => r
+                    .sequence_values::<String>()
+                    .collect::<LuaResult<Vec<_>>>()?,
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "publish.packages.required must be a table",
+                    ));
+                }
+            };
+            let pkg_rsync_args: Option<String> = t.get::<Option<String>>("rsync_args")?;
+
+            Some(PublishPackages {
+                host,
+                user,
+                linkdest,
+                tmpdest,
+                minimum,
+                required,
+                rsync_args: pkg_rsync_args,
+            })
+        }
+        _ => return Err(mlua::Error::runtime("publish.packages must be a table")),
+    };
+
+    let report = match table.get::<Value>("report")? {
+        Value::Nil => None,
+        Value::Table(t) => {
+            const RPT_KEYS: &[&str] = &["from", "host", "path", "rsync_args", "to", "url", "user"];
+            warn_unknown_keys(&t, "publish.report", RPT_KEYS);
+
+            let host: String = t
+                .get::<Option<String>>("host")?
+                .ok_or_else(|| mlua::Error::runtime("publish.report.host is required"))?;
+            let user: Option<String> = t.get::<Option<String>>("user")?;
+            let path: String = t
+                .get::<Option<String>>("path")?
+                .ok_or_else(|| mlua::Error::runtime("publish.report.path is required"))?;
+            let url: Option<String> = t.get::<Option<String>>("url")?;
+            let rpt_rsync_args: Option<String> = t.get::<Option<String>>("rsync_args")?;
+            let from: Option<String> = t.get::<Option<String>>("from")?;
+            let to: Vec<String> = match t.get::<Value>("to")? {
+                Value::Nil => Vec::new(),
+                Value::String(s) => vec![s.to_string_lossy().to_string()],
+                Value::Table(r) => r
+                    .sequence_values::<String>()
+                    .collect::<LuaResult<Vec<_>>>()?,
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "publish.report.to must be a string or table",
+                    ));
+                }
+            };
+
+            Some(PublishReport {
+                host,
+                user,
+                path,
+                url,
+                rsync_args: rpt_rsync_args,
+                from,
+                to,
+            })
+        }
+        _ => return Err(mlua::Error::runtime("publish.report must be a table")),
+    };
+
+    Ok(Some(Publish {
+        rsync,
+        rsync_args,
+        packages,
+        report,
+    }))
 }
 
 fn parse_environment(globals: &Table) -> LuaResult<Option<Environment>> {

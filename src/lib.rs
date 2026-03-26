@@ -23,12 +23,12 @@ pub mod cpu;
 pub mod db;
 pub mod logging;
 pub mod makejobs;
-pub mod report;
 pub mod sandbox;
 pub mod scan;
 pub mod scheduler;
 pub mod state;
 pub mod summary;
+pub mod vcs;
 
 mod history;
 mod init;
@@ -87,7 +87,7 @@ impl std::error::Error for Interrupted {}
 //
 // The typical workflow is:
 //   Config::load() → Scan::new() → scan.start() → scan.resolve()
-//   → Build::new() → build.start() → write_html_report()
+//   → Build::new() → build.start()
 
 pub use action::{Action, ActionType, FSType};
 pub use build::{
@@ -101,7 +101,6 @@ pub use history::{History, HistoryKind, format_duration};
 pub use init::Init;
 pub use makejobs::PkgMakeJobs;
 pub use pkgstate::{PackageCounts, PackageState, PackageStateKind};
-pub use report::write_html_report;
 pub use sandbox::Sandbox;
 pub use scan::{ResolvedPackage, Scan, ScanResult, ScanSummary};
 pub use scheduler::{PackageNode, ScheduledPackage, Scheduler};

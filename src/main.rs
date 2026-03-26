@@ -23,7 +23,6 @@ use bob::build::{self, Build};
 use bob::config::Config;
 use bob::db::Database;
 use bob::logging;
-use bob::report;
 use bob::sandbox::{Sandbox, SandboxScope};
 use bob::scan::Scan;
 use clap::{Parser, Subcommand};
@@ -268,8 +267,22 @@ enum Cmd {
         #[arg(value_name = "PKGPATH|PKGNAME")]
         packages: Vec<String>,
     },
-    /// Generate HTML report from current build logs
-    Report,
+    /// Publish packages and reports to a remote server
+    #[command(arg_required_else_help = true)]
+    Publish {
+        /// Publish binary packages
+        #[arg(short, long)]
+        packages: bool,
+        /// Publish build report
+        #[arg(short, long)]
+        report: bool,
+        /// Send email report
+        #[arg(short, long)]
+        email: bool,
+        /// Show what would be done without uploading
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+    },
     /// Remove current build state (database and build logs)
     Clean {
         /// Only remove package log directories, preserve database
@@ -524,7 +537,12 @@ fn run() -> Result<()> {
             let summary = runner.run_build(buildable, scope)?;
             runner.update_pkg_summary(&prior, &summary);
         }
-        Cmd::Report => {
+        Cmd::Publish {
+            packages,
+            report,
+            email,
+            dry_run,
+        } => {
             let config = Config::load(args.config.as_deref())?;
             let db_path = config.dbdir().join("bob.db");
 
@@ -535,11 +553,8 @@ fn run() -> Result<()> {
                 );
             }
 
-            println!("Generating report...");
             let db = Database::open(config.dbdir())?;
-            let report_path = config.logdir().join("report.html");
-            report::write_html_report(&db, config.logdir(), &report_path)?;
-            println!("HTML report written to: {}", report_path.display());
+            cmd::publish::run(&config, &db, packages, report, email, dry_run)?;
         }
         Cmd::Clean { logs_only } => {
             let config = Config::load(args.config.as_deref())?;

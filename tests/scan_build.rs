@@ -493,6 +493,7 @@ pkgsrc = {{
             prefix: self.root.join("prefix"),
             pkg_dbdir: self.root.join("pkg_dbdir"),
             pkg_refcount_dbdir: self.root.join("pkg_refcount_dbdir"),
+            metadata: std::collections::HashMap::new(),
             cachevars: std::collections::HashMap::new(),
         }
     }

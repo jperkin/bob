@@ -50,6 +50,16 @@ use crate::scan::ScanResult;
 use crate::try_println;
 use crate::{HistoryKind, PackageState, PackageStateKind};
 
+/// Row type for [`Database::get_report_data`]:
+/// (pkgname, pkgpath, scan_data_json, outcome_id, outcome_detail).
+pub type ReportRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<i32>,
+    Option<String>,
+);
+
 fn stage_values() -> String {
     Stage::VARIANTS
         .iter()
@@ -380,7 +390,13 @@ impl Database {
             stages = stage_values(),
         ))?;
 
-        debug!(version = SCHEMA_VERSION, "Created schema");
+        let build_id = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        self.conn.execute(
+            "INSERT INTO metadata (key, value) VALUES ('build_id', ?1)",
+            params![build_id],
+        )?;
+
+        debug!(version = SCHEMA_VERSION, build_id = %build_id, "Created schema");
         Ok(())
     }
 
@@ -1444,6 +1460,22 @@ impl Database {
     // ========================================================================
 
     /**
+     * Get the build ID for this run.
+     *
+     * The build ID is an ISO timestamp set when the database is first
+     * created, and persists across rebuilds until `bob clean`.
+     */
+    pub fn build_id(&self) -> Result<String> {
+        self.conn
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'build_id'",
+                [],
+                |row| row.get(0),
+            )
+            .context("build_id not found in database")
+    }
+
+    /**
      * Check if a full tree scan has been completed.
      */
     pub fn full_scan_complete(&self) -> bool {
@@ -1488,6 +1520,7 @@ impl Database {
             "prefix": env.prefix,
             "pkg_dbdir": env.pkg_dbdir,
             "pkg_refcount_dbdir": env.pkg_refcount_dbdir,
+            "metadata": env.metadata,
             "cachevars": env.cachevars,
         });
         self.conn.execute(
@@ -1520,6 +1553,11 @@ impl Database {
                 .ok_or_else(|| anyhow::anyhow!("Missing {} in pkgsrc_env", key))
         };
 
+        let metadata: HashMap<String, String> = json
+            .get("metadata")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
         let cachevars: HashMap<String, String> = json
             .get("cachevars")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -1531,8 +1569,36 @@ impl Database {
             prefix: get_path("prefix")?,
             pkg_dbdir: get_path("pkg_dbdir")?,
             pkg_refcount_dbdir: get_path("pkg_refcount_dbdir")?,
+            metadata,
             cachevars,
         })
+    }
+
+    /**
+     * Store version control information in the database.
+     */
+    pub fn store_vcs_info(&self, info: &crate::vcs::VcsInfo) -> Result<()> {
+        let json = serde_json::to_string(info)?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('vcs_info', ?1)",
+            params![json],
+        )?;
+        Ok(())
+    }
+
+    /**
+     * Load version control information from the database.
+     */
+    pub fn load_vcs_info(&self) -> Result<crate::vcs::VcsInfo> {
+        let json_str: String = self
+            .conn
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'vcs_info'",
+                [],
+                |row| row.get(0),
+            )
+            .context("vcs_info not found in database")?;
+        serde_json::from_str(&json_str).context("Invalid vcs_info JSON")
     }
 
     /**
@@ -1577,6 +1643,55 @@ impl Database {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(pkgnames)
+    }
+
+    /**
+     * Get the set of restricted package names.
+     *
+     * Returns packages that have NO_BIN_ON_FTP set.  Packages that
+     * depend on restricted packages are not themselves restricted --
+     * users can build the restricted packages locally and still use
+     * the published dependents.
+     */
+    pub fn get_restricted_packages(&self) -> Result<HashSet<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT pkgname FROM packages
+             WHERE json_extract(scan_data, '$.NO_BIN_ON_FTP') IS NOT NULL
+               AND json_extract(scan_data, '$.NO_BIN_ON_FTP') != ''",
+        )?;
+        let restricted = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<HashSet<_>, _>>()?;
+
+        Ok(restricted)
+    }
+
+    /**
+     * Get all packages with their scan data and build status for reporting.
+     *
+     * Returns (pkgname, pkgpath, scan_data_json, outcome_id, detail).
+     */
+    pub fn get_report_data(&self) -> Result<Vec<ReportRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.pkgname, p.pkgpath, p.scan_data, b.outcome, b.outcome_detail
+             FROM packages p
+             LEFT JOIN builds b ON b.package_id = p.id
+             ORDER BY p.pkgname",
+        )?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i32>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(rows)
     }
 
     /**

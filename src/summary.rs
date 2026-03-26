@@ -43,11 +43,19 @@ use crate::db::Database;
  * Summary entries using pkgsrc::archive::BinaryPackage, and writes the
  * concatenated output to `PACKAGES/All/pkg_summary.{gz,zst}`.
  *
+ * Restricted packages (those with `NO_BIN_ON_FTP` set) are excluded so the
+ * summary only advertises packages that can be distributed.
+ *
  * The gz and zst files are written in parallel.
  */
 pub fn generate_pkg_summary(db: &Database, threads: usize) -> Result<()> {
     let pkgsrc_env = db.load_pkgsrc_env()?;
-    let pkgnames = db.get_successful_packages()?;
+    let restricted = db.get_restricted_packages()?;
+    let pkgnames: Vec<String> = db
+        .get_successful_packages()?
+        .into_iter()
+        .filter(|p| !restricted.contains(p.as_str()))
+        .collect();
 
     if pkgnames.is_empty() {
         debug!("No successful packages to include in pkg_summary");

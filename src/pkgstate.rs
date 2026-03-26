@@ -38,6 +38,7 @@ use strum::{EnumCount, IntoEnumIterator};
     Eq,
     strum::EnumCount,
     strum::EnumIter,
+    strum::EnumProperty,
     strum::EnumString,
     strum::FromRepr,
     strum::AsRefStr,
@@ -46,16 +47,27 @@ use strum::{EnumCount, IntoEnumIterator};
 #[strum(serialize_all = "kebab-case")]
 #[repr(i32)]
 pub enum PackageStateKind {
+    #[strum(props(pbulk = "prefailed"))]
     PreSkipped = 0,
+    #[strum(props(pbulk = "prefailed"))]
     PreFailed = 1,
+    #[strum(props(pbulk = "prefailed"))]
     Unresolved = 2,
+    #[strum(props(pbulk = "indirect-prefailed"))]
     IndirectPreSkipped = 3,
+    #[strum(props(pbulk = "indirect-prefailed"))]
     IndirectPreFailed = 4,
+    #[strum(props(pbulk = "indirect-prefailed"))]
     IndirectUnresolved = 5,
+    #[strum(props(pbulk = "open"))]
     Pending = 6,
+    #[strum(props(pbulk = "done"))]
     UpToDate = 7,
+    #[strum(props(pbulk = "done"))]
     Success = 8,
+    #[strum(props(pbulk = "failed"))]
     Failed = 9,
+    #[strum(props(pbulk = "indirect-failed"))]
     IndirectFailed = 10,
 }
 
@@ -134,6 +146,14 @@ impl PackageState {
     /// Kebab-case status label.
     pub fn status(&self) -> &'static str {
         self.kind().into()
+    }
+
+    /**
+     * pbulk-compatible BUILD_STATUS value.
+     */
+    pub fn pbulk_status(&self) -> &'static str {
+        use strum::EnumProperty;
+        self.kind().get_str("pbulk").expect("pbulk prop")
     }
 
     /// Database integer ID, matching variant order.

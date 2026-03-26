@@ -2,6 +2,7 @@ pub mod build;
 pub mod db;
 pub mod history;
 pub mod list;
+pub mod publish;
 pub mod rebuild;
 pub mod sandbox;
 pub mod simulate;
