@@ -797,6 +797,7 @@ impl Scan {
                             // Update progress - show current package
                             if let Ok(mut p) = progress_clone.lock() {
                                 p.state_mut().set_worker_active(thread_id, &pathname);
+                                p.state_mut().increment_dispatched();
                             }
 
                             let result = Self::scan_pkgpath_with(

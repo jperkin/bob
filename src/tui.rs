@@ -156,6 +156,7 @@ pub struct ProgressState {
     pub title: String,
     pub finished_title: String,
     pub total: usize,
+    pub dispatched: usize,
     pub completed: usize,
     pub cached: usize,
     pub failed: usize,
@@ -175,6 +176,7 @@ impl ProgressState {
             title: title.to_string(),
             finished_title: finished_title.to_string(),
             total,
+            dispatched: 0,
             completed: 0,
             cached: 0,
             failed: 0,
@@ -240,6 +242,10 @@ impl ProgressState {
         }
     }
 
+    pub fn increment_dispatched(&mut self) {
+        self.dispatched += 1;
+    }
+
     pub fn increment_completed(&mut self) {
         self.completed += 1;
     }
@@ -256,7 +262,7 @@ impl ProgressState {
         if self.total == 0 {
             0.0
         } else {
-            (self.completed + self.cached + self.failed + self.skipped) as f64 / self.total as f64
+            (self.dispatched + self.cached + self.skipped) as f64 / self.total as f64
         }
     }
 }
@@ -279,7 +285,7 @@ fn format_status_line(state: &ProgressState, msg: (&str, &str), width: usize) ->
     let elapsed_str = format_duration_short(state.elapsed());
     let counts = format!(
         "{}/{}",
-        state.completed + state.cached + state.failed + state.skipped,
+        state.dispatched + state.cached + state.skipped,
         state.total
     );
 

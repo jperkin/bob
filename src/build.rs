@@ -2414,6 +2414,7 @@ impl Build {
                                 if let Ok(mut p) = progress_clone.lock() {
                                     p.clear_output_buffer(c);
                                     p.state_mut().set_worker_active(c, sp.pkg.pkgname());
+                                    p.state_mut().increment_dispatched();
                                     if p.is_plain() {
                                         let _ = p.print_status("Building", sp.pkg.pkgname());
                                     }
