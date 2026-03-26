@@ -184,7 +184,7 @@ impl Sandbox {
      *
      * illumos ps truncates command lines, so pargs is used instead.
      */
-    fn format_process_info(&self, pids: &[String]) -> Option<String> {
+    pub(super) fn format_process_info(&self, pids: &[String]) -> Option<String> {
         let mut info = Vec::new();
         for pid in pids {
             let pargs_output = Command::new("pargs").arg(pid).process_group(0).output();
