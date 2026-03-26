@@ -304,7 +304,7 @@ fn format_status_line(state: &ProgressState, msg: (&str, &str), width: usize) ->
     let filled = (ratio * bar_width as f64) as usize;
     let empty = bar_width.saturating_sub(filled).saturating_sub(1);
     let bar = if filled >= bar_width {
-        "=".repeat(bar_width)
+        format!("{}>", "=".repeat(bar_width - 1))
     } else if filled == 0 {
         format!(">{}", " ".repeat(bar_width.saturating_sub(1)))
     } else {
