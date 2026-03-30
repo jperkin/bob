@@ -2075,7 +2075,10 @@ impl Build {
                 }
                 _ => {
                     let indirect = scheduler.mark_failure(pkgname);
-                    indirect_failed_count += indirect.len();
+                    indirect_failed_count += indirect
+                        .iter()
+                        .filter(|p| !self.cached.contains_key(*p))
+                        .count();
                 }
             }
             cached_count += 1;
