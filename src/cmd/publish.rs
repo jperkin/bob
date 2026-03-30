@@ -596,7 +596,7 @@ fn write_text_report(
     writeln!(file)?;
 
     let mut results = db.get_all_build_results()?;
-    let duration = db.get_total_build_duration()?;
+    let duration = db.get_build_duration()?;
 
     let sched = bob::Scheduler::new(db)?;
     let breaks_counts: HashMap<String, usize> = sched
@@ -833,7 +833,7 @@ th { color: #d35400; font-size: 13px; background: none; border-bottom: 1px solid
 
 fn write_html_report(db: &Database, logdir: &Path, path: &Path, meta: &ReportMeta) -> Result<()> {
     let mut results = db.get_all_build_results()?;
-    let duration = db.get_total_build_duration()?;
+    let duration = db.get_build_duration()?;
 
     let sched = bob::Scheduler::new(db)?;
     let breaks_counts: HashMap<String, usize> = sched

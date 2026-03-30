@@ -1190,15 +1190,40 @@ impl Database {
     }
 
     /**
-     * Get total build duration from all builds.
+     * Store the wall clock duration of the most recent build run.
+     *
+     * This is accumulated across build and rebuild invocations so
+     * the report shows total wall clock time, not per-invocation.
      */
-    pub fn get_total_build_duration(&self) -> Result<Duration> {
-        let total_ms: i64 = self.conn.query_row(
-            "SELECT COALESCE(SUM(duration_ms), 0) FROM builds",
-            [],
-            |row| row.get(0),
+    pub fn add_build_duration(&self, duration: Duration) -> Result<()> {
+        let existing = self.get_build_duration()?;
+        let total_ms = (existing + duration).as_millis() as i64;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('build_duration_ms', ?1)",
+            params![total_ms.to_string()],
         )?;
-        Ok(Duration::from_millis(total_ms as u64))
+        Ok(())
+    }
+
+    /**
+     * Get the accumulated wall clock build duration.
+     */
+    pub fn get_build_duration(&self) -> Result<Duration> {
+        let ms: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(
+                    (SELECT value FROM metadata WHERE key = 'build_duration_ms'),
+                    '0'
+                )",
+                [],
+                |row| {
+                    let s: String = row.get(0)?;
+                    Ok(s.parse::<i64>().unwrap_or(0))
+                },
+            )
+            .unwrap_or(0);
+        Ok(Duration::from_millis(ms as u64))
     }
 
     /**
