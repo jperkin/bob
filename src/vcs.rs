@@ -122,16 +122,7 @@ impl VcsInfo {
         let repo = gix::discover(path).ok()?;
 
         let head = repo.head().ok()?;
-
         let local_branch = head.referent_name().map(|r| r.shorten().to_string());
-
-        let remote_branch = local_branch.as_deref().and_then(|b| {
-            let key = format!("branch.{}.merge", b);
-            repo.config_snapshot().string(key.as_str()).map(|v| {
-                let s = v.to_string();
-                s.trim_start_matches("refs/heads/").to_string()
-            })
-        });
 
         let head_id = head.id();
         let revision_full = head_id.map(|id| id.to_string());
@@ -139,14 +130,23 @@ impl VcsInfo {
             .as_ref()
             .map(|s| s[..s.len().min(12)].to_string());
 
-        let remote_url = local_branch
-            .as_deref()
-            .and_then(|b| {
-                let key = format!("branch.{}.remote", b);
-                repo.config_snapshot()
-                    .string(key.as_str())
-                    .map(|v| v.to_string())
-            })
+        let (remote_name, remote_branch) = if let Some(ref local) = local_branch {
+            let config = repo.config_snapshot();
+            let remote = config
+                .string(format!("branch.{}.remote", local).as_str())
+                .map(|v| v.to_string());
+            let branch = config
+                .string(format!("branch.{}.merge", local).as_str())
+                .map(|v| {
+                    let s = v.to_string();
+                    s.trim_start_matches("refs/heads/").to_string()
+                });
+            (remote, branch)
+        } else {
+            (None, None)
+        };
+
+        let remote_url = remote_name
             .or_else(|| {
                 repo.remote_names()
                     .into_iter()

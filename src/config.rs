@@ -667,6 +667,8 @@ pub struct PublishReport {
     pub url: Option<String>,
     /// Override shared rsync_args for report publishing.
     pub rsync_args: Option<String>,
+    /// Override auto-detected branch name for reports and email.
+    pub branch: Option<String>,
     /// Email sender in "Name <addr>" format.
     pub from: Option<String>,
     /// Email recipients.
@@ -1718,7 +1720,16 @@ fn parse_publish(globals: &Table) -> LuaResult<Option<Publish>> {
     let report = match table.get::<Value>("report")? {
         Value::Nil => None,
         Value::Table(t) => {
-            const RPT_KEYS: &[&str] = &["from", "host", "path", "rsync_args", "to", "url", "user"];
+            const RPT_KEYS: &[&str] = &[
+                "branch",
+                "from",
+                "host",
+                "path",
+                "rsync_args",
+                "to",
+                "url",
+                "user",
+            ];
             warn_unknown_keys(&t, "publish.report", RPT_KEYS);
 
             let host: String = t
@@ -1730,6 +1741,7 @@ fn parse_publish(globals: &Table) -> LuaResult<Option<Publish>> {
                 .ok_or_else(|| mlua::Error::runtime("publish.report.path is required"))?;
             let url: Option<String> = t.get::<Option<String>>("url")?;
             let rpt_rsync_args: Option<String> = t.get::<Option<String>>("rsync_args")?;
+            let branch: Option<String> = t.get::<Option<String>>("branch")?;
             let from: Option<String> = t.get::<Option<String>>("from")?;
             let to: Vec<String> = match t.get::<Value>("to")? {
                 Value::Nil => Vec::new(),
@@ -1750,6 +1762,7 @@ fn parse_publish(globals: &Table) -> LuaResult<Option<Publish>> {
                 path,
                 url,
                 rsync_args: rpt_rsync_args,
+                branch,
                 from,
                 to,
             })

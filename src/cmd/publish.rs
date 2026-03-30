@@ -263,10 +263,17 @@ fn send_email(config: &Config, db: &Database, build_id: &str, dry_run: bool) -> 
     let pkgsrc_env = db.load_pkgsrc_env()?;
     let vcs_info = db.load_vcs_info().unwrap_or_default();
     let platform = pkgsrc_env.platform().unwrap_or_default();
-    let branch = vcs_info
-        .remote_branch
+    let branch = report_cfg
+        .branch
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine remote branch for email subject"))?;
+        .or(vcs_info.remote_branch.as_deref())
+        .or(vcs_info.local_branch.as_deref())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Cannot determine branch for email subject. \
+                 Set publish.report.branch in config."
+            )
+        })?;
     let date = chrono::NaiveDateTime::parse_from_str(build_id, "%Y%m%dT%H%M%SZ")
         .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
         .context("Failed to parse build ID as timestamp")?;
