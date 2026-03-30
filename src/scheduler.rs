@@ -474,7 +474,7 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
         }
 
         let scaled = (available as f64 * base as f64 / total_weight as f64).round() as usize;
-        scaled.max(base).min(available)
+        scaled.max(base)
     }
 
     /** Set the allocator for MAKE_JOBS allocation. */

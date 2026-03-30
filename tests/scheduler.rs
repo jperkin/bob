@@ -2085,3 +2085,40 @@ fn tail_after_mark_success_weighted() {
     let c = allocations.iter().find(|(p, _)| p == "C").unwrap().1;
     assert_eq!((a, b, c), (19, 9, 4), "A={a} B={b} C={c}");
 }
+
+/**
+ * Tail allocation with an overcommitted budget must never allocate 0
+ * jobs.  Three independent packages with a budget of 4 and 2 workers:
+ * the first two each get base=2, exhausting the budget.  The third
+ * must still get at least base=2 (not 0).
+ */
+#[test]
+fn tail_overcommitted_budget() {
+    use bob::makejobs::Allocator;
+
+    let mut packages = HashMap::new();
+    for name in ["A", "B", "C"] {
+        packages.insert(
+            name.to_string(),
+            PackageNode {
+                deps: HashSet::new(),
+                pbulk_weight: 1,
+                cpu_time: 0,
+            },
+        );
+    }
+
+    let mut sched = Scheduler::from_graph(packages);
+    sched.set_allocator(Allocator::new(2, 4));
+
+    for _ in 0..3 {
+        if let Poll::Ready(Some(sp)) = sched.poll() {
+            assert!(
+                sp.make_jobs.allocated().unwrap_or(0) >= 2,
+                "{} got {} jobs",
+                sp.pkg,
+                sp.make_jobs.allocated().unwrap_or(0),
+            );
+        }
+    }
+}
