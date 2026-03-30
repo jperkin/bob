@@ -575,25 +575,41 @@ impl Sandbox {
         }
     }
 
+    /**
+     * Claim and set up `n` sandboxes in parallel.
+     *
+     * Each parallel task independently claims the next available ID
+     * (the atomic mkdir on `.bob` prevents races) and sets it up.
+     * On any failure, all successfully created sandboxes are destroyed.
+     */
     pub fn claim_ids(&self, n: usize) -> Result<Vec<usize>> {
+        let results: Vec<Result<usize>> = (0..n).into_par_iter().map(|_| self.claim_id()).collect();
+
         let mut claimed = Vec::with_capacity(n);
-        for _ in 0..n {
-            match self.claim_id() {
+        let mut first_error: Option<anyhow::Error> = None;
+        for result in results {
+            match result {
                 Ok(id) => claimed.push(id),
                 Err(e) => {
-                    for &id in &claimed {
-                        let _ = self.destroy(id);
+                    if first_error.is_none() {
+                        first_error = Some(e);
                     }
-                    return Err(e);
                 }
             }
         }
+
+        if let Some(e) = first_error {
+            for &id in &claimed {
+                let _ = self.destroy(id);
+            }
+            return Err(e);
+        }
+
+        claimed.sort();
         Ok(claimed)
     }
 
     /**
-     * Create a single sandbox by id.
-     *
      * Atomically claims the ID via the `.bob` marker directory, then
      * runs configured actions and marks complete.  Returns `Ok(false)`
      * if the ID is already taken by another process.
