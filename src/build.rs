@@ -101,9 +101,25 @@ pub enum BuildReason {
     BuildFileRemoved(String),
     /// A tracked source file has changed (hash or CVS ID mismatch).
     BuildFileChanged(String),
-    /// A single dependency was added.
+    /**
+     * A single dependency was added.
+     *
+     * Currently unused.  pkgsrc's ALL_DEPENDS includes indirect
+     * buildlink3 dependencies that are not recorded in the binary
+     * package's BUILD_DEPENDS, so comparing the two sets produces
+     * false "added" results.  To match pbulk behaviour, we only
+     * check for removed or updated dependencies.
+     *
+     * Retained for future use if pkgsrc gains support for correctly
+     * distinguishing direct vs indirect build dependencies.
+     */
     DependencyAdded(String),
-    /// Multiple dependencies were added.
+    /**
+     * Multiple dependencies were added.
+     *
+     * See [`DependencyAdded`](Self::DependencyAdded) for why this is
+     * currently unused.
+     */
     DependenciesAdded(Vec<String>),
     /// A single dependency was removed.
     DependencyRemoved(String),
@@ -282,13 +298,16 @@ pub fn pkg_up_to_date(
         .collect();
     let expected_deps: HashSet<&str> = depends.iter().copied().collect();
 
-    if recorded_deps != expected_deps {
-        let added_set: HashSet<&str> = expected_deps.difference(&recorded_deps).copied().collect();
-        let removed_set: HashSet<&str> =
-            recorded_deps.difference(&expected_deps).copied().collect();
+    /*
+     * Match pbulk behaviour: only check that each recorded dependency
+     * still exists in the expected set.  Dependencies that appear in
+     * ALL_DEPENDS but weren't recorded in the binary package (e.g.
+     * indirect buildlink3 dependencies) are not grounds for a rebuild.
+     */
+    let removed_set: HashSet<&str> = recorded_deps.difference(&expected_deps).copied().collect();
 
-        // Build map of pkgbase -> (full_name, version) for removed deps
-        let removed_by_base: HashMap<String, (&str, String)> = removed_set
+    if !removed_set.is_empty() {
+        let expected_by_base: HashMap<String, (&str, String)> = expected_deps
             .iter()
             .map(|&name| {
                 let pkg = PkgName::new(name);
@@ -300,43 +319,29 @@ pub fn pkg_up_to_date(
             .collect();
 
         let mut updated = Vec::new();
-        let mut added = Vec::new();
-        let mut matched_removed = HashSet::new();
+        let mut removed = Vec::new();
 
-        for &name in &added_set {
+        for &name in &removed_set {
             let pkg = PkgName::new(name);
-            if let Some((old_name, old_ver)) = removed_by_base.get(pkg.pkgbase()) {
+            if let Some((_, new_ver)) = expected_by_base.get(pkg.pkgbase()) {
                 updated.push((
                     pkg.pkgbase().to_string(),
-                    old_ver.clone(),
                     pkg.pkgversion().to_string(),
+                    new_ver.clone(),
                 ));
-                matched_removed.insert(*old_name);
             } else {
-                added.push(name.to_string());
+                removed.push(name.to_string());
             }
         }
 
-        let mut removed: Vec<String> = removed_set
-            .iter()
-            .filter(|&name| !matched_removed.contains(name))
-            .map(|s| s.to_string())
-            .collect();
-
-        debug!(?updated, ?added, ?removed, "Dependency list changed");
-        let reason = if updated.is_empty() && removed.is_empty() {
-            if added.len() == 1 {
-                BuildReason::DependencyAdded(added.swap_remove(0))
-            } else {
-                BuildReason::DependenciesAdded(added)
-            }
-        } else if updated.is_empty() && added.is_empty() {
+        debug!(?updated, ?removed, "Dependency list changed");
+        let reason = if updated.is_empty() {
             if removed.len() == 1 {
                 BuildReason::DependencyRemoved(removed.swap_remove(0))
             } else {
                 BuildReason::DependenciesRemoved(removed)
             }
-        } else if added.is_empty() && removed.is_empty() {
+        } else if removed.is_empty() {
             if updated.len() == 1 {
                 let (base, old, new) = updated.swap_remove(0);
                 BuildReason::DependencyUpdated(base, old, new)
@@ -346,7 +351,7 @@ pub fn pkg_up_to_date(
         } else {
             BuildReason::DependenciesChanged {
                 updated,
-                added,
+                added: Vec::new(),
                 removed,
             }
         };
