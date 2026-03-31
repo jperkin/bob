@@ -576,7 +576,6 @@ impl<'a> PkgBuilder<'a> {
             let stage_start = Instant::now();
             stats.stage = Some(Stage::Depends);
             callback.stage(Stage::Depends.into_str());
-            let _ = self.write_stage(Stage::Depends);
             if !self.install_dependencies()? {
                 stats
                     .stage_durations
@@ -713,7 +712,6 @@ impl<'a> PkgBuilder<'a> {
             let stage_start = Instant::now();
             stats.stage = Some(Stage::Deinstall);
             callback.stage(Stage::Deinstall.into_str());
-            let _ = self.write_stage(Stage::Deinstall);
             if !self.pkg_delete(pkgname_str)? {
                 stats
                     .stage_durations
@@ -784,13 +782,6 @@ impl<'a> PkgBuilder<'a> {
         }
     }
 
-    /// Write the current stage to a .stage file.
-    fn write_stage(&self, stage: Stage) -> anyhow::Result<()> {
-        let stage_file = self.logdir.join(".stage");
-        fs::write(&stage_file, stage.into_str())?;
-        Ok(())
-    }
-
     /// Run a make stage with output logging.
     fn run_make_stage(
         &self,
@@ -812,8 +803,6 @@ impl<'a> PkgBuilder<'a> {
         include_make_flags: bool,
         extra_flags: &[&str],
     ) -> anyhow::Result<(bool, Duration)> {
-        let _ = self.write_stage(stage);
-
         let logfile = self.logdir.join(format!("{}.log", stage.into_str()));
         let work_log = self.logdir.join("work.log");
 

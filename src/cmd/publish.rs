@@ -523,13 +523,6 @@ fn escape_html(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-fn read_failed_phase(log_dir: &Path) -> Option<String> {
-    let stage_file = log_dir.join(".stage");
-    std::fs::read_to_string(stage_file)
-        .ok()
-        .map(|s| s.trim().to_string())
-}
-
 struct ReportMeta<'a> {
     build_id: &'a str,
     pkgsrc_env: &'a bob::config::PkgsrcEnv,
@@ -884,11 +877,10 @@ fn write_html_report(db: &Database, logdir: &Path, path: &Path, meta: &ReportMet
                 .get(result.pkgname.pkgname())
                 .copied()
                 .unwrap_or(0);
-            let pkg_log_dir = logdir.join(result.pkgname.pkgname());
-            let failed_log = read_failed_phase(&pkg_log_dir).and_then(|phase| {
+            let failed_log = result.build_stats.stage.and_then(|stage| {
                 BUILD_PHASES
                     .iter()
-                    .find(|(name, _)| *name == phase)
+                    .find(|(name, _)| *name == stage.into_str())
                     .map(|(_, log)| (*log).to_string())
             });
             FailedPackageInfo {
