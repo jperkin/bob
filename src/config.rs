@@ -580,6 +580,10 @@ pub struct WrkObjDir {
     pub disk: Option<PathBuf>,
     /// Size threshold in bytes for routing between tmpfs and disk.
     pub threshold: Option<u64>,
+    /// Use historical disk usage for routing even when the previous
+    /// build failed.  Without this, a failed build always routes to
+    /// disk regardless of recorded size.
+    pub use_failed_history: bool,
 }
 
 impl WrkObjDir {
@@ -1421,7 +1425,7 @@ fn parse_dynamic(globals: &Table) -> LuaResult<Option<DynamicConfig>> {
     let wrkobjdir = match table.get::<Value>("wrkobjdir")? {
         Value::Nil => None,
         Value::Table(t) => {
-            const WRK_KEYS: &[&str] = &["tmpfs", "disk", "threshold"];
+            const WRK_KEYS: &[&str] = &["tmpfs", "disk", "threshold", "use_failed_history"];
             warn_unknown_keys(&t, "dynamic.wrkobjdir", WRK_KEYS);
 
             let tmpfs: Option<PathBuf> = t.get::<Option<String>>("tmpfs")?.map(PathBuf::from);
@@ -1434,11 +1438,14 @@ fn parse_dynamic(globals: &Table) -> LuaResult<Option<DynamicConfig>> {
                     })
                 })
                 .transpose()?;
+            let use_failed_history =
+                matches!(t.get::<Option<bool>>("use_failed_history")?, Some(true));
 
             Some(WrkObjDir {
                 tmpfs,
                 disk,
                 threshold,
+                use_failed_history,
             })
         }
         _ => return Err(mlua::Error::runtime("dynamic.wrkobjdir must be a table")),

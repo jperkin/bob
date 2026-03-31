@@ -49,7 +49,7 @@ use crate::scan::ResolvedPackage;
 use crate::scheduler::Scheduler;
 use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, RunState, Sandbox};
-use crate::{PackageCounts, PackageState};
+use crate::{PackageCounts, PackageState, PackageStateKind};
 use anyhow::{Context, bail};
 use crossterm::event;
 use glob::Pattern;
@@ -2045,16 +2045,23 @@ impl Build {
          * Packages with no history or a recent failure default to
          * disk (safe choice since tmpfs is bounded).
          */
+        let build_history = db.build_history_by_pkg_all();
         let wrkobjdir_map: HashMap<PkgName, WrkObjKind> = if let Some(w) = self.config.wrkobjdir() {
-            let usage = db.disk_usage_by_pkg_all();
+            let success = Some(PackageStateKind::Success);
             debug!(
                 total_packages = self.scanpkgs.len(),
-                history_entries = usage.len(),
-                "WRKOBJDIR disk usage query results"
+                history_entries = build_history.len(),
+                "WRKOBJDIR routing query results"
             );
             let mut map = HashMap::new();
             for pkgname in self.scanpkgs.keys() {
-                let du = usage.get(pkgname.pkgbase()).copied();
+                let du = build_history.get(pkgname.pkgbase()).and_then(|h| {
+                    if w.use_failed_history || h.outcome == success {
+                        h.disk_usage
+                    } else {
+                        None
+                    }
+                });
                 if let Some(kind) = w.route(du) {
                     map.insert(pkgname.clone(), kind);
                 }
@@ -2337,6 +2344,19 @@ impl Build {
                                     jobs.scanpkgs.get(&sp.pkg).expect("pkg not in scanpkgs");
 
                                 thread_packages.insert(c, sp.pkg.clone());
+                                let hist = build_history.get(sp.pkg.pkgbase());
+                                let wrkobjdir =
+                                    session.wrkobjdir_map.get(&sp.pkg).map(|k| k.to_string());
+                                info!(
+                                    pkgname = %sp.pkg.pkgname(),
+                                    make_jobs = sp.make_jobs.jobs(),
+                                    make_jobs_safe = sp.make_jobs.safe(),
+                                    wrkobjdir = wrkobjdir.as_deref(),
+                                    history = hist.is_some() || sp.cpu_time > 0,
+                                    previous_status = hist.and_then(|h| h.outcome).map(|o| -> &str { o.into() }),
+                                    previous_disk_usage = hist.and_then(|h| h.disk_usage),
+                                    "Scheduler decision"
+                                );
                                 if let Ok(mut p) = progress_clone.lock() {
                                     p.clear_output_buffer(c);
                                     p.state_mut().set_worker_active(c, sp.pkg.pkgname());

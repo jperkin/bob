@@ -190,13 +190,20 @@ fn print_build_status(
 
     let wrkobjdir_map: HashMap<&str, String> = if cols.contains(&"wrkobjdir") {
         if let Some(w) = config.wrkobjdir() {
-            let usage = db.disk_usage_by_pkg_all();
+            let success = Some(PackageStateKind::Success);
+            let history = db.build_history_by_pkg_all();
             status_rows
                 .iter()
                 .filter_map(|r| {
-                    let du = usage
+                    let du = history
                         .get(pkgsrc::PkgName::new(&r.pkgname).pkgbase())
-                        .copied();
+                        .and_then(|h| {
+                            if w.use_failed_history || h.outcome == success {
+                                h.disk_usage
+                            } else {
+                                None
+                            }
+                        });
                     w.route(du)
                         .map(|kind| (r.pkgname.as_str(), kind.to_string()))
                 })

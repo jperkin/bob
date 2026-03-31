@@ -108,6 +108,17 @@ const SCHEMA_VERSION: i32 = 20260317;
 const HISTORY_SCHEMA_VERSION: i32 = 20260323;
 
 /**
+ * Summary of a package's most recent build from history.
+ */
+#[derive(Clone, Debug)]
+pub struct PkgBuildHistory {
+    /// Build outcome, if the stored value maps to a known variant.
+    pub outcome: Option<PackageStateKind>,
+    /// Disk usage in bytes, if recorded.
+    pub disk_usage: Option<u64>,
+}
+
+/**
  * Lightweight package row without full scan data.
  *
  * Use [`Database::get_full_scan_index`] when the complete
@@ -1946,21 +1957,16 @@ impl Database {
     }
 
     /**
-     * Query disk usage for all packages from build history.
+     * Query the most recent build history for all packages.
      *
-     * For each (pkgpath, pkgbase) finds the most recent build.  If that
-     * build was successful and has recorded disk usage, it is included
-     * in the result.  If the most recent build failed, the package is
-     * excluded so that it routes to the safe (disk) default.
-     *
-     * Returns a map of pkgbase to disk usage in bytes.
-     * Returns an empty map on error.
+     * For each (pkgpath, pkgbase) returns the outcome and disk usage
+     * from the most recent build.  Returns an empty map on error.
      */
-    pub fn disk_usage_by_pkg_all(&self) -> HashMap<String, u64> {
+    pub fn build_history_by_pkg_all(&self) -> HashMap<String, PkgBuildHistory> {
         let conn = match self.history_conn() {
             Ok(c) => c,
             Err(e) => {
-                warn!(error = %e, "disk_usage_by_pkg_all: failed to open history db");
+                warn!(error = %e, "build_history_by_pkg_all: failed to open history db");
                 return HashMap::new();
             }
         };
@@ -1969,7 +1975,6 @@ impl Database {
         let out: &str = HistoryKind::Outcome.into();
         let pkgbase_col: &str = HistoryKind::Pkgbase.into();
         let pkgpath_col: &str = HistoryKind::Pkgpath.into();
-        let success_outcome = PackageStateKind::Success as i32;
 
         let sql = format!(
             "WITH latest AS ( \
@@ -1980,33 +1985,41 @@ impl Database {
                         ) AS rn \
                  FROM build_history h \
              ) \
-             SELECT {pkgbase_col}, {du} FROM latest \
-             WHERE rn = 1 \
-               AND {out} = {success_outcome} \
-               AND {du} IS NOT NULL",
+             SELECT {pkgbase_col}, {out}, {du} FROM latest \
+             WHERE rn = 1",
         );
 
         let mut stmt = match conn.prepare(&sql) {
             Ok(s) => s,
             Err(e) => {
-                warn!(error = %e, "disk_usage_by_pkg_all: failed to prepare query");
+                warn!(error = %e, "build_history_by_pkg_all: failed to prepare query");
                 return HashMap::new();
             }
         };
         let rows = match stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i32>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
         }) {
             Ok(r) => r,
             Err(e) => {
-                warn!(error = %e, "disk_usage_by_pkg_all: query failed");
+                warn!(error = %e, "build_history_by_pkg_all: query failed");
                 return HashMap::new();
             }
         };
 
         let mut result = HashMap::new();
         for row in rows.flatten() {
-            let (pkgbase, size) = row;
-            result.insert(pkgbase, size as u64);
+            let (pkgbase, outcome, du) = row;
+            result.insert(
+                pkgbase,
+                PkgBuildHistory {
+                    outcome: PackageStateKind::from_repr(outcome),
+                    disk_usage: du.map(|v| v as u64),
+                },
+            );
         }
         result
     }
