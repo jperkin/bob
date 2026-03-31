@@ -2503,14 +2503,15 @@ impl Build {
                         }
 
                         let indirect_count = jobs.results.len() - results_before - 1;
+                        let dep_count = jobs.scheduler.dep_count(&pkgname);
 
                         if let Ok(mut p) = progress_clone.lock() {
-                            let msg = if indirect_count > 0 {
+                            let msg = if dep_count > 0 {
                                 format!(
                                     "{} ({}, breaks {})",
                                     pkgname.pkgname(),
                                     format_duration(duration),
-                                    indirect_count
+                                    dep_count
                                 )
                             } else {
                                 format!("{} ({})", pkgname.pkgname(), format_duration(duration))

@@ -398,6 +398,13 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
      * not modify scheduler state.  Use this for display purposes
      * (e.g., `bob status`).
      */
+    /**
+     * Get the static dep_count for a package.
+     */
+    pub fn dep_count(&self, pkg: &K) -> usize {
+        self.dep_counts.get(pkg).copied().unwrap_or(0)
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = ScheduledPackage<K>> + '_ {
         self.ranked.iter().map(move |pkg| ScheduledPackage {
             pkg: pkg.clone(),
