@@ -90,8 +90,12 @@ fn exec(config: &Config) -> Result<()> {
         let prefix = &pkgsrc_env.prefix;
         println!("Entering sandbox {}...", sandbox.path(id).display());
         println!();
-        println!("        You are entering a sandbox shell session.  On exit or ^D the sandbox will");
-        println!("        automatically be destroyed.  Set these variables to aid pkgsrc development:");
+        println!(
+            "        You are entering a sandbox shell session.  On exit or ^D the sandbox will"
+        );
+        println!(
+            "        automatically be destroyed.  Set these variables to aid pkgsrc development:"
+        );
         println!();
         println!("        BINPKG_SITES={}", pkgsrc_env.packages.display());
         println!("        DEPENDS_TARGET=bin-install");
