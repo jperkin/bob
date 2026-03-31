@@ -315,6 +315,27 @@ impl Sandbox {
     }
 
     /**
+     * Resolve a single environment variable using the configured
+     * environment settings, following the same precedence as
+     * `apply_environment`: set overrides inherit overrides host.
+     */
+    pub fn resolve_env(&self, name: &str) -> Option<String> {
+        let Some(env) = self.config.environment() else {
+            return std::env::var(name).ok();
+        };
+        if let Some(value) = env.set.get(name) {
+            return Some(value.clone());
+        }
+        if env.clear {
+            if env.inherit.iter().any(|n| n == name) {
+                return std::env::var(name).ok();
+            }
+            return None;
+        }
+        std::env::var(name).ok()
+    }
+
+    /**
      * Kill all processes in a sandbox by id.
      * This is used for graceful shutdown on Ctrl+C.
      */

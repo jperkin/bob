@@ -86,10 +86,18 @@ fn exec(config: &Config) -> Result<()> {
             bail!("pre-build script failed");
         }
         println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
+        let pkgsrc_env = PkgsrcEnv::fetch(config, &sandbox, Some(id))?;
+        let prefix = &pkgsrc_env.prefix;
         println!("Entering sandbox {}...", sandbox.path(id).display());
         let mut cmd = Command::new("/usr/sbin/chroot");
         cmd.arg(sandbox.path(id)).arg("/bin/sh").arg("-i");
         sandbox.apply_environment(&mut cmd);
+        let prefix_path = format!("{}/sbin:{}/bin", prefix.display(), prefix.display());
+        let path = match sandbox.resolve_env("PATH") {
+            Some(base) => format!("{}:{}", prefix_path, base),
+            None => prefix_path,
+        };
+        cmd.env("PATH", path);
         cmd.env("PS1", format!("sandbox:{} $PWD# ", id));
         cmd.stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
