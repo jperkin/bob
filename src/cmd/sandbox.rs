@@ -89,6 +89,14 @@ fn exec(config: &Config) -> Result<()> {
         let pkgsrc_env = PkgsrcEnv::fetch(config, &sandbox, Some(id))?;
         let prefix = &pkgsrc_env.prefix;
         println!("Entering sandbox {}...", sandbox.path(id).display());
+        println!();
+        println!("        You are entering a sandbox shell session.  On exit or ^D the sandbox will");
+        println!("        automatically be destroyed.  Set these variables to aid pkgsrc development:");
+        println!();
+        println!("        BINPKG_SITES={}", pkgsrc_env.packages.display());
+        println!("        DEPENDS_TARGET=bin-install");
+        println!("        export BINPKG_SITES DEPENDS_TARGET");
+        println!();
         let mut cmd = Command::new("/usr/sbin/chroot");
         cmd.arg(sandbox.path(id)).arg("/bin/sh").arg("-i");
         sandbox.apply_environment(&mut cmd);
