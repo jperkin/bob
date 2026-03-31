@@ -2259,6 +2259,8 @@ impl Build {
                             );
                             let _guard = span.enter();
 
+                            let _ = manager_tx
+                                .send(ChannelCommand::StageUpdate(i, Some("setup".to_string())));
                             let log_dir = pkg.session.config.logdir().join(pkgname.pkgname());
                             let timestamp = epoch_secs();
                             let build_start = Instant::now();
