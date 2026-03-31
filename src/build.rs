@@ -541,23 +541,6 @@ impl<'a> PkgBuilder<'a> {
         }
         fs::create_dir_all(&self.logdir)?;
 
-        // Create work.log and chown to build_user if set
-        let work_log = self.logdir.join("work.log");
-        File::create(&work_log)?;
-        if let Some(ref user) = self.build_user {
-            let bob_log = File::options()
-                .create(true)
-                .append(true)
-                .open(self.logdir.join("bob.log"))?;
-            let bob_log_err = bob_log.try_clone()?;
-            let _ = Command::new("chown")
-                .arg(user)
-                .arg(&work_log)
-                .stdout(bob_log)
-                .stderr(bob_log_err)
-                .status();
-        }
-
         let pkgdir = self.session.config.pkgsrc().join(pkgpath.as_path());
 
         // Pre-clean
@@ -804,10 +787,7 @@ impl<'a> PkgBuilder<'a> {
         extra_flags: &[&str],
     ) -> anyhow::Result<(bool, Duration)> {
         let logfile = self.logdir.join(format!("{}.log", stage.into_str()));
-        let work_log = self.logdir.join("work.log");
-
-        let owned_args =
-            self.make_args(pkgdir, targets, include_make_flags, &work_log, extra_flags);
+        let owned_args = self.make_args(pkgdir, targets, include_make_flags, extra_flags);
 
         let args: Vec<&str> = owned_args.iter().map(|s| s.as_str()).collect();
 
@@ -998,12 +978,10 @@ impl<'a> PkgBuilder<'a> {
         cmd.new_session();
         self.apply_envs(&mut cmd, &[]);
 
-        let work_log = self.logdir.join("work.log");
         let make_args = self.make_args(
             pkgdir,
             &["show-var", &format!("VARNAME={}", varname)],
             true,
-            &work_log,
             &[],
         );
 
@@ -1126,7 +1104,6 @@ impl<'a> PkgBuilder<'a> {
         pkgdir: &Path,
         targets: &[&str],
         include_make_flags: bool,
-        work_log: &Path,
         extra_flags: &[&str],
     ) -> Vec<String> {
         let mut owned_args: Vec<String> =
@@ -1142,8 +1119,6 @@ impl<'a> PkgBuilder<'a> {
                     owned_args.push(flag.clone());
                 }
             }
-
-            owned_args.push(format!("WRKLOG={}", work_log.display()));
         }
 
         owned_args.extend(extra_flags.iter().map(|s| s.to_string()));
@@ -1404,45 +1379,6 @@ impl<'a> MakeQuery<'a> {
         }
     }
 
-    /// Query a bmake variable value.
-    fn var(&self, name: &str) -> Option<String> {
-        let pkgdir = self.session.config.pkgsrc().join(self.pkgpath.as_path());
-
-        let mut cmd = self
-            .session
-            .sandbox
-            .command(self.sandbox_id, self.session.config.make());
-        cmd.new_session();
-        cmd.arg("-C")
-            .arg(&pkgdir)
-            .arg("show-var")
-            .arg(format!("VARNAME={}", name));
-
-        // Pass env vars that may affect the variable value
-        for (key, value) in self.env {
-            cmd.env(key, value);
-        }
-
-        cmd.stderr(Stdio::piped());
-
-        let output = cmd.output().ok()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(
-                status = ?output.status.code(),
-                stderr = %stderr.trim(),
-                name,
-                "show-var failed"
-            );
-            return None;
-        }
-
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-        if value.is_empty() { None } else { Some(value) }
-    }
-
     /// Query multiple bmake variables in a single invocation.
     fn vars(&self, names: &[&str]) -> HashMap<String, String> {
         let pkgdir = self.session.config.pkgsrc().join(self.pkgpath.as_path());
@@ -1493,16 +1429,6 @@ impl<'a> MakeQuery<'a> {
             }
         }
         result
-    }
-
-    /// Query a bmake variable and return as PathBuf.
-    fn var_path(&self, name: &str) -> Option<PathBuf> {
-        self.var(name).map(PathBuf::from)
-    }
-
-    /// Get the WRKDIR for this package.
-    fn wrkdir(&self) -> Option<PathBuf> {
-        self.var_path("WRKDIR")
     }
 
     /// Resolve a path to its actual location on the host filesystem.
@@ -1622,13 +1548,29 @@ impl PackageBuild {
                 error!("Package build failed");
                 stats.disk_usage = measure_wrkdir();
                 stats.wrkobjdir = wrkobjdir;
-                self.cleanup_after_failure(status_tx, pkgname, pkgpath, logdir, patterns, &envs);
+                self.cleanup_after_failure(
+                    status_tx,
+                    pkgname,
+                    pkgpath,
+                    logdir,
+                    patterns,
+                    &envs,
+                    wrkdir.as_deref(),
+                );
                 PkgBuildResult::Failed(stats)
             }
             Err(e) => {
                 error!(error = %e, "Package build error");
                 let disk_usage = measure_wrkdir();
-                self.cleanup_after_failure(status_tx, pkgname, pkgpath, logdir, patterns, &envs);
+                self.cleanup_after_failure(
+                    status_tx,
+                    pkgname,
+                    pkgpath,
+                    logdir,
+                    patterns,
+                    &envs,
+                    wrkdir.as_deref(),
+                );
                 PkgBuildResult::Failed(PkgBuildStats {
                     make_jobs: self.make_jobs,
                     disk_usage,
@@ -1659,6 +1601,7 @@ impl PackageBuild {
      * will perform its own cleanup, while this one handles saving useful
      * logs from the build, etc.
      */
+    #[allow(clippy::too_many_arguments)]
     fn cleanup_after_failure(
         &self,
         status_tx: &Sender<ChannelCommand>,
@@ -1667,6 +1610,7 @@ impl PackageBuild {
         logdir: &Path,
         patterns: &[String],
         envs: &[(String, String)],
+        wrkdir: Option<&Path>,
     ) {
         let _ = status_tx.send(ChannelCommand::StageUpdate(
             self.worker_id,
@@ -1685,15 +1629,18 @@ impl PackageBuild {
         );
 
         /*
-         * Save any user-configured save_wrkdir_patterns.
+         * Copy .work.log and any user-configured save_wrkdir_patterns
+         * from WRKDIR before clean destroys it.
          */
-        if !patterns.is_empty() {
-            let save_start = Instant::now();
-            self.save_wrkdir_files(pkgname, pkgpath, logdir, patterns, envs);
-            trace!(
-                elapsed_ms = save_start.elapsed().as_millis(),
-                "save_wrkdir_files completed"
-            );
+        if let Some(wrkdir_path) = wrkdir {
+            let src = wrkdir_path.join(".work.log");
+            let dest = logdir.join(pkgname).join("work.log");
+            if src.exists() {
+                let _ = fs::copy(&src, &dest);
+            }
+            if !patterns.is_empty() {
+                self.save_wrkdir_files(pkgname, logdir, wrkdir_path, patterns);
+            }
         }
 
         /*
@@ -1711,26 +1658,10 @@ impl PackageBuild {
     fn save_wrkdir_files(
         &self,
         pkgname: &str,
-        pkgpath: &PkgPath,
         logdir: &Path,
+        wrkdir_path: &Path,
         patterns: &[String],
-        envs: &[(String, String)],
     ) {
-        let env_map: HashMap<String, String> = envs.iter().cloned().collect();
-        let make = MakeQuery::new(&self.session, self.sandbox_id, pkgpath, &env_map);
-
-        // Get WRKDIR
-        let wrkdir = match make.wrkdir() {
-            Some(w) => w,
-            None => {
-                debug!(%pkgname, "Could not determine WRKDIR, skipping file save");
-                return;
-            }
-        };
-
-        // Resolve to actual filesystem path
-        let wrkdir_path = make.resolve_path(&wrkdir);
-
         if !wrkdir_path.exists() {
             debug!(%pkgname, wrkdir = %wrkdir_path.display(), "WRKDIR does not exist, skipping file save");
             return;
@@ -1760,8 +1691,8 @@ impl PackageBuild {
         // Walk the wrkdir and find matching files
         let mut saved_count = 0;
         if let Err(e) = walk_and_save(
-            &wrkdir_path,
-            &wrkdir_path,
+            wrkdir_path,
+            wrkdir_path,
             &save_dir,
             &compiled_patterns,
             &mut saved_count,
