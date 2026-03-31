@@ -1112,6 +1112,7 @@ impl Sandbox {
                     copy_dir::copy_dir(src, &dest).with_context(|| {
                         format!("Failed to copy {} to {}", src.display(), dest.display())
                     })?;
+                    fs::set_permissions(&dest, fs::metadata(src)?.permissions())?;
                     None
                 }
                 ActionType::Cmd => {
