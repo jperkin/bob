@@ -381,6 +381,11 @@ impl Database {
              CREATE INDEX idx_builds_package ON builds(package_id);
              CREATE INDEX idx_builds_failed_dep ON builds(failed_dep_id);
 
+             CREATE TABLE scan_failures (
+                 pkgpath TEXT PRIMARY KEY,
+                 error TEXT NOT NULL
+             );
+
              CREATE TABLE metadata (
                  key TEXT PRIMARY KEY,
                  value TEXT NOT NULL
@@ -836,6 +841,37 @@ impl Database {
      * those rows and only operate on the packages emitted by the most recent
      * resolve step.
      */
+    /**
+     * Store scan failures in the database.
+     */
+    pub fn store_scan_failures(&self, summary: &crate::scan::ScanSummary) -> Result<()> {
+        self.conn.execute("DELETE FROM scan_failures", [])?;
+        let mut stmt = self
+            .conn
+            .prepare("INSERT INTO scan_failures (pkgpath, error) VALUES (?1, ?2)")?;
+        for pkg in &summary.packages {
+            if let ScanResult::ScanFail { pkgpath, error } = pkg {
+                stmt.execute(params![pkgpath.as_path().display().to_string(), error])?;
+            }
+        }
+        Ok(())
+    }
+
+    /**
+     * Load scan failures from the database.
+     */
+    pub fn get_scan_failures(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT pkgpath, error FROM scan_failures ORDER BY pkgpath")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn store_resolved_selection(&self, summary: &crate::scan::ScanSummary) -> Result<()> {
         let tx = self.transaction()?;
         self.conn.execute("UPDATE packages SET selected = 0", [])?;

@@ -617,7 +617,11 @@ fn write_text_report(
     let summary = BuildSummary {
         duration,
         results,
-        scanfail: Vec::new(),
+        scanfail: db
+            .get_scan_failures()?
+            .into_iter()
+            .filter_map(|(p, e)| pkgsrc::PkgPath::new(&p).ok().map(|pp| (pp, e)))
+            .collect(),
     };
 
     use PackageStateKind::*;
@@ -864,7 +868,11 @@ fn write_html_report(db: &Database, logdir: &Path, path: &Path, meta: &ReportMet
     let summary = BuildSummary {
         duration,
         results,
-        scanfail: Vec::new(),
+        scanfail: db
+            .get_scan_failures()?
+            .into_iter()
+            .filter_map(|(p, e)| pkgsrc::PkgPath::new(&p).ok().map(|pp| (pp, e)))
+            .collect(),
     };
 
     let mut file = std::fs::File::create(path)?;

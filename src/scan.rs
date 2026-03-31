@@ -1711,6 +1711,7 @@ impl Scan {
         db.store_resolved_selection(&result)?;
         db.store_resolved_deps(&result)?;
         db.store_scan_skipped(&result)?;
+        db.store_scan_failures(&result)?;
         println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
 
         let errors: Vec<_> = result.errors().collect();
