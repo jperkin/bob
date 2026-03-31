@@ -514,7 +514,6 @@ const BUILD_PHASES: &[(&str, &str)] = &[
 struct FailedPackageInfo<'a> {
     result: &'a BuildResult,
     breaks_count: usize,
-    failed_phase: Option<String>,
     failed_log: Option<String>,
 }
 
@@ -695,25 +694,18 @@ fn write_text_report(
 
     if !failed.is_empty() {
         writeln!(file)?;
-        writeln!(
-            file,
-            "{:<30} {:>6}  {:<12} Maintainer",
-            "Build Failures", "Breaks", "Phase"
-        )?;
+        writeln!(file, "{:<40} {:>6}  Maintainer", "Build Failures", "Breaks")?;
         writeln!(file, "{}", "-".repeat(78))?;
         for (result, breaks) in &failed {
-            let phase =
-                read_failed_phase(&logdir.join(result.pkgname.pkgname())).unwrap_or_default();
             let maintainer = maintainers
                 .get(result.pkgname.pkgname())
                 .map(|s| s.as_str())
                 .unwrap_or_default();
             writeln!(
                 file,
-                "{:<30} {:>6}  {:<12} {}",
+                "{:<40} {:>6}  {}",
                 result.pkgname.pkgname(),
                 breaks,
-                phase,
                 maintainer
             )?;
         }
@@ -817,13 +809,13 @@ th { color: #d35400; font-size: 13px; background: none; border-bottom: 1px solid
 .header-right a:hover { color: #f37021; }\n\
 .var-columns { margin-bottom: 14px; text-align: center; }\n\
 .var-columns table { display: inline-table; vertical-align: top; margin-right: 24px; text-align: left; }\n\
-.data { width: 100%; }\n\
+.data { width: 100%; font-size: 15px; }\n\
 .vars th, .vars td, .vars .vk { font-family: \"Consolas\", \"Monaco\", \"Courier New\", monospace; }\n\
 .vars th { text-align: left; color: #d35400; font-size: 13px; background: none; border-bottom: 1px solid #f37021; padding: 3px 10px 5px 10px; font-family: \"Trebuchet MS\", verdana, sans-serif; }\n\
 .vars .vk { color: #8a4500; font-weight: bold; font-size: 13px; }\n\
 .vars td { font-size: 13px; border-bottom: 1px solid #f0ebe6; }\n\
-.phase { font-size: 13px; margin-right: 6px; color: #c05500; }\n\
-.phase.f { color: #8a4500; }\n\
+.phase { font-size: 13px; margin-right: 6px; }\n\
+a:visited { color: #8a4500; }\n\
 .indirect { color: #aaa; }\n\
 .reason { color: #888; font-size: 13px; }\n\
 .col-pkg { width: 18%; }\n\
@@ -893,8 +885,7 @@ fn write_html_report(db: &Database, logdir: &Path, path: &Path, meta: &ReportMet
                 .copied()
                 .unwrap_or(0);
             let pkg_log_dir = logdir.join(result.pkgname.pkgname());
-            let failed_phase = read_failed_phase(&pkg_log_dir);
-            let failed_log = failed_phase.as_ref().and_then(|phase| {
+            let failed_log = read_failed_phase(&pkg_log_dir).and_then(|phase| {
                 BUILD_PHASES
                     .iter()
                     .find(|(name, _)| *name == phase)
@@ -903,7 +894,6 @@ fn write_html_report(db: &Database, logdir: &Path, path: &Path, meta: &ReportMet
             FailedPackageInfo {
                 result,
                 breaks_count,
-                failed_phase,
                 failed_log,
             }
         })
@@ -1187,7 +1177,7 @@ fn write_vcs_table(file: &mut std::fs::File, vcs: &bob::vcs::VcsInfo) -> Result<
     Ok(())
 }
 
-fn generate_phase_links(pkg_name: &str, log_dir: &Path, failed_phase: Option<&str>) -> String {
+fn generate_phase_links(pkg_name: &str, log_dir: &Path) -> String {
     if !log_dir.exists() {
         return String::new();
     }
@@ -1195,17 +1185,10 @@ fn generate_phase_links(pkg_name: &str, log_dir: &Path, failed_phase: Option<&st
     for (phase_name, log_file) in BUILD_PHASES {
         let log_path = log_dir.join(log_file);
         if log_path.exists() {
-            if failed_phase == Some(*phase_name) {
-                links.push(format!(
-                    "<a href=\"{}/{}\" class=\"phase f\">{}</a>",
-                    pkg_name, log_file, phase_name
-                ));
-            } else {
-                links.push(format!(
-                    "<a href=\"{}/{}\" class=\"phase\">{}</a>",
-                    pkg_name, log_file, phase_name
-                ));
-            }
+            links.push(format!(
+                "<a href=\"{}/{}\" class=\"phase\">{}</a>",
+                pkg_name, log_file, phase_name
+            ));
         }
     }
     links.join(" ")
@@ -1292,7 +1275,7 @@ fn write_failed_table(
         };
 
         let log_dir = logdir.join(pkg_name);
-        let phase_links = generate_phase_links(pkg_name, &log_dir, info.failed_phase.as_deref());
+        let phase_links = generate_phase_links(pkg_name, &log_dir);
 
         writeln!(
             file,
