@@ -283,11 +283,8 @@ pub fn format_duration(d: Duration) -> String {
 fn format_status_line(state: &ProgressState, msg: (&str, &str), width: usize) -> Line<'static> {
     let ratio = state.progress_ratio();
     let elapsed_str = format_duration_short(state.elapsed());
-    let counts = format!(
-        "{}/{}",
-        state.dispatched + state.cached + state.skipped,
-        state.total
-    );
+    let done = (state.dispatched + state.cached + state.skipped).to_string();
+    let total = state.total.to_string();
 
     let (msg_bold, msg_rest) = msg;
     let has_msg = !msg_bold.is_empty() || !msg_rest.is_empty();
@@ -297,7 +294,8 @@ fn format_status_line(state: &ProgressState, msg: (&str, &str), width: usize) ->
         0
     };
     let bar_chrome = " [".len() + "] ".len();
-    let fixed = STATUS_WIDTH + bar_chrome + counts.len() + 1 + elapsed_str.len() + msg_total_len;
+    let counts_len = done.len() + 1 + total.len();
+    let fixed = STATUS_WIDTH + bar_chrome + counts_len + 1 + elapsed_str.len() + msg_total_len;
     let bar_width = width.saturating_sub(fixed).clamp(1, 30);
     let padding = width.saturating_sub(fixed + bar_width);
 
@@ -316,19 +314,20 @@ fn format_status_line(state: &ProgressState, msg: (&str, &str), width: usize) ->
     if !has_msg {
         Line::from(vec![
             title,
-            Span::raw(format!(" [{}] {} {}", bar, counts, elapsed_str)),
+            Span::raw(format!(" [{}] ", bar)),
+            Span::styled(done, bold),
+            Span::raw("/"),
+            Span::styled(total, bold),
+            Span::raw(format!(" {}", elapsed_str)),
         ])
     } else {
         let mut spans = vec![
             title,
-            Span::raw(format!(
-                " [{}] {} {}{:pad$} (",
-                bar,
-                counts,
-                elapsed_str,
-                "",
-                pad = padding
-            )),
+            Span::raw(format!(" [{}] ", bar)),
+            Span::styled(done, bold),
+            Span::raw("/"),
+            Span::styled(total, bold),
+            Span::raw(format!(" {}{:pad$} (", elapsed_str, "", pad = padding)),
         ];
         if !msg_bold.is_empty() {
             spans.push(Span::styled(msg_bold.to_string(), bold));
