@@ -1056,6 +1056,20 @@ impl Database {
     }
 
     /**
+     * Check if a package has a successful build result.
+     */
+    pub fn is_successful(&self, pkgname: &str) -> Result<bool> {
+        let success = PackageStateKind::Success as i32;
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM builds b
+             JOIN packages p ON b.package_id = p.id
+             WHERE p.pkgname = ?1 AND b.outcome = ?2",
+            params![pkgname, success],
+            |row| row.get::<_, i64>(0),
+        )? > 0)
+    }
+
+    /**
      * Store a build result by pkgname.
      */
     pub fn store_build_by_name(&self, result: &BuildResult) -> Result<()> {

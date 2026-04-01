@@ -200,6 +200,10 @@ pub fn check_up_to_date(
         let pkgname = pkg.pkgname().pkgname();
         match result {
             Ok(None) => {
+                if db.is_successful(pkgname)? {
+                    up_to_date_count += 1;
+                    continue;
+                }
                 let build_result = bob::BuildResult {
                     pkgname: pkg.pkgname().clone(),
                     pkgpath: Some(pkg.pkgpath.clone()),
