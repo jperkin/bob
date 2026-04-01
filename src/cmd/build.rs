@@ -269,10 +269,12 @@ pub fn run_build_with(
     tracing::debug!("Calling build.start()");
     let build_start_time = std::time::Instant::now();
     let mut summary = build.start(state, db)?;
+    let build_elapsed = build_start_time.elapsed();
     tracing::debug!(
-        elapsed_ms = build_start_time.elapsed().as_millis(),
+        elapsed_ms = build_elapsed.as_millis(),
         "build.start() returned"
     );
+    db.add_build_duration(build_elapsed)?;
 
     /*
      * Check if we were interrupted.  All builds that completed before

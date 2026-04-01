@@ -246,6 +246,40 @@ impl PackageCounts {
     pub fn add(&mut self, state: &PackageState) {
         self.0[state.kind() as usize] += 1;
     }
+
+    /// Packages that built successfully.
+    pub fn succeeded(&self) -> usize {
+        self[PackageStateKind::Success]
+    }
+
+    /// Packages that failed to build.
+    pub fn failed(&self) -> usize {
+        self[PackageStateKind::Failed]
+    }
+
+    /// Packages whose existing binary was up to date.
+    pub fn up_to_date(&self) -> usize {
+        self[PackageStateKind::UpToDate]
+    }
+
+    /// Packages not attempted: skip/fail reasons and indirect
+    /// dependents of failed or masked packages.  Does not include
+    /// Unresolved (those appear in scan failures).
+    pub fn masked(&self) -> usize {
+        use PackageStateKind::*;
+        self[PreSkipped]
+            + self[PreFailed]
+            + self[IndirectPreSkipped]
+            + self[IndirectPreFailed]
+            + self[IndirectUnresolved]
+            + self[IndirectFailed]
+    }
+
+    /// Total packages: succeeded + failed + up-to-date + masked.
+    /// Excludes scan failures and unresolved (listed separately).
+    pub fn total(&self) -> usize {
+        self.succeeded() + self.failed() + self.up_to_date() + self.masked()
+    }
 }
 
 impl std::ops::Index<PackageStateKind> for PackageCounts {
@@ -257,12 +291,9 @@ impl std::ops::Index<PackageStateKind> for PackageCounts {
 
 impl std::fmt::Display for PackageState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Unresolved(detail) => write!(f, "Could not resolve: {}", detail),
-            other => match other.detail() {
-                Some(d) if !d.is_empty() => write!(f, "{}", d),
-                _ => write!(f, "{}", other.status()),
-            },
+        match self.detail() {
+            Some(d) if !d.is_empty() => write!(f, "{}", d),
+            _ => write!(f, "{}", self.status()),
         }
     }
 }

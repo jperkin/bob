@@ -37,15 +37,16 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use glob::Pattern;
 use tracing::{debug, info};
 
+use bob::PackageState;
 use bob::build::{BuildResult, BuildSummary, PkgBuildStats};
 use bob::config::{Config, Publish, PublishPackages};
 use bob::db::Database;
-use bob::{PackageState, PackageStateKind};
 
 struct PublishResult {
     uploaded: usize,
@@ -545,48 +546,6 @@ fn write_text_report(
         .platform()
         .unwrap_or_else(|| "unknown".to_string());
 
-    let mut header_fields: Vec<(&str, String)> = vec![("Platform", platform)];
-    if let Some(cc) = m.get("CC_VERSION") {
-        header_fields.push(("Compiler", cc.clone()));
-    }
-    if let Some(url) = meta
-        .vcs_info
-        .web_url()
-        .or_else(|| meta.vcs_info.remote_url.clone())
-    {
-        let mut parts = Vec::new();
-        if let Some(branch) = &meta.vcs_info.remote_branch {
-            parts.push(format!("branch: {}", branch));
-        }
-        if let Some(rev) = &meta.vcs_info.revision {
-            parts.push(format!("rev: {}", rev));
-        }
-        if parts.is_empty() {
-            header_fields.push(("Repository", url));
-        } else {
-            header_fields.push(("Repository", format!("{} ({})", url, parts.join(", "))));
-        }
-    }
-    if let Some(url) = report_url {
-        header_fields.push(("Report", format!("{}/report.html", url)));
-    }
-
-    let max_key = header_fields
-        .iter()
-        .map(|(k, _)| k.len())
-        .max()
-        .unwrap_or(0);
-    for (key, value) in &header_fields {
-        writeln!(
-            file,
-            "{:<width$} {}",
-            format!("{}:", key),
-            value,
-            width = max_key + 1
-        )?;
-    }
-    writeln!(file)?;
-
     let mut results = db.get_all_build_results()?;
     let duration = db.get_build_duration()?;
 
@@ -606,28 +565,26 @@ fn write_text_report(
         });
     }
 
+    let mut scanfail: Vec<(pkgsrc::PkgPath, String)> = db
+        .get_scan_failures()?
+        .into_iter()
+        .filter_map(|(p, e)| pkgsrc::PkgPath::new(&p).ok().map(|pp| (pp, e)))
+        .collect();
+    for r in &results {
+        if let PackageState::Unresolved(reason) = &r.state {
+            if let Some(pp) = &r.pkgpath {
+                scanfail.push((pp.clone(), reason.clone()));
+            }
+        }
+    }
+
     let summary = BuildSummary {
         duration,
         results,
-        scanfail: db
-            .get_scan_failures()?
-            .into_iter()
-            .filter_map(|(p, e)| pkgsrc::PkgPath::new(&p).ok().map(|pp| (pp, e)))
-            .collect(),
+        scanfail,
     };
 
-    use PackageStateKind::*;
     let c = summary.counts();
-    let s = &c.states;
-    let skipped = s[UpToDate]
-        + s[PreSkipped]
-        + s[PreFailed]
-        + s[Unresolved]
-        + s[IndirectPreSkipped]
-        + s[IndirectPreFailed]
-        + s[IndirectUnresolved]
-        + s[IndirectFailed];
-    let total = s[Success] + s[Failed] + skipped + c.scanfail;
 
     let dur_secs = duration.as_secs();
     let hours = dur_secs / 3600;
@@ -641,21 +598,65 @@ fn write_text_report(
         format!("{}s", seconds)
     };
 
-    writeln!(file, "Total:      {:>12}", total)?;
-    writeln!(file, "Succeeded:  {:>12}", s[Success])?;
-    writeln!(file, "Failed:     {:>12}", s[Failed])?;
-    writeln!(file, "Skipped:    {:>12}", skipped)?;
-    if c.scanfail > 0 {
-        writeln!(file, "Scan fail:  {:>12}", c.scanfail)?;
+    if let Some(url) = report_url {
+        writeln!(file, "URL: {}/report.html", url)?;
+        writeln!(file)?;
     }
-    writeln!(file, "Duration:   {:>12}", duration_str)?;
+
+    let mut right: Vec<(&str, String)> = vec![("Platform", platform)];
+    if let Some(cc) = m.get("CC_VERSION") {
+        right.push(("Compiler", cc.clone()));
+    }
+    if let Some(url) = meta
+        .vcs_info
+        .web_url()
+        .or_else(|| meta.vcs_info.remote_url.clone())
+    {
+        right.push(("Repository", url));
+    }
+    if let Some(branch) = &meta.vcs_info.remote_branch {
+        match &meta.vcs_info.revision {
+            Some(rev) => right.push(("Branch", format!("{} (rev: {})", branch, rev))),
+            None => right.push(("Branch", branch.clone())),
+        }
+    }
+    right.push(("Duration", duration_str));
+
+    let left = [
+        ("Total", c.states.total()),
+        ("Succeeded", c.states.succeeded()),
+        ("Failed", c.states.failed()),
+        ("UpToDate", c.states.up_to_date()),
+        ("Masked", c.states.masked()),
+    ];
+
+    for (i, (lk, lv)) in left.iter().enumerate() {
+        let right_part = if i < right.len() {
+            format!("  {:<13}{}", format!("{}:", right[i].0), right[i].1)
+        } else {
+            String::new()
+        };
+        writeln!(file, "{:<12}{:>5}{}", format!("{}:", lk), lv, right_part)?;
+    }
 
     if c.scanfail > 0 {
+        let max_path = summary
+            .scanfail
+            .iter()
+            .map(|(p, _)| p.as_path().display().to_string().len())
+            .max()
+            .unwrap_or(0);
         writeln!(file)?;
-        writeln!(file, "{:<40} Error", "Scan Failures")?;
-        writeln!(file, "{}", "-".repeat(78))?;
+        writeln!(file, "Scan Failures")?;
+        writeln!(file, "{}", "-".repeat(76))?;
         for (pkgpath, error_msg) in &summary.scanfail {
-            writeln!(file, "{:<40} {}", pkgpath.as_path().display(), error_msg)?;
+            writeln!(
+                file,
+                "{:<width$}  {}",
+                pkgpath.as_path().display(),
+                error_msg,
+                width = max_path
+            )?;
         }
     }
 
@@ -687,18 +688,23 @@ fn write_text_report(
 
     if !failed.is_empty() {
         writeln!(file)?;
-        writeln!(file, "{:<40} {:>6}  Maintainer", "Build Failures", "Breaks")?;
-        writeln!(file, "{}", "-".repeat(78))?;
+        writeln!(file, "{:<44} {:>6}  Maintainer", "Build Failures", "Breaks")?;
+        writeln!(file, "{}", "-".repeat(76))?;
         for (result, breaks) in &failed {
             let maintainer = maintainers
                 .get(result.pkgname.pkgname())
                 .map(|s| s.as_str())
                 .unwrap_or_default();
+            let breaks_str = if *breaks > 0 {
+                breaks.to_string()
+            } else {
+                String::new()
+            };
             writeln!(
                 file,
-                "{:<40} {:>6}  {}",
+                "{:<44} {:>6}  {}",
                 result.pkgname.pkgname(),
-                breaks,
+                breaks_str,
                 maintainer
             )?;
         }
@@ -784,41 +790,47 @@ const REPORT_SVG: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/200
 const VARS_SVG: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' width='20' height='20'%3E%3Cpath fill='%23caa080' d='M4 1h8a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V2a1 1 0 011-1zm1 3v1h6V4H5zm0 2.5v1h6v-1H5zm0 2.5v1h4V9H5z'/%3E%3C/svg%3E";
 
 const REPORT_CSS: &str = "\
-body { font-family: \"Trebuchet MS\", verdana, sans-serif; font-size: 14px; color: #444; margin: 1em 4%; background: #fefefe; line-height: 1.45; }\n\
+body { font-family: \"Trebuchet MS\", Verdana, sans-serif; font-size: 0.875rem; color: #444; margin: 1em 4%; background: #fefefe; line-height: 1.45; }\n\
 a { color: #8a4500; text-decoration: none; }\n\
 a:hover { color: #f37021; text-decoration: underline; }\n\
-h1 { font-size: 24px; margin: 0; color: #333; text-align: center; }\n\
-table { border-collapse: collapse; margin-bottom: 14px; }\n\
-th, td { padding: 4px 10px; border-bottom: 1px solid #e8e0d8; text-align: left; font-size: 14px; }\n\
-th, .col-logs { white-space: nowrap; }\n\
-th { color: #d35400; font-size: 13px; background: none; border-bottom: 1px solid #f37021; cursor: pointer; }\n\
+a:visited { color: #8a4500; }\n\
+table { border-collapse: collapse; margin-bottom: 1em; }\n\
+th, td { padding: 0.25em 0.625em; text-align: left; }\n\
+th { white-space: nowrap; color: #d35400; background: none; border-bottom: 1px solid #f37021; cursor: pointer; user-select: none; }\n\
+th:focus-visible { outline: 2px solid #f37021; outline-offset: -2px; }\n\
+th[aria-sort=\"ascending\"]::after { content: \" \\25B2\"; font-size: 0.75em; }\n\
+th[aria-sort=\"descending\"]::after { content: \" \\25BC\"; font-size: 0.75em; }\n\
+.data { font-size: 0.9375rem; white-space: nowrap; }\n\
 .data tbody tr:nth-child(even) td { background: #fdfaf7; }\n\
 .r { text-align: right; }\n\
-.header { margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid #e8ddd4; position: relative; }\n\
-.header-icons { position: absolute; top: 0; }\n\
-.header-left { left: 0; }\n\
-.header-right { right: 0; }\n\
-.header-right a { margin-left: 10px; color: #caa080; }\n\
-.header-right a:hover { color: #f37021; }\n\
-.var-columns { margin-bottom: 14px; text-align: center; }\n\
-.var-columns table { display: inline-table; vertical-align: top; margin-right: 24px; text-align: left; }\n\
-.data { width: 100%; font-size: 15px; }\n\
-.vars th, .vars td, .vars .vk { font-family: \"Consolas\", \"Monaco\", \"Courier New\", monospace; }\n\
-.vars th { text-align: left; color: #d35400; font-size: 13px; background: none; border-bottom: 1px solid #f37021; padding: 3px 10px 5px 10px; font-family: \"Trebuchet MS\", verdana, sans-serif; }\n\
-.vars .vk { color: #8a4500; font-weight: bold; font-size: 13px; }\n\
-.vars td { font-size: 13px; border-bottom: 1px solid #f0ebe6; }\n\
-.phase { font-size: 13px; margin-right: 6px; }\n\
-a:visited { color: #8a4500; }\n\
+.header { margin-bottom: 1em; padding-bottom: 0.625em; border-bottom: 1px solid #e8ddd4; }\n\
+.header-table { width: 100%; white-space: nowrap; border: none; margin: 0; }\n\
+.header-table td { border: none; padding: 0 0.5em; vertical-align: middle; }\n\
+.header-icons { width: 1%; }\n\
+.header-icons a { color: #caa080; margin-left: 0.375em; }\n\
+.header-icons a:hover { color: #f37021; }\n\
+.hdr-label { font-size: 1.5rem; color: #333; }\n\
+.hdr-platform { font-size: 1.5rem; color: #333; text-align: center; }\n\
+.hdr-date { font-size: 1.5rem; color: #333; text-align: right; }\n\
+.var-columns { margin-bottom: 1em; text-align: center; }\n\
+.var-columns table { display: inline-table; vertical-align: top; margin-right: 1.5em; text-align: left; }\n\
+.vars th, .vars td, .vars .vk { font-family: Consolas, Monaco, \"Courier New\", monospace; }\n\
+.vars th { text-align: left; color: #d35400; font-size: 0.75rem; background: none; border-bottom: 1px solid #f37021; padding: 0.1875em 0.625em 0.3125em; font-family: \"Trebuchet MS\", Verdana, sans-serif; cursor: default; }\n\
+.vars .vk { color: #8a4500; font-weight: bold; font-size: 0.75rem; }\n\
+.vars td { font-size: 0.75rem; }\n\
+.stats td:not(.vk) { text-align: right; }\n\
+.phase { margin-right: 0.375em; }\n\
 .indirect { color: #aaa; }\n\
-.reason { color: #888; font-size: 13px; }\n\
-.col-pkg { width: 18%; }\n\
-.col-path { width: 14%; }\n\
-.col-maint { width: 14%; }\n\
-.col-dur { width: 8%; }\n\
-@media (max-width: 1200px) { .col-maint { display: none; } }\n\
-@media (max-width: 1000px) { .col-dur { display: none; } }\n\
-@media (max-width: 900px) { .col-status { display: none; } }\n\
-@media (max-width: 700px) { .col-path { display: none; } body { margin: 1em 1%; } }\n";
+.reason { color: #888; }\n\
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }\n\
+.col-err { width: 75%; }\n\
+.col-pkg span, .col-path span { display: inline-block; max-width: 18em; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }\n\
+.col-breaks, .col-dur { text-align: right; }\n\
+@media (max-width: 100em) { .col-status { display: none; } }\n\
+@media (max-width: 93em) { .col-maint { display: none; } }\n\
+@media (max-width: 80em) { .col-dur { display: none; } }\n\
+@media (max-width: 75em) { .col-path { display: none; } }\n\
+@media (max-width: 58em) { .col-breaks { display: none; } }\n";
 
 fn write_html_report(db: &Database, logdir: &Path, path: &Path, meta: &ReportMeta) -> Result<()> {
     let mut results = db.get_all_build_results()?;
@@ -850,14 +862,23 @@ fn write_html_report(db: &Database, logdir: &Path, path: &Path, meta: &ReportMet
         });
     }
 
+    let mut scanfail: Vec<(pkgsrc::PkgPath, String)> = db
+        .get_scan_failures()?
+        .into_iter()
+        .filter_map(|(p, e)| pkgsrc::PkgPath::new(&p).ok().map(|pp| (pp, e)))
+        .collect();
+    for r in &results {
+        if let PackageState::Unresolved(reason) = &r.state {
+            if let Some(pp) = &r.pkgpath {
+                scanfail.push((pp.clone(), reason.clone()));
+            }
+        }
+    }
+
     let summary = BuildSummary {
         duration,
         results,
-        scanfail: db
-            .get_scan_failures()?
-            .into_iter()
-            .filter_map(|(p, e)| pkgsrc::PkgPath::new(&p).ok().map(|pp| (pp, e)))
-            .collect(),
+        scanfail,
     };
 
     let mut file = std::fs::File::create(path)?;
@@ -900,12 +921,33 @@ fn write_html_report(db: &Database, logdir: &Path, path: &Path, meta: &ReportMet
             .then_with(|| a.result.pkgname.pkgname().cmp(b.result.pkgname.pkgname()))
     });
 
-    let title = format!("Build Report {}", meta.build_id);
+    let display_date = match chrono::NaiveDateTime::parse_from_str(meta.build_id, "%Y%m%dT%H%M%SZ")
+    {
+        Ok(dt) => dt.format("%Y-%m-%d %H:%M").to_string(),
+        Err(_) => meta.build_id.to_string(),
+    };
+    let os = m
+        .get("OS_VARIANT")
+        .or_else(|| m.get("OPSYS"))
+        .context("neither OS_VARIANT nor OPSYS found in metadata")?;
+    let ver = m
+        .get("LOWER_VARIANT_VERSION")
+        .or_else(|| m.get("OS_VERSION"))
+        .context("neither LOWER_VARIANT_VERSION nor OS_VERSION found in metadata")?;
+    let arch = m
+        .get("MACHINE_ARCH")
+        .context("MACHINE_ARCH not found in metadata")?;
+    let platform = format!("{} {}/{}", os, ver, arch);
+    let title = format!("Build Report - {} - {}", platform, display_date);
 
     writeln!(file, "<!DOCTYPE html>")?;
     writeln!(file, "<html lang=\"en\">")?;
     writeln!(file, "<head>")?;
     writeln!(file, "<meta charset=\"UTF-8\">")?;
+    writeln!(
+        file,
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    )?;
     writeln!(file, "<title>{}</title>", escape_html(&title))?;
     writeln!(file, "<style>")?;
     write!(file, "{}", REPORT_CSS)?;
@@ -914,19 +956,24 @@ fn write_html_report(db: &Database, logdir: &Path, path: &Path, meta: &ReportMet
     writeln!(file, "</head>")?;
     writeln!(file, "<body>")?;
 
-    write_header(&mut file, &title)?;
+    write_header(&mut file, &platform, &display_date)?;
 
     writeln!(file, "<div class=\"var-columns\">")?;
     write_statistics_table(&mut file, &summary)?;
     write_platform_table(&mut file, m)?;
     write_paths_table(&mut file, m, &meta.pkgsrc_env.prefix)?;
-    if meta.vcs_info.is_detected() {
-        write_vcs_table(&mut file, meta.vcs_info)?;
-    }
+    write_misc_table(&mut file, meta.vcs_info, summary.duration)?;
     writeln!(file, "</div>")?;
 
+    let pkgpath_base = meta.vcs_info.web_url().and_then(|base| {
+        meta.vcs_info
+            .revision_full
+            .as_ref()
+            .map(|rev| format!("{}/tree/{}", base, rev))
+    });
+
     if !summary.scanfail.is_empty() {
-        write_scanfail_table(&mut file, &summary.scanfail)?;
+        write_scanfail_table(&mut file, &summary.scanfail, pkgpath_base.as_deref())?;
     }
 
     let mut maintainers: HashMap<String, String> = HashMap::new();
@@ -939,8 +986,13 @@ fn write_html_report(db: &Database, logdir: &Path, path: &Path, meta: &ReportMet
             }
         }
     }
-
-    write_failed_table(&mut file, &failed_info, &maintainers, logdir)?;
+    write_failed_table(
+        &mut file,
+        &failed_info,
+        &maintainers,
+        logdir,
+        pkgpath_base.as_deref(),
+    )?;
 
     writeln!(file, "</body>")?;
     writeln!(file, "</html>")?;
@@ -992,18 +1044,34 @@ fn write_sort_script(file: &mut std::fs::File) -> Result<()> {
         file,
         "  t.setAttribute('data-sort-desc', desc ? '1' : '0');"
     )?;
+    writeln!(file, "  var h = t.tHead.rows[0].cells;")?;
+    writeln!(
+        file,
+        "  for (var i = 0; i < h.length; i++) h[i].setAttribute('aria-sort', i == col ? (desc ? 'descending' : 'ascending') : 'none');"
+    )?;
     writeln!(file, "}}")?;
     writeln!(file, "</script>")?;
     Ok(())
 }
 
-fn write_header(file: &mut std::fs::File, title: &str) -> Result<()> {
+fn write_header(file: &mut std::fs::File, platform: &str, date: &str) -> Result<()> {
     writeln!(file, "<div class=\"header\">")?;
+    writeln!(file, "<table class=\"header-table\"><tr>")?;
     writeln!(
         file,
-        "<div class=\"header-icons header-left\"><a href=\"https://pkgsrc.org/\"><img src=\"https://www.pkgsrc.org/img/pkgsrc-square.png\" alt=\"pkgsrc\" height=\"36\"></a></div>"
+        "<td class=\"header-icons\"><a href=\"https://pkgsrc.org/\"><img src=\"https://www.pkgsrc.org/img/pkgsrc-square.png\" alt=\"pkgsrc\" height=\"36\"></a></td>"
     )?;
-    write!(file, "<div class=\"header-icons header-right\">")?;
+    writeln!(file, "<td class=\"hdr-label\">Build Report</td>")?;
+    writeln!(
+        file,
+        "<td class=\"hdr-platform\">{}</td>",
+        escape_html(platform)
+    )?;
+    writeln!(file, "<td class=\"hdr-date\">{}</td>", escape_html(date))?;
+    write!(
+        file,
+        "<td class=\"header-icons\" style=\"text-align:right\">"
+    )?;
     write!(
         file,
         "<a href=\"report.zst\" title=\"Machine-readable report\"><img src=\"{}\" alt=\"Report\"></a>",
@@ -1019,9 +1087,34 @@ fn write_header(file: &mut std::fs::File, title: &str) -> Result<()> {
         "<a href=\"https://github.com/jperkin/bob\" title=\"bob on GitHub\"><img src=\"{}\" alt=\"GitHub\"></a>",
         GITHUB_SVG
     )?;
+    writeln!(file, "</td>")?;
+    writeln!(file, "</tr></table>")?;
     writeln!(file, "</div>")?;
-    writeln!(file, "<h1>{}</h1>", escape_html(title))?;
-    writeln!(file, "</div>")?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_sortable_th(
+    file: &mut std::fs::File,
+    table_id: &str,
+    col: usize,
+    sort_type: &str,
+    label: &str,
+    class: &str,
+    extra_sort: &str,
+    aria_sort: &str,
+) -> Result<()> {
+    let cls = if class.is_empty() {
+        String::new()
+    } else {
+        format!(" class=\"{}\"", class)
+    };
+    writeln!(
+        file,
+        "<th{cls} scope=\"col\" role=\"columnheader\" tabindex=\"0\" aria-sort=\"{aria_sort}\" \
+         onclick=\"sortTable('{table_id}', {col}, '{sort_type}'{extra_sort})\" \
+         onkeydown=\"if(event.key==='Enter')this.click()\">{label}</th>",
+    )?;
     Ok(())
 }
 
@@ -1036,42 +1129,15 @@ fn write_var_row(file: &mut std::fs::File, key: &str, value: &str) -> Result<()>
 }
 
 fn write_statistics_table(file: &mut std::fs::File, summary: &BuildSummary) -> Result<()> {
-    use PackageStateKind::*;
-
-    let duration_secs = summary.duration.as_secs();
-    let hours = duration_secs / 3600;
-    let minutes = (duration_secs % 3600) / 60;
-    let seconds = duration_secs % 60;
-    let duration_str = if hours > 0 {
-        format!("{}h {}m {}s", hours, minutes, seconds)
-    } else if minutes > 0 {
-        format!("{}m {}s", minutes, seconds)
-    } else {
-        format!("{}s", seconds)
-    };
-
     let c = summary.counts();
-    let s = &c.states;
-    let skipped_count = s[UpToDate]
-        + s[PreSkipped]
-        + s[PreFailed]
-        + s[Unresolved]
-        + s[IndirectPreSkipped]
-        + s[IndirectPreFailed]
-        + s[IndirectUnresolved]
-        + s[IndirectFailed];
-    let total = s[Success] + s[Failed] + skipped_count + c.scanfail;
 
-    writeln!(file, "<table class=\"vars\">")?;
+    writeln!(file, "<table class=\"vars stats\">")?;
     writeln!(file, "<tr><th colspan=\"2\">Statistics</th></tr>")?;
-    write_var_row(file, "Total", &total.to_string())?;
-    write_var_row(file, "Succeeded", &s[Success].to_string())?;
-    write_var_row(file, "Failed", &s[Failed].to_string())?;
-    write_var_row(file, "Skipped", &skipped_count.to_string())?;
-    if c.scanfail > 0 {
-        write_var_row(file, "Scan failed", &c.scanfail.to_string())?;
-    }
-    write_var_row(file, "Duration", &duration_str)?;
+    write_var_row(file, "Total", &c.states.total().to_string())?;
+    write_var_row(file, "Succeeded", &c.states.succeeded().to_string())?;
+    write_var_row(file, "Failed", &c.states.failed().to_string())?;
+    write_var_row(file, "UpToDate", &c.states.up_to_date().to_string())?;
+    write_var_row(file, "Masked", &c.states.masked().to_string())?;
     writeln!(file, "</table>")?;
     Ok(())
 }
@@ -1122,11 +1188,19 @@ fn write_paths_table(
     Ok(())
 }
 
-fn write_vcs_table(file: &mut std::fs::File, vcs: &bob::vcs::VcsInfo) -> Result<()> {
+fn write_misc_table(
+    file: &mut std::fs::File,
+    vcs: &bob::vcs::VcsInfo,
+    duration: Duration,
+) -> Result<()> {
     writeln!(file, "<table class=\"vars\">")?;
-    writeln!(file, "<tr><th colspan=\"2\">Version Control</th></tr>")?;
+    writeln!(file, "<tr><th colspan=\"2\">Miscellaneous</th></tr>")?;
 
-    let web_url = vcs.web_url();
+    let web_url = if vcs.is_detected() {
+        vcs.web_url()
+    } else {
+        None
+    };
     let web_base = web_url.as_deref();
 
     if let Some(base) = web_base {
@@ -1165,6 +1239,20 @@ fn write_vcs_table(file: &mut std::fs::File, vcs: &bob::vcs::VcsInfo) -> Result<
             write_var_row(file, "Revision", rev)?;
         }
     }
+    let dur_secs = duration.as_secs();
+    let duration_str = if dur_secs >= 3600 {
+        format!(
+            "{}h {}m {}s",
+            dur_secs / 3600,
+            (dur_secs % 3600) / 60,
+            dur_secs % 60
+        )
+    } else if dur_secs >= 60 {
+        format!("{}m {}s", dur_secs / 60, dur_secs % 60)
+    } else {
+        format!("{}s", dur_secs)
+    };
+    write_var_row(file, "Duration", &duration_str)?;
     writeln!(file, "</table>")?;
     Ok(())
 }
@@ -1191,62 +1279,71 @@ fn write_failed_table(
     failed_info: &[FailedPackageInfo],
     maintainers: &HashMap<String, String>,
     logdir: &Path,
+    pkgpath_base: Option<&str>,
 ) -> Result<()> {
-    writeln!(file, "<table id=\"failed-table\" class=\"data\">")?;
+    let t = "failed-table";
+    writeln!(
+        file,
+        "<table id=\"{t}\" class=\"data\" data-sort-col=\"6\" data-sort-desc=\"0\">"
+    )?;
+    writeln!(file, "<caption class=\"sr-only\">Failed packages</caption>")?;
     writeln!(file, "<thead><tr>")?;
-    writeln!(
+    write_sortable_th(file, t, 0, "str", "PKGNAME", "col-pkg", "", "none")?;
+    write_sortable_th(file, t, 1, "str", "PKGPATH", "col-path", "", "none")?;
+    write_sortable_th(file, t, 2, "num", "Breaks", "col-breaks", "", "none")?;
+    write_sortable_th(file, t, 3, "num", "Duration", "col-dur", "", "none")?;
+    write_sortable_th(file, t, 4, "str", "Maintainer", "col-maint", "", "none")?;
+    write_sortable_th(file, t, 5, "str", "Status", "col-status", "", "none")?;
+    write_sortable_th(
         file,
-        "<th class=\"col-pkg\" onclick=\"sortTable('failed-table', 0, 'str')\">Package</th>"
-    )?;
-    writeln!(
-        file,
-        "<th class=\"col-path\" onclick=\"sortTable('failed-table', 1, 'str')\">Path</th>"
-    )?;
-    writeln!(
-        file,
-        "<th onclick=\"sortTable('failed-table', 2, 'num')\">Breaks</th>"
-    )?;
-    writeln!(
-        file,
-        "<th class=\"col-dur\" onclick=\"sortTable('failed-table', 3, 'num')\">Duration</th>"
-    )?;
-    writeln!(
-        file,
-        "<th class=\"col-maint\" onclick=\"sortTable('failed-table', 4, 'str')\">Maintainer</th>"
-    )?;
-    writeln!(
-        file,
-        "<th class=\"col-status\" onclick=\"sortTable('failed-table', 5, 'str')\">Status</th>"
-    )?;
-    writeln!(
-        file,
-        "<th class=\"col-logs\" onclick=\"sortTable('failed-table', 6, 'num', 2, 'num')\">Build Logs</th>"
+        t,
+        6,
+        "num",
+        "Build Logs",
+        "col-logs",
+        ", 2, 'num'",
+        "ascending",
     )?;
     writeln!(file, "</tr></thead>")?;
     writeln!(file, "<tbody>")?;
 
     for info in failed_info {
         let pkg_name = info.result.pkgname.pkgname();
-        let pkgpath = info
+        let pkgpath_str = info
             .result
             .pkgpath
             .as_ref()
             .map(|p| p.as_path().display().to_string())
             .unwrap_or_default();
+        let escaped_path = escape_html(&pkgpath_str);
+        let pkgpath = match pkgpath_base {
+            Some(base) if !pkgpath_str.is_empty() => format!(
+                "<span title=\"{0}\"><a href=\"{1}/{0}\">{0}</a></span>",
+                escaped_path,
+                escape_html(base),
+            ),
+            _ => format!("<span title=\"{0}\">{0}</span>", escaped_path),
+        };
         let maintainer = maintainers
             .get(pkg_name)
             .map(|s| s.as_str())
             .unwrap_or_default();
 
+        let breaks_display = if info.breaks_count > 0 {
+            info.breaks_count.to_string()
+        } else {
+            String::new()
+        };
+
         if info.result.state.is_skip() {
             let reason = info.result.state.to_string();
             writeln!(
                 file,
-                "<tr><td class=\"indirect\">{}</td><td class=\"col-path indirect\">{}</td><td class=\"r indirect\" data-sort=\"{}\">{}</td><td class=\"col-dur r indirect\" data-sort=\"0\"></td><td class=\"col-maint indirect\">{}</td><td class=\"col-status indirect\">{}</td><td class=\"col-logs reason\" data-sort=\"1\">{}</td></tr>",
+                "<tr><td class=\"col-pkg indirect\"><span title=\"{0}\">{0}</span></td><td class=\"col-path indirect\">{1}</td><td class=\"col-breaks r indirect\" data-sort=\"{2}\">{3}</td><td class=\"col-dur r indirect\" data-sort=\"0\"></td><td class=\"col-maint indirect\">{4}</td><td class=\"col-status indirect\">{5}</td><td class=\"col-logs reason\" data-sort=\"1\">{6}</td></tr>",
                 escape_html(pkg_name),
                 pkgpath,
                 info.breaks_count,
-                info.breaks_count,
+                breaks_display,
                 escape_html(maintainer),
                 info.result.state.status(),
                 escape_html(&reason)
@@ -1261,9 +1358,13 @@ fn write_failed_table(
             format!("{}s", dur_secs)
         };
 
+        let escaped = escape_html(pkg_name);
         let pkg_link = match &info.failed_log {
-            Some(log) => format!("<a href=\"{}/{}\">{}</a>", pkg_name, log, pkg_name),
-            None => escape_html(pkg_name),
+            Some(log) => format!(
+                "<span title=\"{0}\"><a href=\"{0}/{1}\">{0}</a></span>",
+                escaped, log
+            ),
+            None => format!("<span title=\"{0}\">{0}</span>", escaped),
         };
 
         let log_dir = logdir.join(pkg_name);
@@ -1271,11 +1372,11 @@ fn write_failed_table(
 
         writeln!(
             file,
-            "<tr><td>{}</td><td class=\"col-path\">{}</td><td class=\"r\" data-sort=\"{}\">{}</td><td class=\"col-dur r\" data-sort=\"{}\">{}</td><td class=\"col-maint\">{}</td><td class=\"col-status\">{}</td><td class=\"col-logs\" data-sort=\"0\">{}</td></tr>",
+            "<tr><td class=\"col-pkg\">{}</td><td class=\"col-path\">{}</td><td class=\"col-breaks r\" data-sort=\"{}\">{}</td><td class=\"col-dur r\" data-sort=\"{}\">{}</td><td class=\"col-maint\">{}</td><td class=\"col-status\">{}</td><td class=\"col-logs\" data-sort=\"0\">{}</td></tr>",
             pkg_link,
             pkgpath,
             info.breaks_count,
-            info.breaks_count,
+            breaks_display,
             dur_secs,
             duration,
             escape_html(maintainer),
@@ -1292,25 +1393,35 @@ fn write_failed_table(
 fn write_scanfail_table(
     file: &mut std::fs::File,
     scanfail: &[(pkgsrc::PkgPath, String)],
+    pkgpath_base: Option<&str>,
 ) -> Result<()> {
-    writeln!(file, "<table id=\"scanfail-table\" class=\"data\">")?;
+    let t = "scanfail-table";
+    writeln!(
+        file,
+        "<table id=\"{t}\" class=\"data\" style=\"white-space:normal\">"
+    )?;
+    writeln!(file, "<caption class=\"sr-only\">Scan failures</caption>")?;
     writeln!(file, "<thead><tr>")?;
-    writeln!(
-        file,
-        "<th onclick=\"sortTable('scanfail-table', 0, 'str')\">Path</th>"
-    )?;
-    writeln!(
-        file,
-        "<th onclick=\"sortTable('scanfail-table', 1, 'str')\">Error</th>"
-    )?;
+    write_sortable_th(file, t, 0, "str", "PKGPATH", "", "", "none")?;
+    write_sortable_th(file, t, 1, "str", "Scan Error", "col-err", "", "none")?;
     writeln!(file, "</tr></thead>")?;
     writeln!(file, "<tbody>")?;
 
     for (pkgpath, error_msg) in scanfail {
+        let path_str = pkgpath.as_path().display().to_string();
+        let path_html = match pkgpath_base {
+            Some(base) => format!(
+                "<a href=\"{}/{}\">{}</a>",
+                escape_html(base),
+                escape_html(&path_str),
+                escape_html(&path_str)
+            ),
+            None => escape_html(&path_str),
+        };
         writeln!(
             file,
             "<tr><td>{}</td><td>{}</td></tr>",
-            escape_html(&pkgpath.as_path().display().to_string()),
+            path_html,
             escape_html(error_msg)
         )?;
     }
