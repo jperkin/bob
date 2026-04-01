@@ -268,6 +268,26 @@ impl ProgressState {
 }
 
 /// Format a duration in human-readable form.
+/**
+ * Format duration with fixed-width columns for aligned plain text output.
+ * Minutes and seconds each occupy 2 characters so columns line up.
+ */
+fn format_duration_fixed(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{:>5}s", secs)
+    } else if secs < 3600 {
+        format!("{:>2}m {:>2}s", secs / 60, secs % 60)
+    } else {
+        format!(
+            "{}h {:>2}m {:>2}s",
+            secs / 3600,
+            (secs % 3600) / 60,
+            secs % 60
+        )
+    }
+}
+
 pub fn format_duration(d: Duration) -> String {
     let secs = d.as_secs();
     if secs < 60 {
@@ -660,14 +680,48 @@ impl MultiProgress {
     }
 
     /// Print a status message above the progress display.
-    pub fn print_status(&mut self, verb: &str, detail: &str) -> io::Result<()> {
+    pub fn print_status(
+        &mut self,
+        verb: &str,
+        pkg: &str,
+        duration: Option<Duration>,
+        breaks: Option<usize>,
+    ) -> io::Result<()> {
         if self.state.suppressed {
             return Ok(());
         }
         if self.progress_mode == ProgressMode::Plain {
-            println!("{:>tw$} {}", verb, detail, tw = STATUS_WIDTH);
+            let done = self.state.dispatched + self.state.cached + self.state.skipped;
+            let tw = self.state.total.to_string().len();
+            let prefix = format!(
+                "[{:>tw$}/{}] {:>10} ",
+                done,
+                self.state.total,
+                verb,
+                tw = tw
+            );
+            let brk = match breaks {
+                Some(n) if n > 0 => format!(" ({})", n),
+                _ => String::new(),
+            };
+            match duration {
+                Some(d) => {
+                    let dur = format_duration_fixed(d);
+                    let left = format!("{}{}", pkg, brk);
+                    let pad = 80usize.saturating_sub(prefix.len() + left.len() + dur.len());
+                    println!("{}{}{:>pad$}{}", prefix, left, "", dur, pad = pad);
+                }
+                None => println!("{}{}", prefix, pkg),
+            }
             return Ok(());
         }
+        let detail = match (duration, breaks) {
+            (Some(d), Some(n)) if n > 0 => {
+                format!("{} ({}, breaks {})", pkg, format_duration(d), n)
+            }
+            (Some(d), _) => format!("{} ({})", pkg, format_duration(d)),
+            _ => pkg.to_string(),
+        };
         let bold = Style::new().add_modifier(Modifier::BOLD);
         let line = Line::from(vec![
             Span::styled(format!("{:>tw$}", verb, tw = STATUS_WIDTH), bold),

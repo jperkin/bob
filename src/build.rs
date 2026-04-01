@@ -47,7 +47,7 @@ use crate::makejobs::PkgMakeJobs;
 use crate::sandbox::{CommandSetsid, SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
 use crate::scan::ResolvedPackage;
 use crate::scheduler::Scheduler;
-use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
+use crate::tui::{MultiProgress, REFRESH_INTERVAL};
 use crate::{Config, RunState, Sandbox};
 use crate::{PackageCounts, PackageState, PackageStateKind};
 use anyhow::{Context, bail};
@@ -2362,7 +2362,12 @@ impl Build {
                                     p.state_mut().set_worker_active(c, sp.pkg.pkgname());
                                     p.state_mut().increment_dispatched();
                                     if p.is_plain() {
-                                        let _ = p.print_status("Building", sp.pkg.pkgname());
+                                        let _ = p.print_status(
+                                            "Building",
+                                            sp.pkg.pkgname(),
+                                            None,
+                                            None,
+                                        );
                                     }
                                     let _ = p.render();
                                 }
@@ -2413,10 +2418,8 @@ impl Build {
                         }
 
                         if let Ok(mut p) = progress_clone.lock() {
-                            let _ = p.print_status(
-                                "Built",
-                                &format!("{} ({})", pkgname.pkgname(), format_duration(duration)),
-                            );
+                            let _ =
+                                p.print_status("Built", pkgname.pkgname(), Some(duration), None);
                             p.state_mut().increment_completed();
                             if let Some(sid) = sid {
                                 p.clear_output_buffer(sid);
@@ -2448,17 +2451,12 @@ impl Build {
                         let dep_count = jobs.scheduler.dep_count(&pkgname);
 
                         if let Ok(mut p) = progress_clone.lock() {
-                            let msg = if dep_count > 0 {
-                                format!(
-                                    "{} ({}, breaks {})",
-                                    pkgname.pkgname(),
-                                    format_duration(duration),
-                                    dep_count
-                                )
-                            } else {
-                                format!("{} ({})", pkgname.pkgname(), format_duration(duration))
-                            };
-                            let _ = p.print_status("Failed", &msg);
+                            let _ = p.print_status(
+                                "Failed",
+                                pkgname.pkgname(),
+                                Some(duration),
+                                Some(dep_count),
+                            );
                             p.state_mut().increment_failed();
                             p.state_mut().skipped += indirect_count;
                             if let Some(sid) = sid {
