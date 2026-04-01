@@ -1529,8 +1529,10 @@ impl PackageBuild {
         let mut callback = ChannelCallback::new(self.worker_id, status_tx);
         let result = builder.build(&mut callback);
 
-        // Clear stage display
-        let _ = status_tx.send(ChannelCommand::StageUpdate(self.worker_id, None));
+        let _ = status_tx.send(ChannelCommand::StageUpdate(
+            self.worker_id,
+            Some("teardown".to_string()),
+        ));
 
         let measure_wrkdir = || -> Option<u64> {
             let w = wrkdir.as_ref()?;
