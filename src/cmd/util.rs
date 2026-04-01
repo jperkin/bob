@@ -63,7 +63,7 @@ pub fn presolve(file: &PathBuf, output: Option<&PathBuf>, strict: bool, verbose:
             resolve_errors.join("\n  ")
         );
         if strict {
-            bail!("Aborting due to unresolved dependencies (strict mode)");
+            bail!("Aborting due to scan/resolve errors (strict mode)");
         }
     }
 
@@ -108,7 +108,7 @@ pub fn print_presolve(config: &Config, output: Option<&PathBuf>, sort: bool) -> 
 
     let errors: Vec<_> = result.errors().collect();
     if !errors.is_empty() {
-        eprintln!("Unresolved dependencies:\n  {}", errors.join("\n  "));
+        eprintln!("Scan/resolve errors:\n  {}", errors.join("\n  "));
     }
 
     if sort {

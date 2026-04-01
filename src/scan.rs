@@ -262,7 +262,7 @@ impl ScanSummary {
         self.packages.iter().filter(|p| p.is_buildable()).count()
     }
 
-    /// Errors derived from scan failures and unresolved dependencies.
+    /// Scan failures and unresolved dependency errors.
     pub fn errors(&self) -> impl Iterator<Item = &str> {
         self.packages.iter().filter_map(|p| match p {
             ScanResult::ScanFail { error, .. } => Some(error.as_str()),
@@ -1716,9 +1716,9 @@ impl Scan {
 
         let errors: Vec<_> = result.errors().collect();
         if !errors.is_empty() {
-            eprintln!("Unresolved dependencies:\n  {}", errors.join("\n  "));
+            eprintln!("Scan/resolve errors:\n  {}", errors.join("\n  "));
             if strict {
-                bail!("Aborting due to unresolved dependencies (strict_scan enabled)");
+                bail!("Aborting due to scan/resolve errors (strict_scan enabled)");
             }
         }
 

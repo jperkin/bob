@@ -105,24 +105,13 @@ impl BuildRunner {
             }
         }
 
-        // Handle scan errors
-        let scan_errors: Vec<_> = scan.scan_errors().collect();
-        let has_scan_errors = !scan_errors.is_empty();
+        let has_scan_errors = scan.scan_errors().next().is_some();
         if has_scan_errors {
-            eprintln!();
-            for err in &scan_errors {
-                eprintln!("{}", err);
-            }
             if self.config.strict_scan() {
-                bail!("{} package(s) failed to scan", scan_errors.len());
+                let count = scan.scan_errors().count();
+                bail!("{} package(s) failed to scan", count);
             }
-            eprintln!(
-                "Warning: {} package(s) failed to scan, continuing anyway",
-                scan_errors.len()
-            );
-            eprintln!();
         } else if scan.is_full_tree() {
-            // Mark full tree scan as complete if no errors
             self.db.set_full_scan_complete()?;
         }
 
