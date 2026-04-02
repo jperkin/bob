@@ -31,15 +31,32 @@ impl Sandbox {
     ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
         let cmd = self.config.bindfs();
-        Ok(Some(
+        /*
+         * pre_exec raises the NOFILE limit for the bindfs process so it
+         * does not run out of file descriptors when mounting large
+         * directory trees (e.g. Xcode SDKs).  The unsafe block is
+         * required by the pre_exec API; setrlimit is async-signal-safe.
+         */
+        Ok(Some(unsafe {
             Command::new(cmd)
                 .args(opts)
                 .arg(src)
                 .arg(dest)
                 .process_group(0)
+                .pre_exec(|| {
+                    let mut rlim = libc::rlimit {
+                        rlim_cur: 0,
+                        rlim_max: 0,
+                    };
+                    if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
+                        rlim.rlim_cur = rlim.rlim_max;
+                        libc::setrlimit(libc::RLIMIT_NOFILE, &rlim);
+                    }
+                    Ok(())
+                })
                 .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+                .context(format!("Unable to execute {}", cmd))?
+        }))
     }
 
     pub fn mount_devfs(
