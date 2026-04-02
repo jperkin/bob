@@ -59,7 +59,7 @@
 //! | `bootstrap` | string | none | Path to a bootstrap tarball. Required on non-NetBSD systems. Unpacked into each sandbox before builds. |
 //! | `build_user` | string | none | Unprivileged user to run builds as. If set, builds run as this user instead of root. |
 //! | `logdir` | string | `dbdir/logs` | Directory for per-package build logs. Failed builds leave logs here; successful builds clean up. |
-//! | `cachevars` | table | `{}` | List of pkgsrc variable names to fetch once and cache. These are set in the environment for scans and builds (e.g., `{"NATIVE_OPSYS", "NATIVE_OS_VERSION"}`). |
+//! | `cachevars` | table | (OS-specific) | List of pkgsrc variable names to fetch once and cache. These are set in the environment for scans and builds. If set, replaces the built-in defaults. |
 //! | `env` | function or table | `{}` | Environment variables for builds. Can be a table of key-value pairs, or a function receiving package metadata and returning a table. See [Environment Function](#environment-function). |
 //! | `pkgpaths` | table | `{}` | List of package paths to build (e.g., `{"mail/mutt", "www/curl"}`). Dependencies are discovered automatically. |
 //! | `save_wrkdir_patterns` | table | `{}` | Glob patterns for files to preserve from WRKDIR on build failure (e.g., `{"**/config.log"}`). |
@@ -175,12 +175,22 @@ impl PkgsrcEnv {
             "VARBASE",
         ];
 
-        let user_cachevars = config.cachevars();
+        let cachevar_names: Vec<&str> = if !config.cachevars().is_empty() {
+            config.cachevars().iter().map(|s| s.as_str()).collect()
+        } else {
+            let mut v = vec!["NATIVE_OPSYS", "NATIVE_OPSYS_VERSION", "NATIVE_OS_VERSION"];
+            if cfg!(target_os = "netbsd") {
+                v.push("HOST_MACHINE_ARCH");
+            }
+            if cfg!(any(target_os = "illumos", target_os = "solaris")) {
+                v.push("_UNAME_V");
+            }
+            v
+        };
+
         let mut all_varnames: Vec<&str> = REQUIRED_VARS.to_vec();
         all_varnames.extend_from_slice(METADATA_VARS);
-        for v in user_cachevars {
-            all_varnames.push(v.as_str());
-        }
+        all_varnames.extend_from_slice(&cachevar_names);
 
         let varnames_arg = all_varnames.join(" ");
         let script = format!(
@@ -232,10 +242,10 @@ impl PkgsrcEnv {
         }
 
         let mut cachevars: HashMap<String, String> = HashMap::new();
-        for varname in user_cachevars {
-            if let Some(value) = values.get(varname.as_str()) {
+        for varname in &cachevar_names {
+            if let Some(value) = values.get(varname) {
                 if !value.is_empty() {
-                    cachevars.insert(varname.clone(), (*value).to_string());
+                    cachevars.insert((*varname).to_string(), (*value).to_string());
                 }
             }
         }

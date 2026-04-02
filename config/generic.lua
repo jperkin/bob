@@ -55,15 +55,6 @@ pkgsrc = {
     build_user_home = "/home/builder",
     ]]
 
-    -- List of pkgsrc variables to fetch once and cache.  These are then set in
-    -- the environment for scans and builds, avoiding expensive forks.  Only add
-    -- variables that are calculated prior to mk.conf being included.
-    cachevars = {
-        "NATIVE_OPSYS",
-        "NATIVE_OPSYS_VERSION",
-        "NATIVE_OS_VERSION",
-    },
-
     --[[
       On build failure, save files matching these glob patterns from WRKDIR.
 
