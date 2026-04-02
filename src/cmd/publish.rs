@@ -151,8 +151,12 @@ fn generate_reports(config: &Config, db: &Database, build_id: &str) -> Result<()
         .ok_or_else(|| anyhow::anyhow!("No publish.report section in configuration"))?;
 
     let pkgsrc_env = db.load_pkgsrc_env()?;
-    let vcs_info = db.load_vcs_info().unwrap_or_default();
+    let mut vcs_info = db.load_vcs_info().unwrap_or_default();
     let logdir = config.logdir();
+
+    if let Some(branch) = &report_cfg.branch {
+        vcs_info.remote_branch = Some(branch.clone());
+    }
 
     std::fs::create_dir_all(logdir)
         .with_context(|| format!("Failed to create {}", logdir.display()))?;
@@ -616,7 +620,7 @@ fn write_text_report(
     }
     if let Some(branch) = &meta.vcs_info.remote_branch {
         match &meta.vcs_info.revision {
-            Some(rev) => right.push(("Branch", format!("{} (rev: {})", branch, rev))),
+            Some(rev) => right.push(("Branch", format!("{} (revision: {})", branch, rev))),
             None => right.push(("Branch", branch.clone())),
         }
     }
