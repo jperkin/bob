@@ -23,9 +23,9 @@
 //! # Build Process
 //!
 //! 1. Create build sandboxes (one per `build_threads`)
-//! 2. Execute pre-build script in each sandbox
+//! 2. Run pre-build operations in each sandbox
 //! 3. Build packages in parallel, respecting dependencies
-//! 4. Execute post-build script after each package
+//! 4. Run post-build operations after each package
 //! 5. Destroy sandboxes and generate report
 //!
 //! # Build Phases
@@ -1484,14 +1484,14 @@ impl PackageBuild {
 
         let patterns = self.session.config.save_wrkdir_patterns();
 
-        // Run pre-build script if defined (always runs).  The sandbox
-        // is not usable until this completes.
+        // Run pre-build operations (bootstrap unpack + build actions).
+        // The sandbox is not usable until this completes.
         if !self.session.sandbox.run_pre_build(
             self.sandbox_id,
             &self.session.config,
             envs.clone(),
         )? {
-            warn!("pre-build script failed");
+            warn!("pre-build failed");
         }
 
         if let Some(jobs) = self.make_jobs.allocated() {
@@ -1582,16 +1582,16 @@ impl PackageBuild {
             }
         };
 
-        // Run post-build script if defined (always runs regardless of result)
+        // Run post-build operations (build actions + prefix cleanup)
         match self
             .session
             .sandbox
             .run_post_build(self.sandbox_id, &self.session.config, envs)
         {
             Ok(true) => {}
-            Ok(false) => warn!("post-build script failed"),
+            Ok(false) => warn!("post-build failed"),
             Err(e) => {
-                warn!(error = %e, "post-build script error")
+                warn!(error = %e, "post-build error")
             }
         }
 

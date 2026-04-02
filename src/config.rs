@@ -17,16 +17,14 @@
 //! Configuration file parsing (Lua format).
 //!
 //! Bob uses Lua configuration files for maximum flexibility. The configuration
-//! defines paths to pkgsrc, packages to build, sandbox setup, and build scripts.
+//! defines paths to pkgsrc, packages to build, sandbox setup, and per-build actions.
 //!
 //! # Configuration File Structure
 //!
-//! A configuration file has seven main sections:
+//! A configuration file has five main sections:
 //!
 //! - [`options`](#options-section) - General build options (optional)
-//! - [`environment`](#environment-section) - Environment variable configuration (optional)
 //! - [`pkgsrc`](#pkgsrc-section) - pkgsrc paths and package list (required)
-//! - [`scripts`](#scripts-section) - Build script paths (required)
 //! - [`sandboxes`](#sandboxes-section) - Sandbox configuration (optional)
 //! - [`dynamic`](#dynamic-section) - Dynamic resource allocation (optional)
 //! - [`publish`](#publish-section) - Remote publishing configuration (optional)
@@ -42,42 +40,6 @@
 //! | `scan_threads` | integer | 1 | Number of parallel scan processes for dependency discovery. |
 //! | `strict_scan` | boolean | false | If true, abort on scan errors. If false, continue and report failures separately. |
 //! | `log_level` | string | "info" | Log level: "trace", "debug", "info", "warn", or "error". Can be overridden by `RUST_LOG` env var. |
-//!
-//! # Environment Section
-//!
-//! The `environment` section is optional. It controls the environment variables
-//! available to processes executed inside sandboxes.
-//!
-//! If this section is omitted, the parent environment is inherited unchanged.
-//! If present, `clear` defaults to true and the environment is cleared before
-//! applying the configured variables.
-//!
-//! | Field | Type | Default | Description |
-//! |-------|------|---------|-------------|
-//! | `clear` | boolean | true | If true, clear the environment. If false, inherit the full parent environment. |
-//! | `inherit` | table | `{}` | Variable names to copy from the parent environment (only used when `clear = true`). |
-//! | `set` | table | `{}` | Variables to set explicitly as key-value pairs. |
-//!
-//! To configure a minimal, controlled environment:
-//!
-//! ```lua
-//! environment = {
-//!     inherit = { "TERM", "HOME" },
-//!     set = {
-//!         PATH = "/sbin:/bin:/usr/sbin:/usr/bin",
-//!     },
-//! }
-//! ```
-//!
-//! ## Precedence
-//!
-//! Variables are applied in this order (later values override earlier):
-//!
-//! 1. `inherit` - copied from parent process (only if `clear = true`)
-//! 2. `set` - explicitly configured values
-//! 3. `pkgsrc.cachevars` - values fetched from pkgsrc
-//! 4. `pkgsrc.env` - per-package overrides
-//! 5. `bob_*` - internal variables (always set, cannot be overridden)
 //!
 //! # Pkgsrc Section
 //!
@@ -101,7 +63,6 @@
 //! | `env` | function or table | `{}` | Environment variables for builds. Can be a table of key-value pairs, or a function receiving package metadata and returning a table. See [Environment Function](#environment-function). |
 //! | `pkgpaths` | table | `{}` | List of package paths to build (e.g., `{"mail/mutt", "www/curl"}`). Dependencies are discovered automatically. |
 //! | `save_wrkdir_patterns` | table | `{}` | Glob patterns for files to preserve from WRKDIR on build failure (e.g., `{"**/config.log"}`). |
-//! | `tar` | string | `tar` | Path to a tar binary capable of extracting the bootstrap kit. Defaults to `tar` in PATH. |
 //!
 //! ## Environment Function
 //!
@@ -127,35 +88,6 @@
 //! | `no_bin_on_ftp` | string | Value of `NO_BIN_ON_FTP` if set. |
 //! | `restricted` | string | Value of `RESTRICTED` if set. |
 //!
-//! # Scripts Section
-//!
-//! The `scripts` section defines paths to build scripts. Relative paths are
-//! resolved from the configuration file's directory.
-//!
-//! | Script | Required | Description |
-//! |--------|----------|-------------|
-//! | `pre-build` | no | Executed before each package build. Used for per-build sandbox setup (e.g., unpacking bootstrap kit). Receives environment variables listed in [Script Environment](#script-environment). |
-//! | `post-build` | no | Executed after each package build completes (success or failure). |
-//!
-//! ## Script Environment
-//!
-//! Build scripts receive these environment variables:
-//!
-//! | Variable | Description |
-//! |----------|-------------|
-//! | `bob_logdir` | Path to the build logs directory. |
-//! | `bob_make` | Path to the bmake binary. |
-//! | `bob_packages` | Path to the packages directory. |
-//! | `bob_pkg_dbdir` | PKG_DBDIR from pkgsrc. |
-//! | `bob_pkg_refcount_dbdir` | PKG_REFCOUNT_DBDIR from pkgsrc. |
-//! | `bob_pkgtools` | Path to the pkg tools directory. |
-//! | `bob_pkgsrc` | Path to the pkgsrc source tree. |
-//! | `bob_prefix` | Installation prefix. |
-//! | `bob_tar` | Path to the tar binary. |
-//! | `bob_build_user` | Unprivileged build user, if configured. |
-//! | `bob_build_user_home` | Home directory of the build user, if configured. |
-//! | `bob_bootstrap` | Path to the bootstrap tarball, if configured. |
-//!
 //! # Sandboxes Section
 //!
 //! The `sandboxes` section is optional. When present, builds run in isolated
@@ -164,7 +96,21 @@
 //! | Field | Type | Required | Description |
 //! |-------|------|----------|-------------|
 //! | `basedir` | string | yes | Base directory for sandbox roots. Sandboxes are created as numbered subdirectories (`basedir/0`, `basedir/1`, etc.). |
-//! | `actions` | table | yes | List of actions to perform during sandbox setup. See the [`action`](crate::action) module for details. |
+//! | `setup` | table | no | Actions to perform during sandbox creation and destruction. See the [`action`](crate::action) module for details. |
+//! | `build` | table | no | Actions to run before and after each package build. Any "create" action runs after bob's internal pre-build (unpacks bootstrap kit if needed), and any "destroy" action runs before bob's internal post-build (wipes PREFIX and PKG_DBDIR). |
+//! | `environment` | table | no | Environment variables for sandbox processes. If omitted, the parent environment is inherited unchanged. See [Environment](#environment). |
+//!
+//! ## Environment
+//!
+//! Controls the environment variables available to processes executed inside
+//! sandboxes.  If present, `clear` defaults to true and the environment is
+//! cleared before applying the configured variables.
+//!
+//! | Field | Type | Default | Description |
+//! |-------|------|---------|-------------|
+//! | `clear` | boolean | true | If true, clear the environment. If false, inherit the full parent environment. |
+//! | `inherit` | table | `{}` | Variable names to copy from the parent environment (only used when `clear = true`). |
+//! | `set` | table | `{}` | Variables to set explicitly as key-value pairs. |
 
 use crate::action::Action;
 use crate::sandbox::Sandbox;
@@ -514,12 +460,8 @@ pub struct ConfigFile {
     pub options: Option<Options>,
     /// The `pkgsrc` section.
     pub pkgsrc: Pkgsrc,
-    /// The `scripts` section (script name -> path).
-    pub scripts: HashMap<String, PathBuf>,
     /// The `sandboxes` section.
     pub sandboxes: Option<Sandboxes>,
-    /// The `environment` section.
-    pub environment: Option<Environment>,
     /// The `dynamic` section.
     pub dynamic: Option<DynamicConfig>,
     /// The `publish` section.
@@ -693,7 +635,6 @@ pub struct PublishReport {
 /// - `logdir`: Directory for build logs (defaults to `dbdir/logs`)
 /// - `pkgpaths`: List of packages to build
 /// - `save_wrkdir_patterns`: Glob patterns for files to save on build failure
-/// - `tar`: Path to tar binary (defaults to `tar`)
 #[derive(Clone, Debug, Default)]
 pub struct Pkgsrc {
     /// Path to pkgsrc source tree.
@@ -714,28 +655,15 @@ pub struct Pkgsrc {
     pub save_wrkdir_patterns: Vec<String>,
     /// pkgsrc variables to cache and re-set in each environment run.
     pub cachevars: Vec<String>,
-    /// Path to tar binary (defaults to `tar` in PATH).
-    pub tar: Option<PathBuf>,
 }
 
-/// Environment configuration from the `environment` section.
+/// Environment configuration from `sandboxes.environment`.
 ///
 /// Controls the environment variables available to sandbox processes.
 ///
-/// If this section is omitted from the config, the parent environment is
-/// inherited unchanged.  If present, `clear` defaults to true and the
-/// environment is cleared before applying the configured variables.
-///
-/// # Example
-///
-/// ```lua
-/// environment = {
-///     inherit = { "TERM", "HOME" },
-///     set = {
-///         PATH = "/sbin:/bin:/usr/sbin:/usr/bin",
-///     },
-/// }
-/// ```
+/// If omitted, the parent environment is inherited unchanged.  If present,
+/// `clear` defaults to true and the environment is cleared before applying
+/// the configured variables.
 #[derive(Clone, Debug)]
 pub struct Environment {
     /// If true (default), clear the environment before setting variables.
@@ -767,7 +695,7 @@ impl Default for Environment {
 /// ```lua
 /// sandboxes = {
 ///     basedir = "/data/chroot",
-///     actions = {
+///     setup = {
 ///         { action = "mount", fs = "proc", dir = "/proc" },
 ///         { action = "copy", dir = "/etc" },
 ///     },
@@ -780,10 +708,17 @@ pub struct Sandboxes {
     /// Individual sandboxes are created as numbered subdirectories:
     /// `basedir/0`, `basedir/1`, etc.
     pub basedir: PathBuf,
-    /// Actions to perform during sandbox setup/teardown.
-    ///
-    /// See [`Action`] for details.
-    pub actions: Vec<Action>,
+    /// Actions to perform during sandbox creation and destruction.
+    pub setup: Vec<Action>,
+    /**
+     * Actions to run before and after each package build.  Any "create"
+     * action runs after bob's internal pre-build (unpacks bootstrap kit
+     * if needed), and any "destroy" action runs before bob's internal
+     * post-build (wipes PREFIX and PKG_DBDIR).
+     */
+    pub build: Vec<Action>,
+    /// Environment variables for sandbox processes.
+    pub environment: Option<Environment>,
     /// Path to bindfs binary (defaults to "bindfs").
     pub bindfs: String,
 }
@@ -825,31 +760,16 @@ impl Config {
         /*
          * Parse configuration file as Lua.
          */
-        let (mut file, lua_env) =
-            load_lua(&filename)
-                .map_err(|e| anyhow!(e))
-                .with_context(|| {
-                    format!(
-                        "Unable to parse Lua configuration file {}",
-                        filename.display()
-                    )
-                })?;
+        let (file, lua_env) = load_lua(&filename)
+            .map_err(|e| anyhow!(e))
+            .with_context(|| {
+                format!(
+                    "Unable to parse Lua configuration file {}",
+                    filename.display()
+                )
+            })?;
 
-        /*
-         * Parse scripts section.  Paths are resolved relative to config dir
-         * if not absolute.
-         */
         let base_dir = filename.parent().unwrap_or_else(|| Path::new("."));
-        let mut newscripts: HashMap<String, PathBuf> = HashMap::new();
-        for (k, v) in &file.scripts {
-            let fullpath = if v.is_relative() {
-                base_dir.join(v)
-            } else {
-                v.clone()
-            };
-            newscripts.insert(k.clone(), fullpath);
-        }
-        file.scripts = newscripts;
 
         /*
          * Validate bootstrap path exists if specified.
@@ -937,8 +857,11 @@ impl Config {
             .and_then(|s| s.wrkobjdir.as_ref())
     }
 
-    pub fn script(&self, key: &str) -> Option<&PathBuf> {
-        self.file.scripts.get(key)
+    pub fn build_actions(&self) -> &[Action] {
+        match &self.file.sandboxes {
+            Some(sandboxes) => &sandboxes.build,
+            None => &[],
+        }
     }
 
     pub fn make(&self) -> &PathBuf {
@@ -958,7 +881,10 @@ impl Config {
     }
 
     pub fn environment(&self) -> Option<&Environment> {
-        self.file.environment.as_ref()
+        self.file
+            .sandboxes
+            .as_ref()
+            .and_then(|s| s.environment.as_ref())
     }
 
     pub fn publish(&self) -> Option<&Publish> {
@@ -995,10 +921,6 @@ impl Config {
 
     pub fn save_wrkdir_patterns(&self) -> &[String] {
         self.file.pkgsrc.save_wrkdir_patterns.as_slice()
-    }
-
-    pub fn tar(&self) -> Option<&PathBuf> {
-        self.file.pkgsrc.tar.as_ref()
     }
 
     pub fn build_user(&self) -> Option<&str> {
@@ -1069,11 +991,6 @@ impl Config {
                 envs.push((key.clone(), value.clone()));
             }
         }
-        let tar_value = self
-            .tar()
-            .map(|t| t.display().to_string())
-            .unwrap_or_else(|| "tar".to_string());
-        envs.push(("bob_tar".to_string(), tar_value));
         if let Some(build_user) = self.build_user() {
             envs.push(("bob_build_user".to_string(), build_user.to_string()));
         }
@@ -1111,23 +1028,6 @@ impl Config {
                 "make binary does not exist: {}",
                 self.file.pkgsrc.make.display()
             ));
-        }
-
-        // Check scripts exist
-        for (name, path) in &self.file.scripts {
-            if !path.exists() {
-                errors.push(format!(
-                    "Script '{}' does not exist: {}",
-                    name,
-                    path.display()
-                ));
-            } else if !path.is_file() {
-                errors.push(format!(
-                    "Script '{}' is not a file: {}",
-                    name,
-                    path.display()
-                ));
-            }
         }
 
         // Check sandbox basedir is writable if sandboxes enabled
@@ -1244,6 +1144,8 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
     // Get the global table (Lua script should set global variables)
     let globals = lua.globals();
 
+    reject_old_config(&globals)?;
+
     // Parse each section
     let options =
         parse_options(&globals).map_err(|e| format!("Error parsing options config: {}", e))?;
@@ -1252,12 +1154,8 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
         .map_err(|e| format!("Error getting pkgsrc config: {}", e))?;
     let pkgsrc =
         parse_pkgsrc(&globals).map_err(|e| format!("Error parsing pkgsrc config: {}", e))?;
-    let scripts =
-        parse_scripts(&globals).map_err(|e| format!("Error parsing scripts config: {}", e))?;
     let sandboxes =
         parse_sandboxes(&globals).map_err(|e| format!("Error parsing sandboxes config: {}", e))?;
-    let environment = parse_environment(&globals)
-        .map_err(|e| format!("Error parsing environment config: {}", e))?;
     let dynamic =
         parse_dynamic(&globals).map_err(|e| format!("Error parsing dynamic config: {}", e))?;
     let publish =
@@ -1285,14 +1183,51 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
     let config = ConfigFile {
         options,
         pkgsrc,
-        scripts,
         sandboxes,
-        environment,
         dynamic,
         publish,
     };
 
     Ok((config, lua_env))
+}
+
+/**
+ * Check for config keys from older versions and produce a helpful error
+ * directing users to regenerate their config with `bob init`.
+ */
+fn reject_old_config(globals: &Table) -> Result<(), String> {
+    let old_top_level = ["scripts", "environment"];
+    for key in &old_top_level {
+        let val: Value = globals
+            .get(*key)
+            .map_err(|e| format!("Error reading config: {}", e))?;
+        if !val.is_nil() {
+            return Err(format!(
+                "Configuration file uses removed top-level '{}' section. \
+                 Please regenerate your config with 'bob init' and refer \
+                 to the new example files.",
+                key
+            ));
+        }
+    }
+
+    let sandboxes: Value = globals
+        .get("sandboxes")
+        .map_err(|e| format!("Error reading config: {}", e))?;
+    if let Some(table) = sandboxes.as_table() {
+        let actions: Value = table
+            .get("actions")
+            .map_err(|e| format!("Error reading config: {}", e))?;
+        if !actions.is_nil() {
+            return Err("Configuration file uses removed 'sandboxes.actions'. \
+                 This has been renamed to 'sandboxes.setup'. \
+                 Please regenerate your config with 'bob init' and refer \
+                 to the new example files."
+                .to_string());
+        }
+    }
+
+    Ok(())
 }
 
 fn parse_options(globals: &Table) -> LuaResult<Option<Options>> {
@@ -1468,7 +1403,6 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         "make",
         "pkgpaths",
         "save_wrkdir_patterns",
-        "tar",
     ];
     warn_unknown_keys(&pkgsrc, "pkgsrc", KNOWN_KEYS);
 
@@ -1491,7 +1425,6 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
     };
     let logdir: Option<PathBuf> = pkgsrc.get::<Option<String>>("logdir")?.map(PathBuf::from);
     let make = get_required_string(&pkgsrc, "make")?;
-    let tar: Option<PathBuf> = pkgsrc.get::<Option<String>>("tar")?.map(PathBuf::from);
 
     let pkgpaths: Option<Vec<PkgPath>> = match pkgsrc.get::<Value>("pkgpaths")? {
         Value::Nil => None,
@@ -1555,27 +1488,7 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         make: PathBuf::from(make),
         pkgpaths,
         save_wrkdir_patterns,
-        tar,
     })
-}
-
-fn parse_scripts(globals: &Table) -> LuaResult<HashMap<String, PathBuf>> {
-    let scripts: Value = globals.get("scripts")?;
-    if scripts.is_nil() {
-        return Ok(HashMap::new());
-    }
-
-    let table = scripts
-        .as_table()
-        .ok_or_else(|| mlua::Error::runtime("'scripts' must be a table"))?;
-
-    let mut result = HashMap::new();
-    for pair in table.pairs::<String, String>() {
-        let (k, v) = pair?;
-        result.insert(k, PathBuf::from(v));
-    }
-
-    Ok(result)
 }
 
 fn parse_sandboxes(globals: &Table) -> LuaResult<Option<Sandboxes>> {
@@ -1588,7 +1501,7 @@ fn parse_sandboxes(globals: &Table) -> LuaResult<Option<Sandboxes>> {
         .as_table()
         .ok_or_else(|| mlua::Error::runtime("'sandboxes' must be a table"))?;
 
-    const KNOWN_KEYS: &[&str] = &["actions", "basedir", "bindfs"];
+    const KNOWN_KEYS: &[&str] = &["basedir", "bindfs", "build", "environment", "setup"];
     warn_unknown_keys(table, "sandboxes", KNOWN_KEYS);
 
     let basedir: String = table.get("basedir")?;
@@ -1596,21 +1509,33 @@ fn parse_sandboxes(globals: &Table) -> LuaResult<Option<Sandboxes>> {
         .get::<Option<String>>("bindfs")?
         .unwrap_or_else(|| String::from("bindfs"));
 
-    let actions_value: Value = table.get("actions")?;
-    let actions = if actions_value.is_nil() {
-        Vec::new()
-    } else {
-        let actions_table = actions_value
-            .as_table()
-            .ok_or_else(|| mlua::Error::runtime("'sandboxes.actions' must be a table"))?;
-        parse_actions(actions_table, globals)?
-    };
+    let setup = parse_action_list(table, globals, "setup", "sandboxes.setup")?;
+    let build = parse_action_list(table, globals, "build", "sandboxes.build")?;
+    let environment = parse_environment(table)?;
 
     Ok(Some(Sandboxes {
         basedir: PathBuf::from(basedir),
-        actions,
+        setup,
+        build,
+        environment,
         bindfs,
     }))
+}
+
+fn parse_action_list(
+    table: &Table,
+    globals: &Table,
+    key: &str,
+    label: &str,
+) -> LuaResult<Vec<Action>> {
+    let value: Value = table.get(key)?;
+    if value.is_nil() {
+        return Ok(Vec::new());
+    }
+    let actions_table = value
+        .as_table()
+        .ok_or_else(|| mlua::Error::runtime(format!("'{label}' must be a table")))?;
+    parse_actions(actions_table, globals)
 }
 
 fn parse_actions(table: &Table, globals: &Table) -> LuaResult<Vec<Action>> {

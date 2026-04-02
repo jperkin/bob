@@ -36,8 +36,8 @@ strum = { version = "0.28", features = ["derive"] }
 ratatui = { version = "0.30", features = ["scrolling-regions"] }
 rayon = "1.10.0"
 regex = "1"
-rust-embed = "8.7.0"
 systemstat = "0.2"
+tar = "0.4"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }

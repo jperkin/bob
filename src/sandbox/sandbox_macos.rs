@@ -18,9 +18,9 @@ use crate::sandbox::Sandbox;
 use anyhow::{Context, bail};
 use std::fs;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use tracing::debug;
+use tracing::{debug, warn};
 
 impl Sandbox {
     pub fn mount_bindfs(
@@ -194,6 +194,231 @@ impl Sandbox {
     }
 
     /**
+     * Configure mDNSResponder to listen on a Unix socket inside the sandbox,
+     * enabling DNS resolution within the chroot.
+     *
+     * macOS does not support name resolution inside a chroot by default
+     * because the mDNSResponder listening socket is not available.  This
+     * method modifies the mDNSResponder launchd plist to add an additional
+     * Unix socket listener inside the sandbox.
+     *
+     * Uses a lock directory for concurrency safety when multiple sandboxes
+     * are being created simultaneously.
+     */
+    pub fn create_mdns_listener(&self, id: usize) -> anyhow::Result<()> {
+        let sandbox_path = self.path(id);
+        let sock_path = sandbox_path.join("var/run/mDNSResponder");
+        let plist = Path::new("/var/run/com.apple.mDNSResponder.plist");
+        let plist_system = Path::new("/System/Library/LaunchDaemons/com.apple.mDNSResponder.plist");
+        let pb = Path::new("/usr/libexec/PlistBuddy");
+        let entry = "Sockets:Listeners";
+
+        fs::create_dir_all(sandbox_path.join("var/run"))?;
+
+        let add_plist = sandbox_path.join("var/run/add.plist");
+        fs::write(
+            &add_plist,
+            format!(
+                "<array>\n\
+                 \t<dict>\n\
+                 \t\t<key>SockFamily</key>\n\
+                 \t\t<string>Unix</string>\n\
+                 \t\t<key>SockPathName</key>\n\
+                 \t\t<string>{}</string>\n\
+                 \t\t<key>SockPathMode</key>\n\
+                 \t\t<integer>438</integer>\n\
+                 \t</dict>\n\
+                 </array>\n",
+                sock_path.display()
+            ),
+        )?;
+
+        let lock = Path::new("/tmp/updatemdns.lock");
+        let _guard = MdnsLock::acquire(lock)?;
+
+        if !plist.exists() {
+            fs::copy(plist_system, plist).with_context(|| {
+                format!(
+                    "Failed to copy {} to {}",
+                    plist_system.display(),
+                    plist.display()
+                )
+            })?;
+
+            let import_plist = sandbox_path.join("var/run/import.plist");
+            let output = Command::new(pb)
+                .args([
+                    "-x",
+                    "-c",
+                    &format!("Print {entry}"),
+                    &plist.display().to_string(),
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0)
+                .output()
+                .context("Failed to run PlistBuddy")?;
+            if !output.status.success() {
+                bail!(
+                    "PlistBuddy Print failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+            fs::write(&import_plist, &output.stdout)?;
+
+            let plist_str = plist.display().to_string();
+            let import_str = import_plist.display().to_string();
+            let status = Command::new(pb)
+                .args([
+                    "-c",
+                    &format!("Delete {entry}"),
+                    "-c",
+                    &format!("Add {entry} array"),
+                    "-c",
+                    &format!("Add {entry}:0 dict"),
+                    "-c",
+                    &format!("Merge {import_str} {entry}:0"),
+                    "-c",
+                    "Save",
+                    &plist_str,
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .process_group(0)
+                .status()
+                .context("Failed to run PlistBuddy")?;
+            if !status.success() {
+                bail!("PlistBuddy failed to convert Listeners to array");
+            }
+            let _ = fs::remove_file(&import_plist);
+
+            let _ = Command::new("/bin/launchctl")
+                .args(["unload", &plist_system.display().to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .status();
+            let status = Command::new("/bin/launchctl")
+                .args(["load", "-w", &plist_str])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .process_group(0)
+                .status()
+                .context("Failed to run launchctl load")?;
+            if !status.success() {
+                bail!("launchctl load failed for {}", plist.display());
+            }
+        }
+
+        let plist_str = plist.display().to_string();
+        let status = Command::new(pb)
+            .args([
+                "-c",
+                &format!("Merge {} {entry}", add_plist.display()),
+                &plist_str,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .status()
+            .context("Failed to run PlistBuddy")?;
+        if !status.success() {
+            bail!("PlistBuddy Merge failed");
+        }
+
+        Self::reload_mdns(plist)?;
+        let _ = fs::remove_file(&add_plist);
+        Ok(())
+    }
+
+    /**
+     * Remove the mDNSResponder listener socket for this sandbox.
+     */
+    pub fn destroy_mdns_listener(&self, id: usize) -> anyhow::Result<()> {
+        let sandbox_path = self.path(id);
+        let sock_path = sandbox_path.join("var/run/mDNSResponder");
+        let plist = Path::new("/var/run/com.apple.mDNSResponder.plist");
+        let pb = Path::new("/usr/libexec/PlistBuddy");
+        let entry = "Sockets:Listeners";
+
+        if !plist.exists() {
+            return Ok(());
+        }
+
+        let lock = Path::new("/tmp/updatemdns.lock");
+        let _guard = MdnsLock::acquire(lock)?;
+
+        let output = Command::new(pb)
+            .args([
+                "-c",
+                &format!("Print {entry}"),
+                &plist.display().to_string(),
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .output()
+            .context("Failed to run PlistBuddy")?;
+        if !output.status.success() {
+            return Ok(());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let entries: Vec<_> = stdout.lines().filter(|l| l.contains("Dict {")).collect();
+        let sock_str = sock_path.display().to_string();
+        let plist_str = plist.display().to_string();
+
+        for i in 0..entries.len() {
+            let output = Command::new(pb)
+                .args(["-c", &format!("Print {entry}:{i}:SockPathName"), &plist_str])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .output()?;
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if path == sock_str {
+                let status = Command::new(pb)
+                    .args(["-c", &format!("Delete {entry}:{i}"), &plist_str])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .process_group(0)
+                    .status()?;
+                if !status.success() {
+                    warn!(sandbox = id, "Failed to remove mDNS listener entry");
+                }
+                break;
+            }
+        }
+
+        Self::reload_mdns(plist)?;
+        Ok(())
+    }
+
+    /**
+     * Unload and reload the mDNSResponder plist.
+     */
+    fn reload_mdns(plist: &Path) -> anyhow::Result<()> {
+        let plist_str = plist.display().to_string();
+        let _ = Command::new("/bin/launchctl")
+            .args(["unload", &plist_str])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .status();
+        let status = Command::new("/bin/launchctl")
+            .args(["load", "-w", &plist_str])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .status()
+            .context("Failed to run launchctl")?;
+        if !status.success() {
+            bail!("launchctl load failed for {}", plist.display());
+        }
+        Ok(())
+    }
+
+    /**
      * Find PIDs of processes using files under the sandbox path.
      *
      * Uses `fuser` which matches by path, not filesystem.  Filters out
@@ -251,5 +476,45 @@ impl Sandbox {
                 }
             })
             .collect()
+    }
+}
+
+/**
+ * RAII lock guard for mDNSResponder plist modification.
+ *
+ * Uses `mkdir` for atomic lock acquisition.  Automatically removes the
+ * lock directory on drop.
+ */
+struct MdnsLock {
+    path: PathBuf,
+}
+
+impl MdnsLock {
+    fn acquire(path: &Path) -> anyhow::Result<Self> {
+        use std::hash::BuildHasher;
+        let max_retries = 60;
+        let hasher = std::collections::hash_map::RandomState::new();
+        for attempt in 1..=max_retries {
+            if fs::create_dir(path).is_ok() {
+                return Ok(Self {
+                    path: path.to_path_buf(),
+                });
+            }
+            if attempt < max_retries {
+                let ms = 500 + (hasher.hash_one(attempt) % 500);
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
+        }
+        bail!(
+            "Failed to acquire mDNS lock at {} after {} attempts",
+            path.display(),
+            max_retries
+        );
+    }
+}
+
+impl Drop for MdnsLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.path);
     }
 }

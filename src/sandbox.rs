@@ -72,7 +72,7 @@ mod sandbox_netbsd;
 #[cfg(any(target_os = "illumos", target_os = "solaris"))]
 mod sandbox_sunos;
 
-use crate::action::{ActionType, FSType};
+use crate::action::{Action, ActionType, FSType};
 use crate::config::Config;
 use crate::try_println;
 use crate::{Interrupted, RunState};
@@ -647,47 +647,13 @@ impl Sandbox {
                 return Err(e).with_context(|| format!("Failed to create {}", marker.display()));
             }
         }
-        self.perform_actions(id)?;
+        let Some(sandbox) = &self.config.sandboxes() else {
+            bail!("Internal error: trying to create sandbox when sandboxes disabled.");
+        };
+        let envs = self.config.script_env(None);
+        self.perform_actions(id, &sandbox.setup, &envs)?;
         self.mark_complete(id)?;
         Ok(true)
-    }
-
-    /**
-     * Execute a script file with supplied environment variables and optional
-     * stdin data.
-     */
-    pub fn execute(
-        &self,
-        id: Option<usize>,
-        script: &Path,
-        envs: Vec<(String, String)>,
-        stdin_data: Option<&str>,
-    ) -> Result<Child> {
-        let mut cmd = self.command(id, script);
-        cmd.new_session();
-        cmd.current_dir("/");
-
-        for (key, val) in envs {
-            cmd.env(key, val);
-        }
-
-        if stdin_data.is_some() {
-            cmd.stdin(Stdio::piped());
-        } else {
-            cmd.stdin(Stdio::null());
-        }
-
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-        let mut child = cmd.spawn()?;
-
-        if let Some(data) = stdin_data {
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(data.as_bytes())?;
-            }
-        }
-
-        Ok(child)
     }
 
     /**
@@ -749,69 +715,155 @@ impl Sandbox {
     }
 
     /**
-     * Run the pre-build script if configured.
-     * Returns Ok(true) if script ran successfully or wasn't configured,
-     * Ok(false) if script failed.
+     * Run pre-build operations:
+     *  1. Unpack bootstrap kit if configured
+     *  2. Execute build action create commands in order
+     *
+     * Returns Ok(true) if all operations succeeded or none were configured,
+     * Ok(false) if any operation failed.
      */
     pub fn run_pre_build(
         &self,
-        id: Option<usize>,
+        sandbox_id: Option<usize>,
         config: &Config,
         envs: Vec<(String, String)>,
     ) -> Result<bool> {
-        if let Some(script) = config.script("pre-build") {
-            info!(script = %script.display(), "Running pre-build script");
-            let child = self.execute(id, script, envs, None)?;
-            let output = child.wait_with_output()?;
-            if output.status.success() {
-                info!(script = %script.display(), result = "success", "Finished running pre-build script");
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                warn!(
-                    script = %script.display(),
-                    result = "failed",
-                    stdout = %stdout.trim(),
-                    stderr = %stderr.trim(),
-                    "Finished running pre-build script"
-                );
+        if let Some(bootstrap) = config.bootstrap() {
+            let Some(sandbox_id) = sandbox_id else {
+                bail!("bootstrap requires sandboxes to be enabled");
+            };
+            let dest = self.path(sandbox_id);
+            info!(bootstrap = %bootstrap.display(), dest = %dest.display(), "Unpacking bootstrap kit");
+            let file = fs::File::open(bootstrap)
+                .with_context(|| format!("Failed to open bootstrap {}", bootstrap.display()))?;
+            let gz = flate2::read::GzDecoder::new(file);
+            let mut archive = tar::Archive::new(gz);
+            archive.set_preserve_permissions(true);
+            archive.set_preserve_ownerships(true);
+            archive.unpack(&dest).with_context(|| {
+                format!(
+                    "Failed to unpack bootstrap {} to {}",
+                    bootstrap.display(),
+                    dest.display()
+                )
+            })?;
+        }
+
+        let build_actions = config.build_actions();
+        if !build_actions.is_empty() {
+            let Some(sandbox_id) = sandbox_id else {
+                bail!("build actions require sandboxes to be enabled");
+            };
+            if let Err(e) = self.perform_actions(sandbox_id, build_actions, &envs) {
+                warn!(error = %e, "Build action failed");
                 return Ok(false);
             }
         }
+
         Ok(true)
     }
 
     /**
-     * Run the post-build script if configured.
-     * Returns Ok(true) if script ran successfully or wasn't configured,
-     * Ok(false) if script failed.
+     * Run post-build operations:
+     *  1. Execute build action destroy commands in reverse order
+     *  2. Remove prefix, pkg_dbdir, and pkg_refcount_dbdir
+     *
+     * Returns Ok(true) if all operations succeeded or none were configured,
+     * Ok(false) if any operation failed.
      */
     pub fn run_post_build(
         &self,
-        id: Option<usize>,
+        sandbox_id: Option<usize>,
         config: &Config,
         envs: Vec<(String, String)>,
     ) -> Result<bool> {
-        if let Some(script) = config.script("post-build") {
-            info!(script = %script.display(), "Running post-build script");
-            let child = self.execute(id, script, envs, None)?;
-            let output = child.wait_with_output()?;
-            if output.status.success() {
-                info!(script = %script.display(), result = "success", "Finished running post-build script");
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                warn!(
-                    script = %script.display(),
-                    result = "failed",
-                    stdout = %stdout.trim(),
-                    stderr = %stderr.trim(),
-                    "Finished running post-build script"
-                );
+        let build_actions = config.build_actions();
+        if !build_actions.is_empty() {
+            let Some(sandbox_id) = sandbox_id else {
+                bail!("build actions require sandboxes to be enabled");
+            };
+            if let Err(e) = self.reverse_actions(sandbox_id, build_actions, &envs) {
+                warn!(error = %e, "Build action destroy failed");
                 return Ok(false);
             }
         }
+
+        for var in ["bob_prefix", "bob_pkg_dbdir", "bob_pkg_refcount_dbdir"] {
+            if let Some((_, path)) = envs.iter().find(|(k, _)| k == var) {
+                let target = match sandbox_id {
+                    Some(id) => self.resolve_path(id, Path::new(path)),
+                    None => PathBuf::from(path),
+                };
+                if target.exists() {
+                    debug!(path = %target.display(), "Removing");
+                    if let Err(e) = fs::remove_dir_all(&target) {
+                        warn!(
+                            path = %target.display(),
+                            error = %e,
+                            "Failed to remove directory"
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(true)
+    }
+
+    /**
+     * Resolve a path relative to the sandbox root.
+     */
+    fn resolve_path(&self, sandbox_id: usize, path: &Path) -> PathBuf {
+        self.mountpath(sandbox_id, &path.to_path_buf())
+    }
+
+    /**
+     * Run a command as part of an action.
+     *
+     * When `chroot` is true, the command runs inside the sandbox via
+     * chroot.  Otherwise it runs on the host with the sandbox root as
+     * the working directory.
+     */
+    fn run_action_cmd(
+        &self,
+        sandbox_id: usize,
+        cmd: &str,
+        chroot: bool,
+        envs: &[(String, String)],
+    ) -> Result<Option<Output>> {
+        let sandbox_path = self.path(sandbox_id);
+        let output = if chroot {
+            let mut c = Command::new("/usr/sbin/chroot");
+            self.apply_environment(&mut c);
+            for (key, val) in envs {
+                c.env(key, val);
+            }
+            c.arg(&sandbox_path)
+                .arg("/bin/sh")
+                .arg("-ceu")
+                .arg(cmd)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0);
+            c.output()?
+        } else {
+            let mut c = Command::new("/bin/sh");
+            self.apply_environment(&mut c);
+            for (key, val) in envs {
+                c.env(key, val);
+            }
+            c.arg("-ceu")
+                .arg(cmd)
+                .env("bob_sandbox_path", &sandbox_path)
+                .current_dir(&sandbox_path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0);
+            c.output()?
+        };
+        Ok(Some(output))
     }
 
     /**
@@ -831,7 +883,12 @@ impl Sandbox {
         if completeddir.exists() {
             self.remove_empty_hierarchy(&completeddir)?;
         }
-        self.reverse_actions(id)?;
+        let Some(sandbox_config) = &self.config.sandboxes() else {
+            bail!("Internal error: trying to destroy sandbox when sandboxes disabled.");
+        };
+        let envs = self.config.script_env(None);
+        self.kill_processes_by_path(&self.path(id));
+        self.reverse_actions(id, &sandbox_config.setup, &envs)?;
         /*
          * Remove all sandbox contents EXCEPT .bob.  If removal fails due to
          * unexpected files, the .bob marker remains and the sandbox can still
@@ -894,10 +951,10 @@ impl Sandbox {
                 match self.run_post_build(Some(id), &self.config, envs.clone()) {
                     Ok(true) => {}
                     Ok(false) => {
-                        warn!("post-build script failed for sandbox {}", id)
+                        warn!("post-build failed for sandbox {}", id)
                     }
                     Err(e) => {
-                        warn!(error = %e, sandbox = id, "post-build script error")
+                        warn!(error = %e, sandbox = id, "post-build error")
                     }
                 }
             }
@@ -1032,26 +1089,26 @@ impl Sandbox {
         })
     }
 
-    ///
-    /// Iterate over the supplied array of actions in order.  If at any
-    /// point a problem is encountered we immediately bail.
-    ///
-    fn perform_actions(&self, id: usize) -> Result<()> {
-        let Some(sandbox) = &self.config.sandboxes() else {
-            bail!("Internal error: trying to perform actions when sandboxes disabled.");
-        };
-        for action in sandbox.actions.iter() {
+    /**
+     * Execute action create commands in order.
+     */
+    fn perform_actions(
+        &self,
+        sandbox_id: usize,
+        actions: &[Action],
+        envs: &[(String, String)],
+    ) -> Result<()> {
+        for action in actions {
             action.validate()?;
             let action_type = action.action_type()?;
 
-            // For mount/copy actions, dest defaults to src (src is more readable)
             let src = action.src().or(action.dest());
             let dest = action
                 .dest()
                 .or(action.src())
-                .map(|d| self.mountpath(id, d));
-            if let Some(ref dest_path) = dest {
-                self.verify_path_in_sandbox(id, dest_path)?;
+                .map(|d| self.resolve_path(sandbox_id, d));
+            if let Some(dest_path) = &dest {
+                self.verify_path_in_sandbox(sandbox_id, dest_path)?;
             }
 
             let mut opts = vec![];
@@ -1069,7 +1126,7 @@ impl Sandbox {
                     let dest = dest.ok_or_else(|| anyhow::anyhow!("mount action requires dest"))?;
                     if action.ifexists() && !src.exists() {
                         debug!(
-                            sandbox = id,
+                            sandbox = sandbox_id,
                             action = "mount",
                             fs = ?fs_type,
                             src = %src.display(),
@@ -1078,7 +1135,7 @@ impl Sandbox {
                         continue;
                     }
                     debug!(
-                        sandbox = id,
+                        sandbox = sandbox_id,
                         action = "mount",
                         fs = ?fs_type,
                         src = %src.display(),
@@ -1099,7 +1156,7 @@ impl Sandbox {
                         src.ok_or_else(|| anyhow::anyhow!("copy action requires src or dest"))?;
                     let dest = dest.ok_or_else(|| anyhow::anyhow!("copy action requires dest"))?;
                     debug!(
-                        sandbox = id,
+                        sandbox = sandbox_id,
                         action = "copy",
                         src = %src.display(),
                         dest = %dest.display(),
@@ -1118,13 +1175,15 @@ impl Sandbox {
                 ActionType::Cmd => {
                     if let Some(create_cmd) = action.create_cmd() {
                         debug!(
-                            sandbox = id,
+                            sandbox = sandbox_id,
                             action = "cmd",
                             cmd = create_cmd,
                             chroot = action.chroot(),
                             "Running create command"
                         );
-                        if let Some(out) = self.run_action_cmd(id, create_cmd, action.chroot())? {
+                        if let Some(out) =
+                            self.run_action_cmd(sandbox_id, create_cmd, action.chroot(), envs)?
+                        {
                             if !out.status.success() {
                                 let stderr = String::from_utf8_lossy(&out.stderr);
                                 let stderr = stderr.trim();
@@ -1155,12 +1214,14 @@ impl Sandbox {
                     let src = action
                         .src()
                         .ok_or_else(|| anyhow::anyhow!("symlink action requires src"))?;
-                    let dest = action
-                        .dest()
-                        .ok_or_else(|| anyhow::anyhow!("symlink action requires dest"))?;
-                    let dest_path = self.mountpath(id, dest);
+                    let dest_path = self.resolve_path(
+                        sandbox_id,
+                        action
+                            .dest()
+                            .ok_or_else(|| anyhow::anyhow!("symlink action requires dest"))?,
+                    );
                     debug!(
-                        sandbox = id,
+                        sandbox = sandbox_id,
                         action = "symlink",
                         src = %src.display(),
                         dest = %dest_path.display(),
@@ -1182,12 +1243,25 @@ impl Sandbox {
                     })?;
                     None
                 }
+                ActionType::MacosMdnsListener => {
+                    #[cfg(not(target_os = "macos"))]
+                    bail!("'macos-mdns-listener' action is only supported on macOS");
+                    #[cfg(target_os = "macos")]
+                    {
+                        debug!(
+                            sandbox = sandbox_id,
+                            action = "macos-mdns-listener",
+                            "Creating mDNS listener"
+                        );
+                        self.create_mdns_listener(sandbox_id)?;
+                        None
+                    }
+                }
             };
             if let Some(s) = status {
                 if !s.success() {
                     bail!(
-                        "Sandbox action failed (sandbox {}, exit code {:?})",
-                        id,
+                        "Action failed (exit code {:?})",
                         s.code().map_or("signal".to_string(), |c| c.to_string()),
                     );
                 }
@@ -1197,85 +1271,33 @@ impl Sandbox {
     }
 
     /**
-     * Run a custom action command.
-     *
-     * When `chroot` is false (default), the command runs on the host system
-     * with the sandbox root as the working directory.
-     *
-     * When `chroot` is true, the command runs inside the sandbox via chroot
-     * with `/` as the working directory.
-     *
-     * Stdio is captured to prevent commands like `su` from trying to interact
-     * with the terminal. Output is logged on failure.
+     * Execute action destroy commands in reverse order.
      */
-    fn run_action_cmd(
+    fn reverse_actions(
         &self,
-        id: usize,
-        cmd: &str,
-        chroot: bool,
-    ) -> Result<Option<std::process::Output>> {
-        let sandbox_path = self.path(id);
-        let output = if chroot {
-            let mut c = Command::new("/usr/sbin/chroot");
-            self.apply_environment(&mut c);
-            for (key, val) in self.config.script_env(None) {
-                c.env(key, val);
-            }
-            c.arg(&sandbox_path)
-                .arg("/bin/sh")
-                .arg("-ceu")
-                .arg(cmd)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .process_group(0);
-            c.output()?
-        } else {
-            let mut c = Command::new("/bin/sh");
-            self.apply_environment(&mut c);
-            for (key, val) in self.config.script_env(None) {
-                c.env(key, val);
-            }
-            c.arg("-ceu")
-                .arg(cmd)
-                .env("bob_sandbox_path", &sandbox_path)
-                .current_dir(&sandbox_path)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .process_group(0);
-            c.output()?
-        };
-
-        Ok(Some(output))
-    }
-
-    fn reverse_actions(&self, id: usize) -> anyhow::Result<()> {
-        let Some(sandbox) = &self.config.sandboxes() else {
-            bail!("Internal error: trying to reverse actions when sandboxes disabled.");
-        };
-        self.kill_processes_by_path(&self.path(id));
-        for action in sandbox.actions.iter().rev() {
+        sandbox_id: usize,
+        actions: &[Action],
+        envs: &[(String, String)],
+    ) -> Result<()> {
+        for action in actions.iter().rev() {
             let action_type = action.action_type()?;
-            // dest defaults to src if not specified
             let dest = action
                 .dest()
                 .or(action.src())
-                .map(|d| self.mountpath(id, d));
+                .map(|d| self.resolve_path(sandbox_id, d));
 
             match action_type {
                 ActionType::Cmd => {
                     if let Some(destroy_cmd) = action.destroy_cmd() {
-                        let chroot = action.chroot();
                         debug!(
-                            sandbox = id,
                             action = "cmd",
                             cmd = destroy_cmd,
-                            chroot,
+                            chroot = action.chroot(),
                             "Running destroy command"
                         );
-                        let output = self.run_action_cmd(id, destroy_cmd, chroot)?;
-                        if let Some(out) = output {
+                        if let Some(out) =
+                            self.run_action_cmd(sandbox_id, destroy_cmd, action.chroot(), envs)?
+                        {
                             if !out.status.success() {
                                 let stderr = String::from_utf8_lossy(&out.stderr);
                                 let stderr = stderr.trim();
@@ -1302,12 +1324,12 @@ impl Sandbox {
                     }
                 }
                 ActionType::Copy => {
-                    let Some(mntdest) = dest else { continue };
-                    if !mntdest.exists() {
-                        self.remove_empty_dirs(id, &mntdest);
+                    let Some(dest) = dest else { continue };
+                    if !dest.exists() {
+                        self.remove_empty_dirs(sandbox_id, &dest);
                         continue;
                     }
-                    if fs::remove_dir(&mntdest).is_ok() {
+                    if fs::remove_dir(&dest).is_ok() {
                         continue;
                     }
                     /*
@@ -1316,84 +1338,96 @@ impl Sandbox {
                      * First verify the path is within the sandbox.
                      */
                     debug!(
-                        sandbox = id,
+                        sandbox = sandbox_id,
                         action = "copy",
-                        dest = %mntdest.display(),
-                        "Removing copied directory"
+                        dest = %dest.display(),
+                        "Removing copied path"
                     );
-                    self.verify_path_in_sandbox(id, &mntdest)?;
-                    self.remove_dir_recursive(&mntdest)?;
-                    self.remove_empty_dirs(id, &mntdest);
+                    self.verify_path_in_sandbox(sandbox_id, &dest)?;
+                    self.remove_dir_recursive(&dest)?;
+                    self.remove_empty_dirs(sandbox_id, &dest);
                 }
                 ActionType::Symlink => {
-                    let Some(mntdest) = dest else { continue };
-                    if mntdest.is_symlink() {
+                    let Some(dest) = dest else { continue };
+                    if dest.is_symlink() {
                         debug!(
-                            sandbox = id,
+                            sandbox = sandbox_id,
                             action = "symlink",
-                            dest = %mntdest.display(),
+                            dest = %dest.display(),
                             "Removing symlink"
                         );
-                        fs::remove_file(&mntdest)?;
+                        fs::remove_file(&dest)?;
                     }
-                    self.remove_empty_dirs(id, &mntdest);
+                    self.remove_empty_dirs(sandbox_id, &dest);
                 }
                 ActionType::Mount => {
-                    let Some(mntdest) = dest else { continue };
+                    let Some(dest) = dest else { continue };
                     let fs_type = action.fs_type()?;
 
-                    let src = action.src().or(action.dest());
-                    if let Some(src) = src {
+                    if let Some(src) = action.src().or(action.dest()) {
                         if action.ifexists() && !src.exists() {
                             continue;
                         }
                     }
 
                     /*
-                     * If the mount point itself does not exist then do not try to
-                     * unmount it, but do try to clean up any empty parent
-                     * directories up to the root.
+                     * If the mount point does not exist then do not try
+                     * to unmount it, but do try to clean up any empty
+                     * parent directories up to the sandbox root.
                      */
-                    if !mntdest.exists() {
-                        self.remove_empty_dirs(id, &mntdest);
+                    if !dest.exists() {
+                        self.remove_empty_dirs(sandbox_id, &dest);
                         continue;
                     }
 
                     /*
-                     * Before trying to unmount, try just removing the directory,
-                     * in case it was never mounted in the first place.  Avoids
-                     * errors trying to unmount a file system that isn't mounted.
+                     * Try removing the directory first, in case it was
+                     * never mounted.  Avoids errors trying to unmount a
+                     * filesystem that is not mounted.
                      */
-                    if fs::remove_dir(&mntdest).is_ok() {
+                    if fs::remove_dir(&dest).is_ok() {
                         continue;
                     }
 
                     /*
-                     * Unmount the filesystem.  Check return codes and bail on
-                     * failure - it is critical that all mounts are successfully
-                     * unmounted before we attempt to remove the sandbox directory.
+                     * Unmount the filesystem.  It is critical that all
+                     * mounts are successfully unmounted before we attempt
+                     * to remove the sandbox directory.
                      */
                     debug!(
-                        sandbox = id,
+                        sandbox = sandbox_id,
                         action = "mount",
                         fs = ?fs_type,
-                        dest = %mntdest.display(),
+                        dest = %dest.display(),
                         "Unmounting"
                     );
                     let status = match fs_type {
-                        FSType::Bind => self.unmount_bindfs(&mntdest)?,
-                        FSType::Dev => self.unmount_devfs(&mntdest)?,
-                        FSType::Fd => self.unmount_fdfs(&mntdest)?,
-                        FSType::Nfs => self.unmount_nfs(&mntdest)?,
-                        FSType::Proc => self.unmount_procfs(&mntdest)?,
-                        FSType::Tmp => self.unmount_tmpfs(&mntdest)?,
+                        FSType::Bind => self.unmount_bindfs(&dest)?,
+                        FSType::Dev => self.unmount_devfs(&dest)?,
+                        FSType::Fd => self.unmount_fdfs(&dest)?,
+                        FSType::Nfs => self.unmount_nfs(&dest)?,
+                        FSType::Proc => self.unmount_procfs(&dest)?,
+                        FSType::Tmp => self.unmount_tmpfs(&dest)?,
                     };
                     if let Some(s) = status {
                         if !s.success() {
-                            bail!("Failed to unmount {}", mntdest.display());
+                            bail!("Failed to unmount {}", dest.display());
                         }
                     }
-                    self.remove_empty_dirs(id, &mntdest);
+                    self.remove_empty_dirs(sandbox_id, &dest);
+                }
+                ActionType::MacosMdnsListener => {
+                    #[cfg(not(target_os = "macos"))]
+                    bail!("'macos-mdns-listener' action is only supported on macOS");
+                    #[cfg(target_os = "macos")]
+                    {
+                        debug!(
+                            sandbox = sandbox_id,
+                            action = "macos-mdns-listener",
+                            "Destroying mDNS listener"
+                        );
+                        self.destroy_mdns_listener(sandbox_id)?;
+                    }
                 }
             }
         }
@@ -1558,10 +1592,10 @@ impl Drop for SandboxScope {
                 {
                     Ok(true) => {}
                     Ok(false) => {
-                        warn!("post-build script failed for sandbox {}", id)
+                        warn!("post-build failed for sandbox {}", id)
                     }
                     Err(e) => {
-                        warn!(error = %e, sandbox = id, "post-build script error")
+                        warn!(error = %e, sandbox = id, "post-build error")
                     }
                 }
             }

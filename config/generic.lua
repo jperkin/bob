@@ -1,8 +1,10 @@
--- Generic configuration file for unsupported systems.
--- Does not provide a sandboxes section as it is highly OS-specific.
+--[[
+  Generic configuration file for unsupported systems.
 
--- Common variables
-local initdir = "@INITDIR@"
+  Does not provide a sandboxes section as they are highly OS-specific.  As such
+  this is only really useful for performing pkgsrc scans.  Do not try to use it
+  for builds as without sandboxes your installed packages will be removed.
+]]
 
 -- General configuration variables.
 options = {
@@ -12,15 +14,16 @@ options = {
     log_level = "info",
 }
 
---
--- Dynamic resource allocation settings.  Uses statistics from the history
--- database, knowledge of upcoming builds, and package weight to make informed
--- choices for what MAKE_JOBS and WRKOBJDIR should be set to for each package
--- build.
---
--- On first builds with no history, conservative values are used.
---
 --[[
+  Dynamic resource allocation settings.  Uses statistics from the history db,
+  knowledge of upcoming builds, and package weight to make informed choices for
+  what MAKE_JOBS and WRKOBJDIR should be set to for each package build.
+
+  If you set MAKE_JOBS or WRKOBJDIR in mk.conf then you must use ?= so that
+  bob's environment settings take precedence.
+
+  On first builds with no history, conservative values are used.
+
 dynamic = {
     jobs = 16,
     wrkobjdir = {
@@ -34,21 +37,23 @@ dynamic = {
 -- Variables that configure pkgsrc, where it is, what packages to build, etc.
 pkgsrc = {
     basedir = "/usr/pkgsrc",
-    bootstrap = initdir .. "/bootstrap.tar.gz",
+    -- bootstrap = "/path/to/bootstrap.tar.gz",
     make = "/usr/pkg/bin/bmake",
     -- or pkgpaths = read_pkgpaths("/path/to/file"),
     pkgpaths = {
         "mail/mutt",
         "sysutils/coreutils",
     },
-    tar = "/usr/bin/tar",
 
-    -- It is strongly recommended to set up an unprivileged user to perform
-    -- builds.  If this is enabled, there is an action below to automatically
-    -- create the user home directory.  If build_user_home is not set it is
-    -- fetched from getpwnam(3).
-    -- build_user = "builder",
-    -- build_user_home = "/home/builder",
+    --[[
+      It is strongly recommended to set up an unprivileged user to perform
+      builds.  If this is enabled, there is an action below to automatically
+      create the user home directory.  If build_user_home is not set it is
+      retrieved via getpwnam(3).
+
+    build_user = "builder",
+    build_user_home = "/home/builder",
+    ]]
 
     -- List of pkgsrc variables to fetch once and cache.  These are then set in
     -- the environment for scans and builds, avoiding expensive forks.  Only add
@@ -59,18 +64,14 @@ pkgsrc = {
         "NATIVE_OS_VERSION",
     },
 
-    -- On build failure, save files matching these glob patterns from WRKDIR.
-    -- save_wrkdir_patterns = {
-    --     "**/CMakeError.log",
-    --     "**/CMakeOutput.log",
-    --     "**/config.log",
-    --     "**/meson-log.txt",
-    -- },
-}
+    --[[
+      On build failure, save files matching these glob patterns from WRKDIR.
 
--- These scripts are executed during sandbox creation and destruction, as well
--- as before and after every single package build.
-scripts = {
-    ["pre-build"] = initdir .. "/scripts/pre-build",
-    ["post-build"] = initdir .. "/scripts/post-build",
+    save_wrkdir_patterns = {
+        "**/CMakeError.log",
+        "**/CMakeOutput.log",
+        "**/config.log",
+        "**/meson-log.txt",
+    },
+    ]]
 }

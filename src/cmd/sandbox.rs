@@ -83,7 +83,7 @@ fn exec(config: &Config) -> Result<()> {
     let result = (|| -> Result<()> {
         if !sandbox.run_pre_build(Some(id), config, basic_envs)? {
             println!(" failed ({:.1}s)", start.elapsed().as_secs_f32());
-            bail!("pre-build script failed");
+            bail!("pre-build failed");
         }
         println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
         let pkgsrc_env = PkgsrcEnv::fetch(config, &sandbox, Some(id))?;
@@ -124,8 +124,8 @@ fn exec(config: &Config) -> Result<()> {
     let envs = config.script_env(pkgsrc_env.as_ref());
     match sandbox.run_post_build(Some(id), config, envs) {
         Ok(true) => {}
-        Ok(false) => eprintln!("Warning: post-build script failed"),
-        Err(e) => eprintln!("Warning: post-build script error: {e}"),
+        Ok(false) => eprintln!("Warning: post-build failed"),
+        Err(e) => eprintln!("Warning: post-build error: {e}"),
     }
     print!("Destroying sandbox...");
     let _ = std::io::stdout().flush();

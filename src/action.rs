@@ -16,18 +16,19 @@
 
 //! Sandbox action configuration.
 //!
-//! This module defines the types used to configure sandbox setup and teardown
-//! actions. Actions are specified in the `sandboxes.actions` table of the Lua
-//! configuration file.
+//! This module defines the types used to configure sandbox setup and per-build
+//! actions.  Actions are specified in the `sandboxes.setup` and
+//! `sandboxes.build` tables of the Lua configuration file.
 //!
 //! # Action Types
 //!
-//! Four action types are supported:
+//! Five action types are supported:
 //!
 //! - **mount**: Mount a filesystem inside the sandbox
 //! - **copy**: Copy files or directories into the sandbox
 //! - **symlink**: Create a symbolic link inside the sandbox
 //! - **cmd**: Execute shell commands during setup/teardown
+//! - **macos-mdns-listener**: Configure macOS DNS resolution (no-op elsewhere)
 //!
 //! # Execution Order
 //!
@@ -39,7 +40,7 @@
 //! ```lua
 //! sandboxes = {
 //!     basedir = "/data/chroot",
-//!     actions = {
+//!     setup = {
 //!         -- Mount procfs
 //!         { action = "mount", fs = "proc", dir = "/proc" },
 //!
@@ -59,7 +60,7 @@
 //!         { action = "symlink", src = "usr/bin", dest = "/bin" },
 //!
 //!         -- Run command inside sandbox via chroot
-//!         { action = "cmd", chroot = true, create = "ldconfig" },
+//!         { action = "cmd", chroot = true, create = "mkdir -m 1777 /var/tmp" },
 //!
 //!         -- Run command on host (working directory is sandbox root on host)
 //!         { action = "cmd", create = "touch .stamp" },
@@ -80,9 +81,36 @@
 //!                 chown ${bob_build_user} ${bob_build_user_home}
 //!           ]],
 //!           destroy = "rm -rf ${bob_build_user_home}" },
+//!
+//!         -- Enable DNS resolution inside sandbox (macOS only)
+//!         { action = "macos-mdns-listener" },
 //!     },
 //! }
 //! ```
+//!
+//! # Environment Variables
+//!
+//! Shell commands executed by `cmd` actions receive these `bob_*` environment
+//! variables.  Sandbox actions always receive the base set; build actions
+//! also receive the pkgsrc-derived variables once the bootstrap kit has been
+//! unpacked.
+//!
+//! | Variable | Description |
+//! |----------|-------------|
+//! | `bob_logdir` | Path to the build logs directory. |
+//! | `bob_make` | Path to the bmake binary. |
+//! | `bob_pkgsrc` | Path to the pkgsrc source tree. |
+//! | `bob_build_user` | Unprivileged build user (if configured). |
+//! | `bob_build_user_home` | Home directory of the build user (if configured). |
+//! | `bob_bootstrap` | Path to the bootstrap tarball (if configured). |
+//! | `bob_sandbox_path` | Absolute host path to the sandbox root (non-chroot commands only). |
+//! | `bob_packages` | Path to the packages directory (after bootstrap). |
+//! | `bob_pkgtools` | Path to the pkg tools directory (after bootstrap). |
+//! | `bob_prefix` | Installation prefix (after bootstrap). |
+//! | `bob_pkg_dbdir` | PKG_DBDIR from pkgsrc (after bootstrap). |
+//! | `bob_pkg_refcount_dbdir` | PKG_REFCOUNT_DBDIR from pkgsrc (after bootstrap). |
+//!
+//! Any variables listed in `pkgsrc.cachevars` are also available.
 //!
 //! # Common Fields
 //!
@@ -176,6 +204,15 @@ pub enum ActionType {
     Cmd,
     /// Create a symbolic link inside the sandbox.
     Symlink,
+    /// Configure macOS mDNSResponder for DNS resolution inside the sandbox.
+    ///
+    /// On create, adds a Unix socket listener to the mDNSResponder launchd
+    /// plist so that DNS resolution works inside the chroot.  On destroy,
+    /// removes the listener entry.  No-op on non-macOS platforms.
+    ///
+    /// No additional fields are required.
+    #[strum(serialize = "macos-mdns-listener")]
+    MacosMdnsListener,
 }
 
 /// Filesystem types for mount actions.
@@ -403,6 +440,7 @@ impl Action {
                     bail!("'symlink' action requires 'dest' (link name)");
                 }
             }
+            ActionType::MacosMdnsListener => {}
         }
 
         Ok(())

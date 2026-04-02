@@ -626,7 +626,7 @@ impl Scan {
                 &self.config,
                 self.config.script_env(None),
             )? {
-                warn!("pre-build script failed");
+                warn!("pre-build failed");
             }
             println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
         }
@@ -991,14 +991,14 @@ impl Scan {
         Ok(())
     }
 
-    /// Run post-build script if configured.
+    /// Run post-build operations (build actions + prefix cleanup).
     fn run_post_build(&self) -> anyhow::Result<()> {
         if !self.sandbox.run_post_build(
             self.sandbox_id,
             &self.config,
             self.config.script_env(self.pkgsrc_env.as_ref()),
         )? {
-            warn!("post-build script failed");
+            warn!("post-build failed");
         }
         Ok(())
     }
