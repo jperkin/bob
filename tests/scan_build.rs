@@ -1143,10 +1143,13 @@ pkgsrc = {{
     cachevars = {{ \"NATIVE_OPSYS\" }},
     save_wrkdir_patterns = {{ \"**/config.log\" }},
 }}
-environment = {{
-    clear = true,
-    inherit = {{ \"TERM\", \"HOME\" }},
-    set = {{ PATH = \"/sbin:/bin\", LC_ALL = \"C\" }},
+sandboxes = {{
+    basedir = \"{dbdir}/sandboxes\",
+    environment = {{
+        clear = true,
+        inherit = {{ \"TERM\", \"HOME\" }},
+        set = {{ PATH = \"/sbin:/bin\", LC_ALL = \"C\" }},
+    }},
 }}
 ",
         dbdir = h.dbdir().display(),
