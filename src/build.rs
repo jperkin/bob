@@ -47,7 +47,7 @@ use crate::makejobs::PkgMakeJobs;
 use crate::sandbox::{CommandSetsid, SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
 use crate::scan::ResolvedPackage;
 use crate::scheduler::Scheduler;
-use crate::tui::{MultiProgress, REFRESH_INTERVAL};
+use crate::tui::{Progress, REFRESH_INTERVAL};
 use crate::{Config, RunState, Sandbox};
 use crate::{PackageCounts, PackageState, PackageStateKind};
 use anyhow::{Context, bail};
@@ -2094,7 +2094,7 @@ impl Build {
 
         // Set up multi-line progress display using ratatui inline viewport
         let progress = Arc::new(Mutex::new(
-            MultiProgress::new(
+            Progress::new(
                 "Building",
                 "Built",
                 self.scanpkgs.len(),

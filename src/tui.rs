@@ -103,15 +103,6 @@ pub enum ViewMode {
     MultiPanel,
 }
 
-/// Progress output mode.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProgressMode {
-    /// Full TUI with inline viewport and key handling.
-    Tui,
-    /// Plain line-based output to stdout.
-    Plain,
-}
-
 /// State for a single worker thread.
 #[derive(Clone, Debug)]
 pub struct WorkerState {
@@ -186,10 +177,6 @@ impl ProgressState {
             timer_width: 6,
             suppressed: false,
         }
-    }
-
-    pub fn suppress(&mut self) {
-        self.suppressed = true;
     }
 
     /// Update timer width tier based on elapsed durations.
@@ -549,25 +536,43 @@ fn calculate_grid_layout(area: Rect, column_groups: &[Vec<PanelGroup>]) -> Vec<V
         .collect()
 }
 
-/// Line-based progress display using ratatui inline viewport.
-pub struct MultiProgress {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
+/**
+ * Simple progress display for non-terminal output.
+ *
+ * Prints progress dots and status lines to stdout without any terminal
+ * escape sequences.  Used when stdout is not a terminal (e.g. Jenkins,
+ * piped output) or when TUI mode is disabled.
+ */
+pub struct PlainProgress {
     state: ProgressState,
-    view_mode: ViewMode,
-    progress_mode: ProgressMode,
-    output_buffers: Vec<OutputBuffer>,
-    num_workers: usize,
-    /// Messages buffered while in fullscreen mode, printed when returning to inline.
-    pending_messages: Vec<Line<'static>>,
-    /// Whether raw mode was successfully enabled (false when not a terminal).
-    raw_mode: bool,
-    /// Number of dots on the current plain-mode progress line (0-49).
     plain_dots: usize,
-    /// Whether an interrupt has been announced to the user.
     interrupt_announced: bool,
 }
 
-impl MultiProgress {
+impl PlainProgress {
+    pub fn new(title: &str, finished_title: &str, total: usize, num_workers: usize) -> Self {
+        Self {
+            state: ProgressState::new(title, finished_title, total, num_workers),
+            plain_dots: 0,
+            interrupt_announced: false,
+        }
+    }
+}
+
+/**
+ * Progress display that works in both terminal and non-terminal contexts.
+ *
+ * In non-terminal contexts (Jenkins, piped output), uses `PlainProgress`
+ * which prints dots and status lines without escape sequences.  In
+ * terminals with TUI enabled, uses `MultiProgress` with a ratatui inline
+ * viewport for real-time worker status.
+ */
+pub enum Progress {
+    Plain(PlainProgress),
+    Tui(MultiProgress),
+}
+
+impl Progress {
     pub fn new(
         title: &str,
         finished_title: &str,
@@ -575,111 +580,46 @@ impl MultiProgress {
         num_workers: usize,
         tui: bool,
     ) -> io::Result<Self> {
-        // Calculate height: workers + progress bar
-        let height = (num_workers + 1) as u16;
-
-        let is_terminal = tui && io::stdout().is_terminal();
-        let raw_mode = is_terminal && enable_raw_mode().is_ok();
-
-        let progress_mode = if raw_mode {
-            ProgressMode::Tui
-        } else {
-            ProgressMode::Plain
-        };
-
-        let backend = CrosstermBackend::new(stdout());
-        let viewport = if progress_mode == ProgressMode::Tui && raw_mode {
-            Viewport::Inline(height)
-        } else {
-            Viewport::Fixed(Rect::default())
-        };
-        let terminal = Terminal::with_options(backend, TerminalOptions { viewport })?;
-
-        // Create output buffer for each worker (100 lines each)
-        let output_buffers = (0..num_workers).map(|_| OutputBuffer::new(100)).collect();
-
-        let mut state = ProgressState::new(title, finished_title, total, num_workers);
-
-        match progress_mode {
-            ProgressMode::Plain => {
-                if raw_mode {
+        if tui && io::stdout().is_terminal() && enable_raw_mode().is_ok() {
+            match MultiProgress::new(title, finished_title, total, num_workers) {
+                Ok(mp) => return Ok(Self::Tui(mp)),
+                Err(_) => {
                     let _ = disable_raw_mode();
                 }
             }
-            ProgressMode::Tui => {
-                if !raw_mode {
-                    state.suppress();
-                }
-            }
         }
-
-        Ok(Self {
-            terminal,
-            state,
-            view_mode: ViewMode::Inline,
-            progress_mode,
-            output_buffers,
+        Ok(Self::Plain(PlainProgress::new(
+            title,
+            finished_title,
+            total,
             num_workers,
-            pending_messages: Vec::new(),
-            raw_mode: raw_mode && progress_mode == ProgressMode::Tui,
-            plain_dots: 0,
-            interrupt_announced: false,
-        })
+        )))
     }
 
-    /// Returns true if using plain (non-TUI) progress mode.
     pub fn is_plain(&self) -> bool {
-        self.progress_mode == ProgressMode::Plain
-    }
-
-    /**
-     * Print a progress dot in plain mode, flushing the line every 50.
-     */
-    pub fn print_progress_dot(&mut self, done: usize, total: usize) -> io::Result<()> {
-        if self.progress_mode != ProgressMode::Plain || self.state.suppressed {
-            return Ok(());
-        }
-        self.plain_dots += 1;
-        if self.plain_dots >= 50 {
-            let counter = format!("{}/{}", done, total);
-            println!("    {:<50}  {:>11}", ".".repeat(50), counter);
-            self.plain_dots = 0;
-        }
-        Ok(())
-    }
-
-    /**
-     * Flush any pending progress dots in plain mode.
-     */
-    pub fn flush_progress_dots(&mut self, done: usize, total: usize) -> io::Result<()> {
-        if self.progress_mode != ProgressMode::Plain
-            || self.state.suppressed
-            || self.plain_dots == 0
-        {
-            return Ok(());
-        }
-        let dots = ".".repeat(self.plain_dots);
-        let counter = format!("{}/{}", done, total);
-        println!("    {:<50}  {:>11}", dots, counter);
-        self.plain_dots = 0;
-        Ok(())
+        matches!(self, Self::Plain(_))
     }
 
     pub fn state_mut(&mut self) -> &mut ProgressState {
-        &mut self.state
-    }
-
-    pub fn output_buffer_mut(&mut self, id: usize) -> Option<&mut OutputBuffer> {
-        self.output_buffers.get_mut(id)
-    }
-
-    pub fn clear_output_buffer(&mut self, id: usize) {
-        if let Some(buf) = self.output_buffers.get_mut(id) {
-            buf.clear();
+        match self {
+            Self::Plain(p) => &mut p.state,
+            Self::Tui(p) => p.state_mut(),
         }
     }
 
-    /// Print a status message above the progress display.
+    pub fn output_buffer_mut(&mut self, id: usize) -> Option<&mut OutputBuffer> {
+        match self {
+            Self::Plain(_) => None,
+            Self::Tui(p) => p.output_buffer_mut(id),
+        }
+    }
+
+    pub fn clear_output_buffer(&mut self, id: usize) {
+        if let Self::Tui(p) = self {
+            p.clear_output_buffer(id);
+        }
+    }
+
     pub fn print_status(
         &mut self,
         verb: &str,
@@ -687,32 +627,175 @@ impl MultiProgress {
         duration: Option<Duration>,
         breaks: Option<usize>,
     ) -> io::Result<()> {
-        if self.state.suppressed {
-            return Ok(());
-        }
-        if self.progress_mode == ProgressMode::Plain {
-            let done = self.state.dispatched + self.state.cached + self.state.skipped;
-            let tw = self.state.total.to_string().len();
-            let prefix = format!(
-                "[{:>tw$}/{}] {:>10} ",
-                done,
-                self.state.total,
-                verb,
-                tw = tw
-            );
-            let brk = match breaks {
-                Some(n) if n > 0 => format!(" ({})", n),
-                _ => String::new(),
-            };
-            match duration {
-                Some(d) => {
-                    let dur = format_duration_fixed(d);
-                    let left = format!("{}{}", pkg, brk);
-                    let pad = 80usize.saturating_sub(prefix.len() + left.len() + dur.len());
-                    println!("{}{}{:>pad$}{}", prefix, left, "", dur, pad = pad);
+        match self {
+            Self::Plain(p) => {
+                let done = p.state.dispatched + p.state.cached + p.state.skipped;
+                let tw = p.state.total.to_string().len();
+                let prefix = format!("[{:>tw$}/{}] {:>10} ", done, p.state.total, verb, tw = tw);
+                let brk = match breaks {
+                    Some(n) if n > 0 => format!(" ({})", n),
+                    _ => String::new(),
+                };
+                match duration {
+                    Some(d) => {
+                        let dur = format_duration_fixed(d);
+                        let left = format!("{}{}", pkg, brk);
+                        let pad = 80usize.saturating_sub(prefix.len() + left.len() + dur.len());
+                        println!("{}{}{:>pad$}{}", prefix, left, "", dur, pad = pad);
+                    }
+                    None => println!("{}{}", prefix, pkg),
                 }
-                None => println!("{}{}", prefix, pkg),
+                Ok(())
             }
+            Self::Tui(p) => p.print_status(verb, pkg, duration, breaks),
+        }
+    }
+
+    pub fn print_progress_dot(&mut self, done: usize, total: usize) -> io::Result<()> {
+        if let Self::Plain(p) = self {
+            p.plain_dots += 1;
+            if p.plain_dots >= 50 {
+                let counter = format!("{}/{}", done, total);
+                println!("    {:<50}  {:>11}", ".".repeat(50), counter);
+                p.plain_dots = 0;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn flush_progress_dots(&mut self, done: usize, total: usize) -> io::Result<()> {
+        if let Self::Plain(p) = self {
+            if p.plain_dots > 0 {
+                let dots = ".".repeat(p.plain_dots);
+                let counter = format!("{}/{}", done, total);
+                println!("    {:<50}  {:>11}", dots, counter);
+                p.plain_dots = 0;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn announce_interrupt(&mut self) {
+        match self {
+            Self::Plain(p) => {
+                if !p.interrupt_announced {
+                    p.interrupt_announced = true;
+                    eprintln!("Interrupted, stopping...");
+                }
+            }
+            Self::Tui(p) => p.announce_interrupt(),
+        }
+    }
+
+    pub fn render(&mut self) -> io::Result<()> {
+        match self {
+            Self::Plain(_) => Ok(()),
+            Self::Tui(p) => p.render(),
+        }
+    }
+
+    pub fn handle_event(&mut self) -> io::Result<bool> {
+        match self {
+            Self::Plain(_) => Ok(false),
+            Self::Tui(p) => p.handle_event(),
+        }
+    }
+
+    pub fn finish(&mut self) -> io::Result<()> {
+        match self {
+            Self::Plain(p) => {
+                let elapsed_str = format_duration(p.state.elapsed());
+                let total = p.state.completed + p.state.cached + p.state.failed + p.state.skipped;
+                println!(
+                    "{} {} in {} ({} succeeded, {} cached, {} failed, {} skipped)",
+                    p.state.finished_title,
+                    total,
+                    elapsed_str,
+                    p.state.completed,
+                    p.state.cached,
+                    p.state.failed,
+                    p.state.skipped,
+                );
+                Ok(())
+            }
+            Self::Tui(p) => p.finish(),
+        }
+    }
+
+    pub fn finish_silent(&mut self) -> io::Result<Duration> {
+        match self {
+            Self::Plain(p) => Ok(p.state.elapsed()),
+            Self::Tui(p) => p.finish_silent(),
+        }
+    }
+
+    pub fn finish_interrupted(&mut self) -> io::Result<bool> {
+        match self {
+            Self::Plain(_) => Ok(false),
+            Self::Tui(p) => p.finish_interrupted(),
+        }
+    }
+}
+
+/// Line-based progress display using ratatui inline viewport.
+pub(crate) struct MultiProgress {
+    terminal: Terminal<CrosstermBackend<Stdout>>,
+    state: ProgressState,
+    view_mode: ViewMode,
+    output_buffers: Vec<OutputBuffer>,
+    num_workers: usize,
+    /// Messages buffered while in fullscreen mode, printed when returning to inline.
+    pending_messages: Vec<Line<'static>>,
+    interrupt_announced: bool,
+}
+
+impl MultiProgress {
+    /** Create a new TUI progress display. Raw mode must already be enabled. */
+    fn new(
+        title: &str,
+        finished_title: &str,
+        total: usize,
+        num_workers: usize,
+    ) -> io::Result<Self> {
+        let height = (num_workers + 1) as u16;
+        let backend = CrosstermBackend::new(stdout());
+        let viewport = Viewport::Inline(height);
+        let terminal = Terminal::with_options(backend, TerminalOptions { viewport })?;
+        let output_buffers = (0..num_workers).map(|_| OutputBuffer::new(100)).collect();
+
+        Ok(Self {
+            terminal,
+            state: ProgressState::new(title, finished_title, total, num_workers),
+            view_mode: ViewMode::Inline,
+            output_buffers,
+            num_workers,
+            pending_messages: Vec::new(),
+            interrupt_announced: false,
+        })
+    }
+
+    fn state_mut(&mut self) -> &mut ProgressState {
+        &mut self.state
+    }
+
+    fn output_buffer_mut(&mut self, id: usize) -> Option<&mut OutputBuffer> {
+        self.output_buffers.get_mut(id)
+    }
+
+    fn clear_output_buffer(&mut self, id: usize) {
+        if let Some(buf) = self.output_buffers.get_mut(id) {
+            buf.clear();
+        }
+    }
+
+    fn print_status(
+        &mut self,
+        verb: &str,
+        pkg: &str,
+        duration: Option<Duration>,
+        breaks: Option<usize>,
+    ) -> io::Result<()> {
+        if self.state.suppressed {
             return Ok(());
         }
         let detail = match (duration, breaks) {
@@ -746,20 +829,14 @@ impl MultiProgress {
      * calls are no-ops so that both `handle_event` and the
      * manager/scan loop can call this without duplicating output.
      */
-    pub fn announce_interrupt(&mut self) {
+    fn announce_interrupt(&mut self) {
         if self.interrupt_announced {
             return;
         }
         self.interrupt_announced = true;
-        if self.progress_mode == ProgressMode::Plain {
-            eprintln!("Interrupted, stopping...");
-        }
     }
 
-    pub fn render(&mut self) -> io::Result<()> {
-        if self.progress_mode == ProgressMode::Plain {
-            return self.render_plain();
-        }
+    fn render(&mut self) -> io::Result<()> {
         match self.view_mode {
             ViewMode::Inline => self.render_inline(),
             ViewMode::MultiPanel => self.render_multipanel(),
@@ -822,14 +899,8 @@ impl MultiProgress {
         Ok(())
     }
 
-    fn render_plain(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-
-    /// Handle a pending terminal event (call only after poll returned true).
-    /// Returns Ok(true) if view mode was toggled.
-    pub fn handle_event(&mut self) -> io::Result<bool> {
-        if self.state.suppressed || self.progress_mode == ProgressMode::Plain {
+    fn handle_event(&mut self) -> io::Result<bool> {
+        if self.state.suppressed {
             return Ok(false);
         }
 
@@ -861,8 +932,7 @@ impl MultiProgress {
         Ok(false)
     }
 
-    /// Toggle between inline and multi-panel view modes.
-    pub fn toggle_view_mode(&mut self) -> io::Result<()> {
+    fn toggle_view_mode(&mut self) -> io::Result<()> {
         match self.view_mode {
             ViewMode::Inline => self.switch_to_multipanel()?,
             ViewMode::MultiPanel => self.switch_to_inline()?,
@@ -1106,8 +1176,7 @@ impl MultiProgress {
         }
     }
 
-    /// Finish display and print a summary line.
-    pub fn finish(&mut self) -> io::Result<()> {
+    fn finish(&mut self) -> io::Result<()> {
         let elapsed = self.finish_silent()?;
         let elapsed_str = format_duration(elapsed);
         let total =
@@ -1125,57 +1194,27 @@ impl MultiProgress {
         Ok(())
     }
 
-    /// Finish display without printing a summary. Returns elapsed time.
-    pub fn finish_silent(&mut self) -> io::Result<Duration> {
-        // If in multi-panel mode, switch back to inline first to restore output
+    fn finish_silent(&mut self) -> io::Result<Duration> {
         if self.view_mode == ViewMode::MultiPanel {
             self.switch_to_inline()?;
         }
-
-        if self.raw_mode {
-            let _ = disable_raw_mode();
-            self.raw_mode = false;
-        }
-
-        // Clear the inline viewport area
-        if !self.state.suppressed {
-            self.terminal.clear()?;
-            stdout().execute(Show)?;
-        }
-
+        let _ = disable_raw_mode();
+        self.terminal.clear()?;
+        stdout().execute(Show)?;
         Ok(self.state.elapsed())
     }
 
-    /**
-     * Clean up the display for an interrupt.
-     *
-     * Returns `true` if cleanup was performed (first call), `false` if
-     * already suppressed (idempotent -- safe to call multiple times).
-     * Callers should print their interrupt message only when this
-     * returns `true`, to avoid duplicates.
-     */
-    pub fn finish_interrupted(&mut self) -> io::Result<bool> {
+    fn finish_interrupted(&mut self) -> io::Result<bool> {
         if self.state.suppressed {
             return Ok(false);
         }
         self.state.suppressed = true;
-
-        // If in multi-panel mode, switch back to inline first to restore output
         if self.view_mode == ViewMode::MultiPanel {
             let _ = self.switch_to_inline();
         }
-
-        if self.raw_mode {
-            let _ = disable_raw_mode();
-            self.raw_mode = false;
-        }
-
-        // Clear the inline viewport area
+        let _ = disable_raw_mode();
         self.terminal.clear()?;
-
-        // Restore cursor
         stdout().execute(Show)?;
-
         Ok(true)
     }
 }
@@ -1297,15 +1336,10 @@ fn truncate_left_cols(s: &str, max_cols: usize) -> String {
 
 impl Drop for MultiProgress {
     fn drop(&mut self) {
-        // If in multi-panel mode, leave alternate screen
         if self.view_mode == ViewMode::MultiPanel {
             let _ = stdout().execute(LeaveAlternateScreen);
         }
-        if self.raw_mode {
-            let _ = disable_raw_mode();
-            // Restore cursor visibility (only needed if we were in raw mode,
-            // otherwise we never hid it and Show emits a visible escape code)
-            let _ = stdout().execute(Show);
-        }
+        let _ = disable_raw_mode();
+        let _ = stdout().execute(Show);
     }
 }

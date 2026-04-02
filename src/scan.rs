@@ -39,7 +39,7 @@
 
 use crate::config::PkgsrcEnv;
 use crate::sandbox::{SandboxScope, wait_output_with_shutdown};
-use crate::tui::{MultiProgress, REFRESH_INTERVAL, format_duration};
+use crate::tui::{Progress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, Interrupted, RunState, Sandbox};
 use crate::{PackageCounts, PackageState, PackageStateKind};
 use anyhow::{Context, Result, bail};
@@ -673,7 +673,7 @@ impl Scan {
         // Note: finished_title is unused since we print our own summary
         let total_count = self.initial_cached + self.incoming.len();
         let progress = Arc::new(Mutex::new(
-            MultiProgress::new(
+            Progress::new(
                 "Scanning",
                 "",
                 total_count,
