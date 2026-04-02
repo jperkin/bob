@@ -41,12 +41,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use glob::Pattern;
+use strum::IntoEnumIterator;
 use tracing::{debug, info};
 
-use bob::PackageState;
 use bob::build::{BuildResult, BuildSummary, PkgBuildStats};
 use bob::config::{Config, Publish, PublishPackages};
 use bob::db::Database;
+use bob::{PackageCounts, PackageState, PackageStateKind};
 
 struct PublishResult {
     uploaded: usize,
@@ -158,10 +159,35 @@ fn generate_reports(config: &Config, db: &Database, build_id: &str) -> Result<()
         vcs_info.remote_branch = Some(branch.clone());
     }
 
+    let mut states = PackageCounts::default();
+    for r in &db.get_all_build_results()? {
+        states.add(&r.state);
+    }
+    for (_, _, state) in &db.get_prefailskip_packages()? {
+        states.add(state);
+    }
+    for (_, _, failed_dep) in &db.get_indirect_failures()? {
+        states.add(&PackageState::IndirectFailed(failed_dep.clone()));
+    }
+
+    let duration = db.get_build_duration()?;
+    let report_url = report_cfg
+        .url
+        .as_ref()
+        .map(|u| format!("{}/{}", u, build_id));
+
     std::fs::create_dir_all(logdir)
         .with_context(|| format!("Failed to create {}", logdir.display()))?;
 
-    write_variables_json(&pkgsrc_env, &vcs_info, logdir)?;
+    write_variables_json(
+        &pkgsrc_env,
+        &vcs_info,
+        &states,
+        build_id,
+        report_url.as_deref(),
+        duration,
+        logdir,
+    )?;
 
     let report_path = logdir.join("report.html");
     let report_meta = ReportMeta {
@@ -169,11 +195,6 @@ fn generate_reports(config: &Config, db: &Database, build_id: &str) -> Result<()
         pkgsrc_env: &pkgsrc_env,
         vcs_info: &vcs_info,
     };
-
-    let report_url = report_cfg
-        .url
-        .as_ref()
-        .map(|u| format!("{}/{}", u, build_id));
 
     println!("Generating report...");
     write_html_report(db, logdir, &report_path, &report_meta)?;
@@ -289,6 +310,7 @@ fn send_email(config: &Config, db: &Database, build_id: &str, dry_run: bool) -> 
         .context("Failed to read report.txt -- was the report generated?")?;
 
     use lettre::message::Mailbox;
+    use lettre::message::header::{HeaderName, HeaderValue};
     use lettre::{Message, SendmailTransport, Transport};
 
     let from: Mailbox = from_str
@@ -302,6 +324,18 @@ fn send_email(config: &Config, db: &Database, build_id: &str, dry_run: bool) -> 
             .parse()
             .with_context(|| format!("Invalid to address: {}", addr))?;
         builder = builder.to(to);
+    }
+
+    if let Some(url) = &report_cfg.url {
+        let base = format!("{}/{}", url, build_id);
+        builder = builder.raw_header(HeaderValue::new(
+            HeaderName::new_from_ascii_str("X-Bob-Report-URL"),
+            format!("{}/report.html", base),
+        ));
+        builder = builder.raw_header(HeaderValue::new(
+            HeaderName::new_from_ascii_str("X-Bob-Report-Raw"),
+            format!("{}/report.zst", base),
+        ));
     }
 
     let message = builder
@@ -559,11 +593,11 @@ fn write_text_report(
         .map(|sp| (sp.pkg.to_string(), sp.dep_count))
         .collect();
 
-    for (pkgname, pkgpath, reason) in db.get_prefailed_packages()? {
+    for (pkgname, pkgpath, state) in db.get_prefailskip_packages()? {
         results.push(BuildResult {
             pkgname: pkgsrc::PkgName::new(&pkgname),
             pkgpath: pkgpath.and_then(|p| pkgsrc::PkgPath::new(&p).ok()),
-            state: PackageState::PreFailed(reason),
+            state,
             log_dir: None,
             build_stats: PkgBuildStats::default(),
         });
@@ -760,6 +794,10 @@ fn write_machine_report(db: &Database, logdir: &Path) -> Result<()> {
 fn write_variables_json(
     pkgsrc_env: &bob::config::PkgsrcEnv,
     vcs_info: &bob::vcs::VcsInfo,
+    states: &PackageCounts,
+    build_id: &str,
+    report_url: Option<&str>,
+    duration: Duration,
     logdir: &Path,
 ) -> Result<()> {
     let mut pkgsrc = serde_json::Map::new();
@@ -773,8 +811,38 @@ fn write_variables_json(
         pkgsrc.insert(key.clone(), serde_json::Value::String(value.clone()));
     }
 
+    let mut counts = serde_json::Map::new();
+    for kind in PackageStateKind::iter() {
+        counts.insert(
+            kind.as_ref().to_string(),
+            serde_json::Value::Number(states[kind].into()),
+        );
+    }
+
+    let mut report = serde_json::Map::new();
+    report.insert(
+        "date".to_string(),
+        serde_json::Value::String(build_id.to_string()),
+    );
+    report.insert(
+        "duration".to_string(),
+        serde_json::Value::Number(duration.as_secs().into()),
+    );
+    if let Some(base) = report_url {
+        report.insert(
+            "url".to_string(),
+            serde_json::Value::String(format!("{}/report.html", base)),
+        );
+        report.insert(
+            "raw".to_string(),
+            serde_json::Value::String(format!("{}/report.zst", base)),
+        );
+    }
+
     let mut root = serde_json::Map::new();
     root.insert("pkgsrc".to_string(), serde_json::Value::Object(pkgsrc));
+    root.insert("counts".to_string(), serde_json::Value::Object(counts));
+    root.insert("report".to_string(), serde_json::Value::Object(report));
 
     if vcs_info.is_detected() {
         let vcs = serde_json::to_value(vcs_info)?;
@@ -846,11 +914,11 @@ fn write_html_report(db: &Database, logdir: &Path, path: &Path, meta: &ReportMet
         .map(|sp| (sp.pkg.to_string(), sp.dep_count))
         .collect();
 
-    for (pkgname, pkgpath, reason) in db.get_prefailed_packages()? {
+    for (pkgname, pkgpath, state) in db.get_prefailskip_packages()? {
         results.push(BuildResult {
             pkgname: pkgsrc::PkgName::new(&pkgname),
             pkgpath: pkgpath.and_then(|p| pkgsrc::PkgPath::new(&p).ok()),
-            state: PackageState::PreFailed(reason),
+            state,
             log_dir: None,
             build_stats: PkgBuildStats::default(),
         });

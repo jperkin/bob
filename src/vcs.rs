@@ -33,7 +33,7 @@ use tracing::debug;
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct VcsInfo {
     /// Version control system type.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", rename = "format")]
     pub vcs: Option<String>,
     /// Remote URL.
     #[serde(skip_serializing_if = "Option::is_none")]

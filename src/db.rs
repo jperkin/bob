@@ -1400,20 +1400,31 @@ impl Database {
     }
 
     /**
-     * Get pre-failed packages (those with skip_reason or fail_reason but no
-     * build result). Returns (pkgname, pkgpath, reason).
+     * Get pre-failed and pre-skipped packages (those with fail_reason or
+     * skip_reason but no build result). Returns (pkgname, pkgpath, state)
+     * where state is PreFailed or PreSkipped depending on which reason is set.
      */
-    pub fn get_prefailed_packages(&self) -> Result<Vec<(String, Option<String>, String)>> {
+    pub fn get_prefailskip_packages(&self) -> Result<Vec<(String, Option<String>, PackageState)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT p.pkgname, p.pkgpath,
-                    COALESCE(p.fail_reason, p.skip_reason) as reason
+            "SELECT p.pkgname, p.pkgpath, p.skip_reason, p.fail_reason
              FROM packages p
              WHERE (p.skip_reason IS NOT NULL OR p.fail_reason IS NOT NULL)
                AND NOT EXISTS (SELECT 1 FROM builds b WHERE b.package_id = p.id)
              ORDER BY p.pkgname",
         )?;
 
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        let rows = stmt.query_map([], |row| {
+            let pkgname: String = row.get(0)?;
+            let pkgpath: Option<String> = row.get(1)?;
+            let skip: Option<String> = row.get(2)?;
+            let fail: Option<String> = row.get(3)?;
+            let state = match (fail, skip) {
+                (Some(r), _) => PackageState::PreFailed(r),
+                (_, Some(r)) => PackageState::PreSkipped(r),
+                _ => PackageState::PreFailed(String::new()),
+            };
+            Ok((pkgname, pkgpath, state))
+        })?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
