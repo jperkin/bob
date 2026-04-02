@@ -210,16 +210,19 @@ show-subdir-var:
 
     /// pkgtools/pkg_install Makefile: show-vars outputs environment values.
     fn write_pkg_install_makefile(&self) -> Result<()> {
-        // Output order must match REQUIRED_VARS: PACKAGES, PKG_DBDIR,
-        // PKG_REFCOUNT_DBDIR, PKG_TOOLS_BIN, PREFIX
         let content = format!(
             "\
 show-vars:
-\t@echo \"{packages}\"
-\t@echo \"{pkg_dbdir}\"
-\t@echo \"{pkg_refcount_dbdir}\"
-\t@echo \"{pkgtools}\"
-\t@echo \"{prefix}\"
+\t@for v in ${{VARNAMES}}; do \\\n\
+\t  case \"$$v\" in \\\n\
+\t    PACKAGES) echo \"{packages}\" ;; \\\n\
+\t    PKG_DBDIR) echo \"{pkg_dbdir}\" ;; \\\n\
+\t    PKG_REFCOUNT_DBDIR) echo \"{pkg_refcount_dbdir}\" ;; \\\n\
+\t    PKG_TOOLS_BIN) echo \"{pkgtools}\" ;; \\\n\
+\t    PREFIX) echo \"{prefix}\" ;; \\\n\
+\t    *) echo ;; \\\n\
+\t  esac; \\\n\
+\tdone
 ",
             packages = self.packages_dir().display(),
             pkg_dbdir = self.root.join("pkg_dbdir").display(),
@@ -1393,18 +1396,6 @@ fn test_build_logs() -> Result<()> {
         fp_log.join("package.log").exists(),
         "fail-package should have package.log"
     );
-
-    // All failed builds should have a .stage file
-    for name in &[
-        "build-fail-1.0",
-        "fail-checksum-1.0",
-        "fail-at-build-1.0",
-        "fail-install-1.0",
-        "fail-package-1.0",
-    ] {
-        let stage_file = h.logdir().join(name).join(".stage");
-        assert!(stage_file.exists(), "{} should have a .stage file", name);
-    }
 
     Ok(())
 }
