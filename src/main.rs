@@ -199,20 +199,19 @@ impl BuildRunner {
     }
 }
 
-#[derive(Debug, Parser)]
-#[command(
-    name = "bob",
-    author,
-    version,
-    about,
-    long_about = "\
+fn long_about() -> String {
+    let config_path = bob::config::default_config_path()
+        .expect("unable to determine default config path (HOME not set?)")
+        .display()
+        .to_string();
+    format!(
+        "\
 A pkgsrc package builder
 
-\x1b[1;4mFirst time setup:\x1b[0m
+\x1b[1;4mFirst time setup (create configuration file):\x1b[0m
 
-  bob init <dir>   Create new configuration directory
-  cd <dir>         Bob looks for config.lua in current directory by default
-  vi config.lua    Configure packages to build, customise sandboxes, etc.
+  bob init
+  vi {config_path}
 
 \x1b[1;4mBuild all packages:\x1b[0m
 
@@ -220,6 +219,16 @@ A pkgsrc package builder
 
 Each of the main target commands depend on the previous being up-to-date, so
 'bob build' will automatically run 'bob scan' first to get build information."
+    )
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "bob",
+    author,
+    version,
+    about,
+    long_about = long_about(),
 )]
 pub struct Args {
     /// Use the specified configuration file instead of the default path
@@ -232,8 +241,8 @@ pub struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
-    /// Initialise a new build directory and configuration file
-    Init { dir: PathBuf },
+    /// Create a default configuration file
+    Init,
     /// Perform recursive scan of packages and resolve dependencies
     Scan {
         /// Skip up-to-date checking (scan and resolve only)
@@ -437,8 +446,8 @@ fn run() -> Result<()> {
     let args = Args::parse();
 
     match args.cmd {
-        Cmd::Init { dir: ref arg } => {
-            Init::create(arg)?;
+        Cmd::Init => {
+            Init::create(args.config.as_deref())?;
         }
         Cmd::Scan { scan_only } => {
             let runner = BuildRunner::new(args.config.as_deref())?;

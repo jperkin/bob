@@ -735,26 +735,25 @@ impl Config {
     /// Returns an error if the configuration file doesn't exist or contains
     /// invalid Lua syntax.
     pub fn load(config_path: Option<&Path>) -> Result<Config> {
-        /*
-         * Load user-supplied configuration file, or the default location.
-         */
-        let filename = if let Some(path) = config_path {
-            if path.is_relative() {
-                std::env::current_dir()
-                    .context("Unable to determine current directory")?
-                    .join(path)
-            } else {
-                path.to_path_buf()
+        let filename = match config_path {
+            Some(path) => {
+                if path.is_relative() {
+                    std::env::current_dir()
+                        .context("Unable to determine current directory")?
+                        .join(path)
+                } else {
+                    path.to_path_buf()
+                }
             }
-        } else {
-            std::env::current_dir()
-                .context("Unable to determine current directory")?
-                .join("config.lua")
+            None => default_config_path()?,
         };
 
-        /* A configuration file is mandatory. */
         if !filename.exists() {
-            anyhow::bail!("Configuration file {} does not exist", filename.display());
+            anyhow::bail!(
+                "Configuration file {} does not exist.\n\
+                 Run 'bob init' to create a default configuration.",
+                filename.display()
+            );
         }
 
         /*
@@ -784,15 +783,15 @@ impl Config {
         }
 
         /*
-         * Resolve dbdir: explicit value from options, or default to
-         * "./db" relative to the config file directory.  Relative paths
-         * are resolved against the config directory.
+         * Resolve dbdir: explicit value from options, or the platform
+         * default data directory.  Relative paths are resolved against
+         * the config file directory.
          */
         let raw_dbdir = file.options.as_ref().and_then(|o| o.dbdir.clone());
         let dbdir = match raw_dbdir {
             Some(p) if p.is_absolute() => p,
             Some(p) => base_dir.join(p),
-            None => base_dir.join("db"),
+            None => default_data_dir()?,
         };
 
         /*
@@ -1114,6 +1113,47 @@ impl Config {
     }
 }
 
+/**
+ * Return the default configuration file path.
+ *
+ * If `BOB_SYSCONFDIR` was set at compile time (e.g. by pkgsrc to
+ * `/usr/pkg/etc/bob`), uses `$BOB_SYSCONFDIR/config.lua`.  Otherwise
+ * uses the XDG config directory (`~/.config/bob/config.lua`).
+ */
+pub fn default_config_path() -> Result<PathBuf> {
+    let dir = match option_env!("BOB_SYSCONFDIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => {
+            let xdg = xdg::BaseDirectories::new();
+            let config_home = xdg
+                .config_home
+                .context("Unable to determine XDG config directory (HOME not set?)")?;
+            config_home.join("bob")
+        }
+    };
+    Ok(dir.join("config.lua"))
+}
+
+/**
+ * Return the default data directory for databases and logs.
+ *
+ * If `BOB_DATADIR` was set at compile time (e.g. by pkgsrc to
+ * `/var/db/bob`), uses that directly.  Otherwise uses the XDG data
+ * directory (`~/.local/share/bob`).
+ */
+pub fn default_data_dir() -> Result<PathBuf> {
+    match option_env!("BOB_DATADIR") {
+        Some(dir) => Ok(PathBuf::from(dir)),
+        None => {
+            let xdg = xdg::BaseDirectories::new();
+            let dir = xdg
+                .data_home
+                .context("Unable to determine XDG data directory (HOME not set?)")?;
+            Ok(dir.join("bob"))
+        }
+    }
+}
+
 /// Load a Lua configuration file and return a ConfigFile and LuaEnv.
 fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
     let lua = Lua::new();
@@ -1191,6 +1231,10 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
     Ok((config, lua_env))
 }
 
+const OLD_CONFIG_ERROR: &str = "\n\n\
+    The configuration format and the default location have changed.  Run 'bob init' to\n\
+    generate a new file and update it with any changes required for your environment.";
+
 /**
  * Check for config keys from older versions and produce a helpful error
  * directing users to regenerate their config with `bob init`.
@@ -1202,12 +1246,7 @@ fn reject_old_config(globals: &Table) -> Result<(), String> {
             .get(*key)
             .map_err(|e| format!("Error reading config: {}", e))?;
         if !val.is_nil() {
-            return Err(format!(
-                "Configuration file uses removed top-level '{}' section. \
-                 Please regenerate your config with 'bob init' and refer \
-                 to the new example files.",
-                key
-            ));
+            return Err(OLD_CONFIG_ERROR.to_string());
         }
     }
 
@@ -1219,11 +1258,7 @@ fn reject_old_config(globals: &Table) -> Result<(), String> {
             .get("actions")
             .map_err(|e| format!("Error reading config: {}", e))?;
         if !actions.is_nil() {
-            return Err("Configuration file uses removed 'sandboxes.actions'. \
-                 This has been renamed to 'sandboxes.setup'. \
-                 Please regenerate your config with 'bob init' and refer \
-                 to the new example files."
-                .to_string());
+            return Err(OLD_CONFIG_ERROR.to_string());
         }
     }
 

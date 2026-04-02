@@ -15,48 +15,45 @@
  */
 
 /*!
- * Configuration directory initialisation.
+ * Configuration file initialisation.
  *
- * Creates a new bob configuration directory with a platform-appropriate
- * `config.lua`.
+ * Creates a platform-appropriate `config.lua` configuration file.
  */
 
-use anyhow::bail;
+use crate::config::default_config_path;
+use anyhow::{Context, bail};
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 
 /**
- * Configuration directory generator for `bob init`.
+ * Configuration file generator for `bob init`.
  */
 pub struct Init {}
 
 impl Init {
     /**
-     * Create a new configuration directory at `dir`.
+     * Create a new configuration file.
      *
-     * Generates a platform-specific `config.lua`.  The directory must not
-     * already exist or must be empty.
+     * If `config_path` is provided, writes to that path.  Otherwise
+     * writes to the platform default location.  The file must not
+     * already exist.
      */
-    pub fn create(dir: &PathBuf) -> anyhow::Result<()> {
-        let dir = if dir.is_absolute() {
-            dir.to_path_buf()
-        } else {
-            env::current_dir()?.join(dir)
+    pub fn create(config_path: Option<&Path>) -> anyhow::Result<()> {
+        let path = match config_path {
+            Some(p) => {
+                if p.is_relative() {
+                    env::current_dir()?.join(p)
+                } else {
+                    p.to_path_buf()
+                }
+            }
+            None => default_config_path()?,
         };
-        if dir.exists() {
-            if !dir.is_dir() {
-                bail!("{} exists and is not a directory", dir.display());
-            }
-            if fs::read_dir(&dir)?.next().is_some() {
-                bail!("{} exists and is not empty", dir.display());
-            }
-        }
 
-        println!(
-            "Initialising new configuration directory {}:",
-            dir.display()
-        );
+        if path.exists() {
+            bail!("Configuration file {} already exists", path.display());
+        }
 
         let confstr = match env::consts::OS {
             "illumos" => include_str!("../config/illumos.lua"),
@@ -73,10 +70,12 @@ impl Init {
             }
         };
 
-        let conffile = dir.join("config.lua");
-        fs::create_dir_all(conffile.parent().unwrap())?;
-        fs::write(&conffile, confstr)?;
-        println!("\t{}", conffile.display());
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        fs::write(&path, confstr)?;
+        println!("Created {}", path.display());
 
         Ok(())
     }
