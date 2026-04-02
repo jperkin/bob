@@ -1303,8 +1303,9 @@ impl Drop for MultiProgress {
         }
         if self.raw_mode {
             let _ = disable_raw_mode();
+            // Restore cursor visibility (only needed if we were in raw mode,
+            // otherwise we never hid it and Show emits a visible escape code)
+            let _ = stdout().execute(Show);
         }
-        // Ensure cursor is visible when dropped
-        let _ = stdout().execute(Show);
     }
 }
