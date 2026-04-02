@@ -923,15 +923,15 @@ impl Sandbox {
      * Create sandboxes, claiming available IDs.
      */
     pub fn create_all(&self, count: usize) -> Result<()> {
-        if count == 1 {
-            print!("Creating sandbox...");
+        let msg = if count == 1 {
+            "Creating sandbox".to_string()
         } else {
-            print!("Creating {} sandboxes...", count);
-        }
-        let _ = std::io::stdout().flush();
+            format!("Creating {} sandboxes", count)
+        };
+        crate::print_status(&msg);
         let start = Instant::now();
         self.claim_ids(count)?;
-        println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
+        crate::print_elapsed(&msg, start.elapsed());
         Ok(())
     }
 
@@ -959,12 +959,12 @@ impl Sandbox {
                 }
             }
         }
-        if sandboxes.len() == 1 {
-            print!("Destroying sandbox...");
+        let msg = if sandboxes.len() == 1 {
+            "Destroying sandbox".to_string()
         } else {
-            print!("Destroying {} sandboxes...", sandboxes.len());
-        }
-        let _ = std::io::stdout().flush();
+            format!("Destroying {} sandboxes", sandboxes.len())
+        };
+        crate::print_status(&msg);
         let start = Instant::now();
         let results: Vec<(usize, Result<()>)> = sandboxes
             .into_par_iter()
@@ -981,7 +981,7 @@ impl Sandbox {
             }
         }
         if failed == 0 {
-            println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
+            crate::print_elapsed(&msg, start.elapsed());
             Ok(())
         } else {
             Err(anyhow::anyhow!(
@@ -1600,12 +1600,12 @@ impl Drop for SandboxScope {
                 }
             }
         }
-        if self.owned.len() == 1 {
-            print!("Destroying sandbox...");
+        let msg = if self.owned.len() == 1 {
+            "Destroying sandbox".to_string()
         } else {
-            print!("Destroying {} sandboxes...", self.owned.len());
-        }
-        let _ = std::io::stdout().flush();
+            format!("Destroying {} sandboxes", self.owned.len())
+        };
+        crate::print_status(&msg);
         let start = Instant::now();
         let ids = self.owned.clone();
         let results: Vec<(usize, Result<()>)> = ids
@@ -1623,7 +1623,7 @@ impl Drop for SandboxScope {
             }
         }
         if failed == 0 {
-            println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
+            crate::print_elapsed(&msg, start.elapsed());
         } else {
             eprintln!(
                 "Warning: failed to destroy {} sandbox{}",

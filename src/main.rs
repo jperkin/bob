@@ -177,15 +177,12 @@ impl BuildRunner {
         if !changed {
             return;
         }
-        print!("Generating pkg_summary...");
-        if std::io::Write::flush(&mut std::io::stdout()).is_err() {
-            return;
-        }
+        bob::print_status("Generating pkg_summary");
         tracing::debug!("Generating pkg_summary");
         let start = std::time::Instant::now();
         match bob::generate_pkg_summary(&self.db, self.config.build_threads()) {
             Ok(()) => {
-                println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
+                bob::print_elapsed("Generating pkg_summary", start.elapsed());
                 tracing::debug!(
                     elapsed_ms = start.elapsed().as_millis(),
                     "Finished generating pkg_summary"

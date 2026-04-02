@@ -2028,15 +2028,15 @@ impl Build {
         let n = self.config.build_threads().min(scheduler.queued_count());
         if self.scope.enabled() && n > self.scope.count() {
             let to_create = n - self.scope.count();
-            if to_create == 1 {
-                print!("Creating sandbox...");
+            let msg = if to_create == 1 {
+                "Creating sandbox".to_string()
             } else {
-                print!("Creating {} sandboxes...", to_create);
-            }
-            let _ = std::io::Write::flush(&mut std::io::stdout());
+                format!("Creating {} sandboxes", to_create)
+            };
+            crate::print_status(&msg);
             let start = std::time::Instant::now();
             self.scope.ensure(n)?;
-            println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
+            crate::print_elapsed(&msg, start.elapsed());
         }
 
         /*

@@ -14,7 +14,6 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -75,17 +74,16 @@ fn exec(config: &Config) -> Result<()> {
     if !sandbox.enabled() {
         bail!("No sandboxes configured");
     }
-    print!("Creating sandbox...");
-    let _ = std::io::stdout().flush();
+    bob::print_status("Creating sandbox");
     let start = Instant::now();
     let id = sandbox.claim_id()?;
     let basic_envs = config.script_env(None);
     let result = (|| -> Result<()> {
         if !sandbox.run_pre_build(Some(id), config, basic_envs)? {
-            println!(" failed ({:.1}s)", start.elapsed().as_secs_f32());
+            bob::print_elapsed("Creating sandbox", start.elapsed());
             bail!("pre-build failed");
         }
-        println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
+        bob::print_elapsed("Creating sandbox", start.elapsed());
         let pkgsrc_env = PkgsrcEnv::fetch(config, &sandbox, Some(id))?;
         let prefix = &pkgsrc_env.prefix;
         println!("Entering sandbox {}...", sandbox.path(id).display());
@@ -127,10 +125,9 @@ fn exec(config: &Config) -> Result<()> {
         Ok(false) => eprintln!("Warning: post-build failed"),
         Err(e) => eprintln!("Warning: post-build error: {e}"),
     }
-    print!("Destroying sandbox...");
-    let _ = std::io::stdout().flush();
+    bob::print_status("Destroying sandbox");
     let start = Instant::now();
     sandbox.destroy(id)?;
-    println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
+    bob::print_elapsed("Destroying sandbox", start.elapsed());
     result
 }

@@ -35,6 +35,35 @@ use std::io::{self, IsTerminal, Stdout, stdout};
 use std::time::{Duration, Instant};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+/**
+ * Print a status message before starting work.
+ *
+ * In a terminal, prints "msg..." without a newline so the user sees
+ * real-time progress.  In non-terminal output, does nothing -- the
+ * full line is printed by [`print_elapsed`] after the work completes.
+ */
+pub fn print_status(msg: &str) {
+    if io::stdout().is_terminal() {
+        print!("{}...", msg);
+        let _ = io::Write::flush(&mut io::stdout());
+    }
+}
+
+/**
+ * Print the completion of a timed operation.
+ *
+ * In a terminal, appends " done (Xs)" to the line started by
+ * [`print_status`].  In non-terminal output, prints the full
+ * "msg... done (Xs)" as a single line.
+ */
+pub fn print_elapsed(msg: &str, elapsed: Duration) {
+    if io::stdout().is_terminal() {
+        println!(" done ({:.1}s)", elapsed.as_secs_f32());
+    } else {
+        println!("{}... done ({:.1}s)", msg, elapsed.as_secs_f32());
+    }
+}
+
 /// Default refresh interval for UI updates (10fps).
 /// Used for both event polling timeout and render throttling.
 pub const REFRESH_INTERVAL: Duration = Duration::from_millis(100);

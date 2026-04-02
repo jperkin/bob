@@ -69,8 +69,7 @@ pub fn check_up_to_date(
 
     db.clear_build_reasons()?;
 
-    print!("Calculating package build status...");
-    std::io::Write::flush(&mut std::io::stdout())?;
+    bob::print_status("Calculating package build status");
     let start = std::time::Instant::now();
 
     let pool = rayon::ThreadPoolBuilder::new()
@@ -233,7 +232,7 @@ pub fn check_up_to_date(
         db.store_build_reason(pkgname, &reason.to_string())?;
     }
 
-    println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
+    bob::print_elapsed("Calculating package build status", start.elapsed());
 
     Ok(up_to_date_count)
 }

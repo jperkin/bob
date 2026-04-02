@@ -49,7 +49,7 @@ use petgraph::graphmap::DiGraphMap;
 use pkgsrc::{Pattern, PatternCache, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::io::{BufReader, Write};
+use std::io::BufReader;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -616,8 +616,7 @@ impl Scan {
          * Ensure a sandbox exists. The caller manages overall lifecycle.
          */
         if scope.enabled() {
-            print!("Creating sandbox...");
-            let _ = std::io::stdout().flush();
+            crate::print_status("Creating sandbox");
             let start = Instant::now();
             let ids = scope.ensure(1)?;
             self.sandbox_id = ids.first().copied();
@@ -628,7 +627,7 @@ impl Scan {
             )? {
                 warn!("pre-build failed");
             }
-            println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
+            crate::print_elapsed("Creating sandbox", start.elapsed());
         }
 
         let env = match db.load_pkgsrc_env() {
@@ -1702,9 +1701,7 @@ impl Scan {
         db: &crate::db::Database,
         strict: bool,
     ) -> Result<ScanSummary> {
-        print!("Resolving dependencies...");
-        std::io::Write::flush(&mut std::io::stdout())?;
-
+        crate::print_status("Resolving dependencies");
         let start = std::time::Instant::now();
         let scan_data = db.get_all_scan_data()?;
         let result = self.resolve(scan_data)?;
@@ -1712,7 +1709,7 @@ impl Scan {
         db.store_resolved_deps(&result)?;
         db.store_scan_skipped(&result)?;
         db.store_scan_failures(&result)?;
-        println!(" done ({:.1}s)", start.elapsed().as_secs_f32());
+        crate::print_elapsed("Resolving dependencies", start.elapsed());
 
         let errors: Vec<_> = result.errors().collect();
         if !errors.is_empty() {
