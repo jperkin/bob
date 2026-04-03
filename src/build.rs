@@ -1958,7 +1958,7 @@ impl Build {
      * Results are persisted to `db` as each package completes.
      */
     pub fn start(
-        &mut self,
+        mut self,
         state: &RunState,
         db: &crate::db::Database,
     ) -> anyhow::Result<BuildSummary> {
@@ -2078,8 +2078,9 @@ impl Build {
         }
 
         let logdir = self.config.logdir().clone();
+        let total_packages = self.scanpkgs.len();
         let jobs = BuildJobs {
-            scanpkgs: self.scanpkgs.clone(),
+            scanpkgs: self.scanpkgs,
             scheduler,
             results,
             logdir,
@@ -2094,14 +2095,8 @@ impl Build {
 
         // Set up multi-line progress display using ratatui inline viewport
         let progress = Arc::new(Mutex::new(
-            Progress::new(
-                "Building",
-                "Built",
-                self.scanpkgs.len(),
-                n,
-                self.config.tui(),
-            )
-            .context("Failed to initialize progress display")?,
+            Progress::new("Building", "Built", total_packages, n, self.config.tui())
+                .context("Failed to initialize progress display")?,
         ));
 
         // Mark cached and indirect-failed packages in progress display
