@@ -696,7 +696,7 @@ fn test_full_build() -> Result<()> {
     // Run build
     let build_sandbox = Sandbox::new(&config);
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
-    let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
+    let build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
     let build_result = build.start(&state, &db)?;
 
     let bc = build_result.counts();
@@ -864,7 +864,7 @@ fn test_build_bootstrap_skips_deinstall() -> Result<()> {
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
-    let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
+    let build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
     let build_result = build.start(&state, &db)?;
 
     // base should succeed
@@ -966,7 +966,7 @@ fn run_scan_and_build(h: &TestHarness) -> Result<(Database, ScanSummary, bob::Bu
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
-    let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
+    let build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
     let build_result = build.start(&state, &db)?;
 
     Ok((db, scan_result, build_result))
@@ -1532,7 +1532,7 @@ fn test_limited_build() -> Result<()> {
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
-    let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
+    let build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
     let build_result = build.start(&state, &db)?;
 
     // All 4 should succeed
@@ -1670,7 +1670,7 @@ pkgsrc = {{
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
-    let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
+    let build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
     let build_result = build.start(&state, &db)?;
 
     let bc = build_result.counts();
@@ -1840,7 +1840,7 @@ fn test_multi_version_multiple_records_build_all_variants() -> Result<()> {
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
-    let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
+    let build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
     let build_result = build.start(&state, &db)?;
 
     for pkgname in ["py27-dual-1.0", "py314-dual-1.0"] {
@@ -2432,7 +2432,7 @@ fn test_pkg_summary_skipped_when_all_fail() -> Result<()> {
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
-    let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
+    let build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
     let summary = build.start(&state, &db)?;
 
     assert_eq!(summary.counts().states[Success], 0);
@@ -2475,7 +2475,7 @@ fn test_pkg_summary_regenerated_when_new_packages_added() -> Result<()> {
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
-    let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
+    let build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
     let first_summary = build.start(&state, &db)?;
 
     assert_eq!(first_summary.counts().states[Success], 1);
@@ -2790,7 +2790,7 @@ show-vars:
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
-    let mut build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
+    let build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
     let build_result = build.start(&state, &db)?;
 
     assert_eq!(
