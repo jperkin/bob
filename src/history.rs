@@ -25,7 +25,7 @@
 
 use std::time::Duration;
 
-use strum::{EnumMessage, EnumProperty, VariantArray};
+use strum::{EnumMessage, VariantArray};
 
 use crate::build::Stage;
 use crate::{ColumnAlign, PackageState};
@@ -54,27 +54,21 @@ const CPU_PREFIX: &str = "cpu:";
 )]
 #[strum(serialize_all = "snake_case")]
 pub enum HistoryKind {
-    #[strum(message = "Build start time", props(default = "true"))]
+    #[strum(message = "Build start time")]
     Timestamp,
     #[strum(message = "Package path in pkgsrc")]
     Pkgpath,
-    #[strum(message = "Package name and version", props(default = "true"))]
+    #[strum(message = "Package name and version")]
     Pkgname,
     #[strum(message = "Package name without version")]
     Pkgbase,
-    #[strum(message = "Build result", props(default = "true"))]
+    #[strum(message = "Build result")]
     Outcome,
-    #[strum(
-        message = "Last stage attempted (for failures)",
-        props(default = "true")
-    )]
+    #[strum(message = "Last stage attempted (for failures)")]
     Stage,
-    #[strum(message = "MAKE_JOBS used", props(default = "true", align = "right"))]
+    #[strum(message = "MAKE_JOBS used", props(align = "right"))]
     MakeJobs,
-    #[strum(
-        message = "Total wall-clock duration",
-        props(default = "true", align = "right")
-    )]
+    #[strum(message = "Total wall-clock duration", props(align = "right"))]
     Duration,
     #[strum(message = "WRKDIR size at end of build", props(align = "right"))]
     DiskUsage,
@@ -88,11 +82,6 @@ pub enum HistoryKind {
 impl crate::ColumnAlign for HistoryKind {}
 
 impl HistoryKind {
-    /// Whether this column is shown by default.
-    pub fn is_default(self) -> bool {
-        self.get_str("default").is_some()
-    }
-
     /// All valid column names with alignment.
     pub fn all_columns() -> Vec<(String, crate::Align)> {
         Self::VARIANTS
@@ -113,16 +102,13 @@ impl HistoryKind {
 
     /// Column names shown by default.
     pub fn default_names() -> Vec<&'static str> {
-        let duration: &str = Self::Duration.into();
-        let mut names: Vec<&'static str> = Self::VARIANTS
-            .iter()
-            .filter(|c| c.is_default())
-            .map(|v| v.into())
-            .collect();
-        if let Some(pos) = names.iter().position(|&n| n == duration) {
-            names.insert(pos, Stage::Build.into_str());
-        }
-        names
+        use HistoryKind::*;
+        [
+            Timestamp, Pkgname, Outcome, MakeJobs, Wrkobjdir, DiskUsage, Duration,
+        ]
+        .iter()
+        .map(|v| v.into())
+        .collect()
     }
 
     /// Generate the `after_long_help` text for `bob history`.
