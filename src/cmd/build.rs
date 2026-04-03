@@ -257,10 +257,38 @@ pub fn run_build_with(
         bail!("No packages to build");
     }
 
-    let buildable: indexmap::IndexMap<_, _> = scan_result
-        .buildable()
-        .map(|p| (p.pkgname().clone(), p.clone()))
-        .collect();
+    let mut buildable = indexmap::IndexMap::new();
+    let mut skipped_results: Vec<build::BuildResult> = Vec::new();
+    let mut scanfail_results: Vec<(pkgsrc::PkgPath, String)> = Vec::new();
+
+    for pkg in scan_result.packages {
+        match pkg {
+            ScanResult::Buildable(resolved) => {
+                buildable.insert(resolved.pkgname().clone(), resolved);
+            }
+            ScanResult::Skipped {
+                pkgpath,
+                state,
+                index,
+                ..
+            } => {
+                let Some(pkgname) = index.as_ref().map(|i| &i.pkgname) else {
+                    error!(%pkgpath, "Skipped package missing PKGNAME");
+                    continue;
+                };
+                skipped_results.push(build::BuildResult {
+                    pkgname: pkgname.clone(),
+                    pkgpath: Some(pkgpath),
+                    state,
+                    log_dir: None,
+                    build_stats: build::PkgBuildStats::default(),
+                });
+            }
+            ScanResult::ScanFail { pkgpath, error } => {
+                scanfail_results.push((pkgpath, error));
+            }
+        }
+    }
 
     let pkgsrc_env = db
         .load_pkgsrc_env()
@@ -289,31 +317,7 @@ pub fn run_build_with(
         return Err(Interrupted.into());
     }
 
-    for pkg in scan_result.packages.iter() {
-        match pkg {
-            ScanResult::Skipped {
-                pkgpath,
-                state,
-                index,
-                ..
-            } => {
-                let Some(pkgname) = index.as_ref().map(|i| &i.pkgname) else {
-                    error!(%pkgpath, "Skipped package missing PKGNAME");
-                    continue;
-                };
-                summary.results.push(build::BuildResult {
-                    pkgname: pkgname.clone(),
-                    pkgpath: Some(pkgpath.clone()),
-                    state: state.clone(),
-                    log_dir: None,
-                    build_stats: build::PkgBuildStats::default(),
-                });
-            }
-            ScanResult::ScanFail { pkgpath, error } => {
-                summary.scanfail.push((pkgpath.clone(), error.clone()));
-            }
-            ScanResult::Buildable(_) => {}
-        }
-    }
+    summary.results.extend(skipped_results);
+    summary.scanfail.extend(scanfail_results);
     Ok(summary)
 }
