@@ -73,7 +73,7 @@ mod sandbox_netbsd;
 mod sandbox_sunos;
 
 use crate::action::{Action, ActionType, FSType};
-use crate::config::Config;
+use crate::config::{Config, PkgsrcEnv};
 use crate::try_println;
 use crate::{Interrupted, RunState};
 use anyhow::{Context, Result, bail};
@@ -940,12 +940,12 @@ impl Sandbox {
      * on each sandbox first, then destroys them.  Continue on errors to ensure
      * all sandboxes are attempted, printing each error as it occurs.
      */
-    pub fn destroy_all(&self) -> Result<()> {
+    pub fn destroy_all(&self, pkgsrc_env: Option<&PkgsrcEnv>) -> Result<()> {
         let sandboxes = self.discover_sandboxes()?;
         if sandboxes.is_empty() {
             return Ok(());
         }
-        let envs = self.config.script_env(None);
+        let envs = self.config.script_env(pkgsrc_env);
         for &id in &sandboxes {
             if self.path(id).exists() {
                 match self.run_post_build(Some(id), &self.config, envs.clone()) {

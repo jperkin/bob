@@ -52,7 +52,13 @@ pub fn run(config: &Config, cmd: SandboxCmd) -> Result<()> {
             if !sandbox.enabled() {
                 bail!("No sandboxes configured");
             }
-            sandbox.destroy_all()?;
+            let pkgsrc_env = bob::Database::open(config.dbdir())
+                .and_then(|db| db.load_pkgsrc_env())
+                .ok();
+            if pkgsrc_env.is_none() {
+                eprintln!("Warning: No database available, unable to remove pkgsrc directories.");
+            }
+            sandbox.destroy_all(pkgsrc_env.as_ref())?;
         }
         SandboxCmd::Exec => {
             logging::init(config.dbdir(), config.log_level())?;
