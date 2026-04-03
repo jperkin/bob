@@ -635,7 +635,10 @@ impl Scan {
             Err(_) => {
                 let env = PkgsrcEnv::fetch(&self.config, &self.sandbox, self.sandbox_id)?;
                 db.store_pkgsrc_env(&env)?;
-                let vcs_info = crate::vcs::VcsInfo::from_path(self.config.pkgsrc());
+                let mut vcs_info = crate::vcs::VcsInfo::from_path(self.config.pkgsrc());
+                if let Some(branch) = self.config.report_branch() {
+                    vcs_info.remote_branch = Some(branch.to_string());
+                }
                 db.store_vcs_info(&vcs_info)?;
                 env
             }

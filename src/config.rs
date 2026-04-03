@@ -900,6 +900,14 @@ impl Config {
         self.file.publish.as_ref()
     }
 
+    pub fn report_branch(&self) -> Option<&str> {
+        self.file
+            .publish
+            .as_ref()
+            .and_then(|p| p.report.as_ref())
+            .and_then(|r| r.branch.as_deref())
+    }
+
     pub fn bindfs(&self) -> &str {
         self.file
             .sandboxes
@@ -1718,7 +1726,8 @@ fn parse_publish(globals: &Table) -> LuaResult<Option<Publish>> {
                 .ok_or_else(|| mlua::Error::runtime("publish.report.path is required"))?;
             let url: Option<String> = t.get::<Option<String>>("url")?;
             let rpt_rsync_args: Option<String> = t.get::<Option<String>>("rsync_args")?;
-            let branch: Option<String> = t.get::<Option<String>>("branch")?;
+            let branch: Option<String> =
+                t.get::<Option<String>>("branch")?.filter(|s| !s.is_empty());
             let from: Option<String> = t.get::<Option<String>>("from")?;
             let to: Vec<String> = match t.get::<Value>("to")? {
                 Value::Nil => Vec::new(),

@@ -152,12 +152,8 @@ fn generate_reports(config: &Config, db: &Database, build_id: &str) -> Result<()
         .ok_or_else(|| anyhow::anyhow!("No publish.report section in configuration"))?;
 
     let pkgsrc_env = db.load_pkgsrc_env()?;
-    let mut vcs_info = db.load_vcs_info().unwrap_or_default();
+    let vcs_info = db.load_vcs_info().unwrap_or_default();
     let logdir = config.logdir();
-
-    if let Some(branch) = &report_cfg.branch {
-        vcs_info.remote_branch = Some(branch.clone());
-    }
 
     let mut states = PackageCounts::default();
     for r in &db.get_all_build_results()? {
