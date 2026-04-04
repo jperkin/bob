@@ -315,6 +315,11 @@ Examples:
         #[command(flatten)]
         args: cmd::status::StatusArgs,
     },
+    /// Show the failing build log for a package
+    Log {
+        #[command(flatten)]
+        args: cmd::log::LogArgs,
+    },
     /// View build history
     #[command(after_long_help = bob::HistoryKind::after_help())]
     History {
@@ -575,6 +580,11 @@ fn run() -> Result<()> {
             let config = Config::load(args.config.as_deref())?;
             let db = Database::open(config.dbdir())?;
             cmd::status::run(&db, &config, status_args)?;
+        }
+        Cmd::Log { args: log_args } => {
+            let config = Config::load(args.config.as_deref())?;
+            let db = Database::open(config.dbdir())?;
+            cmd::log::run(&db, log_args)?;
         }
         Cmd::History { args: history_args } => {
             let config = Config::load(args.config.as_deref())?;

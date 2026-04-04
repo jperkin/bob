@@ -388,6 +388,7 @@ pub fn pkg_up_to_date(
     Copy,
     PartialEq,
     Eq,
+    clap::ValueEnum,
     serde::Serialize,
     serde::Deserialize,
     strum::EnumProperty,
@@ -395,6 +396,7 @@ pub fn pkg_up_to_date(
     strum::IntoStaticStr,
     strum::VariantArray,
 )]
+#[clap(rename_all = "kebab-case")]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case", const_into_str)]
 #[repr(i32)]
