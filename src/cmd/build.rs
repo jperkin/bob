@@ -317,6 +317,48 @@ pub fn run_build_with(
         return Err(Interrupted.into());
     }
 
+    /*
+     * Record history for non-built packages (skipped, scanfail) so that
+     * build diffs can compare all package outcomes between builds.
+     */
+    let build_id = db.build_id().ok();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    for result in &skipped_results {
+        if let Some(mut input) = result.history_input() {
+            input.build_id = build_id.clone();
+            if input.timestamp == 0 {
+                input.timestamp = now;
+            }
+            if let Err(e) = db.record_history(&input) {
+                tracing::warn!(error = %e, "Failed to save skipped history");
+            }
+        }
+    }
+    for (pkgpath, err_msg) in &scanfail_results {
+        let input = bob::History {
+            timestamp: now,
+            pkgpath: pkgpath.to_string(),
+            pkgname: pkgpath.to_string(),
+            pkgbase: pkgpath.to_string(),
+            outcome: bob::PackageState::Unresolved(err_msg.clone()),
+            stage: None,
+            make_jobs: None,
+            duration: std::time::Duration::ZERO,
+            disk_usage: None,
+            wrkobjdir: None,
+            stage_durations: Vec::new(),
+            stage_cpu_times: Vec::new(),
+            build_id: build_id.clone(),
+        };
+        if let Err(e) = db.record_history(&input) {
+            tracing::warn!(error = %e, "Failed to save scanfail history");
+        }
+    }
+
     summary.results.extend(skipped_results);
     summary.scanfail.extend(scanfail_results);
     Ok(summary)

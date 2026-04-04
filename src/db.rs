@@ -90,6 +90,7 @@ fn history_schema() -> String {
                 HistoryKind::MakeJobs => "INTEGER",
                 HistoryKind::DiskUsage => "INTEGER",
                 HistoryKind::Wrkobjdir => "TEXT",
+                HistoryKind::BuildId => "TEXT",
             };
             format!("{name} {sql}")
         })
@@ -105,7 +106,7 @@ const SCHEMA_VERSION: i32 = 20260317;
 /**
  * Schema version for history.db - update when history schema changes.
  */
-const HISTORY_SCHEMA_VERSION: i32 = 20260323;
+const HISTORY_SCHEMA_VERSION: i32 = 20260404;
 
 /**
  * Summary of a package's most recent build from history.
@@ -1886,6 +1887,7 @@ impl Database {
                 row.get::<_, i64>(8)?,
                 row.get::<_, Option<i64>>(9)?,
                 row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<String>>(11)?,
             ))
         })?;
 
@@ -1904,6 +1906,7 @@ impl Database {
                 duration,
                 disk_usage,
                 wrkobjdir,
+                build_id,
             ) = row?;
             if let Some(re) = pattern {
                 if !re.is_match(&pkgpath) && !re.is_match(&pkgname) {
@@ -1931,6 +1934,7 @@ impl Database {
                 wrkobjdir: wrkobjdir.and_then(|s| s.parse().ok()),
                 stage_durations: Vec::new(),
                 stage_cpu_times: Vec::new(),
+                build_id,
             });
         }
 
@@ -2136,6 +2140,162 @@ impl Database {
         tx.commit()?;
         Ok(())
     }
+
+    /**
+     * List all build IDs in history, most recent first.
+     */
+    pub fn list_history_builds(&self) -> Result<Vec<BuildListEntry>> {
+        let conn = self.history_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT build_id, COUNT(*) AS packages, MIN(timestamp) AS started \
+             FROM build_history \
+             WHERE build_id IS NOT NULL \
+             GROUP BY build_id \
+             ORDER BY started DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(BuildListEntry {
+                build_id: row.get(0)?,
+                package_count: row.get::<_, i64>(1)? as usize,
+                started: row.get(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to list history builds")
+    }
+
+    /**
+     * Compute the diff between two builds.
+     *
+     * Returns categorised changes: new failures, fixes, added/removed
+     * packages, version changes, and other outcome transitions.
+     *
+     * Uses FULL OUTER JOIN on latest-per-pkgpath within each build,
+     * leveraging the `idx_history_build_id(build_id, pkgpath, id)`
+     * compound index.
+     */
+    pub fn compute_build_diff(&self, left_id: &str, right_id: &str) -> Result<BuildDiff> {
+        let conn = self.history_conn()?;
+        let mut stmt = conn.prepare(
+            "WITH l AS ( \
+                 SELECT pkgpath, pkgname, outcome, \
+                        ROW_NUMBER() OVER (PARTITION BY pkgpath ORDER BY id DESC) AS rn \
+                 FROM build_history WHERE build_id = ?1 \
+             ), \
+             r AS ( \
+                 SELECT pkgpath, pkgname, outcome, \
+                        ROW_NUMBER() OVER (PARTITION BY pkgpath ORDER BY id DESC) AS rn \
+                 FROM build_history WHERE build_id = ?2 \
+             ) \
+             SELECT \
+                 COALESCE(l.pkgpath, r.pkgpath), \
+                 l.pkgname, r.pkgname, \
+                 l.outcome, r.outcome \
+             FROM (SELECT * FROM l WHERE rn = 1) l \
+             FULL OUTER JOIN (SELECT * FROM r WHERE rn = 1) r \
+                 ON l.pkgpath = r.pkgpath \
+             WHERE l.outcome IS NULL OR r.outcome IS NULL \
+                OR l.outcome != r.outcome OR l.pkgname != r.pkgname",
+        )?;
+
+        let rows = stmt.query_map(params![left_id, right_id], |row| {
+            let left_outcome_id: Option<i32> = row.get(3)?;
+            let right_outcome_id: Option<i32> = row.get(4)?;
+            Ok(DiffEntry {
+                pkgpath: row.get(0)?,
+                left_pkgname: row.get(1)?,
+                right_pkgname: row.get(2)?,
+                left_outcome: left_outcome_id.and_then(PackageStateKind::from_repr),
+                right_outcome: right_outcome_id.and_then(PackageStateKind::from_repr),
+            })
+        })?;
+
+        let mut diff = BuildDiff {
+            left_build_id: left_id.to_string(),
+            right_build_id: right_id.to_string(),
+            new_failures: Vec::new(),
+            fixes: Vec::new(),
+            new_packages: Vec::new(),
+            removed_packages: Vec::new(),
+            version_changes: Vec::new(),
+            other_changes: Vec::new(),
+        };
+
+        use PackageStateKind::*;
+        for row in rows {
+            let entry = row?;
+            match (entry.left_outcome, entry.right_outcome) {
+                // Added or removed packages
+                (None, Some(_)) => diff.new_packages.push(entry),
+                (Some(_), None) => diff.removed_packages.push(entry),
+                // Outcome changed
+                (Some(lo), Some(ro)) if lo == ro => {
+                    // Same outcome, must be a pkgname change
+                    diff.version_changes.push(entry);
+                }
+                (Some(lo), Some(ro)) => {
+                    let was_ok = matches!(lo, Success | UpToDate);
+                    let now_failed = matches!(ro, Failed);
+                    let was_failed = matches!(lo, Failed);
+                    let now_ok = matches!(ro, Success | UpToDate);
+                    if was_ok && now_failed {
+                        diff.new_failures.push(entry);
+                    } else if was_failed && now_ok {
+                        diff.fixes.push(entry);
+                    } else {
+                        diff.other_changes.push(entry);
+                    }
+                }
+                (None, None) => {} // shouldn't happen
+            }
+        }
+
+        // Sort each category by pkgpath for stable output
+        diff.new_failures.sort_by(|a, b| a.pkgpath.cmp(&b.pkgpath));
+        diff.fixes.sort_by(|a, b| a.pkgpath.cmp(&b.pkgpath));
+        diff.new_packages.sort_by(|a, b| a.pkgpath.cmp(&b.pkgpath));
+        diff.removed_packages
+            .sort_by(|a, b| a.pkgpath.cmp(&b.pkgpath));
+        diff.version_changes
+            .sort_by(|a, b| a.pkgpath.cmp(&b.pkgpath));
+        diff.other_changes.sort_by(|a, b| a.pkgpath.cmp(&b.pkgpath));
+
+        Ok(diff)
+    }
+}
+
+/**
+ * A single entry in a build diff.
+ */
+pub struct DiffEntry {
+    pub pkgpath: String,
+    pub left_pkgname: Option<String>,
+    pub right_pkgname: Option<String>,
+    pub left_outcome: Option<PackageStateKind>,
+    pub right_outcome: Option<PackageStateKind>,
+}
+
+/**
+ * Categorised differences between two builds.
+ */
+pub struct BuildDiff {
+    pub left_build_id: String,
+    pub right_build_id: String,
+    pub new_failures: Vec<DiffEntry>,
+    pub fixes: Vec<DiffEntry>,
+    pub new_packages: Vec<DiffEntry>,
+    pub removed_packages: Vec<DiffEntry>,
+    pub version_changes: Vec<DiffEntry>,
+    pub other_changes: Vec<DiffEntry>,
+}
+
+/**
+ * Summary of a build session from history.
+ */
+pub struct BuildListEntry {
+    pub build_id: String,
+    pub package_count: usize,
+    pub started: i64,
 }
 
 /**
@@ -2163,10 +2323,14 @@ fn check_history_schema(dbdir: &Path) -> Result<()> {
             })?;
         if version != HISTORY_SCHEMA_VERSION {
             anyhow::bail!(
-                "History schema mismatch: found v{}, expected v{}. \
-                 Remove history.db to reset.",
-                version,
-                HISTORY_SCHEMA_VERSION
+                "History schema mismatch: found v{version}, expected v{expected}. \
+                 Remove history.db to reset, or migrate manually with:\n  \
+                 sqlite3 history.db \
+                 'ALTER TABLE build_history ADD COLUMN build_id TEXT; \
+                 CREATE INDEX idx_history_build_id \
+                 ON build_history(build_id, pkgpath, id); \
+                 UPDATE schema_version SET version = {expected};'",
+                expected = HISTORY_SCHEMA_VERSION
             );
         }
     }
@@ -2239,6 +2403,8 @@ pub(crate) fn create_history_schema(conn: &Connection) -> Result<()> {
              ON build_history(pkgpath, outcome);
          CREATE INDEX idx_history_timestamp
              ON build_history(timestamp);
+         CREATE INDEX idx_history_build_id
+             ON build_history(build_id, pkgpath, id);
 
          CREATE TABLE wall_times (
              history_id INTEGER NOT NULL
@@ -2302,6 +2468,7 @@ pub(crate) fn record_history_to(conn: &Connection, rec: &crate::History) -> Resu
             dur_ms(rec.duration),
             rec.disk_usage.map(|s| s as i64),
             rec.wrkobjdir.as_ref().map(|k| k.to_string()),
+            rec.build_id.as_deref(),
         ],
     )?;
     let history_id = conn.last_insert_rowid();
@@ -2488,6 +2655,7 @@ mod tests {
             wrkobjdir: None,
             stage_durations: vec![(Stage::Build, Duration::from_millis(wall_ms))],
             stage_cpu_times: vec![(Stage::Build, Duration::from_millis(cpu_ms))],
+            build_id: None,
         };
         record_history_to(conn, &rec).expect("failed to insert build");
     }

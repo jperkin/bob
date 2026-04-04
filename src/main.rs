@@ -286,6 +286,11 @@ enum Cmd {
         #[arg(short = 'l', long = "logs-only")]
         logs_only: bool,
     },
+    /// Compare package results between two builds
+    Diff {
+        #[command(flatten)]
+        args: cmd::diff::DiffArgs,
+    },
     /// Show comprehensive package build status
     #[command(after_long_help = "\
 Status values:
@@ -570,6 +575,11 @@ fn run() -> Result<()> {
             if logdir.exists() {
                 std::fs::remove_dir_all(logdir).context("Failed to remove log directory")?;
             }
+        }
+        Cmd::Diff { args: diff_args } => {
+            let config = Config::load(args.config.as_deref())?;
+            let db = Database::open(config.dbdir())?;
+            cmd::diff::run(&db, diff_args)?;
         }
         Cmd::Db { sql } => {
             let config = Config::load(args.config.as_deref())?;

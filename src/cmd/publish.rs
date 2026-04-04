@@ -172,6 +172,13 @@ fn generate_reports(config: &Config, db: &Database, build_id: &str) -> Result<()
         .as_ref()
         .map(|u| format!("{}/{}", u, build_id));
 
+    let diff = match db.list_history_builds() {
+        Ok(builds) if builds.len() >= 2 => db
+            .compute_build_diff(&builds[1].build_id, &builds[0].build_id)
+            .ok(),
+        _ => None,
+    };
+
     std::fs::create_dir_all(logdir)
         .with_context(|| format!("Failed to create {}", logdir.display()))?;
 
@@ -183,6 +190,7 @@ fn generate_reports(config: &Config, db: &Database, build_id: &str) -> Result<()
         report_url.as_deref(),
         duration,
         logdir,
+        diff.as_ref(),
     )?;
 
     let report_path = logdir.join("report.html");
@@ -193,9 +201,15 @@ fn generate_reports(config: &Config, db: &Database, build_id: &str) -> Result<()
     };
 
     println!("Generating report...");
-    write_html_report(db, logdir, &report_path, &report_meta)?;
+    write_html_report(db, logdir, &report_path, &report_meta, diff.as_ref())?;
     write_machine_report(db, logdir)?;
-    write_text_report(db, logdir, &report_meta, report_url.as_deref())?;
+    write_text_report(
+        db,
+        logdir,
+        &report_meta,
+        report_url.as_deref(),
+        diff.as_ref(),
+    )?;
 
     Ok(())
 }
@@ -569,6 +583,7 @@ fn write_text_report(
     logdir: &Path,
     meta: &ReportMeta,
     report_url: Option<&str>,
+    diff: Option<&bob::db::BuildDiff>,
 ) -> Result<()> {
     let path = logdir.join("report.txt");
     let mut file = std::fs::File::create(&path)
@@ -671,6 +686,59 @@ fn write_text_report(
             String::new()
         };
         writeln!(file, "{:<12}{:>5}{}", format!("{}:", lk), lv, right_part)?;
+    }
+
+    if let Some(d) = diff {
+        writeln!(file)?;
+        writeln!(file, "Changes from Previous Build ({})", d.left_build_id)?;
+        writeln!(file, "{}", "-".repeat(76))?;
+        writeln!(
+            file,
+            "  New failures: {:>5}    Fixes: {:>5}",
+            d.new_failures.len(),
+            d.fixes.len()
+        )?;
+
+        if !d.new_failures.is_empty() {
+            writeln!(file)?;
+            writeln!(file, "New Failures:")?;
+            let max_path = d
+                .new_failures
+                .iter()
+                .map(|e| e.pkgpath.len())
+                .max()
+                .unwrap_or(0);
+            for e in &d.new_failures {
+                let pkgname = e.right_pkgname.as_deref().unwrap_or("-");
+                writeln!(
+                    file,
+                    "  {:<width$}  {}",
+                    e.pkgpath,
+                    pkgname,
+                    width = max_path
+                )?;
+            }
+        }
+
+        if !d.fixes.is_empty() {
+            writeln!(file)?;
+            writeln!(file, "Fixes:")?;
+            let max_path = d.fixes.iter().map(|e| e.pkgpath.len()).max().unwrap_or(0);
+            for e in &d.fixes {
+                let pkgname = e
+                    .right_pkgname
+                    .as_deref()
+                    .or(e.left_pkgname.as_deref())
+                    .unwrap_or("-");
+                writeln!(
+                    file,
+                    "  {:<width$}  {}",
+                    e.pkgpath,
+                    pkgname,
+                    width = max_path
+                )?;
+            }
+        }
     }
 
     if c.scanfail > 0 {
@@ -787,6 +855,7 @@ fn write_machine_report(db: &Database, logdir: &Path) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_variables_json(
     pkgsrc_env: &bob::config::PkgsrcEnv,
     vcs_info: &bob::vcs::VcsInfo,
@@ -795,6 +864,7 @@ fn write_variables_json(
     report_url: Option<&str>,
     duration: Duration,
     logdir: &Path,
+    diff: Option<&bob::db::BuildDiff>,
 ) -> Result<()> {
     let mut pkgsrc = serde_json::Map::new();
     pkgsrc.insert(
@@ -843,6 +913,39 @@ fn write_variables_json(
     if vcs_info.is_detected() {
         let vcs = serde_json::to_value(vcs_info)?;
         root.insert("vcs".to_string(), vcs);
+    }
+
+    if let Some(d) = diff {
+        let mut diff_obj = serde_json::Map::new();
+        diff_obj.insert(
+            "compared_build_id".to_string(),
+            serde_json::Value::String(d.left_build_id.clone()),
+        );
+        diff_obj.insert(
+            "new_failures".to_string(),
+            serde_json::Value::Number(d.new_failures.len().into()),
+        );
+        diff_obj.insert(
+            "fixes".to_string(),
+            serde_json::Value::Number(d.fixes.len().into()),
+        );
+        diff_obj.insert(
+            "new_packages".to_string(),
+            serde_json::Value::Number(d.new_packages.len().into()),
+        );
+        diff_obj.insert(
+            "removed_packages".to_string(),
+            serde_json::Value::Number(d.removed_packages.len().into()),
+        );
+        diff_obj.insert(
+            "version_changes".to_string(),
+            serde_json::Value::Number(d.version_changes.len().into()),
+        );
+        diff_obj.insert(
+            "other_changes".to_string(),
+            serde_json::Value::Number(d.other_changes.len().into()),
+        );
+        root.insert("diff".to_string(), serde_json::Value::Object(diff_obj));
     }
 
     let path = logdir.join("variables.json");
@@ -900,7 +1003,13 @@ th[aria-sort=\"descending\"]::after { content: \" \\25BC\"; font-size: 0.75em; }
 @media (max-width: 75em) { .col-path { display: none; } }\n\
 @media (max-width: 58em) { .col-breaks { display: none; } }\n";
 
-fn write_html_report(db: &Database, logdir: &Path, path: &Path, meta: &ReportMeta) -> Result<()> {
+fn write_html_report(
+    db: &Database,
+    logdir: &Path,
+    path: &Path,
+    meta: &ReportMeta,
+    diff: Option<&bob::db::BuildDiff>,
+) -> Result<()> {
     let mut results = db.get_all_build_results()?;
     let duration = db.get_build_duration()?;
 
@@ -1039,6 +1148,10 @@ fn write_html_report(db: &Database, logdir: &Path, path: &Path, meta: &ReportMet
             .as_ref()
             .map(|rev| format!("{}/tree/{}", base, rev))
     });
+
+    if let Some(d) = diff {
+        write_diff_section(&mut file, d, pkgpath_base.as_deref())?;
+    }
 
     if !summary.scanfail.is_empty() {
         write_scanfail_table(&mut file, &summary.scanfail, pkgpath_base.as_deref())?;
@@ -1453,6 +1566,107 @@ fn write_failed_table(
         )?;
     }
 
+    writeln!(file, "</tbody>")?;
+    writeln!(file, "</table>")?;
+    Ok(())
+}
+
+fn write_diff_section(
+    file: &mut std::fs::File,
+    diff: &bob::db::BuildDiff,
+    pkgpath_base: Option<&str>,
+) -> Result<()> {
+    writeln!(
+        file,
+        "<h3>Changes from Previous Build ({})</h3>",
+        escape_html(&diff.left_build_id)
+    )?;
+    writeln!(file, "<p>")?;
+    writeln!(
+        file,
+        "New failures: <b>{}</b> &middot; Fixes: <b>{}</b> &middot; \
+         New packages: {} &middot; Removed: {} &middot; \
+         Version changes: {} &middot; Other: {}",
+        diff.new_failures.len(),
+        diff.fixes.len(),
+        diff.new_packages.len(),
+        diff.removed_packages.len(),
+        diff.version_changes.len(),
+        diff.other_changes.len(),
+    )?;
+    writeln!(file, "</p>")?;
+
+    if !diff.new_failures.is_empty() {
+        write_diff_table(
+            file,
+            "diff_new_failures",
+            "New Failures",
+            &diff.new_failures,
+            pkgpath_base,
+            true,
+        )?;
+    }
+
+    if !diff.fixes.is_empty() {
+        write_diff_table(file, "diff_fixes", "Fixes", &diff.fixes, pkgpath_base, true)?;
+    }
+
+    Ok(())
+}
+
+fn write_diff_table(
+    file: &mut std::fs::File,
+    id: &str,
+    title: &str,
+    entries: &[bob::db::DiffEntry],
+    pkgpath_base: Option<&str>,
+    use_right_name: bool,
+) -> Result<()> {
+    writeln!(file, "<h4>{} ({})</h4>", title, entries.len())?;
+    writeln!(
+        file,
+        "<table class=\"data\" id=\"{id}\" data-sort-col=\"0\" data-sort-desc=\"0\">"
+    )?;
+    writeln!(file, "<thead><tr>")?;
+    writeln!(
+        file,
+        "<th onclick=\"sortTable('{id}',0,'str')\" tabindex=\"0\">PKGPATH</th>"
+    )?;
+    writeln!(
+        file,
+        "<th onclick=\"sortTable('{id}',1,'str')\" tabindex=\"0\">PKGNAME</th>"
+    )?;
+    writeln!(file, "</tr></thead>")?;
+    writeln!(file, "<tbody>")?;
+    for e in entries {
+        let pkgname = if use_right_name {
+            e.right_pkgname
+                .as_deref()
+                .or(e.left_pkgname.as_deref())
+                .unwrap_or("-")
+        } else {
+            e.left_pkgname
+                .as_deref()
+                .or(e.right_pkgname.as_deref())
+                .unwrap_or("-")
+        };
+        let path_cell = if let Some(base) = pkgpath_base {
+            format!(
+                "<a href=\"{}/{}\">{}</a>",
+                base,
+                escape_html(&e.pkgpath),
+                escape_html(&e.pkgpath)
+            )
+        } else {
+            escape_html(&e.pkgpath)
+        };
+        writeln!(
+            file,
+            "<tr><td>{}</td><td>{}</td></tr>",
+            path_cell,
+            escape_html(pkgname)
+        )?;
+    }
     writeln!(file, "</tbody>")?;
     writeln!(file, "</table>")?;
     Ok(())

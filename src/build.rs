@@ -1244,27 +1244,52 @@ pub struct BuildResult {
 
 impl BuildResult {
     /**
-     * Build a history input record for actual builds (success/failed).
-     * Returns None for skipped, up-to-date, or indirect outcomes.
+     * Build a history input record for this result.
+     *
+     * Returns `Some` for all outcomes except `Pending`.  For non-built
+     * packages (skipped, up-to-date, indirect) timing fields are zero.
+     * The caller must set `build_id` before recording.
      */
     pub fn history_input(&self) -> Option<crate::History> {
-        match &self.state {
-            PackageState::Success | PackageState::Failed(_) => {}
-            _ => return None,
+        if self.state == PackageState::Pending {
+            return None;
         }
+        let pkgpath = self.pkgpath.as_ref()?.to_string();
+        let (duration, stage, make_jobs, disk_usage, wrkobjdir, stage_durations, stage_cpu_times) =
+            match &self.state {
+                PackageState::Success | PackageState::Failed(_) => (
+                    self.build_stats.duration,
+                    self.build_stats.stage,
+                    self.build_stats.make_jobs.jobs(),
+                    self.build_stats.disk_usage,
+                    self.build_stats.wrkobjdir.clone(),
+                    self.build_stats.stage_durations.clone(),
+                    self.build_stats.stage_cpu_times.clone(),
+                ),
+                _ => (
+                    Duration::ZERO,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            };
         Some(crate::History {
             timestamp: self.build_stats.timestamp,
-            pkgpath: self.pkgpath.as_ref()?.to_string(),
+            pkgpath,
             pkgname: self.pkgname.pkgname().to_string(),
             pkgbase: self.pkgname.pkgbase().to_string(),
             outcome: self.state.clone(),
-            stage: self.build_stats.stage,
-            make_jobs: self.build_stats.make_jobs.jobs(),
-            duration: self.build_stats.duration,
-            disk_usage: self.build_stats.disk_usage,
-            wrkobjdir: self.build_stats.wrkobjdir.clone(),
-            stage_durations: self.build_stats.stage_durations.clone(),
-            stage_cpu_times: self.build_stats.stage_cpu_times.clone(),
+            stage,
+            make_jobs,
+            duration,
+            disk_usage,
+            wrkobjdir,
+            stage_durations,
+            stage_cpu_times,
+            build_id: None,
         })
     }
 }
@@ -2506,6 +2531,7 @@ impl Build {
         // and recv() returns Err, ending this loop.
         let mut saved_count = 0;
         let mut db_error: Option<anyhow::Error> = None;
+        let build_id = db.build_id().ok();
         while let Ok(result) = completed_rx.recv() {
             if let Err(e) = db.store_build_by_name(&result) {
                 warn!(
@@ -2520,7 +2546,8 @@ impl Build {
                 saved_count += 1;
             }
 
-            if let Some(input) = result.history_input() {
+            if let Some(mut input) = result.history_input() {
+                input.build_id = build_id.clone();
                 if let Err(e) = db.record_history(&input) {
                     warn!(
                         pkgname = %result.pkgname.pkgname(),

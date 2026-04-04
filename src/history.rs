@@ -74,6 +74,8 @@ pub enum HistoryKind {
     DiskUsage,
     #[strum(message = "WRKOBJDIR type (tmpfs or disk)")]
     Wrkobjdir,
+    #[strum(message = "Build session identifier")]
+    BuildId,
 }
 
 /**
@@ -180,6 +182,8 @@ pub struct History {
     pub stage_durations: Vec<(Stage, Duration)>,
     /// Per-stage CPU time (user+sys from wait4).
     pub stage_cpu_times: Vec<(Stage, Duration)>,
+    /// Build session identifier (from bob.db metadata).
+    pub build_id: Option<String>,
 }
 
 fn format_timestamp(epoch: i64) -> String {
@@ -287,6 +291,7 @@ impl History {
                 .as_ref()
                 .map(|k| k.to_string())
                 .unwrap_or_else(dash),
+            HistoryKind::BuildId => self.build_id.clone().unwrap_or_else(dash),
         }
     }
 
@@ -348,6 +353,7 @@ impl History {
                 .as_ref()
                 .map(|k| k.to_string())
                 .unwrap_or_else(dash),
+            HistoryKind::BuildId => self.build_id.clone().unwrap_or_else(dash),
         }
     }
 }
