@@ -66,10 +66,7 @@ pub fn run(db: &Database, args: LogArgs) -> Result<()> {
             }
         }
         _ => {
-            let mut msg = format!(
-                "Multiple failed packages match '{}':\n",
-                args.package
-            );
+            let mut msg = format!("Multiple failed packages match '{}':\n", args.package);
             for r in &matches {
                 let pkgpath = r
                     .pkgpath
