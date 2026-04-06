@@ -229,7 +229,7 @@ Each of the main target commands depend on the previous being up-to-date, so
 )]
 pub struct Args {
     /// Use the specified configuration file instead of the default path
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     config: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -238,7 +238,7 @@ pub struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
-    /// Create a default configuration file
+    /// Create a configuration file
     Init,
     /// Perform recursive scan of packages and resolve dependencies
     Scan {
