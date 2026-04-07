@@ -71,6 +71,15 @@ pub fn try_println(s: &str) -> bool {
     !matches!(result, Err(e) if e.kind() == io::ErrorKind::BrokenPipe)
 }
 
+/**
+ * Return the current time as seconds since the Unix epoch.
+ */
+pub fn epoch_secs() -> Result<i64, std::time::SystemTimeError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+}
+
 /// Error indicating the operation was interrupted (e.g., by Ctrl+C).
 #[derive(Debug)]
 pub struct Interrupted;

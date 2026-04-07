@@ -317,6 +317,31 @@ pub fn run_build_with(
         return Err(Interrupted.into());
     }
 
+    /*
+     * Record history for non-built packages (skipped, scanfail) so that
+     * build diffs can compare all package outcomes between builds.
+     */
+    let build_id = db.build_id().ok();
+    if let Some(bid) = &build_id {
+        if let Some(rev) = db.load_vcs_info().ok().and_then(|v| v.revision) {
+            if let Err(e) = db.store_build_revision(bid, &rev) {
+                tracing::warn!(error = %e, "Failed to save build revision");
+            }
+        }
+    }
+    let now = bob::epoch_secs()?;
+
+    for result in &skipped_results {
+        if let Some(mut input) = result.history_input() {
+            input.build_id = build_id.clone();
+            if input.timestamp == 0 {
+                input.timestamp = now;
+            }
+            if let Err(e) = db.record_history(&input) {
+                tracing::warn!(error = %e, "Failed to save skipped history");
+            }
+        }
+    }
     summary.results.extend(skipped_results);
     summary.scanfail.extend(scanfail_results);
     Ok(summary)

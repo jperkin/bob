@@ -1,5 +1,6 @@
 pub mod build;
 pub mod db;
+pub mod diff;
 pub mod history;
 pub mod list;
 pub mod log;

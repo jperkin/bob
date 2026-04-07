@@ -90,6 +90,7 @@ fn history_schema() -> String {
                 HistoryKind::MakeJobs => "INTEGER",
                 HistoryKind::DiskUsage => "INTEGER",
                 HistoryKind::Wrkobjdir => "TEXT",
+                HistoryKind::BuildId => "TEXT",
             };
             format!("{name} {sql}")
         })
@@ -105,7 +106,7 @@ const SCHEMA_VERSION: i32 = 20260317;
 /**
  * Schema version for history.db - update when history schema changes.
  */
-const HISTORY_SCHEMA_VERSION: i32 = 20260323;
+const HISTORY_SCHEMA_VERSION: i32 = 20260406;
 
 /**
  * Summary of a package's most recent build from history.
@@ -1867,10 +1868,22 @@ impl Database {
      */
     pub fn query_history(&self, pattern: Option<&regex::Regex>) -> Result<Vec<crate::History>> {
         let conn = self.history_conn()?;
-        let cols: Vec<&str> = HistoryKind::VARIANTS.iter().map(<&str>::from).collect();
+        let cols: String = HistoryKind::VARIANTS
+            .iter()
+            .map(|v| format!("bh.{}", <&str>::from(v)))
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!(
-            "SELECT id, {} FROM build_history ORDER BY timestamp DESC, id DESC",
-            cols.join(", "),
+            "SELECT bh.id, {cols}, \
+                    wt.stage, wt.duration, ct.duration \
+             FROM build_history bh \
+             LEFT JOIN wall_times wt ON wt.history_id = bh.id \
+             LEFT JOIN cpu_times ct ON ct.history_id = bh.id \
+                                   AND ct.stage = wt.stage \
+             WHERE bh.outcome IN ({success}, {failed}) \
+             ORDER BY bh.timestamp DESC, bh.id DESC",
+            success = PackageStateKind::Success as i32,
+            failed = PackageStateKind::Failed as i32,
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| {
@@ -1886,11 +1899,16 @@ impl Database {
                 row.get::<_, i64>(8)?,
                 row.get::<_, Option<i64>>(9)?,
                 row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<i32>>(12)?,
+                row.get::<_, Option<i64>>(13)?,
+                row.get::<_, Option<i64>>(14)?,
             ))
         })?;
 
-        let mut results = Vec::new();
-        let mut history_ids = Vec::new();
+        let mut results: Vec<crate::History> = Vec::new();
+        let mut current_id: Option<i64> = None;
+        let mut current_accepted = false;
         for row in rows {
             let (
                 id,
@@ -1904,12 +1922,42 @@ impl Database {
                 duration,
                 disk_usage,
                 wrkobjdir,
+                build_id,
+                wt_stage,
+                wt_duration,
+                ct_duration,
             ) = row?;
+
+            if Some(id) == current_id {
+                if current_accepted {
+                    if let Some(last) = results.last_mut() {
+                        if let Some(stage_id) = wt_stage {
+                            let stage = Stage::from_repr(stage_id)
+                                .ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", stage_id))?;
+                            if let Some(ms) = wt_duration {
+                                last.stage_durations
+                                    .push((stage, Duration::from_millis(ms as u64)));
+                            }
+                            if let Some(ms) = ct_duration {
+                                last.stage_cpu_times
+                                    .push((stage, Duration::from_millis(ms as u64)));
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            current_id = Some(id);
+            current_accepted = false;
+
             if let Some(re) = pattern {
                 if !re.is_match(&pkgpath) && !re.is_match(&pkgname) {
                     continue;
                 }
             }
+
+            current_accepted = true;
             let outcome = PackageState::from_db(outcome_id, None)
                 .ok_or_else(|| anyhow::anyhow!("Unknown outcome type id: {}", outcome_id))?;
             let stage = stage_id
@@ -1917,7 +1965,20 @@ impl Database {
                     Stage::from_repr(id).ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", id))
                 })
                 .transpose()?;
-            history_ids.push(id);
+
+            let mut stage_durations = Vec::new();
+            let mut stage_cpu_times = Vec::new();
+            if let Some(st_id) = wt_stage {
+                let st = Stage::from_repr(st_id)
+                    .ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", st_id))?;
+                if let Some(ms) = wt_duration {
+                    stage_durations.push((st, Duration::from_millis(ms as u64)));
+                }
+                if let Some(ms) = ct_duration {
+                    stage_cpu_times.push((st, Duration::from_millis(ms as u64)));
+                }
+            }
+
             results.push(crate::History {
                 timestamp,
                 pkgpath,
@@ -1929,53 +1990,10 @@ impl Database {
                 duration: Duration::from_millis(duration as u64),
                 disk_usage: disk_usage.map(|s| s as u64),
                 wrkobjdir: wrkobjdir.and_then(|s| s.parse().ok()),
-                stage_durations: Vec::new(),
-                stage_cpu_times: Vec::new(),
+                stage_durations,
+                stage_cpu_times,
+                build_id,
             });
-        }
-
-        if !history_ids.is_empty() {
-            let id_to_idx: HashMap<i64, usize> = history_ids
-                .iter()
-                .enumerate()
-                .map(|(i, &id)| (id, i))
-                .collect();
-            let placeholders: String = history_ids
-                .iter()
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(",");
-            for (table, field) in [
-                ("wall_times", "stage_durations"),
-                ("cpu_times", "stage_cpu_times"),
-            ] {
-                let sql = format!(
-                    "SELECT history_id, stage, duration \
-                     FROM {table} \
-                     WHERE history_id IN ({placeholders})",
-                );
-                let mut stmt = conn.prepare(&sql)?;
-                let rows =
-                    stmt.query_map(rusqlite::params_from_iter(history_ids.iter()), |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, i32>(1)?,
-                            row.get::<_, i64>(2)?,
-                        ))
-                    })?;
-                for row in rows {
-                    let (history_id, stage_id, duration_ms) = row?;
-                    if let Some(&idx) = id_to_idx.get(&history_id) {
-                        let stage = Stage::from_repr(stage_id)
-                            .ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", stage_id))?;
-                        let entry = (stage, Duration::from_millis(duration_ms as u64));
-                        match field {
-                            "stage_durations" => results[idx].stage_durations.push(entry),
-                            _ => results[idx].stage_cpu_times.push(entry),
-                        }
-                    }
-                }
-            }
         }
 
         Ok(results)
@@ -2136,6 +2154,236 @@ impl Database {
         tx.commit()?;
         Ok(())
     }
+
+    /**
+     * List all build IDs in history, most recent first.
+     */
+    pub fn list_history_builds(&self) -> Result<Vec<BuildListEntry>> {
+        let conn = self.history_conn()?;
+        let success = PackageStateKind::Success as i32;
+        let up_to_date = PackageStateKind::UpToDate as i32;
+        let failed = PackageStateKind::Failed as i32;
+        let mut stmt = conn.prepare(
+            "WITH latest AS ( \
+                 SELECT build_id, outcome, \
+                        ROW_NUMBER() OVER ( \
+                            PARTITION BY build_id, pkgpath \
+                            ORDER BY id DESC \
+                        ) AS rn \
+                 FROM build_history \
+                 WHERE build_id IS NOT NULL \
+             ) \
+             SELECT build_id, COUNT(*) AS packages, \
+                    SUM(CASE WHEN outcome IN (?1, ?2) THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN outcome = ?3 THEN 1 ELSE 0 END) \
+             FROM latest \
+             WHERE rn = 1 \
+             GROUP BY build_id \
+             ORDER BY build_id DESC",
+        )?;
+        let rows = stmt.query_map(params![success, up_to_date, failed], |row| {
+            Ok(BuildListEntry {
+                build_id: row.get(0)?,
+                package_count: row.get::<_, i64>(1)? as usize,
+                succeeded: row.get::<_, i64>(2)? as usize,
+                failed: row.get::<_, i64>(3)? as usize,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to list history builds")
+    }
+
+    /**
+     * Store VCS revision for a build in the history database.
+     */
+    pub fn store_build_revision(&self, build_id: &str, revision: &str) -> Result<()> {
+        let conn = self.history_conn()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO build_metadata (build_id, revision) VALUES (?1, ?2)",
+            params![build_id, revision],
+        )?;
+        Ok(())
+    }
+
+    /**
+     * Get the VCS revision for a build from the history database.
+     */
+    pub fn get_build_revision(&self, build_id: &str) -> Result<Option<String>> {
+        let conn = self.history_conn()?;
+        match conn.query_row(
+            "SELECT revision FROM build_metadata WHERE build_id = ?1",
+            [build_id],
+            |row| row.get(0),
+        ) {
+            Ok(rev) => Ok(Some(rev)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /**
+     * Compute the diff between two builds.
+     *
+     * Returns categorised changes: new failures, fixes, added/removed
+     * packages, version changes, and other outcome transitions.
+     */
+    pub fn compute_build_diff(&self, build1_id: &str, build2_id: &str) -> Result<BuildDiff> {
+        let conn = self.history_conn()?;
+
+        type PkgRecord = (String, i32, Option<i32>);
+        let query_build = |bid: &str| -> Result<HashMap<String, PkgRecord>> {
+            let mut stmt = conn.prepare(
+                "SELECT pkgpath, pkgname, outcome, stage FROM ( \
+                     SELECT pkgpath, pkgname, outcome, stage, \
+                            ROW_NUMBER() OVER (PARTITION BY pkgpath ORDER BY id DESC) AS rn \
+                     FROM build_history WHERE build_id = ?1 \
+                 ) WHERE rn = 1",
+            )?;
+            let mut map = HashMap::new();
+            let rows = stmt.query_map([bid], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i32>(2)?,
+                    row.get::<_, Option<i32>>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (pkgpath, pkgname, outcome, stage) = row?;
+                map.insert(pkgpath, (pkgname, outcome, stage));
+            }
+            Ok(map)
+        };
+
+        let b1 = query_build(build1_id)?;
+        let b2 = query_build(build2_id)?;
+
+        let mut diff = BuildDiff {
+            build1_id: build1_id.to_string(),
+            build2_id: build2_id.to_string(),
+            new_failures: Vec::new(),
+            fixes: Vec::new(),
+            version_changes: Vec::new(),
+            other_changes: Vec::new(),
+        };
+
+        use PackageStateKind::*;
+
+        for (pkgpath, (b2_pkgname, b2_outcome_id, b2_stage_id)) in &b2 {
+            let b2_outcome = PackageStateKind::from_repr(*b2_outcome_id);
+            let b2_stage = b2_stage_id.and_then(Stage::from_repr);
+
+            let entry_from = |b1_pkg: Option<&PkgRecord>| DiffEntry {
+                pkgpath: pkgpath.clone(),
+                build1_pkgname: b1_pkg.map(|(n, _, _)| n.clone()),
+                build2_pkgname: Some(b2_pkgname.clone()),
+                build1_outcome: b1_pkg.and_then(|(_, o, _)| PackageStateKind::from_repr(*o)),
+                build2_outcome: b2_outcome,
+                build1_stage: b1_pkg.and_then(|(_, _, s)| s.and_then(Stage::from_repr)),
+                build2_stage: b2_stage,
+            };
+
+            match b1.get(pkgpath) {
+                Some(b1_rec) => {
+                    let b1_outcome = PackageStateKind::from_repr(b1_rec.1);
+                    let b1_stage = b1_rec.2.and_then(Stage::from_repr);
+                    if b1_outcome == b2_outcome && b1_rec.0 == *b2_pkgname && b1_stage == b2_stage {
+                        continue;
+                    }
+                    let entry = entry_from(Some(b1_rec));
+                    match (b1_outcome, b2_outcome) {
+                        (Some(b1o), Some(b2o)) => {
+                            let was_failed = matches!(b1o, Failed);
+                            let now_failed = matches!(b2o, Failed);
+                            let now_ok = matches!(b2o, Success | UpToDate);
+                            if !was_failed && now_failed {
+                                diff.new_failures.push(entry);
+                            } else if was_failed && now_ok {
+                                diff.fixes.push(entry);
+                            } else if was_failed && now_failed {
+                                diff.version_changes.push(entry);
+                            } else {
+                                diff.other_changes.push(entry);
+                            }
+                        }
+                        _ => diff.other_changes.push(entry),
+                    }
+                }
+                None => {
+                    let entry = entry_from(None);
+                    if matches!(b2_outcome, Some(Failed)) {
+                        diff.new_failures.push(entry);
+                    } else {
+                        diff.other_changes.push(entry);
+                    }
+                }
+            }
+        }
+
+        for (pkgpath, (b1_pkgname, b1_outcome_id, b1_stage_id)) in &b1 {
+            if b2.contains_key(pkgpath) {
+                continue;
+            }
+            let b1_outcome = PackageStateKind::from_repr(*b1_outcome_id);
+            let entry = DiffEntry {
+                pkgpath: pkgpath.clone(),
+                build1_pkgname: Some(b1_pkgname.clone()),
+                build2_pkgname: None,
+                build1_outcome: b1_outcome,
+                build2_outcome: None,
+                build1_stage: b1_stage_id.and_then(Stage::from_repr),
+                build2_stage: None,
+            };
+            if matches!(b1_outcome, Some(Failed)) {
+                diff.fixes.push(entry);
+            } else {
+                diff.other_changes.push(entry);
+            }
+        }
+
+        Ok(diff)
+    }
+}
+
+/**
+ * A single entry in a build diff.
+ */
+pub struct DiffEntry {
+    pub pkgpath: String,
+    pub build1_pkgname: Option<String>,
+    pub build2_pkgname: Option<String>,
+    pub build1_outcome: Option<PackageStateKind>,
+    pub build2_outcome: Option<PackageStateKind>,
+    pub build1_stage: Option<Stage>,
+    pub build2_stage: Option<Stage>,
+}
+
+/**
+ * Categorised differences between two builds.
+ *
+ * Categories focus on build failures:
+ *  - `new_failures`: packages now failing that were not before
+ *  - `fixes`: packages that were failing but now succeed
+ *  - `version_changes`: packages still broken but with a change (version bump,
+ *    failure mode change, etc.)
+ */
+pub struct BuildDiff {
+    pub build1_id: String,
+    pub build2_id: String,
+    pub new_failures: Vec<DiffEntry>,
+    pub fixes: Vec<DiffEntry>,
+    pub version_changes: Vec<DiffEntry>,
+    pub other_changes: Vec<DiffEntry>,
+}
+
+/**
+ * Summary of a build session from history.
+ */
+pub struct BuildListEntry {
+    pub build_id: String,
+    pub package_count: usize,
+    pub succeeded: usize,
+    pub failed: usize,
 }
 
 /**
@@ -2163,10 +2411,10 @@ fn check_history_schema(dbdir: &Path) -> Result<()> {
             })?;
         if version != HISTORY_SCHEMA_VERSION {
             anyhow::bail!(
-                "History schema mismatch: found v{}, expected v{}. \
-                 Remove history.db to reset.",
-                version,
-                HISTORY_SCHEMA_VERSION
+                "History schema mismatch: found v{version}, expected v{expected}. \
+                 Remove {} to reset.",
+                path.display(),
+                expected = HISTORY_SCHEMA_VERSION
             );
         }
     }
@@ -2239,6 +2487,8 @@ pub(crate) fn create_history_schema(conn: &Connection) -> Result<()> {
              ON build_history(pkgpath, outcome);
          CREATE INDEX idx_history_timestamp
              ON build_history(timestamp);
+         CREATE INDEX idx_history_build_id
+             ON build_history(build_id, pkgpath, id);
 
          CREATE TABLE wall_times (
              history_id INTEGER NOT NULL
@@ -2261,7 +2511,12 @@ pub(crate) fn create_history_schema(conn: &Connection) -> Result<()> {
              user_pct INTEGER NOT NULL,
              sys_pct INTEGER NOT NULL
          );
-         CREATE INDEX idx_cpu_timestamp ON cpu_usage(timestamp);",
+         CREATE INDEX idx_cpu_timestamp ON cpu_usage(timestamp);
+
+         CREATE TABLE build_metadata (
+             build_id TEXT PRIMARY KEY,
+             revision TEXT
+         );",
         HISTORY_SCHEMA_VERSION,
         outcome_types = PackageState::db_values(),
         stages = stage_values(),
@@ -2302,6 +2557,7 @@ pub(crate) fn record_history_to(conn: &Connection, rec: &crate::History) -> Resu
             dur_ms(rec.duration),
             rec.disk_usage.map(|s| s as i64),
             rec.wrkobjdir.as_ref().map(|k| k.to_string()),
+            rec.build_id.as_deref(),
         ],
     )?;
     let history_id = conn.last_insert_rowid();
@@ -2488,6 +2744,7 @@ mod tests {
             wrkobjdir: None,
             stage_durations: vec![(Stage::Build, Duration::from_millis(wall_ms))],
             stage_cpu_times: vec![(Stage::Build, Duration::from_millis(cpu_ms))],
+            build_id: None,
         };
         record_history_to(conn, &rec).expect("failed to insert build");
     }

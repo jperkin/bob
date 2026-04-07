@@ -66,15 +66,8 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc, mpsc::Sender};
 use std::task::Poll;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, info_span, trace, warn};
-
-fn epoch_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
 
 /// How often to batch and send build output lines to the UI channel.
 /// This is the floor on log display responsiveness — output cannot appear
@@ -1244,13 +1237,15 @@ pub struct BuildResult {
 
 impl BuildResult {
     /**
-     * Build a history input record for actual builds (success/failed).
-     * Returns None for skipped, up-to-date, or indirect outcomes.
+     * Build a history input record for this result.
+     *
+     * Returns Some for all outcomes except Pending.  For non-built
+     * packages (skipped, up-to-date, indirect) timing fields are zero.
+     * The caller must set build_id before recording.
      */
     pub fn history_input(&self) -> Option<crate::History> {
-        match &self.state {
-            PackageState::Success | PackageState::Failed(_) => {}
-            _ => return None,
+        if self.state == PackageState::Pending {
+            return None;
         }
         Some(crate::History {
             timestamp: self.build_stats.timestamp,
@@ -1265,6 +1260,7 @@ impl BuildResult {
             wrkobjdir: self.build_stats.wrkobjdir.clone(),
             stage_durations: self.build_stats.stage_durations.clone(),
             stage_cpu_times: self.build_stats.stage_cpu_times.clone(),
+            build_id: None,
         })
     }
 }
@@ -2188,7 +2184,8 @@ impl Build {
                             let _ = manager_tx
                                 .send(ChannelCommand::StageUpdate(i, Some("setup".to_string())));
                             let log_dir = pkg.session.config.logdir().join(pkgname.pkgname());
-                            let timestamp = epoch_secs();
+                            /* Can only fail if the clock is before 1970. */
+                            let timestamp = crate::epoch_secs().unwrap_or(0);
                             let build_start = Instant::now();
                             let result = pkg.build(&manager_tx);
                             let duration = build_start.elapsed();
@@ -2506,6 +2503,7 @@ impl Build {
         // and recv() returns Err, ending this loop.
         let mut saved_count = 0;
         let mut db_error: Option<anyhow::Error> = None;
+        let build_id = db.build_id().ok();
         while let Ok(result) = completed_rx.recv() {
             if let Err(e) = db.store_build_by_name(&result) {
                 warn!(
@@ -2520,7 +2518,8 @@ impl Build {
                 saved_count += 1;
             }
 
-            if let Some(input) = result.history_input() {
+            if let Some(mut input) = result.history_input() {
+                input.build_id = build_id.clone();
                 if let Err(e) = db.record_history(&input) {
                     warn!(
                         pkgname = %result.pkgname.pkgname(),

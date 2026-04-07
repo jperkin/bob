@@ -172,6 +172,13 @@ fn generate_reports(config: &Config, db: &Database, build_id: &str) -> Result<()
         .as_ref()
         .map(|u| format!("{}/{}", u, build_id));
 
+    let diff = match db.list_history_builds() {
+        Ok(builds) if builds.len() >= 2 => db
+            .compute_build_diff(&builds[1].build_id, &builds[0].build_id)
+            .ok(),
+        _ => None,
+    };
+
     std::fs::create_dir_all(logdir)
         .with_context(|| format!("Failed to create {}", logdir.display()))?;
 
@@ -183,6 +190,7 @@ fn generate_reports(config: &Config, db: &Database, build_id: &str) -> Result<()
         report_url.as_deref(),
         duration,
         logdir,
+        diff.as_ref(),
     )?;
 
     let report_path = logdir.join("report.html");
@@ -193,9 +201,15 @@ fn generate_reports(config: &Config, db: &Database, build_id: &str) -> Result<()
     };
 
     println!("Generating report...");
-    write_html_report(db, logdir, &report_path, &report_meta)?;
+    write_html_report(db, logdir, &report_path, &report_meta, diff.as_ref())?;
     write_machine_report(db, logdir)?;
-    write_text_report(db, logdir, &report_meta, report_url.as_deref())?;
+    write_text_report(
+        db,
+        logdir,
+        &report_meta,
+        report_url.as_deref(),
+        diff.as_ref(),
+    )?;
 
     Ok(())
 }
@@ -569,6 +583,7 @@ fn write_text_report(
     logdir: &Path,
     meta: &ReportMeta,
     report_url: Option<&str>,
+    diff: Option<&bob::db::BuildDiff>,
 ) -> Result<()> {
     let path = logdir.join("report.txt");
     let mut file = std::fs::File::create(&path)
@@ -673,6 +688,60 @@ fn write_text_report(
         writeln!(file, "{:<12}{:>5}{}", format!("{}:", lk), lv, right_part)?;
     }
 
+    let mut maintainers: HashMap<String, String> = HashMap::new();
+    for (pkgname, _, scan_data, _, _) in db.get_report_data()? {
+        if let Some(json_str) = scan_data {
+            if let Ok(idx) = serde_json::from_str::<pkgsrc::ScanIndex>(&json_str) {
+                if let Some(m) = idx.maintainer {
+                    maintainers.insert(pkgname, m);
+                }
+            }
+        }
+    }
+
+    if let Some(d) = diff {
+        if !d.new_failures.is_empty() {
+            let mut sorted: Vec<_> = d.new_failures.iter().collect();
+            let get_breaks = |e: &bob::db::DiffEntry| -> usize {
+                e.build2_pkgname
+                    .as_deref()
+                    .and_then(|n| breaks_counts.get(n))
+                    .copied()
+                    .unwrap_or(0)
+            };
+            let was_previously_ok = |e: &bob::db::DiffEntry| -> bool {
+                matches!(
+                    e.build1_outcome,
+                    None | Some(PackageStateKind::Success) | Some(PackageStateKind::UpToDate)
+                )
+            };
+            sorted.sort_by(|a, b| {
+                was_previously_ok(b)
+                    .cmp(&was_previously_ok(a))
+                    .then_with(|| get_breaks(b).cmp(&get_breaks(a)))
+            });
+            writeln!(file)?;
+            writeln!(
+                file,
+                "{:<44} {:>6}  Previously",
+                format!("New Failures Since {}", d.build1_id),
+                "Breaks"
+            )?;
+            writeln!(file, "{}", "-".repeat(76))?;
+            for e in &sorted {
+                let pkgname = e.build2_pkgname.as_deref().unwrap_or("-");
+                let breaks = breaks_counts.get(pkgname).copied().unwrap_or(0);
+                let previously: &str = e.build1_outcome.map(|o| o.into()).unwrap_or("");
+                let breaks_str = if breaks > 0 {
+                    breaks.to_string()
+                } else {
+                    String::new()
+                };
+                writeln!(file, "{:<44} {:>6}  {}", pkgname, breaks_str, previously)?;
+            }
+        }
+    }
+
     if c.scanfail > 0 {
         let max_path = summary
             .scanfail
@@ -691,17 +760,6 @@ fn write_text_report(
                 error_msg,
                 width = max_path
             )?;
-        }
-    }
-
-    let mut maintainers: HashMap<String, String> = HashMap::new();
-    for (pkgname, _, scan_data, _, _) in db.get_report_data()? {
-        if let Some(json_str) = scan_data {
-            if let Ok(idx) = serde_json::from_str::<pkgsrc::ScanIndex>(&json_str) {
-                if let Some(m) = idx.maintainer {
-                    maintainers.insert(pkgname, m);
-                }
-            }
         }
     }
 
@@ -787,6 +845,7 @@ fn write_machine_report(db: &Database, logdir: &Path) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_variables_json(
     pkgsrc_env: &bob::config::PkgsrcEnv,
     vcs_info: &bob::vcs::VcsInfo,
@@ -795,6 +854,7 @@ fn write_variables_json(
     report_url: Option<&str>,
     duration: Duration,
     logdir: &Path,
+    diff: Option<&bob::db::BuildDiff>,
 ) -> Result<()> {
     let mut pkgsrc = serde_json::Map::new();
     pkgsrc.insert(
@@ -845,6 +905,31 @@ fn write_variables_json(
         root.insert("vcs".to_string(), vcs);
     }
 
+    if let Some(d) = diff {
+        let mut diff_obj = serde_json::Map::new();
+        diff_obj.insert(
+            "compared_build_id".to_string(),
+            serde_json::Value::String(d.build1_id.clone()),
+        );
+        diff_obj.insert(
+            "new_failures".to_string(),
+            serde_json::Value::Number(d.new_failures.len().into()),
+        );
+        diff_obj.insert(
+            "fixes".to_string(),
+            serde_json::Value::Number(d.fixes.len().into()),
+        );
+        diff_obj.insert(
+            "version_changes".to_string(),
+            serde_json::Value::Number(d.version_changes.len().into()),
+        );
+        diff_obj.insert(
+            "other_changes".to_string(),
+            serde_json::Value::Number(d.other_changes.len().into()),
+        );
+        root.insert("diff".to_string(), serde_json::Value::Object(diff_obj));
+    }
+
     let path = logdir.join("variables.json");
     let file = std::fs::File::create(&path)
         .with_context(|| format!("Failed to create {}", path.display()))?;
@@ -868,7 +953,7 @@ th { white-space: nowrap; color: #d35400; background: none; border-bottom: 1px s
 th:focus-visible { outline: 2px solid #f37021; outline-offset: -2px; }\n\
 th[aria-sort=\"ascending\"]::after { content: \" \\25B2\"; font-size: 0.75em; }\n\
 th[aria-sort=\"descending\"]::after { content: \" \\25BC\"; font-size: 0.75em; }\n\
-.data { font-size: 0.9375rem; white-space: nowrap; }\n\
+.data { font-size: 0.8125rem; white-space: nowrap; margin: 0 auto; }\n\
 .data tbody tr:nth-child(even) td { background: #fdfaf7; }\n\
 .r { text-align: right; }\n\
 .header { margin-bottom: 1em; padding-bottom: 0.625em; border-bottom: 1px solid #e8ddd4; }\n\
@@ -900,7 +985,13 @@ th[aria-sort=\"descending\"]::after { content: \" \\25BC\"; font-size: 0.75em; }
 @media (max-width: 75em) { .col-path { display: none; } }\n\
 @media (max-width: 58em) { .col-breaks { display: none; } }\n";
 
-fn write_html_report(db: &Database, logdir: &Path, path: &Path, meta: &ReportMeta) -> Result<()> {
+fn write_html_report(
+    db: &Database,
+    logdir: &Path,
+    path: &Path,
+    meta: &ReportMeta,
+    diff: Option<&bob::db::BuildDiff>,
+) -> Result<()> {
     let mut results = db.get_all_build_results()?;
     let duration = db.get_build_duration()?;
 
@@ -1030,7 +1121,7 @@ fn write_html_report(db: &Database, logdir: &Path, path: &Path, meta: &ReportMet
     write_statistics_table(&mut file, &summary)?;
     write_platform_table(&mut file, m)?;
     write_paths_table(&mut file, m, &meta.pkgsrc_env.prefix)?;
-    write_misc_table(&mut file, meta.vcs_info, summary.duration)?;
+    write_misc_table(&mut file, meta.vcs_info, summary.duration, db, diff)?;
     writeln!(file, "</div>")?;
 
     let pkgpath_base = meta.vcs_info.web_url().and_then(|base| {
@@ -1039,6 +1130,10 @@ fn write_html_report(db: &Database, logdir: &Path, path: &Path, meta: &ReportMet
             .as_ref()
             .map(|rev| format!("{}/tree/{}", base, rev))
     });
+
+    if let Some(d) = diff {
+        write_diff_section(&mut file, d, &failed_info, pkgpath_base.as_deref())?;
+    }
 
     if !summary.scanfail.is_empty() {
         write_scanfail_table(&mut file, &summary.scanfail, pkgpath_base.as_deref())?;
@@ -1056,6 +1151,7 @@ fn write_html_report(db: &Database, logdir: &Path, path: &Path, meta: &ReportMet
     }
     write_failed_table(
         &mut file,
+        "All Failures",
         &failed_info,
         &maintainers,
         logdir,
@@ -1260,6 +1356,8 @@ fn write_misc_table(
     file: &mut std::fs::File,
     vcs: &bob::vcs::VcsInfo,
     duration: Duration,
+    db: &Database,
+    diff: Option<&bob::db::BuildDiff>,
 ) -> Result<()> {
     writeln!(file, "<table class=\"vars\">")?;
     writeln!(file, "<tr><th colspan=\"2\">Miscellaneous</th></tr>")?;
@@ -1307,6 +1405,18 @@ fn write_misc_table(
             write_var_row(file, "Revision", rev)?;
         }
     }
+    if let Some(d) = diff {
+        if let Some((url, old_rev, new_rev)) = build_compare_url(db, vcs, &d.build1_id) {
+            writeln!(
+                file,
+                "<tr><td class=\"vk\">Compare</td>\
+                 <td><a href=\"{}\">{}..{}</a></td></tr>",
+                escape_html(&url),
+                escape_html(&old_rev),
+                escape_html(&new_rev),
+            )?;
+        }
+    }
     let dur_secs = duration.as_secs();
     let duration_str = if dur_secs >= 3600 {
         format!(
@@ -1344,6 +1454,7 @@ fn generate_phase_links(pkg_name: &str, log_dir: &Path) -> String {
 
 fn write_failed_table(
     file: &mut std::fs::File,
+    title: &str,
     failed_info: &[FailedPackageInfo],
     maintainers: &HashMap<String, String>,
     logdir: &Path,
@@ -1356,8 +1467,8 @@ fn write_failed_table(
     )?;
     writeln!(file, "<caption class=\"sr-only\">Failed packages</caption>")?;
     writeln!(file, "<thead><tr>")?;
-    write_sortable_th(file, t, 0, "str", "PKGNAME", "col-pkg", "", "none")?;
-    write_sortable_th(file, t, 1, "str", "PKGPATH", "col-path", "", "none")?;
+    write_sortable_th(file, t, 0, "str", title, "col-pkg", "", "none")?;
+    write_sortable_th(file, t, 1, "str", "PkgPath", "col-path", "", "none")?;
     write_sortable_th(file, t, 2, "num", "Breaks", "col-breaks", "", "none")?;
     write_sortable_th(file, t, 3, "num", "Duration", "col-dur", "", "none")?;
     write_sortable_th(file, t, 4, "str", "Maintainer", "col-maint", "", "none")?;
@@ -1456,6 +1567,145 @@ fn write_failed_table(
     writeln!(file, "</tbody>")?;
     writeln!(file, "</table>")?;
     Ok(())
+}
+
+fn write_diff_section(
+    file: &mut std::fs::File,
+    diff: &bob::db::BuildDiff,
+    failed_info: &[FailedPackageInfo],
+    pkgpath_base: Option<&str>,
+) -> Result<()> {
+    if diff.new_failures.is_empty() {
+        return Ok(());
+    }
+
+    let info_by_name: HashMap<&str, &FailedPackageInfo> = failed_info
+        .iter()
+        .map(|i| (i.result.pkgname.pkgname(), i))
+        .collect();
+
+    let was_ok = |e: &bob::db::DiffEntry| -> bool {
+        matches!(
+            e.build1_outcome,
+            None | Some(PackageStateKind::Success) | Some(PackageStateKind::UpToDate)
+        )
+    };
+
+    let mut sorted: Vec<_> = diff.new_failures.iter().collect();
+    sorted.sort_by(|a, b| {
+        let ai = a
+            .build2_pkgname
+            .as_deref()
+            .and_then(|n| info_by_name.get(n));
+        let bi = b
+            .build2_pkgname
+            .as_deref()
+            .and_then(|n| info_by_name.get(n));
+        let ab = ai.map(|i| i.breaks_count).unwrap_or(0);
+        let bb = bi.map(|i| i.breaks_count).unwrap_or(0);
+        was_ok(b).cmp(&was_ok(a)).then_with(|| bb.cmp(&ab))
+    });
+
+    let t = "diff-new-failures";
+    let title = format!("New Failures Since {}", escape_html(&diff.build1_id));
+    writeln!(
+        file,
+        "<table id=\"{t}\" class=\"data\" data-sort-col=\"2\" data-sort-desc=\"1\">"
+    )?;
+    writeln!(
+        file,
+        "<caption class=\"sr-only\">New failures since previous build</caption>"
+    )?;
+    writeln!(file, "<thead><tr>")?;
+    write_sortable_th(file, t, 0, "str", &title, "col-pkg", "", "none")?;
+    write_sortable_th(file, t, 1, "str", "PkgPath", "col-path", "", "none")?;
+    write_sortable_th(file, t, 2, "num", "Breaks", "col-breaks", "", "none")?;
+    write_sortable_th(file, t, 3, "num", "Duration", "col-dur", "", "none")?;
+    write_sortable_th(file, t, 4, "str", "Previously", "col-prev", "", "none")?;
+    writeln!(file, "</tr></thead>")?;
+    writeln!(file, "<tbody>")?;
+
+    for e in &sorted {
+        let pkgname = e
+            .build2_pkgname
+            .as_deref()
+            .or(e.build1_pkgname.as_deref())
+            .unwrap_or("-");
+        let info = info_by_name.get(pkgname);
+
+        let escaped_path = escape_html(&e.pkgpath);
+        let pkgpath_cell = match pkgpath_base {
+            Some(base) => format!(
+                "<span title=\"{0}\"><a href=\"{1}/{0}\">{0}</a></span>",
+                escaped_path,
+                escape_html(base),
+            ),
+            None => format!("<span title=\"{0}\">{0}</span>", escaped_path),
+        };
+
+        let breaks = info.map(|i| i.breaks_count).unwrap_or(0);
+        let breaks_display = if breaks > 0 {
+            breaks.to_string()
+        } else {
+            String::new()
+        };
+
+        let (dur_secs, duration) = match info {
+            Some(i) => {
+                let s = i.result.build_stats.duration.as_secs();
+                let d = if s >= 60 {
+                    format!("{}m {}s", s / 60, s % 60)
+                } else {
+                    format!("{}s", s)
+                };
+                (s, d)
+            }
+            None => (0, String::new()),
+        };
+
+        let previously: &str = e.build1_outcome.map(|o| o.into()).unwrap_or("");
+
+        let escaped = escape_html(pkgname);
+        let pkg_link = match info.and_then(|i| i.failed_log.as_deref()) {
+            Some(log) => format!(
+                "<span title=\"{0}\"><a href=\"{0}/{1}\">{0}</a></span>",
+                escaped, log
+            ),
+            None => format!("<span title=\"{0}\">{0}</span>", escaped),
+        };
+
+        writeln!(
+            file,
+            "<tr><td class=\"col-pkg\">{}</td>\
+             <td class=\"col-path\">{}</td>\
+             <td class=\"col-breaks r\" data-sort=\"{}\">{}</td>\
+             <td class=\"col-dur r\" data-sort=\"{}\">{}</td>\
+             <td class=\"col-prev\">{}</td></tr>",
+            pkg_link, pkgpath_cell, breaks, breaks_display, dur_secs, duration, previously,
+        )?;
+    }
+
+    writeln!(file, "</tbody>")?;
+    writeln!(file, "</table>")?;
+    Ok(())
+}
+
+/**
+ * Build a compare URL and revision pair for two builds.
+ *
+ * If both builds have revisions and a web URL is available, returns
+ * a GitHub-style compare URL and the two revision strings.
+ */
+fn build_compare_url(
+    db: &Database,
+    vcs_info: &bob::vcs::VcsInfo,
+    build1_id: &str,
+) -> Option<(String, String, String)> {
+    let web_url = vcs_info.web_url()?;
+    let old_rev = db.get_build_revision(build1_id).ok()??;
+    let new_rev = vcs_info.revision.as_deref()?;
+    let url = format!("{}/compare/{}..{}", web_url, old_rev, new_rev);
+    Some((url, old_rev, new_rev.to_string()))
 }
 
 fn write_scanfail_table(
