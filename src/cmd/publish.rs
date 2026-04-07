@@ -134,7 +134,7 @@ fn publish_packages(config: &Config, db: &Database, dry_run: bool) -> Result<Pub
     let _ = std::fs::remove_file(&filter_path);
     result?;
 
-    run_ssh_swap(publish, packages, dry_run)?;
+    run_ssh_swap(packages, dry_run)?;
 
     Ok(PublishResult {
         uploaded: uploadable.len(),
@@ -224,10 +224,7 @@ fn publish_report(config: &Config, build_id: &str, dry_run: bool) -> Result<()> 
         .ok_or_else(|| anyhow::anyhow!("No publish.report section in configuration"))?;
 
     let logdir = config.logdir();
-    let rsync_args = report_cfg
-        .rsync_args
-        .as_deref()
-        .unwrap_or(&publish.rsync_args);
+    let rsync_args = &report_cfg.rsync_args;
 
     let target = format!(
         "{}:{}/{}",
@@ -445,10 +442,7 @@ fn run_rsync(
     packages_dir: &Path,
     dry_run: bool,
 ) -> Result<()> {
-    let rsync_args = packages
-        .rsync_args
-        .as_deref()
-        .unwrap_or(&publish.rsync_args);
+    let rsync_args = &packages.rsync_args;
 
     let mut cmd = Command::new(&publish.rsync);
     cmd.arg("--exclude-from").arg(filter_path);
@@ -487,7 +481,7 @@ fn run_rsync(
     Ok(())
 }
 
-fn run_ssh_swap(publish: &Publish, packages: &PublishPackages, dry_run: bool) -> Result<()> {
+fn run_ssh_swap(packages: &PublishPackages, dry_run: bool) -> Result<()> {
     let script = format!(
         "if [ -f {tmpdest}/All/pkg_summary.gz ]; then \
              if [ -d {linkdest} ]; then \
@@ -514,7 +508,7 @@ fn run_ssh_swap(publish: &Publish, packages: &PublishPackages, dry_run: bool) ->
 
     info!(remote = %format_remote(&packages.host, packages.user.as_deref()), "Performing atomic directory swap");
 
-    let ssh = publish
+    let ssh = packages
         .rsync_args
         .split_whitespace()
         .skip_while(|a| *a != "-e")

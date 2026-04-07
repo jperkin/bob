@@ -415,14 +415,13 @@ impl WrkObjKind {
 /// Publishing configuration from the `publish` section.
 ///
 /// Controls how binary packages and reports are published to remote servers.
-/// Shared rsync defaults (`rsync`, `rsync_args`) are inherited by sub-sections
-/// unless overridden.
+/// Each sub-section configures its own rsync arguments since the appropriate
+/// defaults differ: binary packages are already compressed and don't benefit
+/// from rsync's `-z`, while text-heavy report directories do.
 #[derive(Clone, Debug)]
 pub struct Publish {
     /// Path to rsync binary (default: "rsync").
     pub rsync: PathBuf,
-    /// Default rsync arguments (default: "-av --delete-excluded -e ssh").
-    pub rsync_args: String,
     /// Package publishing configuration.
     pub packages: Option<PublishPackages>,
     /// Report publishing configuration.
@@ -447,8 +446,10 @@ pub struct PublishPackages {
     pub minimum: Option<usize>,
     /// Glob patterns that must match at least one successful package.
     pub required: Vec<String>,
-    /// Override shared rsync_args for package publishing.
-    pub rsync_args: Option<String>,
+    /// rsync arguments for package publishing.  Default
+    /// `"-av --delete-excluded -e ssh"`: no `-z` since binary packages
+    /// are already compressed.
+    pub rsync_args: String,
 }
 
 /// Report publishing configuration.
@@ -462,8 +463,10 @@ pub struct PublishReport {
     pub path: String,
     /// Public URL where the report is accessible.
     pub url: Option<String>,
-    /// Override shared rsync_args for report publishing.
-    pub rsync_args: Option<String>,
+    /// rsync arguments for report publishing.  Default
+    /// `"-avz --delete-excluded -e ssh"`: includes `-z` since reports
+    /// are mostly text and benefit from compression.
+    pub rsync_args: String,
     /// Override auto-detected branch name for reports and email.
     pub branch: Option<String>,
     /// Email sender in "Name <addr>" format.
@@ -1102,11 +1105,34 @@ fn reject_old_config(globals: &Table) -> Result<(), String> {
         .get("sandboxes")
         .map_err(|e| format!("Error reading config: {}", e))?;
     if let Some(table) = sandboxes.as_table() {
-        let actions: Value = table
-            .get("actions")
+        // `actions` was the original action list field, before the
+        // split into `setup`/`build`.  `build` was the per-package
+        // action list before it was renamed to `hooks`.
+        for key in ["actions", "build"] {
+            let val: Value = table
+                .get(key)
+                .map_err(|e| format!("Error reading config: {}", e))?;
+            if !val.is_nil() {
+                return Err(OLD_CONFIG_ERROR.to_string());
+            }
+        }
+
+        // `sandboxes.environment` previously had top-level `clear`,
+        // `inherit`, and `set` fields.  These are now nested inside
+        // per-context sub-tables (`build` and `dev`), each of which
+        // has its own `clear`, `inherit`, and `vars`.
+        let env: Value = table
+            .get("environment")
             .map_err(|e| format!("Error reading config: {}", e))?;
-        if !actions.is_nil() {
-            return Err(OLD_CONFIG_ERROR.to_string());
+        if let Some(env_table) = env.as_table() {
+            for key in ["clear", "inherit", "set"] {
+                let val: Value = env_table
+                    .get(key)
+                    .map_err(|e| format!("Error reading config: {}", e))?;
+                if !val.is_nil() {
+                    return Err(OLD_CONFIG_ERROR.to_string());
+                }
+            }
         }
     }
 
@@ -1121,6 +1147,18 @@ fn reject_old_config(globals: &Table) -> Result<(), String> {
             if !val.is_nil() {
                 return Err(OLD_CONFIG_ERROR.to_string());
             }
+        }
+    }
+
+    let publish: Value = globals
+        .get("publish")
+        .map_err(|e| format!("Error reading config: {}", e))?;
+    if let Some(table) = publish.as_table() {
+        let val: Value = table
+            .get("rsync_args")
+            .map_err(|e| format!("Error reading config: {}", e))?;
+        if !val.is_nil() {
+            return Err(OLD_CONFIG_ERROR.to_string());
         }
     }
 
@@ -1438,6 +1476,18 @@ fn parse_actions(table: &Table, globals: &Table) -> LuaResult<Vec<Action>> {
     let mut actions = Vec::new();
     for v in table.sequence_values::<Table>() {
         let action_table = v?;
+
+        // The `ifset` and `ifexists` action fields were replaced by
+        // `only = { set = ... }` and `only = { exists = ... }`
+        // respectively.  Reject the old form so users don't silently
+        // lose their conditionals.
+        for key in ["ifset", "ifexists"] {
+            let val: Value = action_table.get(key)?;
+            if !val.is_nil() {
+                return Err(mlua::Error::runtime(OLD_CONFIG_ERROR));
+            }
+        }
+
         match parse_action_only(&action_table, globals)? {
             Some(only) => {
                 let mut action = Action::from_lua(&action_table)?;
@@ -1541,16 +1591,13 @@ fn parse_publish(globals: &Table) -> LuaResult<Option<Publish>> {
         .as_table()
         .ok_or_else(|| mlua::Error::runtime("'publish' must be a table"))?;
 
-    const KNOWN_KEYS: &[&str] = &["packages", "report", "rsync", "rsync_args"];
+    const KNOWN_KEYS: &[&str] = &["packages", "report", "rsync"];
     warn_unknown_keys(table, "publish", KNOWN_KEYS);
 
     let rsync: PathBuf = table
         .get::<Option<String>>("rsync")?
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("rsync"));
-    let rsync_args: String = table
-        .get::<Option<String>>("rsync_args")?
-        .unwrap_or_else(|| "-av --delete-excluded -e ssh".to_string());
 
     let packages = match table.get::<Value>("packages")? {
         Value::Nil => None,
@@ -1588,7 +1635,9 @@ fn parse_publish(globals: &Table) -> LuaResult<Option<Publish>> {
                     ));
                 }
             };
-            let pkg_rsync_args: Option<String> = t.get::<Option<String>>("rsync_args")?;
+            let rsync_args: String = t
+                .get::<Option<String>>("rsync_args")?
+                .unwrap_or_else(|| "-av --delete-excluded -e ssh".to_string());
 
             Some(PublishPackages {
                 host,
@@ -1597,7 +1646,7 @@ fn parse_publish(globals: &Table) -> LuaResult<Option<Publish>> {
                 tmpdest,
                 minimum,
                 required,
-                rsync_args: pkg_rsync_args,
+                rsync_args,
             })
         }
         _ => return Err(mlua::Error::runtime("publish.packages must be a table")),
@@ -1626,7 +1675,9 @@ fn parse_publish(globals: &Table) -> LuaResult<Option<Publish>> {
                 .get::<Option<String>>("path")?
                 .ok_or_else(|| mlua::Error::runtime("publish.report.path is required"))?;
             let url: Option<String> = t.get::<Option<String>>("url")?;
-            let rpt_rsync_args: Option<String> = t.get::<Option<String>>("rsync_args")?;
+            let rsync_args: String = t
+                .get::<Option<String>>("rsync_args")?
+                .unwrap_or_else(|| "-avz --delete-excluded -e ssh".to_string());
             let branch: Option<String> =
                 t.get::<Option<String>>("branch")?.filter(|s| !s.is_empty());
             let from: Option<String> = t.get::<Option<String>>("from")?;
@@ -1648,7 +1699,7 @@ fn parse_publish(globals: &Table) -> LuaResult<Option<Publish>> {
                 user,
                 path,
                 url,
-                rsync_args: rpt_rsync_args,
+                rsync_args,
                 branch,
                 from,
                 to,
@@ -1659,7 +1710,6 @@ fn parse_publish(globals: &Table) -> LuaResult<Option<Publish>> {
 
     Ok(Some(Publish {
         rsync,
-        rsync_args,
         packages,
         report,
     }))
