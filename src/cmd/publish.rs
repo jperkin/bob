@@ -104,7 +104,11 @@ fn publish_packages(config: &Config, db: &Database, dry_run: bool) -> Result<Pub
 
     validate_pre_publish(packages, &successful)?;
 
-    println!("Publishing packages...");
+    if dry_run {
+        println!("Publishing packages (dry-run)...");
+    } else {
+        println!("Publishing packages...");
+    }
 
     let restricted = db.get_restricted_packages()?;
     if !restricted.is_empty() {
