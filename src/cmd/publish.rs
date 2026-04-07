@@ -17,13 +17,16 @@
 /*!
  * Implementation of the `bob publish` command.
  *
- * Package publishing uses rsync with `--link-dest` for space-efficient
- * atomic updates.  The flow is:
+ * Package publishing has two knobs in `publish.packages`:
  *
- * 1. Rsync to a temporary staging directory with `--link-dest` pointing
- *    at the current live directory (unchanged files become hardlinks).
- * 2. Atomically swap the staging directory into place via ssh, removing
- *    the previous live directory.
+ * - `tmppath` (optional): if unset, rsync writes straight to `path`.
+ *   If set, rsync writes to `tmppath` with `--link-dest=path` so that
+ *   unchanged files become hardlinks against the live tree.
+ * - `swapcmd` (optional, requires `tmppath`): a shell command run via
+ *   ssh on the remote host after rsync completes.  Supports `{path}`
+ *   and `{tmppath}` placeholders.  No default -- if `swapcmd` is
+ *   unset, the staged data is left in `tmppath` and the caller is
+ *   responsible for whatever happens next.
  *
  * Restricted packages (those with `NO_BIN_ON_FTP` set) are excluded
  * from the upload filter list.
@@ -134,7 +137,34 @@ fn publish_packages(config: &Config, db: &Database, dry_run: bool) -> Result<Pub
     let _ = std::fs::remove_file(&filter_path);
     result?;
 
-    run_ssh_swap(packages, dry_run)?;
+    if let Some(swapcmd) = &packages.swapcmd {
+        let tmppath = packages
+            .tmppath
+            .as_deref()
+            .expect("swapcmd requires tmppath (enforced at config parse time)");
+        let script = swapcmd
+            .replace("{path}", &packages.path)
+            .replace("{tmppath}", tmppath);
+        let remote = format_remote(&packages.host, packages.user.as_deref());
+
+        if dry_run {
+            info!("Dry run: would execute via ssh:");
+            println!("  ssh {} '{}'", remote, script);
+        } else {
+            info!(remote = %remote, "Running swapcmd via ssh");
+            let status = Command::new("ssh")
+                .arg(&remote)
+                .arg(&script)
+                .status()
+                .context("Failed to execute ssh")?;
+            if !status.success() {
+                bail!(
+                    "swapcmd failed with exit code {}",
+                    status.code().unwrap_or(-1)
+                );
+            }
+        }
+    }
 
     Ok(PublishResult {
         uploaded: uploadable.len(),
@@ -443,6 +473,8 @@ fn run_rsync(
     dry_run: bool,
 ) -> Result<()> {
     let rsync_args = &packages.rsync_args;
+    let remote = format_remote(&packages.host, packages.user.as_deref());
+    let dest = packages.tmppath.as_ref().unwrap_or(&packages.path);
 
     let mut cmd = Command::new(&publish.rsync);
     cmd.arg("--exclude-from").arg(filter_path);
@@ -450,22 +482,21 @@ fn run_rsync(
         cmd.arg(arg);
     }
     cmd.arg("--partial-dir=.rsync-partial");
-    cmd.arg(format!("--link-dest={}", packages.linkdest));
+    if packages.tmppath.is_some() {
+        cmd.arg(format!("--link-dest={}", packages.path));
+    }
     if dry_run {
         cmd.arg("--dry-run");
     }
     cmd.arg(".");
-    cmd.arg(format!(
-        "{}:{}",
-        format_remote(&packages.host, packages.user.as_deref()),
-        packages.tmpdest
-    ));
+    cmd.arg(format!("{}:{}", remote, dest));
     cmd.current_dir(packages_dir);
 
     info!(
-        remote = %format_remote(&packages.host, packages.user.as_deref()),
-        tmpdest = %packages.tmpdest,
-        linkdest = %packages.linkdest,
+        remote = %remote,
+        dest = %dest,
+        path = %packages.path,
+        mode = if packages.tmppath.is_some() { "staged" } else { "direct" },
         "Running rsync"
     );
     debug!(cmd = ?cmd, "rsync command");
@@ -474,56 +505,6 @@ fn run_rsync(
     if !status.success() {
         bail!(
             "rsync failed with exit code {}",
-            status.code().unwrap_or(-1)
-        );
-    }
-
-    Ok(())
-}
-
-fn run_ssh_swap(packages: &PublishPackages, dry_run: bool) -> Result<()> {
-    let script = format!(
-        "if [ -f {tmpdest}/All/pkg_summary.gz ]; then \
-             if [ -d {linkdest} ]; then \
-                 mv {linkdest} {tmpdest}-old; \
-             else \
-                 mkdir -p $(dirname {linkdest}); \
-             fi; \
-             mv {tmpdest} {linkdest}; \
-             rm -rf {tmpdest}-old; \
-         fi",
-        tmpdest = packages.tmpdest,
-        linkdest = packages.linkdest,
-    );
-
-    if dry_run {
-        info!("Dry run: would execute via ssh:");
-        println!(
-            "  ssh {} '{}'",
-            format_remote(&packages.host, packages.user.as_deref()),
-            script
-        );
-        return Ok(());
-    }
-
-    info!(remote = %format_remote(&packages.host, packages.user.as_deref()), "Performing atomic directory swap");
-
-    let ssh = packages
-        .rsync_args
-        .split_whitespace()
-        .skip_while(|a| *a != "-e")
-        .nth(1)
-        .unwrap_or("ssh");
-
-    let status = Command::new(ssh)
-        .arg(format_remote(&packages.host, packages.user.as_deref()))
-        .arg(&script)
-        .status()
-        .context("Failed to execute ssh")?;
-
-    if !status.success() {
-        bail!(
-            "ssh directory swap failed with exit code {}",
             status.code().unwrap_or(-1)
         );
     }

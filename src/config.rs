@@ -430,7 +430,13 @@ pub struct Publish {
 
 /// Package publishing configuration.
 ///
-/// Uses rsync `--link-dest` for space-efficient atomic updates.
+/// Supports two modes:
+///
+/// - **Direct**: `tmppath` is unset.  rsync writes straight to `path`.
+/// - **Atomic**: `tmppath` is set.  rsync writes to `tmppath` with
+///   `--link-dest=path` (unchanged files become hardlinks), then a
+///   shell script (`swapcmd`) atomically swaps `tmppath` into `path`.
+///
 /// Restricted packages (NO_BIN_ON_FTP) are automatically excluded.
 #[derive(Clone, Debug)]
 pub struct PublishPackages {
@@ -438,10 +444,16 @@ pub struct PublishPackages {
     pub host: String,
     /// Remote user (if unset, relies on ssh config).
     pub user: Option<String>,
-    /// Remote path to the live published directory (link-dest source).
-    pub linkdest: String,
-    /// Remote path for temporary staging during sync.
-    pub tmpdest: String,
+    /// Remote path to the live published directory.
+    pub path: String,
+    /// Optional remote path for staging during sync.  If set, enables
+    /// atomic-swap mode: rsync writes here with `--link-dest=path`,
+    /// then `swapcmd` moves it into place.
+    pub tmppath: Option<String>,
+    /// Optional override of the swap shell script run after rsync in
+    /// atomic mode.  Supports `{path}` and `{tmppath}` placeholders.
+    /// Only meaningful when `tmppath` is set.
+    pub swapcmd: Option<String>,
     /// Minimum successful package count required before publishing.
     pub minimum: Option<usize>,
     /// Glob patterns that must match at least one successful package.
@@ -963,11 +975,13 @@ impl Config {
                 if pkgs.host.is_empty() {
                     errors.push("publish.packages.host must not be empty".to_string());
                 }
-                if pkgs.linkdest.is_empty() {
-                    errors.push("publish.packages.linkdest must not be empty".to_string());
+                if pkgs.path.is_empty() {
+                    errors.push("publish.packages.path must not be empty".to_string());
                 }
-                if pkgs.tmpdest.is_empty() {
-                    errors.push("publish.packages.tmpdest must not be empty".to_string());
+                if let Some(tmppath) = &pkgs.tmppath {
+                    if tmppath.is_empty() {
+                        errors.push("publish.packages.tmppath must not be empty".to_string());
+                    }
                 }
             }
             if let Some(report) = &publish.report {
@@ -1612,11 +1626,12 @@ fn parse_publish(globals: &Table) -> LuaResult<Option<Publish>> {
         Value::Table(t) => {
             const PKG_KEYS: &[&str] = &[
                 "host",
-                "linkdest",
                 "minimum",
+                "path",
                 "required",
                 "rsync_args",
-                "tmpdest",
+                "swapcmd",
+                "tmppath",
                 "user",
             ];
             warn_unknown_keys(&t, "publish.packages", PKG_KEYS);
@@ -1625,12 +1640,15 @@ fn parse_publish(globals: &Table) -> LuaResult<Option<Publish>> {
                 .get::<Option<String>>("host")?
                 .ok_or_else(|| mlua::Error::runtime("publish.packages.host is required"))?;
             let user: Option<String> = t.get::<Option<String>>("user")?;
-            let linkdest: String = t
-                .get::<Option<String>>("linkdest")?
-                .ok_or_else(|| mlua::Error::runtime("publish.packages.linkdest is required"))?;
-            let tmpdest: String = t
-                .get::<Option<String>>("tmpdest")?
-                .ok_or_else(|| mlua::Error::runtime("publish.packages.tmpdest is required"))?;
+            let path: String = t
+                .get::<Option<String>>("path")?
+                .ok_or_else(|| mlua::Error::runtime("publish.packages.path is required"))?;
+            let tmppath: Option<String> = t
+                .get::<Option<String>>("tmppath")?
+                .filter(|s| !s.is_empty());
+            let swapcmd: Option<String> = t
+                .get::<Option<String>>("swapcmd")?
+                .filter(|s| !s.is_empty());
             let minimum: Option<usize> = t.get::<Option<usize>>("minimum")?;
             let required: Vec<String> = match t.get::<Value>("required")? {
                 Value::Nil => Vec::new(),
@@ -1647,11 +1665,18 @@ fn parse_publish(globals: &Table) -> LuaResult<Option<Publish>> {
                 .get::<Option<String>>("rsync_args")?
                 .unwrap_or_else(|| "-av --delete-excluded -e ssh".to_string());
 
+            if swapcmd.is_some() && tmppath.is_none() {
+                return Err(mlua::Error::runtime(
+                    "publish.packages.swapcmd requires tmppath to be set",
+                ));
+            }
+
             Some(PublishPackages {
                 host,
                 user,
-                linkdest,
-                tmpdest,
+                path,
+                tmppath,
+                swapcmd,
                 minimum,
                 required,
                 rsync_args,
