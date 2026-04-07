@@ -73,14 +73,29 @@ sandboxes = {
 
     --[[
       Environment variable configuration for sandboxed processes.  It is
-      recommended to be as strict as possible, as pollution from the user
-      environment can negatively impact builds.
+      recommended to be as strict as possible, especially in the "build"
+      section used by production build sandboxes, as pollution from the user
+      environment can negatively impact builds.  The "dev" section used by
+      "bob sandbox exec" is primarily for interactive pkgsrc work, and you
+      may want to set useful variables to suit the development environment.
     ]]
     environment = {
-        clear = true,
-        inherit = { "TERM", "HOME" },
-        set = {
-            PATH = "/sbin:/bin:/usr/sbin:/usr/bin",
+        build = {
+            clear = true,
+            inherit = { "TERM", "HOME" },
+            vars = {
+                PATH = "/sbin:/bin:/usr/sbin:/usr/bin",
+            },
+        },
+        dev = {
+            clear = true,
+            inherit = { "TERM", "HOME" },
+            vars = {
+                BINPKG_SITES = "${bob_packages}",
+                DEPENDS_TARGET = "bin-install",
+                PATH = "${bob_prefix}/sbin:${bob_prefix}/bin:/sbin:/bin:/usr/sbin:/usr/bin",
+                PS1 = [["sandbox:${bob_sandbox_id} "'${PWD}# ']],
+            },
         },
     },
 
@@ -119,7 +134,7 @@ sandboxes = {
         -- Configure build user home directory if enabled.  Bob automatically
         -- sets bob_build_user* variables when the build user is configured,
         -- and the scripts are executed with 'set -eu', so these should be safe.
-        { action = "cmd", ifset = "pkgsrc.build_user",
+        { action = "cmd", only = { set = "pkgsrc.build_user" },
           create = [[
                 mkdir -p ${bob_sandbox_path}${bob_build_user_home}
                 chown ${bob_build_user} ${bob_sandbox_path}${bob_build_user_home}
@@ -132,12 +147,12 @@ sandboxes = {
     },
 
     --[[
-      Custom actions to run before and after each individual build.  Any create
-      action will run after the internal pre-build script (unpacks bootstrap kit
-      if needed), and any destroy action runs before the internal post-build
-      script (wipes PREFIX and PKG_DBDIR).
+      Per-package hook actions.  Any create action will run after the internal
+      pre-build script (unpacks bootstrap kit if needed), and any destroy
+      action runs before the internal post-build script (wipes PREFIX and
+      PKG_DBDIR).
 
-    build = {
+    hooks = {
         -- As an example, ensure clean passwd file and /tmp for each build.
         { action = "cmd",
           create = "cp /etc/passwd ${bob_sandbox_path}/etc/passwd",

@@ -14,6 +14,8 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+use std::fmt::Write as _;
+use std::fs;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -76,7 +78,7 @@ pub fn run(config: &Config, cmd: SandboxCmd) -> Result<()> {
 }
 
 fn exec(config: &Config) -> Result<()> {
-    let sandbox = Sandbox::new(config);
+    let sandbox = Sandbox::new_dev(config);
     if !sandbox.enabled() {
         bail!("No sandboxes configured");
     }
@@ -91,30 +93,11 @@ fn exec(config: &Config) -> Result<()> {
         }
         bob::print_elapsed("Creating sandbox", start.elapsed());
         let pkgsrc_env = PkgsrcEnv::fetch(config, &sandbox, Some(id))?;
-        let prefix = &pkgsrc_env.prefix;
+        let init_path = write_shell_init(config, &sandbox, &pkgsrc_env, id)?;
         println!("Entering sandbox {}...", sandbox.path(id).display());
-        println!();
-        println!(
-            "        You are entering a sandbox shell session.  On exit or ^D the sandbox will"
-        );
-        println!(
-            "        automatically be destroyed.  Set these variables to aid pkgsrc development:"
-        );
-        println!();
-        println!("        BINPKG_SITES={}", pkgsrc_env.packages.display());
-        println!("        DEPENDS_TARGET=bin-install");
-        println!("        export BINPKG_SITES DEPENDS_TARGET");
-        println!();
         let mut cmd = Command::new("/usr/sbin/chroot");
-        cmd.arg(sandbox.path(id)).arg("/bin/sh").arg("-i");
-        sandbox.apply_environment(&mut cmd);
-        let prefix_path = format!("{}/sbin:{}/bin", prefix.display(), prefix.display());
-        let path = match sandbox.resolve_env("PATH") {
-            Some(base) => format!("{}:{}", prefix_path, base),
-            None => prefix_path,
-        };
-        cmd.env("PATH", path);
-        cmd.env("PS1", format!("sandbox:{} $PWD# ", id));
+        cmd.arg(sandbox.path(id)).arg("/bin/sh").arg(&init_path);
+        sandbox.apply_dev_environment(&mut cmd);
         cmd.stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
@@ -136,4 +119,75 @@ fn exec(config: &Config) -> Result<()> {
     sandbox.destroy(id)?;
     bob::print_elapsed("Destroying sandbox", start.elapsed());
     result
+}
+
+/**
+ * Write the shell init wrapper script to `<sandbox>/.bob/shell-init`.
+ *
+ * The wrapper exports all `bob_*` variables (defensively double-quoted
+ * by bob, since they may contain whitespace), then exports each variable
+ * from the `environment.dev.vars` config table verbatim -- the user is
+ * responsible for any shell quoting.  Finally it removes itself and
+ * execs the configured interactive shell (`environment.dev.shell`,
+ * defaulting to `/bin/sh`).  Returning the path inside the chroot lets
+ * the caller invoke `chroot <path> /bin/sh /.bob/shell-init`.
+ */
+fn write_shell_init(
+    config: &Config,
+    sandbox: &Sandbox,
+    pkgsrc_env: &PkgsrcEnv,
+    id: usize,
+) -> Result<String> {
+    let dev_ctx = config.environment().and_then(|e| e.dev.as_ref());
+    let interactive_shell = dev_ctx
+        .and_then(|c| c.shell.as_ref())
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "/bin/sh".to_string());
+
+    let mut script = String::new();
+    script.push_str("#!/bin/sh\n");
+
+    let mut bob_vars = config.script_env(Some(pkgsrc_env));
+    bob_vars.push(("bob_sandbox_id".to_string(), id.to_string()));
+    bob_vars.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, value) in &bob_vars {
+        let _ = writeln!(script, "export {}={}", name, bob_dquote(value));
+    }
+
+    if let Some(ctx) = dev_ctx {
+        let mut dev_vars: Vec<(&String, &String)> = ctx.vars.iter().collect();
+        dev_vars.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, value) in dev_vars {
+            let _ = writeln!(script, "export {}={}", name, value);
+        }
+    }
+
+    script.push_str("rm -f /.bob/shell-init\n");
+    let _ = writeln!(script, "exec {} -i", interactive_shell);
+
+    let host_path = sandbox.path(id).join(".bob/shell-init");
+    fs::write(&host_path, &script)
+        .with_context(|| format!("Failed to write {}", host_path.display()))?;
+    Ok("/.bob/shell-init".to_string())
+}
+
+/**
+ * Wrap a `bob_*` value in POSIX shell double quotes with full escaping.
+ *
+ * Used only for bob's own values, not user-supplied `environment.shell`
+ * entries.  These are paths and identifiers that bob constructs, so
+ * `$`, backtick, `\`, and `"` are all escaped to make the assignment
+ * safe regardless of any unusual characters in the path.
+ */
+fn bob_dquote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        if matches!(c, '"' | '\\' | '`' | '$') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
 }

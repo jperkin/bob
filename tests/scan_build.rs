@@ -1149,9 +1149,16 @@ pkgsrc = {{
 sandboxes = {{
     basedir = \"{dbdir}/sandboxes\",
     environment = {{
-        clear = true,
-        inherit = {{ \"TERM\", \"HOME\" }},
-        set = {{ PATH = \"/sbin:/bin\", LC_ALL = \"C\" }},
+        build = {{
+            clear = true,
+            inherit = {{ \"TERM\", \"HOME\" }},
+            vars = {{ PATH = \"/sbin:/bin\", LC_ALL = \"C\" }},
+        }},
+        dev = {{
+            clear = true,
+            inherit = {{ \"TERM\", \"HOME\" }},
+            vars = {{ BINPKG_SITES = \"$bob_packages\" }},
+        }},
     }},
 }}
 ",
@@ -1171,12 +1178,19 @@ sandboxes = {{
     let env = config
         .environment()
         .expect("environment section should exist");
-    assert!(env.clear);
-    assert_eq!(env.inherit, vec!["TERM", "HOME"]);
-    let mut expected_set = HashMap::new();
-    expected_set.insert("PATH".to_string(), "/sbin:/bin".to_string());
-    expected_set.insert("LC_ALL".to_string(), "C".to_string());
-    assert_eq!(env.set, expected_set);
+    let build = env.build.as_ref().expect("environment.build should exist");
+    assert!(build.clear);
+    assert_eq!(build.inherit, vec!["TERM", "HOME"]);
+    let mut expected_build_vars = HashMap::new();
+    expected_build_vars.insert("PATH".to_string(), "/sbin:/bin".to_string());
+    expected_build_vars.insert("LC_ALL".to_string(), "C".to_string());
+    assert_eq!(build.vars, expected_build_vars);
+    let dev = env.dev.as_ref().expect("environment.dev should exist");
+    assert!(dev.clear);
+    assert_eq!(dev.inherit, vec!["TERM", "HOME"]);
+    let mut expected_dev_vars = HashMap::new();
+    expected_dev_vars.insert("BINPKG_SITES".to_string(), "$bob_packages".to_string());
+    assert_eq!(dev.vars, expected_dev_vars);
 
     Ok(())
 }

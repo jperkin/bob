@@ -37,6 +37,7 @@
 //! |-------|------|---------|-------------|
 //! | `build_threads` | integer | 1 | Number of parallel build sandboxes. Each sandbox builds one package at a time. |
 //! | `dbdir` | string | "./db" | Directory for bob state files (database, tracing log). Relative to config file directory. |
+//! | `logdir` | string | `dbdir/logs` | Directory for per-package build logs. Failed builds leave logs here; successful builds clean up. |
 //! | `scan_threads` | integer | 1 | Number of parallel scan processes for dependency discovery. |
 //! | `strict_scan` | boolean | false | If true, abort on scan errors. If false, continue and report failures separately. |
 //! | `log_level` | string | "info" | Log level: "trace", "debug", "info", "warn", or "error". Can be overridden by `RUST_LOG` env var. |
@@ -58,35 +59,12 @@
 //! |-------|------|---------|-------------|
 //! | `bootstrap` | string | none | Path to a bootstrap tarball. Required on non-NetBSD systems. Unpacked into each sandbox before builds. |
 //! | `build_user` | string | none | Unprivileged user to run builds as. If set, builds run as this user instead of root. |
-//! | `logdir` | string | `dbdir/logs` | Directory for per-package build logs. Failed builds leave logs here; successful builds clean up. |
 //! | `cachevars` | table | (OS-specific) | List of pkgsrc variable names to fetch once and cache. These are set in the environment for scans and builds. If set, replaces the built-in defaults. |
-//! | `env` | function or table | `{}` | Environment variables for builds. Can be a table of key-value pairs, or a function receiving package metadata and returning a table. See [Environment Function](#environment-function). |
 //! | `pkgpaths` | table | `{}` | List of package paths to build (e.g., `{"mail/mutt", "www/curl"}`). Dependencies are discovered automatically. |
 //! | `save_wrkdir_patterns` | table | `{}` | Glob patterns for files to preserve from WRKDIR on build failure (e.g., `{"**/config.log"}`). |
 //!
-//! ## Environment Function
-//!
-//! The `env` field can be a function that returns environment variables for each
-//! package build. The function receives a `pkg` table with the following fields:
-//!
-//! | Field | Type | Description |
-//! |-------|------|-------------|
-//! | `pkgname` | string | Package name with version (e.g., `mutt-2.2.12`). |
-//! | `pkgpath` | string | Package path in pkgsrc (e.g., `mail/mutt`). |
-//! | `all_depends` | string | Space-separated list of all transitive dependency paths. |
-//! | `depends` | string | Space-separated list of direct dependency package names. |
-//! | `scan_depends` | string | Space-separated list of scan-time dependency paths. |
-//! | `categories` | string | Package categories from `CATEGORIES`. |
-//! | `maintainer` | string | Package maintainer email from `MAINTAINER`. |
-//! | `bootstrap_pkg` | string | Value of `BOOTSTRAP_PKG` if set. |
-//! | `usergroup_phase` | string | Value of `USERGROUP_PHASE` if set. |
-//! | `use_destdir` | string | Value of `USE_DESTDIR`. |
-//! | `multi_version` | string | Value of `MULTI_VERSION` if set. |
-//! | `pbulk_weight` | string | Value of `PBULK_WEIGHT` if set. |
-//! | `pkg_skip_reason` | string | Value of `PKG_SKIP_REASON` if set. |
-//! | `pkg_fail_reason` | string | Value of `PKG_FAIL_REASON` if set. |
-//! | `no_bin_on_ftp` | string | Value of `NO_BIN_ON_FTP` if set. |
-//! | `restricted` | string | Value of `RESTRICTED` if set. |
+//! Per-package make variables should be set in pkgsrc's `mk.conf`, not in
+//! bob.  Bob does not provide a per-package environment override mechanism.
 //!
 //! # Sandboxes Section
 //!
@@ -97,31 +75,65 @@
 //! |-------|------|----------|-------------|
 //! | `basedir` | string | yes | Base directory for sandbox roots. Sandboxes are created as numbered subdirectories (`basedir/0`, `basedir/1`, etc.). |
 //! | `setup` | table | no | Actions to perform during sandbox creation and destruction. See the [`action`](crate::action) module for details. |
-//! | `build` | table | no | Actions to run before and after each package build. Any "create" action runs after bob's internal pre-build (unpacks bootstrap kit if needed), and any "destroy" action runs before bob's internal post-build (wipes PREFIX and PKG_DBDIR). |
+//! | `hooks` | table | no | Per-package hook actions. Any "create" action runs after bob's internal pre-build (unpacks bootstrap kit if needed); any "destroy" action runs before bob's internal post-build (wipes PREFIX and PKG_DBDIR). |
 //! | `environment` | table | no | Environment variables for sandbox processes. If omitted, the parent environment is inherited unchanged. See [Environment](#environment). |
 //!
 //! ## Environment
 //!
-//! Controls the environment variables available to processes executed inside
-//! sandboxes.  If present, `clear` defaults to true and the environment is
-//! cleared before applying the configured variables.
+//! Controls how environment variables are set for processes running inside
+//! sandboxes.  When this section is omitted, sandbox processes inherit bob's
+//! parent environment unchanged.
+//!
+//! `environment` contains two independent sub-tables, `build` and `dev`,
+//! one for each context bob runs processes in.  They have an identical
+//! shape (`clear`, `inherit`, `vars`) but are configured separately so
+//! that interactive development conveniences cannot leak into automated
+//! builds.  Either sub-table can be omitted; an omitted context inherits
+//! bob's parent environment unchanged.
+//!
+//! - `build` is used by every operation that `bob build` performs: sandbox
+//!   setup, pre- and post-build hooks, and the package builds themselves.
+//!   Values are passed directly to each process as literal strings; no
+//!   shell ever evaluates them.  This context typically wants a strict,
+//!   minimal environment for build reproducibility.
+//!
+//! - `dev` is used only by interactive `bob sandbox shell` sessions.
+//!   Bob writes the values into a small init script
+//!   (`<sandbox>/.bob/shell-init`) that the chrooted shell runs at startup,
+//!   one `export NAME=value` line per entry.  Each value is emitted
+//!   verbatim, so what you write must be a valid shell assignment
+//!   right-hand side -- in particular, values containing whitespace or
+//!   shell metacharacters need to be quoted by the user.  Values can
+//!   reference `bob_*` variables (or any other shell variables) using
+//!   ordinary shell syntax, for example `PATH = "${bob_prefix}/bin:..."`.
+//!   This context typically wants a more generous `inherit` list (e.g.
+//!   `EDITOR`, `PAGER`, locale variables) than `build`, since interactive
+//!   sessions benefit from the developer's normal environment.  See the
+//!   [`action`](crate::action) module for the full list of `bob_*`
+//!   variables.
+//!
+//! Each `build`/`dev` sub-table has the following fields:
 //!
 //! | Field | Type | Default | Description |
 //! |-------|------|---------|-------------|
-//! | `clear` | boolean | true | If true, clear the environment. If false, inherit the full parent environment. |
-//! | `inherit` | table | `{}` | Variable names to copy from the parent environment (only used when `clear = true`). |
-//! | `set` | table | `{}` | Variables to set explicitly as key-value pairs. |
+//! | `clear` | boolean | `true` | Start each sandbox process with an empty environment.  Set to `false` to inherit bob's full parent environment instead. |
+//! | `inherit` | table | `{}` | When `clear` is `true`, names of variables to copy from bob's parent environment. |
+//! | `vars` | table | `{}` | Variables to set in this context.  In `build` these are literal strings; in `dev` they are written verbatim into the init script. |
+//!
+//! The `dev` sub-table additionally accepts:
+//!
+//! | Field | Type | Default | Description |
+//! |-------|------|---------|-------------|
+//! | `shell` | string | `/bin/sh` | Path to the interactive shell binary used for the dev session.  The path is resolved inside the sandbox chroot, so the binary must exist there (typically arranged by a `setup` action that mounts or copies it). |
 
 use crate::action::Action;
 use crate::sandbox::Sandbox;
-use crate::scan::ResolvedPackage;
 use anyhow::{Context, Result, anyhow, bail};
-use mlua::{Lua, RegistryKey, Result as LuaResult, Table, Value};
+use mlua::{Lua, Result as LuaResult, Table, Value};
 use pkgsrc::PkgPath;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 /// Environment variables retrieved from pkgsrc.
 ///
@@ -281,178 +293,6 @@ impl PkgsrcEnv {
     }
 }
 
-/// Holds the Lua state for evaluating env functions.
-#[derive(Clone)]
-pub struct LuaEnv {
-    lua: Arc<Mutex<Lua>>,
-    env_key: Option<Arc<RegistryKey>>,
-}
-
-impl std::fmt::Debug for LuaEnv {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LuaEnv")
-            .field("has_env", &self.env_key.is_some())
-            .finish()
-    }
-}
-
-impl Default for LuaEnv {
-    fn default() -> Self {
-        Self {
-            lua: Arc::new(Mutex::new(Lua::new())),
-            env_key: None,
-        }
-    }
-}
-
-impl LuaEnv {
-    /// Get environment variables for a package by calling the env function.
-    /// Returns a HashMap of VAR_NAME -> value.
-    pub fn get_env(&self, pkg: &ResolvedPackage) -> Result<HashMap<String, String>, String> {
-        let Some(env_key) = &self.env_key else {
-            return Ok(HashMap::new());
-        };
-
-        let lua = self
-            .lua
-            .lock()
-            .map_err(|e| format!("Lua lock error: {}", e))?;
-
-        // Get the env value from registry
-        let env_value: Value = lua
-            .registry_value(env_key)
-            .map_err(|e| format!("Failed to get env from registry: {}", e))?;
-
-        let idx = &pkg.index;
-
-        let result_table: Table = match env_value {
-            // If it's a function, call it with pkg info
-            Value::Function(func) => {
-                let pkg_table = lua
-                    .create_table()
-                    .map_err(|e| format!("Failed to create table: {}", e))?;
-
-                // Set all ScanIndex fields
-                pkg_table
-                    .set("pkgname", idx.pkgname.to_string())
-                    .map_err(|e| format!("Failed to set pkgname: {}", e))?;
-                pkg_table
-                    .set("pkgpath", pkg.pkgpath.as_path().display().to_string())
-                    .map_err(|e| format!("Failed to set pkgpath: {}", e))?;
-                pkg_table
-                    .set(
-                        "all_depends",
-                        idx.all_depends
-                            .as_ref()
-                            .map(|deps| {
-                                deps.depends()
-                                    .filter_map(|d| d.ok())
-                                    .map(|d| d.pkgpath().to_string())
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
-                            })
-                            .unwrap_or_default(),
-                    )
-                    .map_err(|e| format!("Failed to set all_depends: {}", e))?;
-                pkg_table
-                    .set(
-                        "pkg_skip_reason",
-                        idx.pkg_skip_reason.clone().unwrap_or_default(),
-                    )
-                    .map_err(|e| format!("Failed to set pkg_skip_reason: {}", e))?;
-                pkg_table
-                    .set(
-                        "pkg_fail_reason",
-                        idx.pkg_fail_reason.clone().unwrap_or_default(),
-                    )
-                    .map_err(|e| format!("Failed to set pkg_fail_reason: {}", e))?;
-                pkg_table
-                    .set(
-                        "no_bin_on_ftp",
-                        idx.no_bin_on_ftp.clone().unwrap_or_default(),
-                    )
-                    .map_err(|e| format!("Failed to set no_bin_on_ftp: {}", e))?;
-                pkg_table
-                    .set("restricted", idx.restricted.clone().unwrap_or_default())
-                    .map_err(|e| format!("Failed to set restricted: {}", e))?;
-                pkg_table
-                    .set("categories", idx.categories.clone().unwrap_or_default())
-                    .map_err(|e| format!("Failed to set categories: {}", e))?;
-                pkg_table
-                    .set("maintainer", idx.maintainer.clone().unwrap_or_default())
-                    .map_err(|e| format!("Failed to set maintainer: {}", e))?;
-                pkg_table
-                    .set("use_destdir", idx.use_destdir.clone().unwrap_or_default())
-                    .map_err(|e| format!("Failed to set use_destdir: {}", e))?;
-                pkg_table
-                    .set(
-                        "bootstrap_pkg",
-                        idx.bootstrap_pkg.clone().unwrap_or_default(),
-                    )
-                    .map_err(|e| format!("Failed to set bootstrap_pkg: {}", e))?;
-                pkg_table
-                    .set(
-                        "usergroup_phase",
-                        idx.usergroup_phase.clone().unwrap_or_default(),
-                    )
-                    .map_err(|e| format!("Failed to set usergroup_phase: {}", e))?;
-                pkg_table
-                    .set(
-                        "scan_depends",
-                        idx.scan_depends
-                            .as_ref()
-                            .map(|deps| {
-                                deps.iter()
-                                    .map(|p| p.display().to_string())
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
-                            })
-                            .unwrap_or_default(),
-                    )
-                    .map_err(|e| format!("Failed to set scan_depends: {}", e))?;
-                pkg_table
-                    .set("pbulk_weight", idx.pbulk_weight.clone().unwrap_or_default())
-                    .map_err(|e| format!("Failed to set pbulk_weight: {}", e))?;
-                pkg_table
-                    .set(
-                        "multi_version",
-                        idx.multi_version
-                            .as_ref()
-                            .map(|v| v.join(" "))
-                            .unwrap_or_default(),
-                    )
-                    .map_err(|e| format!("Failed to set multi_version: {}", e))?;
-                pkg_table
-                    .set(
-                        "depends",
-                        pkg.depends()
-                            .iter()
-                            .map(|d| d.to_string())
-                            .collect::<Vec<_>>()
-                            .join(" "),
-                    )
-                    .map_err(|e| format!("Failed to set depends: {}", e))?;
-
-                func.call(pkg_table)
-                    .map_err(|e| format!("Failed to call env function: {}", e))?
-            }
-            // If it's a table, use it directly
-            Value::Table(t) => t,
-            Value::Nil => return Ok(HashMap::new()),
-            _ => return Err("env must be a function or table".to_string()),
-        };
-
-        // Convert Lua table to HashMap
-        let mut env = HashMap::new();
-        for pair in result_table.pairs::<String, String>() {
-            let (k, v) = pair.map_err(|e| format!("Failed to iterate env table: {}", e))?;
-            env.insert(k, v);
-        }
-
-        Ok(env)
-    }
-}
-
 /// Main configuration structure.
 #[derive(Clone, Debug, Default)]
 pub struct Config {
@@ -460,7 +300,6 @@ pub struct Config {
     dbdir: PathBuf,
     logdir: PathBuf,
     log_level: String,
-    lua_env: LuaEnv,
 }
 
 /// Parsed configuration file contents.
@@ -490,6 +329,8 @@ pub struct Options {
     pub build_threads: Option<usize>,
     /// Directory for bob state files (database, tracing log).
     pub dbdir: Option<PathBuf>,
+    /// Directory for build logs (defaults to `dbdir/logs`).
+    pub logdir: Option<PathBuf>,
     /// Number of parallel scan processes.
     pub scan_threads: Option<usize>,
     /// If true, abort on scan errors. If false, continue and report failures.
@@ -642,7 +483,6 @@ pub struct PublishReport {
 ///
 /// - `bootstrap`: Path to bootstrap tarball (required on non-NetBSD systems)
 /// - `build_user`: Unprivileged user for builds
-/// - `logdir`: Directory for build logs (defaults to `dbdir/logs`)
 /// - `pkgpaths`: List of packages to build
 /// - `save_wrkdir_patterns`: Glob patterns for files to save on build failure
 #[derive(Clone, Debug, Default)]
@@ -655,8 +495,6 @@ pub struct Pkgsrc {
     pub build_user: Option<String>,
     /// Home directory of build_user (resolved from password database).
     pub build_user_home: Option<PathBuf>,
-    /// Directory for build logs (defaults to dbdir/logs).
-    pub logdir: Option<PathBuf>,
     /// Path to bmake binary.
     pub make: PathBuf,
     /// List of packages to build.
@@ -669,28 +507,57 @@ pub struct Pkgsrc {
 
 /// Environment configuration from `sandboxes.environment`.
 ///
-/// Controls the environment variables available to sandbox processes.
+/// Wraps two independent per-context configurations: `build` (for every
+/// operation driven by `bob build`) and `dev` (for interactive sandbox
+/// sessions used during pkgsrc development).  See the module-level
+/// documentation for the full description.
 ///
-/// If omitted, the parent environment is inherited unchanged.  If present,
-/// `clear` defaults to true and the environment is cleared before applying
-/// the configured variables.
-#[derive(Clone, Debug)]
+/// Either context can be `None`, meaning bob's parent environment is
+/// inherited unchanged for that context.
+#[derive(Clone, Debug, Default)]
 pub struct Environment {
-    /// If true (default), clear the environment before setting variables.
-    /// If false, inherit the full parent environment.
-    pub clear: bool,
-    /// Variable names to copy from the parent environment (when `clear = true`).
-    pub inherit: Vec<String>,
-    /// Variables to set explicitly.
-    pub set: HashMap<String, String>,
+    /// Build-time environment context.  When `None`, bob's parent
+    /// environment is inherited unchanged for build operations.
+    pub build: Option<EnvContext>,
+    /// Interactive (dev) environment context.  When `None`, bob's
+    /// parent environment is inherited unchanged for the interactive
+    /// session.
+    pub dev: Option<EnvContext>,
 }
 
-impl Default for Environment {
+/// A single environment context (`environment.build` or `environment.dev`).
+///
+/// Each context has its own `clear`/`inherit`/`vars` policy so that the
+/// build and dev contexts can be configured independently.
+#[derive(Clone, Debug)]
+pub struct EnvContext {
+    /// Whether to start processes in this context with an empty
+    /// environment.  Defaults to `true`.  When `false`, bob's full
+    /// parent environment is inherited instead.
+    pub clear: bool,
+    /// When `clear` is `true`, names of variables to copy from bob's
+    /// parent environment.
+    pub inherit: Vec<String>,
+    /// Variables to set in this context.  For `build`, values are
+    /// literal strings.  For `dev`, values are written verbatim into
+    /// the wrapper init script so they can reference `bob_*` and other
+    /// shell variables but must be quoted by the user if they contain
+    /// whitespace or shell metacharacters.
+    pub vars: HashMap<String, String>,
+    /// Path to the interactive shell binary for the dev sandbox
+    /// session.  Only meaningful in `environment.dev`; ignored in
+    /// `environment.build`.  Defaults to `/bin/sh`.  The path is
+    /// resolved inside the sandbox chroot.
+    pub shell: Option<PathBuf>,
+}
+
+impl Default for EnvContext {
     fn default() -> Self {
         Self {
             clear: true,
             inherit: Vec::new(),
-            set: HashMap::new(),
+            vars: HashMap::new(),
+            shell: None,
         }
     }
 }
@@ -721,12 +588,12 @@ pub struct Sandboxes {
     /// Actions to perform during sandbox creation and destruction.
     pub setup: Vec<Action>,
     /**
-     * Actions to run before and after each package build.  Any "create"
-     * action runs after bob's internal pre-build (unpacks bootstrap kit
-     * if needed), and any "destroy" action runs before bob's internal
-     * post-build (wipes PREFIX and PKG_DBDIR).
+     * Per-package hook actions.  Any "create" action runs after bob's
+     * internal pre-build (unpacks bootstrap kit if needed); any "destroy"
+     * action runs before bob's internal post-build (wipes PREFIX and
+     * PKG_DBDIR).
      */
-    pub build: Vec<Action>,
+    pub hooks: Vec<Action>,
     /// Environment variables for sandbox processes.
     pub environment: Option<Environment>,
     /// Path to bindfs binary (defaults to "bindfs").
@@ -769,7 +636,7 @@ impl Config {
         /*
          * Parse configuration file as Lua.
          */
-        let (file, lua_env) = load_lua(&filename)
+        let file = load_lua(&filename)
             .map_err(|e| anyhow!(e))
             .with_context(|| {
                 format!(
@@ -808,9 +675,9 @@ impl Config {
          * Default logdir to dbdir/logs if not explicitly set.
          */
         let logdir = file
-            .pkgsrc
-            .logdir
-            .clone()
+            .options
+            .as_ref()
+            .and_then(|o| o.logdir.clone())
             .unwrap_or_else(|| dbdir.join("logs"));
 
         /*
@@ -827,7 +694,6 @@ impl Config {
             dbdir,
             logdir,
             log_level,
-            lua_env,
         })
     }
 
@@ -866,9 +732,9 @@ impl Config {
             .and_then(|s| s.wrkobjdir.as_ref())
     }
 
-    pub fn build_actions(&self) -> &[Action] {
+    pub fn hooks(&self) -> &[Action] {
         match &self.file.sandboxes {
-            Some(sandboxes) => &sandboxes.build,
+            Some(sandboxes) => &sandboxes.hooks,
             None => &[],
         }
     }
@@ -957,18 +823,6 @@ impl Config {
         self.file.pkgsrc.cachevars.as_slice()
     }
 
-    /// Get environment variables for a package from the Lua env function/table.
-    pub fn get_pkg_env(
-        &self,
-        pkg: &ResolvedPackage,
-    ) -> Result<std::collections::HashMap<String, String>, String> {
-        self.lua_env.get_env(pkg)
-    }
-
-    /// Return environment variables for script execution.
-    ///
-    /// If `pkgsrc_env` is provided, includes the pkgsrc-derived variables
-    /// (packages, pkgtools, prefix, pkg_dbdir, pkg_refcount_dbdir).
     /// Return environment variables for script execution.
     ///
     /// If `pkgsrc_env` is provided, includes the pkgsrc-derived variables
@@ -1172,8 +1026,8 @@ pub fn default_data_dir() -> Result<PathBuf> {
     }
 }
 
-/// Load a Lua configuration file and return a ConfigFile and LuaEnv.
-fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
+/// Load and parse a Lua configuration file.
+fn load_lua(filename: &Path) -> Result<ConfigFile, String> {
     let lua = Lua::new();
 
     // Add config directory to package.path so require() finds relative modules
@@ -1207,9 +1061,6 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
     // Parse each section
     let options =
         parse_options(&globals).map_err(|e| format!("Error parsing options config: {}", e))?;
-    let pkgsrc_table: Table = globals
-        .get("pkgsrc")
-        .map_err(|e| format!("Error getting pkgsrc config: {}", e))?;
     let pkgsrc =
         parse_pkgsrc(&globals).map_err(|e| format!("Error parsing pkgsrc config: {}", e))?;
     let sandboxes =
@@ -1219,34 +1070,13 @@ fn load_lua(filename: &Path) -> Result<(ConfigFile, LuaEnv), String> {
     let publish =
         parse_publish(&globals).map_err(|e| format!("Error parsing publish config: {}", e))?;
 
-    // Store env function/table in registry if it exists
-    let env_key = if let Ok(env_value) = pkgsrc_table.get::<Value>("env") {
-        if !env_value.is_nil() {
-            let key = lua
-                .create_registry_value(env_value)
-                .map_err(|e| format!("Failed to store env in registry: {}", e))?;
-            Some(Arc::new(key))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let lua_env = LuaEnv {
-        lua: Arc::new(Mutex::new(lua)),
-        env_key,
-    };
-
-    let config = ConfigFile {
+    Ok(ConfigFile {
         options,
         pkgsrc,
         sandboxes,
         dynamic,
         publish,
-    };
-
-    Ok((config, lua_env))
+    })
 }
 
 const OLD_CONFIG_ERROR: &str = "\n\n\
@@ -1280,6 +1110,20 @@ fn reject_old_config(globals: &Table) -> Result<(), String> {
         }
     }
 
+    let pkgsrc: Value = globals
+        .get("pkgsrc")
+        .map_err(|e| format!("Error reading config: {}", e))?;
+    if let Some(table) = pkgsrc.as_table() {
+        for key in ["env", "logdir"] {
+            let val: Value = table
+                .get(key)
+                .map_err(|e| format!("Error reading config: {}", e))?;
+            if !val.is_nil() {
+                return Err(OLD_CONFIG_ERROR.to_string());
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -1297,6 +1141,7 @@ fn parse_options(globals: &Table) -> LuaResult<Option<Options>> {
         "build_threads",
         "dbdir",
         "log_level",
+        "logdir",
         "scan_threads",
         "tui",
         "strict_scan",
@@ -1304,10 +1149,12 @@ fn parse_options(globals: &Table) -> LuaResult<Option<Options>> {
     warn_unknown_keys(table, "options", KNOWN_KEYS);
 
     let dbdir: Option<PathBuf> = table.get::<Option<String>>("dbdir")?.map(PathBuf::from);
+    let logdir: Option<PathBuf> = table.get::<Option<String>>("logdir")?.map(PathBuf::from);
 
     Ok(Some(Options {
         build_threads: table.get::<Option<usize>>("build_threads")?,
         dbdir,
+        logdir,
         scan_threads: table.get::<Option<usize>>("scan_threads")?,
         strict_scan: table.get::<Option<bool>>("strict_scan")?,
         log_level: table.get::<Option<String>>("log_level")?,
@@ -1451,8 +1298,6 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         "build_user",
         "build_user_home",
         "cachevars",
-        "env",
-        "logdir",
         "make",
         "pkgpaths",
         "save_wrkdir_patterns",
@@ -1476,7 +1321,6 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
     } else {
         None
     };
-    let logdir: Option<PathBuf> = pkgsrc.get::<Option<String>>("logdir")?.map(PathBuf::from);
     let make = get_required_string(&pkgsrc, "make")?;
 
     let pkgpaths: Option<Vec<PkgPath>> = match pkgsrc.get::<Value>("pkgpaths")? {
@@ -1537,7 +1381,6 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         build_user,
         build_user_home,
         cachevars,
-        logdir,
         make: PathBuf::from(make),
         pkgpaths,
         save_wrkdir_patterns,
@@ -1554,7 +1397,7 @@ fn parse_sandboxes(globals: &Table) -> LuaResult<Option<Sandboxes>> {
         .as_table()
         .ok_or_else(|| mlua::Error::runtime("'sandboxes' must be a table"))?;
 
-    const KNOWN_KEYS: &[&str] = &["basedir", "bindfs", "build", "environment", "setup"];
+    const KNOWN_KEYS: &[&str] = &["basedir", "bindfs", "environment", "hooks", "setup"];
     warn_unknown_keys(table, "sandboxes", KNOWN_KEYS);
 
     let basedir: String = table.get("basedir")?;
@@ -1563,13 +1406,13 @@ fn parse_sandboxes(globals: &Table) -> LuaResult<Option<Sandboxes>> {
         .unwrap_or_else(|| String::from("bindfs"));
 
     let setup = parse_action_list(table, globals, "setup", "sandboxes.setup")?;
-    let build = parse_action_list(table, globals, "build", "sandboxes.build")?;
+    let hooks = parse_action_list(table, globals, "hooks", "sandboxes.hooks")?;
     let environment = parse_environment(table)?;
 
     Ok(Some(Sandboxes {
         basedir: PathBuf::from(basedir),
         setup,
-        build,
+        hooks,
         environment,
         bindfs,
     }))
@@ -1594,16 +1437,74 @@ fn parse_action_list(
 fn parse_actions(table: &Table, globals: &Table) -> LuaResult<Vec<Action>> {
     let mut actions = Vec::new();
     for v in table.sequence_values::<Table>() {
-        let mut action = Action::from_lua(&v?)?;
-        if let Some(varpath) = action.ifset().map(String::from) {
-            match resolve_lua_var(globals, &varpath) {
-                Some(val) => action.substitute_var(&varpath, &val),
-                None => continue,
+        let action_table = v?;
+        match parse_action_only(&action_table, globals)? {
+            Some(only) => {
+                let mut action = Action::from_lua(&action_table)?;
+                action.set_only(only);
+                actions.push(action);
+            }
+            None => {
+                // The parse-time `only.set` check failed: drop the action.
             }
         }
-        actions.push(action);
     }
     Ok(actions)
+}
+
+/// Parse the `only = { ... }` predicate table for an action.
+///
+/// Returns `Some(only)` if the action should be kept (with the runtime
+/// predicates populated), or `None` if a parse-time predicate (`set`)
+/// failed and the action should be dropped.  Actions without an `only`
+/// table return `Some(Only::default())`.
+fn parse_action_only(
+    action_table: &Table,
+    globals: &Table,
+) -> LuaResult<Option<crate::action::Only>> {
+    use crate::action::{ActionContext, Only};
+
+    let only_value: Value = action_table.get("only")?;
+    let only_table = match only_value {
+        Value::Nil => return Ok(Some(Only::default())),
+        Value::Table(t) => t,
+        _ => {
+            return Err(mlua::Error::runtime("'only' must be a table of predicates"));
+        }
+    };
+
+    const ONLY_KEYS: &[&str] = &["environment", "set", "exists"];
+    warn_unknown_keys(&only_table, "only", ONLY_KEYS);
+
+    let mut only = Only::default();
+
+    if let Some(env_str) = only_table.get::<Option<String>>("environment")? {
+        let env = match env_str.as_str() {
+            "build" => ActionContext::Build,
+            "dev" => ActionContext::Dev,
+            other => {
+                return Err(mlua::Error::runtime(format!(
+                    "'only.environment' must be 'build' or 'dev', got '{}'",
+                    other
+                )));
+            }
+        };
+        only.environment = Some(env);
+    }
+
+    // `set` is checked at parse time against the Lua globals; if the
+    // referenced var is unset, the action is dropped entirely.
+    if let Some(varpath) = only_table.get::<Option<String>>("set")? {
+        if resolve_lua_var(globals, &varpath).is_none() {
+            return Ok(None);
+        }
+    }
+
+    if let Some(path_str) = only_table.get::<Option<String>>("exists")? {
+        only.exists = Some(PathBuf::from(path_str));
+    }
+
+    Ok(Some(only))
 }
 
 /**
@@ -1774,8 +1675,34 @@ fn parse_environment(globals: &Table) -> LuaResult<Option<Environment>> {
         .as_table()
         .ok_or_else(|| mlua::Error::runtime("'environment' must be a table"))?;
 
-    const KNOWN_KEYS: &[&str] = &["clear", "inherit", "set"];
+    const KNOWN_KEYS: &[&str] = &["build", "dev"];
     warn_unknown_keys(table, "environment", KNOWN_KEYS);
+
+    let build = parse_env_context(table, "build")?;
+    let dev = parse_env_context(table, "dev")?;
+
+    Ok(Some(Environment { build, dev }))
+}
+
+fn parse_env_context(parent: &Table, name: &str) -> LuaResult<Option<EnvContext>> {
+    let value: Value = parent.get(name)?;
+    let table = match value {
+        Value::Nil => return Ok(None),
+        Value::Table(t) => t,
+        _ => {
+            return Err(mlua::Error::runtime(format!(
+                "'environment.{}' must be a table",
+                name
+            )));
+        }
+    };
+
+    let qualified = format!("environment.{}", name);
+    let known_keys: &[&str] = match name {
+        "dev" => &["clear", "inherit", "vars", "shell"],
+        _ => &["clear", "inherit", "vars"],
+    };
+    warn_unknown_keys(&table, &qualified, known_keys);
 
     let clear: bool = table.get::<Option<bool>>("clear")?.unwrap_or(true);
 
@@ -1786,13 +1713,14 @@ fn parse_environment(globals: &Table) -> LuaResult<Option<Environment>> {
             .filter_map(|r| r.ok())
             .collect(),
         _ => {
-            return Err(mlua::Error::runtime(
-                "'environment.inherit' must be a table",
-            ));
+            return Err(mlua::Error::runtime(format!(
+                "'{}.inherit' must be a table",
+                qualified
+            )));
         }
     };
 
-    let set: HashMap<String, String> = match table.get::<Value>("set")? {
+    let vars: HashMap<String, String> = match table.get::<Value>("vars")? {
         Value::Nil => HashMap::new(),
         Value::Table(t) => {
             let mut map = HashMap::new();
@@ -1802,13 +1730,25 @@ fn parse_environment(globals: &Table) -> LuaResult<Option<Environment>> {
             }
             map
         }
-        _ => return Err(mlua::Error::runtime("'environment.set' must be a table")),
+        _ => {
+            return Err(mlua::Error::runtime(format!(
+                "'{}.vars' must be a table",
+                qualified
+            )));
+        }
     };
 
-    Ok(Some(Environment {
+    let shell: Option<PathBuf> = if name == "dev" {
+        table.get::<Option<String>>("shell")?.map(PathBuf::from)
+    } else {
+        None
+    };
+
+    Ok(Some(EnvContext {
         clear,
         inherit,
-        set,
+        vars,
+        shell,
     }))
 }
 

@@ -1452,33 +1452,19 @@ impl PackageBuild {
 
         let logdir = self.session.config.logdir();
 
-        let pkg_env = self
-            .session
-            .config
-            .get_pkg_env(&self.pkginfo)
-            .map_err(|e| anyhow::anyhow!("Lua env config error: {e}"))?;
-
         let mut envs = self
             .session
             .config
             .script_env(Some(&self.session.pkgsrc_env));
 
-        // Inject scheduler-computed WRKOBJDIR unless the user's env
-        // function already set it (user overrides win).
-        let wrkobjdir_kind = if !pkg_env.contains_key("WRKOBJDIR") {
+        // Inject scheduler-computed WRKOBJDIR for this package.
+        let wrkobjdir_kind =
             if let Some(kind) = self.session.wrkobjdir_map.get(&self.pkginfo.index.pkgname) {
                 envs.push(("WRKOBJDIR".to_string(), kind.path().display().to_string()));
                 Some(kind)
             } else {
                 None
-            }
-        } else {
-            None
-        };
-
-        for (key, value) in &pkg_env {
-            envs.push((key.clone(), value.clone()));
-        }
+            };
 
         let patterns = self.session.config.save_wrkdir_patterns();
 

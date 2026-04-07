@@ -72,7 +72,7 @@ mod sandbox_netbsd;
 #[cfg(any(target_os = "illumos", target_os = "solaris"))]
 mod sandbox_sunos;
 
-use crate::action::{Action, ActionType, FSType};
+use crate::action::{Action, ActionContext, ActionType, FSType};
 use crate::config::{Config, PkgsrcEnv};
 use crate::try_println;
 use crate::{Interrupted, RunState};
@@ -229,20 +229,36 @@ pub fn wait_output_with_shutdown(child: Child, state: &RunState) -> Result<Outpu
 #[derive(Clone, Debug, Default)]
 pub struct Sandbox {
     config: Config,
+    context: ActionContext,
 }
 
 impl Sandbox {
     /**
-     * Create a new [`Sandbox`] instance.  This is used even if sandboxes have
-     * not been enabled, as it provides a consistent interface to run commands
-     * through using [`execute`].  If sandboxes are enabled then commands are
-     * executed via `chroot(8)`, otherwise they are executed directly.
+     * Create a new [`Sandbox`] instance for build operations.  This is
+     * used even if sandboxes have not been enabled, as it provides a
+     * consistent interface to run commands through using [`execute`].
+     * If sandboxes are enabled then commands are executed via
+     * `chroot(8)`, otherwise they are executed directly.
      *
      * [`execute`]: Sandbox::execute
      */
     pub fn new(config: &Config) -> Sandbox {
+        Self::with_context(config, ActionContext::Build)
+    }
+
+    /**
+     * Create a new [`Sandbox`] instance for `bob sandbox shell`
+     * interactive sessions.  Actions whose `only.context` is set to
+     * `"dev"` will run; actions restricted to `"build"` will be skipped.
+     */
+    pub fn new_dev(config: &Config) -> Sandbox {
+        Self::with_context(config, ActionContext::Dev)
+    }
+
+    fn with_context(config: &Config, context: ActionContext) -> Sandbox {
         Sandbox {
             config: config.clone(),
+            context,
         }
     }
 
@@ -286,53 +302,52 @@ impl Sandbox {
             }
             None => Command::new(cmd),
         };
-        self.apply_environment(&mut c);
+        self.apply_build_environment(&mut c);
         c
     }
 
     /**
-     * Apply the configured environment settings to a Command.
+     * Apply the build-time environment to a Command.
      *
-     * If no environment section is configured, the parent environment is
-     * inherited unchanged.  If a section is present, `clear` defaults to
-     * true and only explicitly configured variables are available.
+     * Resolves to `environment.build` from the config.  If neither
+     * `environment` nor `environment.build` is configured, the parent
+     * environment is inherited unchanged.  Otherwise the context's
+     * `clear`/`inherit` policy is applied and its `vars` are set.
      */
-    pub fn apply_environment(&self, cmd: &mut Command) {
-        let Some(env) = self.config.environment() else {
+    pub fn apply_build_environment(&self, cmd: &mut Command) {
+        let Some(ctx) = self.config.environment().and_then(|e| e.build.as_ref()) else {
             return;
         };
-        if env.clear {
-            cmd.env_clear();
-            for name in &env.inherit {
-                if let Ok(value) = std::env::var(name) {
-                    cmd.env(name, value);
-                }
-            }
-        }
-        for (name, value) in &env.set {
+        Self::apply_env_context(cmd, ctx);
+        for (name, value) in &ctx.vars {
             cmd.env(name, value);
         }
     }
 
     /**
-     * Resolve a single environment variable using the configured
-     * environment settings, following the same precedence as
-     * `apply_environment`: set overrides inherit overrides host.
+     * Apply only the dev-context parent-environment policy
+     * (`clear`/`inherit`) to a Command, without setting any variables.
+     *
+     * Used by interactive `bob sandbox shell` sessions, where the user's
+     * `environment.dev.vars` are written to a wrapper init script and
+     * exported by the shell itself rather than via `cmd.env()`.
      */
-    pub fn resolve_env(&self, name: &str) -> Option<String> {
-        let Some(env) = self.config.environment() else {
-            return std::env::var(name).ok();
+    pub fn apply_dev_environment(&self, cmd: &mut Command) {
+        let Some(ctx) = self.config.environment().and_then(|e| e.dev.as_ref()) else {
+            return;
         };
-        if let Some(value) = env.set.get(name) {
-            return Some(value.clone());
-        }
-        if env.clear {
-            if env.inherit.iter().any(|n| n == name) {
-                return std::env::var(name).ok();
+        Self::apply_env_context(cmd, ctx);
+    }
+
+    fn apply_env_context(cmd: &mut Command, ctx: &crate::config::EnvContext) {
+        if ctx.clear {
+            cmd.env_clear();
+            for name in &ctx.inherit {
+                if let Ok(value) = std::env::var(name) {
+                    cmd.env(name, value);
+                }
             }
-            return None;
         }
-        std::env::var(name).ok()
     }
 
     /**
@@ -749,13 +764,13 @@ impl Sandbox {
             })?;
         }
 
-        let build_actions = config.build_actions();
-        if !build_actions.is_empty() {
+        let hooks = config.hooks();
+        if !hooks.is_empty() {
             let Some(sandbox_id) = sandbox_id else {
-                bail!("build actions require sandboxes to be enabled");
+                bail!("hooks require sandboxes to be enabled");
             };
-            if let Err(e) = self.perform_actions(sandbox_id, build_actions, &envs) {
-                warn!(error = %e, "Build action failed");
+            if let Err(e) = self.perform_actions(sandbox_id, hooks, &envs) {
+                warn!(error = %e, "Hook action failed");
                 return Ok(false);
             }
         }
@@ -765,7 +780,7 @@ impl Sandbox {
 
     /**
      * Run post-build operations:
-     *  1. Execute build action destroy commands in reverse order
+     *  1. Execute hook destroy commands in reverse order
      *  2. Remove prefix, pkg_dbdir, and pkg_refcount_dbdir
      *
      * Returns Ok(true) if all operations succeeded or none were configured,
@@ -777,13 +792,13 @@ impl Sandbox {
         config: &Config,
         envs: Vec<(String, String)>,
     ) -> Result<bool> {
-        let build_actions = config.build_actions();
-        if !build_actions.is_empty() {
+        let hooks = config.hooks();
+        if !hooks.is_empty() {
             let Some(sandbox_id) = sandbox_id else {
-                bail!("build actions require sandboxes to be enabled");
+                bail!("hooks require sandboxes to be enabled");
             };
-            if let Err(e) = self.reverse_actions(sandbox_id, build_actions, &envs) {
-                warn!(error = %e, "Build action destroy failed");
+            if let Err(e) = self.reverse_actions(sandbox_id, hooks, &envs) {
+                warn!(error = %e, "Hook destroy action failed");
                 return Ok(false);
             }
         }
@@ -834,7 +849,7 @@ impl Sandbox {
         let sandbox_path = self.path(sandbox_id);
         let output = if chroot {
             let mut c = Command::new("/usr/sbin/chroot");
-            self.apply_environment(&mut c);
+            self.apply_build_environment(&mut c);
             for (key, val) in envs {
                 c.env(key, val);
             }
@@ -849,7 +864,7 @@ impl Sandbox {
             c.output()?
         } else {
             let mut c = Command::new("/bin/sh");
-            self.apply_environment(&mut c);
+            self.apply_build_environment(&mut c);
             for (key, val) in envs {
                 c.env(key, val);
             }
@@ -1099,6 +1114,17 @@ impl Sandbox {
         envs: &[(String, String)],
     ) -> Result<()> {
         for action in actions {
+            if !action.only().matches(self.context) {
+                debug!(
+                    sandbox = sandbox_id,
+                    action = action
+                        .action_type()
+                        .map(|t| format!("{:?}", t))
+                        .unwrap_or_default(),
+                    "Skipped (only predicate not satisfied)"
+                );
+                continue;
+            }
             action.validate()?;
             let action_type = action.action_type()?;
 
@@ -1124,16 +1150,6 @@ impl Sandbox {
                     let src =
                         src.ok_or_else(|| anyhow::anyhow!("mount action requires src or dest"))?;
                     let dest = dest.ok_or_else(|| anyhow::anyhow!("mount action requires dest"))?;
-                    if action.ifexists() && !src.exists() {
-                        debug!(
-                            sandbox = sandbox_id,
-                            action = "mount",
-                            fs = ?fs_type,
-                            src = %src.display(),
-                            "Skipped (source does not exist)"
-                        );
-                        continue;
-                    }
                     debug!(
                         sandbox = sandbox_id,
                         action = "mount",
@@ -1280,6 +1296,9 @@ impl Sandbox {
         envs: &[(String, String)],
     ) -> Result<()> {
         for action in actions.iter().rev() {
+            if !action.only().matches(self.context) {
+                continue;
+            }
             let action_type = action.action_type()?;
             let dest = action
                 .dest()
@@ -1363,12 +1382,6 @@ impl Sandbox {
                 ActionType::Mount => {
                     let Some(dest) = dest else { continue };
                     let fs_type = action.fs_type()?;
-
-                    if let Some(src) = action.src().or(action.dest()) {
-                        if action.ifexists() && !src.exists() {
-                            continue;
-                        }
-                    }
 
                     /*
                      * If the mount point does not exist then do not try

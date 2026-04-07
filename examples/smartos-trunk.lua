@@ -59,15 +59,28 @@ sandboxes = {
     basedir = "/data/chroot",
 
     environment = {
-        clear = true,
-        inherit = { "TERM", "HOME" },
-        set = {
-            PATH = "/sbin:/usr/bin:/usr/sbin:/opt/tools/bin",
+        build = {
+            clear = true,
+            inherit = { "TERM", "HOME" },
+            vars = {
+                PATH = "/sbin:/usr/bin:/usr/sbin:/opt/tools/bin",
+            },
+        },
+        dev = {
+            clear = true,
+            inherit = { "TERM", "HOME" },
+            vars = {
+                BINPKG_SITES = "${bob_packages}",
+                DEPENDS_TARGET = "bin-install",
+                PATH = "${bob_prefix}/sbin:${bob_prefix}/bin:/sbin:/usr/bin:/usr/sbin:/opt/tools/bin",
+                PS1 = [["sandbox:${bob_sandbox_id} "'${PWD}# ']],
+            },
         },
     },
 
     setup = {
-        { action = "mount", fs = "lofs", dir = "/devices", opts = "-o ro", ifexists = true },
+        { action = "mount", fs = "lofs", dir = "/devices", opts = "-o ro",
+          only = { exists = "/devices" } },
         { action = "mount", fs = "lofs", dir = "/dev", opts = "-o ro" },
         { action = "mount", fs = "fd", dir = "/dev/fd" },
         { action = "mount", fs = "proc", dir = "/proc" },
@@ -88,7 +101,7 @@ sandboxes = {
 
         { action = "cmd", chroot = true, create = "mkdir -m 1777 /var/tmp; chmod 1777 /tmp" },
 
-        { action = "cmd", ifset = "pkgsrc.build_user", create = [[
+        { action = "cmd", only = { set = "pkgsrc.build_user" }, create = [[
             mkdir -p ${bob_sandbox_path}${bob_build_user_home}
             chown ${bob_build_user} ${bob_sandbox_path}${bob_build_user_home}
           ]],

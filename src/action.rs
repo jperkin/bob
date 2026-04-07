@@ -71,16 +71,22 @@
 //!           destroy = "rm -rf /home/builder" },
 //!
 //!         -- Only mount if source exists on host
-//!         { action = "mount", fs = "bind", dir = "/opt/local", ifexists = true },
+//!         { action = "mount", fs = "bind", dir = "/opt/local",
+//!           only = { exists = "/opt/local" } },
 //!
 //!         -- Only run if pkgsrc.build_user is set
 //!         { action = "cmd", chroot = true,
-//!           ifset = "pkgsrc.build_user",
+//!           only = { set = "pkgsrc.build_user" },
 //!           create = [[
 //!                 mkdir -p ${bob_build_user_home}
 //!                 chown ${bob_build_user} ${bob_build_user_home}
 //!           ]],
 //!           destroy = "rm -rf ${bob_build_user_home}" },
+//!
+//!         -- Only run for `bob sandbox shell` interactive sessions
+//!         { action = "copy", src = os.getenv("HOME") .. "/.vimrc",
+//!           dest = "/root/.vimrc",
+//!           only = { environment = "dev" } },
 //!
 //!         -- Enable DNS resolution inside sandbox (macOS only)
 //!         { action = "macos-mdns-listener" },
@@ -104,6 +110,7 @@
 //! | `bob_build_user_home` | Home directory of the build user (if configured). |
 //! | `bob_bootstrap` | Path to the bootstrap tarball (if configured). |
 //! | `bob_sandbox_path` | Absolute host path to the sandbox root (non-chroot commands only). |
+//! | `bob_sandbox_id` | Numeric sandbox id (`bob sandbox shell` only). |
 //! | `bob_packages` | Path to the packages directory (after bootstrap). |
 //! | `bob_pkgtools` | Path to the pkg tools directory (after bootstrap). |
 //! | `bob_prefix` | Installation prefix (after bootstrap). |
@@ -119,13 +126,76 @@
 //! | `dir` | string | Shorthand when `src` and `dest` are the same path |
 //! | `src` | string | Source path on the host system |
 //! | `dest` | string | Destination path inside the sandbox |
-//! | `ifexists` | boolean | Only perform action if source exists (default: false) |
-//! | `ifset` | string | Only perform action if the named config variable is set (e.g. `"pkgsrc.build_user"`). Occurrences of `{var}` in `create`/`destroy` are replaced with the variable's value. |
+//! | `only` | table | Conditional predicates restricting when this action runs.  See [Conditional Actions](#conditional-actions). |
+//!
+//! # Conditional Actions
+//!
+//! Any action may include an `only = { ... }` table whose entries restrict
+//! when the action runs.  All present predicates must match for the action
+//! to be applied; an action without `only` runs unconditionally.
+//!
+//! | Predicate | Type | Description |
+//! |-----------|------|-------------|
+//! | `environment` | string | `"build"` to run only for automated build operations, or `"dev"` to run only for `bob sandbox shell` interactive sessions.  Mirrors the `sandboxes.environment.{build,dev}` distinction. |
+//! | `set` | string | Dotted Lua config path (e.g. `"pkgsrc.build_user"`).  Action is dropped at config load time if the variable is not set. |
+//! | `exists` | string | Host filesystem path.  Action is skipped at run time if the path does not exist. |
 
 use anyhow::{Context, Error, bail};
 use mlua::{Result as LuaResult, Table};
 use std::path::PathBuf;
 use std::str::FromStr;
+
+/// The execution context of a sandbox operation.
+///
+/// Actions can be conditionally restricted to one context via the
+/// `only.context` field.  Actions without an `only.context` predicate
+/// run in both contexts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ActionContext {
+    /// Automated build operations (`bob build`, `bob sandbox create`,
+    /// `bob sandbox destroy`).
+    #[default]
+    Build,
+    /// Interactive `bob sandbox shell` sessions.
+    Dev,
+}
+
+/// Runtime predicates for an action's `only = { ... }` table.
+///
+/// All present predicates must match for the action to run.  An empty
+/// `Only` (the default) imposes no restrictions.
+///
+/// The `set` predicate (a dotted Lua config-var path) is checked at
+/// config parse time, and actions whose `set` is unsatisfied are dropped
+/// before they ever reach the runner.  Only `environment` and `exists`
+/// are stored here for runtime evaluation.
+#[derive(Clone, Debug, Default)]
+pub struct Only {
+    /// If set, the action only runs in this execution environment.
+    /// Mirrors the `environment.build` / `environment.dev` distinction
+    /// from the sandbox config.
+    pub environment: Option<ActionContext>,
+    /// If set, the action only runs when this host path exists at the
+    /// time the action runner reaches it.
+    pub exists: Option<PathBuf>,
+}
+
+impl Only {
+    /// Returns true if the action should run in the given environment.
+    pub fn matches(&self, env: ActionContext) -> bool {
+        if let Some(want) = self.environment {
+            if want != env {
+                return false;
+            }
+        }
+        if let Some(path) = &self.exists {
+            if !path.exists() {
+                return false;
+            }
+        }
+        true
+    }
+}
 
 /// A sandbox action configuration.
 ///
@@ -147,7 +217,6 @@ use std::str::FromStr;
 /// | `fs` | yes | Filesystem type (bind, dev, fd, nfs, proc, tmp) |
 /// | `dir` or `src`/`dest` | yes | Mount point path |
 /// | `opts` | no | Mount options (e.g., "ro", "size=1G") |
-/// | `ifexists` | no | Only mount if source exists (default: false) |
 ///
 /// ## Copy Actions
 ///
@@ -186,8 +255,7 @@ pub struct Action {
     create: Option<String>,
     destroy: Option<String>,
     chroot: bool,
-    ifexists: bool,
-    ifset: Option<String>,
+    only: Only,
 }
 
 /// The type of sandbox action to perform.
@@ -341,9 +409,19 @@ impl Action {
             create: t.get("create").ok(),
             destroy: t.get("destroy").ok(),
             chroot: t.get("chroot").unwrap_or(false),
-            ifexists: t.get("ifexists").unwrap_or(false),
-            ifset: t.get("ifset").ok(),
+            only: Only::default(),
         })
+    }
+
+    /// Replace this action's runtime `only` predicate.  Used by
+    /// `parse_actions` after it processes the parse-time `only.set`
+    /// check.
+    pub fn set_only(&mut self, only: Only) {
+        self.only = only;
+    }
+
+    pub fn only(&self) -> &Only {
+        &self.only
     }
 
     pub fn src(&self) -> Option<&PathBuf> {
@@ -380,28 +458,6 @@ impl Action {
 
     pub fn chroot(&self) -> bool {
         self.chroot
-    }
-
-    pub fn ifexists(&self) -> bool {
-        self.ifexists
-    }
-
-    pub fn ifset(&self) -> Option<&str> {
-        self.ifset.as_deref()
-    }
-
-    /**
-     * Substitute all occurrences of `{varpath}` in the `create` and
-     * `destroy` command strings with the given value.
-     */
-    pub fn substitute_var(&mut self, varpath: &str, value: &str) {
-        let pattern = format!("{{{}}}", varpath);
-        if let Some(cmd) = &mut self.create {
-            *cmd = cmd.replace(&pattern, value);
-        }
-        if let Some(cmd) = &mut self.destroy {
-            *cmd = cmd.replace(&pattern, value);
-        }
     }
 
     /// Validate the action configuration.
