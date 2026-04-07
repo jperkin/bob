@@ -853,46 +853,30 @@ fn write_variables_json(
     let mut pkgsrc = serde_json::Map::new();
     pkgsrc.insert(
         "PREFIX".to_string(),
-        serde_json::Value::String(pkgsrc_env.prefix.display().to_string()),
+        pkgsrc_env.prefix.display().to_string().into(),
     );
     let mut sorted: Vec<_> = pkgsrc_env.metadata.iter().collect();
     sorted.sort_by_key(|(k, _)| k.as_str());
     for (key, value) in sorted {
-        pkgsrc.insert(key.clone(), serde_json::Value::String(value.clone()));
+        pkgsrc.insert(key.clone(), value.clone().into());
     }
 
-    let mut counts = serde_json::Map::new();
-    for kind in PackageStateKind::iter() {
-        counts.insert(
-            kind.as_ref().to_string(),
-            serde_json::Value::Number(states[kind].into()),
-        );
-    }
+    let counts: serde_json::Map<_, _> = PackageStateKind::iter()
+        .map(|kind| (kind.as_ref().to_string(), states[kind].into()))
+        .collect();
 
     let mut report = serde_json::Map::new();
-    report.insert(
-        "date".to_string(),
-        serde_json::Value::String(build_id.to_string()),
-    );
-    report.insert(
-        "duration".to_string(),
-        serde_json::Value::Number(duration.as_secs().into()),
-    );
+    report.insert("date".to_string(), build_id.into());
+    report.insert("duration".to_string(), duration.as_secs().into());
     if let Some(base) = report_url {
-        report.insert(
-            "url".to_string(),
-            serde_json::Value::String(format!("{}/report.html", base)),
-        );
-        report.insert(
-            "raw".to_string(),
-            serde_json::Value::String(format!("{}/report.zst", base)),
-        );
+        report.insert("url".to_string(), format!("{}/report.html", base).into());
+        report.insert("raw".to_string(), format!("{}/report.zst", base).into());
     }
 
     let mut root = serde_json::Map::new();
-    root.insert("pkgsrc".to_string(), serde_json::Value::Object(pkgsrc));
-    root.insert("counts".to_string(), serde_json::Value::Object(counts));
-    root.insert("report".to_string(), serde_json::Value::Object(report));
+    root.insert("pkgsrc".to_string(), pkgsrc.into());
+    root.insert("counts".to_string(), counts.into());
+    root.insert("report".to_string(), report.into());
 
     if vcs_info.is_detected() {
         let vcs = serde_json::to_value(vcs_info)?;
@@ -900,28 +884,16 @@ fn write_variables_json(
     }
 
     if let Some(d) = diff {
-        let mut diff_obj = serde_json::Map::new();
-        diff_obj.insert(
-            "compared_build_id".to_string(),
-            serde_json::Value::String(d.build1_id.clone()),
+        root.insert(
+            "diff".to_string(),
+            serde_json::json!({
+                "compared_build_id": d.build1_id,
+                "new_failures": d.new_failures.len(),
+                "fixes": d.fixes.len(),
+                "version_changes": d.version_changes.len(),
+                "other_changes": d.other_changes.len(),
+            }),
         );
-        diff_obj.insert(
-            "new_failures".to_string(),
-            serde_json::Value::Number(d.new_failures.len().into()),
-        );
-        diff_obj.insert(
-            "fixes".to_string(),
-            serde_json::Value::Number(d.fixes.len().into()),
-        );
-        diff_obj.insert(
-            "version_changes".to_string(),
-            serde_json::Value::Number(d.version_changes.len().into()),
-        );
-        diff_obj.insert(
-            "other_changes".to_string(),
-            serde_json::Value::Number(d.other_changes.len().into()),
-        );
-        root.insert("diff".to_string(), serde_json::Value::Object(diff_obj));
     }
 
     let path = logdir.join("variables.json");
