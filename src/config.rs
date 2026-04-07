@@ -1082,9 +1082,17 @@ fn load_lua(filename: &Path) -> Result<ConfigFile, String> {
     })
 }
 
-const OLD_CONFIG_ERROR: &str = "\n\n\
-    The configuration format and the default location have changed.  Run 'bob init' to\n\
-    generate a new file and update it with any changes required for your environment.";
+/// Build the migration error message for an unsupported config key.
+fn old_config_error(key: &str) -> String {
+    format!(
+        "\n\n\
+        '{}' is no longer a supported configuration key.\n\n\
+        The configuration file format and the default location have changed.  Run\n\
+        'bob init' to generate a new file and merge any changes required for your\n\
+        setup.  See https://docs.rs/bob/latest/bob/config/ for more information.",
+        key
+    )
+}
 
 /**
  * Check for config keys from older versions and produce a helpful error
@@ -1097,7 +1105,7 @@ fn reject_old_config(globals: &Table) -> Result<(), String> {
             .get(*key)
             .map_err(|e| format!("Error reading config: {}", e))?;
         if !val.is_nil() {
-            return Err(OLD_CONFIG_ERROR.to_string());
+            return Err(old_config_error(key));
         }
     }
 
@@ -1113,7 +1121,7 @@ fn reject_old_config(globals: &Table) -> Result<(), String> {
                 .get(key)
                 .map_err(|e| format!("Error reading config: {}", e))?;
             if !val.is_nil() {
-                return Err(OLD_CONFIG_ERROR.to_string());
+                return Err(old_config_error(&format!("sandboxes.{}", key)));
             }
         }
 
@@ -1130,7 +1138,7 @@ fn reject_old_config(globals: &Table) -> Result<(), String> {
                     .get(key)
                     .map_err(|e| format!("Error reading config: {}", e))?;
                 if !val.is_nil() {
-                    return Err(OLD_CONFIG_ERROR.to_string());
+                    return Err(old_config_error(&format!("sandboxes.environment.{}", key)));
                 }
             }
         }
@@ -1145,7 +1153,7 @@ fn reject_old_config(globals: &Table) -> Result<(), String> {
                 .get(key)
                 .map_err(|e| format!("Error reading config: {}", e))?;
             if !val.is_nil() {
-                return Err(OLD_CONFIG_ERROR.to_string());
+                return Err(old_config_error(&format!("pkgsrc.{}", key)));
             }
         }
     }
@@ -1158,7 +1166,7 @@ fn reject_old_config(globals: &Table) -> Result<(), String> {
             .get("rsync_args")
             .map_err(|e| format!("Error reading config: {}", e))?;
         if !val.is_nil() {
-            return Err(OLD_CONFIG_ERROR.to_string());
+            return Err(old_config_error("publish.rsync_args"));
         }
     }
 
@@ -1484,7 +1492,7 @@ fn parse_actions(table: &Table, globals: &Table) -> LuaResult<Vec<Action>> {
         for key in ["ifset", "ifexists"] {
             let val: Value = action_table.get(key)?;
             if !val.is_nil() {
-                return Err(mlua::Error::runtime(OLD_CONFIG_ERROR));
+                return Err(mlua::Error::runtime(old_config_error(key)));
             }
         }
 
