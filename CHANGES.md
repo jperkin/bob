@@ -1,5 +1,9 @@
 # Changelog
 
+## Version 0.99.1 (2026-04-08)
+
+* Minor improvements to error handling and package description.
+
 ## Version 0.99.0 (2026-04-08)
 
 * New `bob publish` command for publishing binary packages and HTML reports
