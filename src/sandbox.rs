@@ -43,7 +43,7 @@
 //! ```lua
 //! sandboxes = {
 //!     basedir = "/data/chroot",
-//!     actions = {
+//!     setup = {
 //!         { action = "mount", fs = "proc", dir = "/proc" },
 //!         { action = "mount", fs = "dev", dir = "/dev" },
 //!         { action = "mount", fs = "bind", dir = "/usr/bin", opts = "ro" },
