@@ -450,10 +450,11 @@ pub struct PublishPackages {
     /// atomic-swap mode: rsync writes here with `--link-dest=path`,
     /// then `swapcmd` moves it into place.
     pub tmppath: Option<String>,
-    /// Optional override of the swap shell script run after rsync in
-    /// atomic mode.  Supports `{path}` and `{tmppath}` placeholders.
-    /// Only meaningful when `tmppath` is set.
-    pub swapcmd: Option<String>,
+    /// Optional shell script run via ssh on the remote host after rsync
+    /// completes.  Only meaningful when `tmppath` is set.  Either a
+    /// literal string or a [`ScriptValue`] bundling the script with
+    /// environment variables.
+    pub swapcmd: Option<ScriptValue>,
     /// Minimum successful package count required before publishing.
     pub minimum: Option<usize>,
     /// Glob patterns that must match at least one successful package.
@@ -1249,6 +1250,117 @@ fn get_required_string(table: &Table, field: &str) -> LuaResult<String> {
     }
 }
 
+/**
+ * A shell script bundled with the environment variables that should be
+ * set when it runs.  Used for script-typed config fields like
+ * `publish.packages.swapcmd` and the `create`/`destroy` fields of
+ * sandbox setup actions.
+ */
+#[derive(Clone, Debug, Default)]
+pub struct ScriptValue {
+    pub run: String,
+    pub env: Vec<(String, String)>,
+}
+
+/**
+ * Read a script-typed config field.  Accepts two forms:
+ *
+ * - A literal string (no env vars).
+ * - A function returning the result of `scriptenv(run, env)`, so the
+ *   env values can reference other config sections after the whole
+ *   config has loaded.
+ *
+ * Returns Ok(None) if the field is nil or the script body is empty.
+ */
+pub(crate) fn get_optional_script(table: &Table, field: &str) -> LuaResult<Option<ScriptValue>> {
+    let value: Value = table.get(field)?;
+    let sv = match value {
+        Value::Nil => return Ok(None),
+        Value::String(s) => ScriptValue {
+            run: s.to_str()?.to_string(),
+            env: Vec::new(),
+        },
+        Value::Function(f) => {
+            let result: Table = f
+                .call(())
+                .map_err(|e| mlua::Error::runtime(format!("'{}' function failed: {}", field, e)))?;
+            script_value_from_table(field, &result)?
+        }
+        _ => {
+            return Err(mlua::Error::runtime(format!(
+                "field '{}' must be a string or function, got {}",
+                field,
+                value.type_name()
+            )));
+        }
+    };
+    if sv.run.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(sv))
+    }
+}
+
+fn script_value_from_table(field: &str, t: &Table) -> LuaResult<ScriptValue> {
+    let run: String = t.get::<Option<String>>("run")?.ok_or_else(|| {
+        mlua::Error::runtime(format!("'{}' table must have a 'run' string field", field))
+    })?;
+    let env = match t.get::<Value>("env")? {
+        Value::Nil => Vec::new(),
+        Value::Table(et) => {
+            let mut pairs: Vec<(String, String)> = Vec::new();
+            for entry in et.pairs::<String, Value>() {
+                let (k, v) = entry?;
+                if !is_valid_env_key(&k) {
+                    return Err(mlua::Error::runtime(format!(
+                        "'{}.env' key '{}' is not a valid shell identifier \
+                         (must match [A-Za-z_][A-Za-z0-9_]*)",
+                        field, k
+                    )));
+                }
+                let v = match v {
+                    Value::String(s) => s.to_str()?.to_string(),
+                    Value::Integer(n) => n.to_string(),
+                    Value::Number(n) => n.to_string(),
+                    Value::Boolean(b) => b.to_string(),
+                    _ => {
+                        return Err(mlua::Error::runtime(format!(
+                            "'{}.env.{}' must be a string, number, or boolean, got {}",
+                            field,
+                            k,
+                            v.type_name()
+                        )));
+                    }
+                };
+                pairs.push((k, v));
+            }
+            pairs.sort_by(|a, b| a.0.cmp(&b.0));
+            pairs
+        }
+        _ => {
+            return Err(mlua::Error::runtime(format!(
+                "'{}.env' must be a table",
+                field
+            )));
+        }
+    };
+    Ok(ScriptValue { run, env })
+}
+
+/*
+ * A valid shell identifier matches [A-Za-z_][A-Za-z0-9_]*.  Used to
+ * validate env var names so they can be safely interpolated into shell
+ * preludes and referenced as ${name} from script bodies.
+ */
+fn is_valid_env_key(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Parse a human-readable size string into bytes.
 ///
 /// Accepts integer suffixes K, M, G, T (case-insensitive) with optional
@@ -1646,9 +1758,7 @@ fn parse_publish(globals: &Table) -> LuaResult<Option<Publish>> {
             let tmppath: Option<String> = t
                 .get::<Option<String>>("tmppath")?
                 .filter(|s| !s.is_empty());
-            let swapcmd: Option<String> = t
-                .get::<Option<String>>("swapcmd")?
-                .filter(|s| !s.is_empty());
+            let swapcmd: Option<ScriptValue> = get_optional_script(&t, "swapcmd")?;
             let minimum: Option<usize> = t.get::<Option<usize>>("minimum")?;
             let required: Vec<String> = match t.get::<Value>("required")? {
                 Value::Nil => Vec::new(),

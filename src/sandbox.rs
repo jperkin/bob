@@ -1193,13 +1193,18 @@ impl Sandbox {
                         debug!(
                             sandbox = sandbox_id,
                             action = "cmd",
-                            cmd = create_cmd,
+                            cmd = %create_cmd.run,
                             chroot = action.chroot(),
                             "Running create command"
                         );
-                        if let Some(out) =
-                            self.run_action_cmd(sandbox_id, create_cmd, action.chroot(), envs)?
-                        {
+                        let mut merged_envs: Vec<(String, String)> = envs.to_vec();
+                        merged_envs.extend(create_cmd.env.iter().cloned());
+                        if let Some(out) = self.run_action_cmd(
+                            sandbox_id,
+                            &create_cmd.run,
+                            action.chroot(),
+                            &merged_envs,
+                        )? {
                             if !out.status.success() {
                                 let stderr = String::from_utf8_lossy(&out.stderr);
                                 let stderr = stderr.trim();
@@ -1209,7 +1214,7 @@ impl Sandbox {
                                         out.status
                                             .code()
                                             .map_or("signal".to_string(), |c| c.to_string()),
-                                        create_cmd,
+                                        create_cmd.run,
                                     );
                                 } else {
                                     bail!(
@@ -1217,7 +1222,7 @@ impl Sandbox {
                                         out.status
                                             .code()
                                             .map_or("signal".to_string(), |c| c.to_string()),
-                                        create_cmd,
+                                        create_cmd.run,
                                         stderr,
                                     );
                                 }
@@ -1310,13 +1315,18 @@ impl Sandbox {
                     if let Some(destroy_cmd) = action.destroy_cmd() {
                         debug!(
                             action = "cmd",
-                            cmd = destroy_cmd,
+                            cmd = %destroy_cmd.run,
                             chroot = action.chroot(),
                             "Running destroy command"
                         );
-                        if let Some(out) =
-                            self.run_action_cmd(sandbox_id, destroy_cmd, action.chroot(), envs)?
-                        {
+                        let mut merged_envs: Vec<(String, String)> = envs.to_vec();
+                        merged_envs.extend(destroy_cmd.env.iter().cloned());
+                        if let Some(out) = self.run_action_cmd(
+                            sandbox_id,
+                            &destroy_cmd.run,
+                            action.chroot(),
+                            &merged_envs,
+                        )? {
                             if !out.status.success() {
                                 let stderr = String::from_utf8_lossy(&out.stderr);
                                 let stderr = stderr.trim();
@@ -1326,7 +1336,7 @@ impl Sandbox {
                                         out.status
                                             .code()
                                             .map_or("signal".to_string(), |c| c.to_string()),
-                                        destroy_cmd,
+                                        destroy_cmd.run,
                                     );
                                 } else {
                                     bail!(
@@ -1334,7 +1344,7 @@ impl Sandbox {
                                         out.status
                                             .code()
                                             .map_or("signal".to_string(), |c| c.to_string()),
-                                        destroy_cmd,
+                                        destroy_cmd.run,
                                         stderr,
                                     );
                                 }

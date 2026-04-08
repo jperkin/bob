@@ -22,10 +22,14 @@
  * - `tmppath` (optional): if unset, rsync writes straight to `path`.
  *   If set, rsync writes to `tmppath` with `--link-dest=path` so that
  *   unchanged files become hardlinks against the live tree.
- * - `swapcmd` (optional, requires `tmppath`): a shell command run via
- *   ssh on the remote host after rsync completes.  Supports `{path}`
- *   and `{tmppath}` placeholders.  No default -- if `swapcmd` is
- *   unset, the staged data is left in `tmppath` and the caller is
+ * - `swapcmd` (optional, requires `tmppath`): a shell script run on
+ *   the remote host after rsync completes.  Either a literal string,
+ *   or a Lua function returning a `scriptenv(run, env)` bundle so the
+ *   env values can reference other config sections.  The script is
+ *   piped to `ssh host sh -eu` on stdin; `set -eu` is mandatory so
+ *   failures and unset variable references abort immediately rather
+ *   than silently proceeding.  No default -- if `swapcmd` is unset,
+ *   the staged data is left in `tmppath` and the caller is
  *   responsible for whatever happens next.
  *
  * Restricted packages (those with `NO_BIN_ON_FTP` set) are excluded
@@ -39,7 +43,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -48,7 +52,7 @@ use strum::IntoEnumIterator;
 use tracing::{debug, info};
 
 use bob::build::{BuildResult, BuildSummary, PkgBuildStats};
-use bob::config::{Config, Publish, PublishPackages};
+use bob::config::{Config, Publish, PublishPackages, ScriptValue};
 use bob::db::Database;
 use bob::{PackageCounts, PackageState, PackageStateKind};
 
@@ -142,31 +146,17 @@ fn publish_packages(config: &Config, db: &Database, dry_run: bool) -> Result<Pub
     result?;
 
     if let Some(swapcmd) = &packages.swapcmd {
-        let tmppath = packages
-            .tmppath
-            .as_deref()
-            .expect("swapcmd requires tmppath (enforced at config parse time)");
-        let script = swapcmd
-            .replace("{path}", &packages.path)
-            .replace("{tmppath}", tmppath);
         let remote = format_remote(&packages.host, packages.user.as_deref());
+        let script = build_remote_script(swapcmd)?;
 
         if dry_run {
-            info!("Dry run: would execute via ssh:");
-            println!("  ssh {} '{}'", remote, script);
+            info!("Dry run: would pipe to ssh {} sh -eu:", remote);
+            for line in script.lines() {
+                println!("  {}", line);
+            }
         } else {
             info!(remote = %remote, "Running swapcmd via ssh");
-            let status = Command::new("ssh")
-                .arg(&remote)
-                .arg(&script)
-                .status()
-                .context("Failed to execute ssh")?;
-            if !status.success() {
-                bail!(
-                    "swapcmd failed with exit code {}",
-                    status.code().unwrap_or(-1)
-                );
-            }
+            run_remote_script(&remote, &script)?;
         }
     }
 
@@ -513,6 +503,59 @@ fn run_rsync(
         );
     }
 
+    Ok(())
+}
+
+/*
+ * Build a shell script to pipe over ssh.  Each env var becomes a
+ * `name=value` assignment on its own line (shell-quoted by shlex if
+ * the value needs it), followed by the user's script body.
+ */
+fn build_remote_script(sv: &ScriptValue) -> Result<String> {
+    let mut out = String::new();
+    for (k, v) in &sv.env {
+        let quoted = shlex::try_quote(v)
+            .with_context(|| format!("env value for '{}' cannot be shell-quoted", k))?;
+        out.push_str(k);
+        out.push('=');
+        out.push_str(&quoted);
+        out.push('\n');
+    }
+    out.push_str(&sv.run);
+    Ok(out)
+}
+
+/*
+ * Run a script on a remote host via ssh.  The script body is sent on
+ * stdin and executed by `sh -eu`, so the script never appears as a
+ * shell-quoted argument.  `set -eu` is mandatory: any failed command
+ * or unset variable reference aborts immediately rather than silently
+ * proceeding.
+ */
+fn run_remote_script(remote: &str, script: &str) -> Result<()> {
+    let mut child = Command::new("ssh")
+        .arg(remote)
+        .arg("sh")
+        .arg("-eu")
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("Failed to spawn ssh")?;
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Failed to open ssh stdin"))?;
+        stdin
+            .write_all(script.as_bytes())
+            .context("Failed to write script to ssh stdin")?;
+    }
+    let status = child.wait().context("Failed to wait for ssh")?;
+    if !status.success() {
+        bail!(
+            "swapcmd failed with exit code {}",
+            status.code().unwrap_or(-1)
+        );
+    }
     Ok(())
 }
 

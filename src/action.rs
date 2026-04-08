@@ -140,6 +140,7 @@
 //! | `set` | string | Dotted Lua config path (e.g. `"pkgsrc.build_user"`).  Action is dropped at config load time if the variable is not set. |
 //! | `exists` | string | Host filesystem path.  Action is skipped at run time if the path does not exist. |
 
+use crate::config::ScriptValue;
 use anyhow::{Context, Error, bail};
 use mlua::{Result as LuaResult, Table};
 use std::path::PathBuf;
@@ -252,8 +253,8 @@ pub struct Action {
     src: Option<PathBuf>,
     dest: Option<PathBuf>,
     opts: Option<String>,
-    create: Option<String>,
-    destroy: Option<String>,
+    create: Option<ScriptValue>,
+    destroy: Option<ScriptValue>,
     chroot: bool,
     only: Only,
 }
@@ -406,8 +407,8 @@ impl Action {
             src,
             dest,
             opts: t.get("opts").ok(),
-            create: t.get("create").ok(),
-            destroy: t.get("destroy").ok(),
+            create: crate::config::get_optional_script(t, "create")?,
+            destroy: crate::config::get_optional_script(t, "destroy")?,
             chroot: t.get("chroot").unwrap_or(false),
             only: Only::default(),
         })
@@ -448,11 +449,11 @@ impl Action {
         self.opts.as_ref()
     }
 
-    pub fn create_cmd(&self) -> Option<&String> {
+    pub fn create_cmd(&self) -> Option<&ScriptValue> {
         self.create.as_ref()
     }
 
-    pub fn destroy_cmd(&self) -> Option<&String> {
+    pub fn destroy_cmd(&self) -> Option<&ScriptValue> {
         self.destroy.as_ref()
     }
 
