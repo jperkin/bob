@@ -1,5 +1,9 @@
 # Changelog
 
+## Version 0.99.2 (2026-04-08)
+
+* Improve documentation.
+
 ## Version 0.99.1 (2026-04-08)
 
 * Minor improvements to error handling and package description.
