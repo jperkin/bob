@@ -1,5 +1,45 @@
 # Changelog
 
+## Version 0.99.0 (2026-04-08)
+
+* New `bob publish` command for publishing binary packages and HTML reports
+  to a remote host.  Supports both direct rsync and a staging mode using
+  `--link-dest` for atomic updates with a user-supplied swap command run over
+  ssh.  Reports include build summaries, package history, and machine-readable
+  output, and `--dry-run` is supported.
+
+* New `bob log` and `bob diff` commands.  `log` shows build failure logs by
+  pkgname or pkgpath regex with optional stage selection.  `diff` compares two
+  historical builds and shows what changed.
+
+* Bob now uses standard XDG paths for config and data, with `BOB_SYSCONFDIR`
+  and `BOB_DATADIR` overrides.  The requirement to run from the same directory
+  as `config.lua` is gone, default `cachevars` are built in, and `-c` is now a
+  global flag usable with any subcommand.
+
+* Substantial sandbox config restructure.  `sandboxes.actions` is now
+  `sandboxes.setup`, the top-level `environment` section has moved into
+  `sandboxes` and is split into per-context `build` and `dev` sub-tables,
+  per-action `ifset`/`ifexists` are replaced with a unified `only = { ... }`
+  predicate, `pkgsrc.env` has been removed, and `pkgsrc.logdir` is now
+  `options.logdir`.
+
+* The `scripts` config section has been removed; pre/post-build scripts
+  are now native Rust, and arbitrary commands can be run via the new
+  `sandboxes.hooks` action list.  A new `scriptenv()` Lua helper bundles a
+  shell script body with the environment variables it needs, so script bodies
+  can reference config values from anywhere without declaration order issues.
+
+* `bob list blockers` and `bob list blocked-by` accept regex patterns
+  consistent with other `bob list` subcommands.  New `use_failed_history`
+  option to include failed builds when routing `WRKOBJDIR` between tmpfs and
+  disk.  Scan failures are now persisted in the database and included in
+  reports.  Up-to-date checking has temporarily reverted to matching pbulk
+  behaviour due to unnecessary rebuilds when `USE_INDIRECT_DEPENDS` is enabled.
+
+* Significant number of minor tweaks, bug fixes, reliability improvements,
+  and performance optimisations.
+
 ## Version 0.9.0 (2026-03-25)
 
 * Support for dynamic `MAKE_JOBS` and `WRKOBJDIR` based on historical build
