@@ -22,8 +22,10 @@
  * repository details (remote URL, branch, revision).
  */
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -170,6 +172,13 @@ impl VcsInfo {
         })
     }
 
+    /**
+     * Build a commit URL for a single revision, if a web URL is derivable.
+     */
+    pub fn commit_url(&self, sha: &str) -> Option<String> {
+        Some(format!("{}/commit/{}", self.web_url()?, sha))
+    }
+
     fn try_cvs(path: &Path) -> Option<Self> {
         let root_path = path.join("CVS/Root");
         let remote_url = std::fs::read_to_string(root_path)
@@ -202,4 +211,196 @@ impl VcsInfo {
             revision_full: None,
         })
     }
+}
+
+/**
+ * A single commit's display info, used by the build report's "Commits"
+ * column to show what changed in a pkgpath since the previous build.
+ */
+#[derive(Clone, Debug)]
+pub struct CommitInfo {
+    /// Author "username" -- the local part of the email if the email
+    /// looks valid, otherwise the display name.
+    pub author: String,
+    /// Full commit SHA, used to construct commit URLs.
+    pub sha_full: String,
+    /// Shortened SHA for display, the shortest unique abbreviation in
+    /// the repository (typically 7 characters, longer if needed).
+    pub sha_short: String,
+}
+
+/**
+ * Walk the git history between two revisions and group commits by the
+ * pkgpath they touched.  For each commit reachable from `new_rev` but
+ * not from `old_rev`, the changed file list is examined and the commit
+ * is recorded against any pkgpath whose subtree contains a changed
+ * file.
+ *
+ * Returns an empty map if the repository is not git, if either revision
+ * cannot be resolved, or if the walk fails.  Errors during the walk
+ * itself propagate.
+ *
+ * Commits are returned in the order produced by `rev_walk`, which is
+ * topological/reverse-chronological -- newest first.
+ */
+pub fn commits_for_pkgpaths(
+    repo_path: &Path,
+    old_rev: &str,
+    new_rev: &str,
+    pkgpaths: &HashSet<String>,
+) -> anyhow::Result<HashMap<String, Vec<CommitInfo>>> {
+    let mut result: HashMap<String, Vec<CommitInfo>> = HashMap::new();
+    if pkgpaths.is_empty() {
+        return Ok(result);
+    }
+
+    let repo = gix::discover(repo_path)
+        .with_context(|| format!("Failed to open git repository at {}", repo_path.display()))?;
+
+    let new_id = repo
+        .rev_parse_single(new_rev)
+        .with_context(|| format!("Failed to resolve revision {}", new_rev))?
+        .detach();
+    let old_id = repo
+        .rev_parse_single(old_rev)
+        .with_context(|| format!("Failed to resolve revision {}", old_rev))?
+        .detach();
+
+    let walk = repo
+        .rev_walk([new_id])
+        .with_hidden([old_id])
+        .all()
+        .context("Failed to start revision walk")?;
+
+    let mut walk_count = 0usize;
+    let mut match_count = 0usize;
+    for info in walk {
+        let info = info.context("Revision walk error")?;
+        walk_count += 1;
+        let commit = info
+            .object()
+            .with_context(|| format!("Failed to load commit {}", info.id))?;
+
+        let author = extract_author(&commit);
+        let sha_full = info.id.to_string();
+        let sha_short = info.id.to_hex_with_len(7).to_string();
+
+        let new_tree = commit.tree().context("Failed to load commit tree")?;
+        let parent_id = commit.parent_ids().next();
+        let parent_tree = parent_id
+            .and_then(|pid| pid.object().ok())
+            .and_then(|o| o.try_into_commit().ok())
+            .and_then(|c| c.tree().ok());
+        let touched = changed_pkgpaths(&repo, &new_tree, parent_tree.as_ref(), pkgpaths)?;
+
+        if touched.is_empty() {
+            continue;
+        }
+        match_count += 1;
+        let entry = CommitInfo {
+            author,
+            sha_full,
+            sha_short,
+        };
+        for pkgpath in touched {
+            result.entry(pkgpath).or_default().push(entry.clone());
+        }
+    }
+
+    tracing::debug!(
+        walk_count,
+        match_count,
+        "commits_for_pkgpaths walk complete"
+    );
+    Ok(result)
+}
+
+/**
+ * Diff `new_tree` against `old_tree` (or the empty tree if `None`) and
+ * return the set of pkgpaths whose subtrees contain at least one changed
+ * file.  A pkgpath is matched if it is the leading directory prefix of
+ * any changed file's path.
+ */
+fn changed_pkgpaths(
+    repo: &gix::Repository,
+    new_tree: &gix::Tree<'_>,
+    old_tree: Option<&gix::Tree<'_>>,
+    pkgpaths: &HashSet<String>,
+) -> anyhow::Result<HashSet<String>> {
+    use gix::object::tree::diff::Change;
+    use std::ops::ControlFlow;
+
+    let mut touched: HashSet<String> = HashSet::new();
+    let empty_tree;
+    let lhs = match old_tree {
+        Some(t) => t,
+        None => {
+            empty_tree = repo.empty_tree();
+            &empty_tree
+        }
+    };
+
+    let mut platform = lhs.changes().context("Failed to start tree diff")?;
+    platform
+        .for_each_to_obtain_tree(new_tree, |change| {
+            let path: String = match change {
+                Change::Addition { location, .. }
+                | Change::Deletion { location, .. }
+                | Change::Modification { location, .. } => location.to_string(),
+                Change::Rewrite {
+                    location,
+                    source_location,
+                    ..
+                } => {
+                    if let Some(pp) = pkgpath_for(source_location.to_string().as_str()) {
+                        if pkgpaths.contains(&pp) {
+                            touched.insert(pp);
+                        }
+                    }
+                    location.to_string()
+                }
+            };
+            if let Some(pp) = pkgpath_for(&path) {
+                if pkgpaths.contains(&pp) {
+                    touched.insert(pp);
+                }
+            }
+            Ok::<_, std::convert::Infallible>(ControlFlow::Continue(()))
+        })
+        .context("Tree diff failed")?;
+
+    Ok(touched)
+}
+
+/**
+ * Extract the pkgpath from a file path: the first two path components,
+ * joined with `/`.  Returns None if the path doesn't have at least two
+ * components.
+ */
+fn pkgpath_for(path: &str) -> Option<String> {
+    let mut parts = path.splitn(3, '/');
+    let category = parts.next()?;
+    let pkg = parts.next()?;
+    if category.is_empty() || pkg.is_empty() {
+        return None;
+    }
+    Some(format!("{}/{}", category, pkg))
+}
+
+/**
+ * Extract a "username" from a commit author signature.  Prefers the
+ * local part of the email address if it looks valid, falling back to
+ * the display name.
+ */
+fn extract_author(commit: &gix::Commit<'_>) -> String {
+    let Ok(sig) = commit.author() else {
+        return String::new();
+    };
+    let email = sig.email.to_string();
+    if let Some((local, _)) = email.split_once('@') {
+        if !local.is_empty() {
+            return local.to_string();
+        }
+    }
+    sig.name.to_string()
 }
