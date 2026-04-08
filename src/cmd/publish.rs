@@ -40,7 +40,7 @@
  * appended to the remote path so each run gets its own directory.
  */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -203,6 +203,10 @@ fn generate_reports(config: &Config, db: &Database, build_id: &str) -> Result<()
         _ => None,
     };
 
+    let commits = diff
+        .as_ref()
+        .and_then(|d| compute_diff_commits(db, config, &vcs_info, d));
+
     std::fs::create_dir_all(logdir)
         .with_context(|| format!("Failed to create {}", logdir.display()))?;
 
@@ -225,7 +229,14 @@ fn generate_reports(config: &Config, db: &Database, build_id: &str) -> Result<()
     };
 
     println!("Generating report...");
-    write_html_report(db, logdir, &report_path, &report_meta, diff.as_ref())?;
+    write_html_report(
+        db,
+        logdir,
+        &report_path,
+        &report_meta,
+        diff.as_ref(),
+        commits.as_ref(),
+    )?;
     write_machine_report(db, logdir)?;
     write_text_report(
         db,
@@ -985,6 +996,7 @@ fn write_html_report(
     path: &Path,
     meta: &ReportMeta,
     diff: Option<&bob::db::BuildDiff>,
+    commits: Option<&HashMap<String, Vec<bob::vcs::CommitInfo>>>,
 ) -> Result<()> {
     let mut results = db.get_all_build_results()?;
     let duration = db.get_build_duration()?;
@@ -1126,7 +1138,14 @@ fn write_html_report(
     });
 
     if let Some(d) = diff {
-        write_diff_section(&mut file, d, &failed_info, pkgpath_base.as_deref())?;
+        write_diff_section(
+            &mut file,
+            d,
+            &failed_info,
+            pkgpath_base.as_deref(),
+            commits,
+            meta.vcs_info,
+        )?;
     }
 
     if !summary.scanfail.is_empty() {
@@ -1568,10 +1587,14 @@ fn write_diff_section(
     diff: &bob::db::BuildDiff,
     failed_info: &[FailedPackageInfo],
     pkgpath_base: Option<&str>,
+    commits: Option<&HashMap<String, Vec<bob::vcs::CommitInfo>>>,
+    vcs_info: &bob::vcs::VcsInfo,
 ) -> Result<()> {
     if diff.new_failures.is_empty() {
         return Ok(());
     }
+
+    let show_commits = commits.is_some_and(|c| !c.is_empty());
 
     let info_by_name: HashMap<&str, &FailedPackageInfo> = failed_info
         .iter()
@@ -1616,6 +1639,9 @@ fn write_diff_section(
     write_sortable_th(file, t, 2, "num", "Breaks", "col-breaks", "", "none")?;
     write_sortable_th(file, t, 3, "num", "Duration", "col-dur", "", "none")?;
     write_sortable_th(file, t, 4, "str", "Previously", "col-prev", "", "none")?;
+    if show_commits {
+        write_sortable_th(file, t, 5, "str", "Commits", "col-commits", "", "none")?;
+    }
     writeln!(file, "</tr></thead>")?;
     writeln!(file, "<tbody>")?;
 
@@ -1668,14 +1694,39 @@ fn write_diff_section(
             None => format!("<span title=\"{0}\">{0}</span>", escaped),
         };
 
+        let commits_cell = if show_commits {
+            let entries = commits.and_then(|m| m.get(&e.pkgpath));
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(entries) = entries {
+                for c in entries {
+                    let label = format!("{}@{}", escape_html(&c.author), escape_html(&c.sha_short));
+                    let part = match vcs_info.commit_url(&c.sha_full) {
+                        Some(url) => format!("<a href=\"{}\">{}</a>", escape_html(&url), label),
+                        None => label,
+                    };
+                    parts.push(part);
+                }
+            }
+            format!("<td class=\"col-commits\">{}</td>", parts.join(" "))
+        } else {
+            String::new()
+        };
+
         writeln!(
             file,
             "<tr><td class=\"col-pkg\">{}</td>\
              <td class=\"col-path\">{}</td>\
              <td class=\"col-breaks r\" data-sort=\"{}\">{}</td>\
              <td class=\"col-dur r\" data-sort=\"{}\">{}</td>\
-             <td class=\"col-prev\">{}</td></tr>",
-            pkg_link, pkgpath_cell, breaks, breaks_display, dur_secs, duration, previously,
+             <td class=\"col-prev\">{}</td>{}</tr>",
+            pkg_link,
+            pkgpath_cell,
+            breaks,
+            breaks_display,
+            dur_secs,
+            duration,
+            previously,
+            commits_cell,
         )?;
     }
 
@@ -1700,6 +1751,38 @@ fn build_compare_url(
     let new_rev = vcs_info.revision.as_deref()?;
     let url = format!("{}/compare/{}..{}", web_url, old_rev, new_rev);
     Some((url, old_rev, new_rev.to_string()))
+}
+
+/**
+ * For each pkgpath in `diff.new_failures`, compute the list of commits
+ * in the pkgsrc tree that touched that pkgpath since the previous build.
+ * Returns None if any prerequisite is missing (no git, missing previous
+ * revision, walk failure).
+ */
+fn compute_diff_commits(
+    db: &Database,
+    config: &Config,
+    vcs_info: &bob::vcs::VcsInfo,
+    diff: &bob::db::BuildDiff,
+) -> Option<HashMap<String, Vec<bob::vcs::CommitInfo>>> {
+    let old_rev = db.get_build_revision(&diff.build1_id).ok()??;
+    let new_rev = vcs_info.revision_full.as_deref()?;
+    let pkgpaths: HashSet<String> = diff
+        .new_failures
+        .iter()
+        .map(|e| e.pkgpath.clone())
+        .collect();
+    if pkgpaths.is_empty() {
+        return None;
+    }
+    match bob::vcs::commits_for_pkgpaths(config.pkgsrc(), &old_rev, new_rev, &pkgpaths) {
+        Ok(map) if !map.is_empty() => Some(map),
+        Ok(_) => None,
+        Err(e) => {
+            debug!(error = %e, "Failed to compute per-pkgpath commit list");
+            None
+        }
+    }
 }
 
 fn write_scanfail_table(
