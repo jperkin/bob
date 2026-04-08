@@ -1,6 +1,6 @@
 [package]
 name = "bob"
-description = "A pkgsrc package builder"
+description = "Fast, robust, powerful, user-friendly pkgsrc package builder"
 version = "0.99.0"
 authors = ["Jonathan Perkin <jonathan@perkin.org.uk>"]
 keywords = ["cli", "pkgsrc"]
