@@ -16,10 +16,10 @@
 
 use anyhow::{Result, bail};
 use clap::Args;
-use regex::Regex;
 
 use bob::db::Database;
 
+use super::util::pkg_pattern;
 use super::{Col, Formatter, OutputFormat};
 
 #[derive(Debug, Args)]
@@ -87,12 +87,7 @@ fn print_history(
         }
     }
 
-    let pattern = package
-        .map(|p| {
-            Regex::new(&format!("(?i){}", p))
-                .map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", p, e))
-        })
-        .transpose()?;
+    let pattern = package.map(pkg_pattern).transpose()?;
 
     let records = db.query_history(pattern.as_ref())?;
 

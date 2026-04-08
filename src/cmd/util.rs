@@ -18,14 +18,29 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use pkgsrc::ScanIndex;
+use regex::Regex;
 
 use bob::PackageStateKind;
 use bob::config::Config;
 use bob::db::Database;
 use bob::scan::Scan;
 use bob::try_println;
+
+/**
+ * Compile a case-insensitive regex from a user-supplied package
+ * pattern.  Used by commands like `bob log`, `bob list`, `bob status`,
+ * and `bob history` to match packages by pkgname or pkgpath.
+ *
+ * The pattern is wrapped with `(?i)` so matching is case-insensitive
+ * regardless of how the user wrote it.  Returns an error with the
+ * offending pattern in the message if the regex is malformed.
+ */
+pub fn pkg_pattern(pattern: &str) -> Result<Regex> {
+    Regex::new(&format!("(?i){}", pattern))
+        .map_err(|e| anyhow!("Invalid pattern '{}': {}", pattern, e))
+}
 
 pub fn presolve(file: &PathBuf, output: Option<&PathBuf>, strict: bool, verbose: u8) -> Result<()> {
     let reader: Box<dyn std::io::BufRead> = if file.as_os_str() == "-" {

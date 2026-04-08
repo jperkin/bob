@@ -20,11 +20,12 @@ use std::io::IsTerminal;
 use anyhow::{Result, bail};
 use clap::Subcommand;
 use crossterm::terminal;
-use regex::Regex;
 
 use bob::PackageState;
 use bob::db::Database;
 use bob::try_println;
+
+use super::util::pkg_pattern;
 
 fn use_color() -> bool {
     std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
@@ -59,7 +60,7 @@ pub enum ListCmd {
     },
     /// Show what is blocking a package from building
     Blockers {
-        /// Package name or pkgpath
+        /// Package name or pkgpath pattern (regex)
         package: String,
         /// Output pkgpath instead of pkgname
         #[arg(short, long)]
@@ -67,7 +68,7 @@ pub enum ListCmd {
     },
     /// Show packages blocked by a failed package
     BlockedBy {
-        /// Package name or pkgpath
+        /// Package name or pkgpath pattern (regex)
         package: String,
         /// Output pkgpath instead of pkgname
         #[arg(short, long)]
@@ -95,28 +96,63 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
             print_build_tree(db, path, all, format, package.as_deref())?;
         }
         ListCmd::Blockers { package, path } => {
-            for (pkgname, pkgpath, reason) in db.get_blockers(&package)? {
-                let s = if path {
-                    format!("{} ({})", pkgpath, reason)
-                } else {
-                    format!("{} ({})", pkgname, reason)
-                };
-                if !try_println(&s) {
-                    break;
+            let matches = match_packages(db, &package)?;
+            let multi = matches.len() > 1;
+            for pkg in matches {
+                if multi && !try_println(&format!("{} ({}):", pkg.pkgname, pkg.pkgpath)) {
+                    return Ok(());
+                }
+                for (pkgname, pkgpath, reason) in db.get_blockers(pkg.id)? {
+                    let s = if path {
+                        format!("{}{} ({})", if multi { "  " } else { "" }, pkgpath, reason)
+                    } else {
+                        format!("{}{} ({})", if multi { "  " } else { "" }, pkgname, reason)
+                    };
+                    if !try_println(&s) {
+                        return Ok(());
+                    }
                 }
             }
         }
         ListCmd::BlockedBy { package, path } => {
-            for (pkgname, pkgpath) in db.get_blocked_by(&package)? {
-                let s = if path { pkgpath } else { pkgname };
-                if !try_println(&s) {
-                    break;
+            let matches = match_packages(db, &package)?;
+            let multi = matches.len() > 1;
+            for pkg in matches {
+                if multi && !try_println(&format!("{} ({}):", pkg.pkgname, pkg.pkgpath)) {
+                    return Ok(());
+                }
+                for (pkgname, pkgpath) in db.get_blocked_by(pkg.id)? {
+                    let s = if path {
+                        format!("{}{}", if multi { "  " } else { "" }, pkgpath)
+                    } else {
+                        format!("{}{}", if multi { "  " } else { "" }, pkgname)
+                    };
+                    if !try_println(&s) {
+                        return Ok(());
+                    }
                 }
             }
         }
     }
 
     Ok(())
+}
+
+/**
+ * Resolve a user-supplied package pattern (regex) to the matching set
+ * of packages from the scan database.  Errors if no packages match.
+ */
+fn match_packages(db: &Database, pattern: &str) -> Result<Vec<bob::db::PackageRow>> {
+    let re = pkg_pattern(pattern)?;
+    let matches: Vec<bob::db::PackageRow> = db
+        .get_all_packages()?
+        .into_iter()
+        .filter(|p| re.is_match(&p.pkgname) || re.is_match(&p.pkgpath))
+        .collect();
+    if matches.is_empty() {
+        bail!("No packages match '{}'", pattern);
+    }
+    Ok(matches)
 }
 
 /**
@@ -183,8 +219,7 @@ fn print_build_tree(
 
     // Determine package set
     let packages: HashSet<String> = if let Some(pattern) = package {
-        let re = Regex::new(&format!("(?i){}", pattern))
-            .map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", pattern, e))?;
+        let re = pkg_pattern(pattern)?;
 
         let matches: Vec<&str> = pkgname_to_pkgpath
             .iter()

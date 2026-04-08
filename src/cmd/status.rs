@@ -24,6 +24,7 @@ use strum::{EnumProperty, VariantArray};
 use bob::db::{Database, PackageStatusRow};
 use bob::{ColumnAlign, Config, PackageState, PackageStateKind, Scheduler};
 
+use super::util::pkg_pattern;
 use super::{Col, Formatter, OutputFormat};
 
 #[derive(Clone, Copy, strum::EnumProperty, strum::IntoStaticStr, strum::VariantArray)]
@@ -169,10 +170,8 @@ fn print_build_status(
 
     let pkg_patterns: Vec<Regex> = pkg_filters
         .iter()
-        .map(|p| {
-            Regex::new(&format!("(?i){}", p))
-                .map_err(|e| anyhow::anyhow!("Invalid regex '{}': {}", p, e))
-        })
+        .map(String::as_str)
+        .map(pkg_pattern)
         .collect::<Result<Vec<_>>>()?;
 
     let need_multi = cols.contains(&"multi_version");

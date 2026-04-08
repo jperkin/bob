@@ -1290,21 +1290,9 @@ impl Database {
 
     /**
      * Get blockers for a package - what's preventing it from building.
-     * Accepts either pkgname or pkgpath (auto-detected by presence of '/').
      * Returns (pkgname, pkgpath, reason) for each blocking dependency.
      */
-    pub fn get_blockers(&self, package: &str) -> Result<Vec<(String, String, String)>> {
-        let pkg = if package.contains('/') {
-            let pkgs = self.get_packages_by_path(package)?;
-            pkgs.into_iter().next()
-        } else {
-            self.get_package_by_name(package)?
-        };
-
-        let Some(pkg) = pkg else {
-            anyhow::bail!("Package '{}' not found in database", package);
-        };
-
+    pub fn get_blockers(&self, package_id: i64) -> Result<Vec<(String, String, String)>> {
         let mut stmt = self.conn.prepare(
             "WITH RECURSIVE
              blocking(id, outcome) AS (
@@ -1332,7 +1320,7 @@ impl Database {
 
         let rows = stmt.query_map(
             params![
-                pkg.id,
+                package_id,
                 PackageStateKind::Success as i32,
                 PackageStateKind::UpToDate as i32,
                 PackageStateKind::Failed as i32,
@@ -1361,21 +1349,9 @@ impl Database {
 
     /**
      * Get packages blocked by a failed package.
-     * Accepts either pkgname or pkgpath (auto-detected by presence of '/').
      * Returns (pkgname, pkgpath) for each blocked package.
      */
-    pub fn get_blocked_by(&self, package: &str) -> Result<Vec<(String, String)>> {
-        let pkg = if package.contains('/') {
-            let pkgs = self.get_packages_by_path(package)?;
-            pkgs.into_iter().next()
-        } else {
-            self.get_package_by_name(package)?
-        };
-
-        let Some(pkg) = pkg else {
-            anyhow::bail!("Package '{}' not found in database", package);
-        };
-
+    pub fn get_blocked_by(&self, package_id: i64) -> Result<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare(
             "WITH RECURSIVE
              affected(id) AS (
@@ -1395,7 +1371,7 @@ impl Database {
              ORDER BY p.pkgname",
         )?;
 
-        let rows = stmt.query_map([pkg.id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let rows = stmt.query_map([package_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }

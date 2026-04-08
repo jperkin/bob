@@ -20,8 +20,8 @@ use std::process::Command;
 
 use anyhow::{Result, bail};
 use clap::Args;
-use regex::Regex;
 
+use crate::cmd::util::pkg_pattern;
 use bob::db::Database;
 use bob::{BuildResult, PackageState, Stage};
 
@@ -38,8 +38,7 @@ pub struct LogArgs {
 }
 
 pub fn run(db: &Database, args: LogArgs) -> Result<()> {
-    let pattern = Regex::new(&format!("(?i){}", args.package))
-        .map_err(|e| anyhow::anyhow!("Invalid pattern '{}': {}", args.package, e))?;
+    let pattern = pkg_pattern(&args.package)?;
 
     let results = db.get_all_build_results()?;
 
