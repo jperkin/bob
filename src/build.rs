@@ -194,6 +194,16 @@ impl std::fmt::Display for BuildReason {
 }
 
 /**
+ * Convert a pkgdir path to a &str for passing to bmake's `-C` flag.
+ * Errors cleanly if the path is not valid UTF-8 rather than panicking.
+ */
+fn pkgdir_as_str(pkgdir: &Path) -> anyhow::Result<&str> {
+    pkgdir
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("pkgdir path is not valid UTF-8: {}", pkgdir.display()))
+}
+
+/**
  * Check if a package binary is up-to-date with its sources.
  *
  * Returns `Ok(None)` if the package doesn't need rebuilding:
@@ -782,7 +792,7 @@ impl<'a> PkgBuilder<'a> {
         extra_flags: &[&str],
     ) -> anyhow::Result<(bool, Duration)> {
         let logfile = self.logdir.join(format!("{}.log", stage.into_str()));
-        let owned_args = self.make_args(pkgdir, targets, include_make_flags, extra_flags);
+        let owned_args = self.make_args(pkgdir, targets, include_make_flags, extra_flags)?;
 
         let args: Vec<&str> = owned_args.iter().map(|s| s.as_str()).collect();
 
@@ -978,7 +988,7 @@ impl<'a> PkgBuilder<'a> {
             &["show-var", &format!("VARNAME={}", varname)],
             true,
             &[],
-        );
+        )?;
 
         let bob_log = File::options()
             .create(true)
@@ -1084,7 +1094,8 @@ impl<'a> PkgBuilder<'a> {
             return Ok(true);
         }
 
-        let mut args = vec!["-C", pkgdir.to_str().unwrap(), "create-usergroup"];
+        let pkgdir_str = pkgdir_as_str(pkgdir)?;
+        let mut args = vec!["-C", pkgdir_str, "create-usergroup"];
         if stage == Stage::Configure {
             args.push("clean");
         }
@@ -1100,9 +1111,9 @@ impl<'a> PkgBuilder<'a> {
         targets: &[&str],
         include_make_flags: bool,
         extra_flags: &[&str],
-    ) -> Vec<String> {
+    ) -> anyhow::Result<Vec<String>> {
         let mut owned_args: Vec<String> =
-            vec!["-C".to_string(), pkgdir.to_str().unwrap().to_string()];
+            vec!["-C".to_string(), pkgdir_as_str(pkgdir)?.to_string()];
         owned_args.extend(targets.iter().map(|s| s.to_string()));
 
         if include_make_flags {
@@ -1118,7 +1129,7 @@ impl<'a> PkgBuilder<'a> {
 
         owned_args.extend(extra_flags.iter().map(|s| s.to_string()));
 
-        owned_args
+        Ok(owned_args)
     }
 
     fn apply_envs(&self, cmd: &mut Command, extra_envs: &[(&str, &str)]) {
