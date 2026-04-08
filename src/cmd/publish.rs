@@ -506,7 +506,7 @@ fn run_rsync(
     Ok(())
 }
 
-/*
+/**
  * Build a shell script to pipe over ssh.  Each env var becomes a
  * `name=value` assignment on its own line (shell-quoted by shlex if
  * the value needs it), followed by the user's script body.
@@ -525,7 +525,7 @@ fn build_remote_script(sv: &ScriptValue) -> Result<String> {
     Ok(out)
 }
 
-/*
+/**
  * Run a script on a remote host via ssh.  The script body is sent on
  * stdin and executed by `sh -eu`, so the script never appears as a
  * shell-quoted argument.  `set -eu` is mandatory: any failed command
