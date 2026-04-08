@@ -1,14 +1,16 @@
-# Bob - A fast, robust, powerful, user-friendly, pkgsrc package builder
+# Fast, robust, powerful, user-friendly pkgsrc builder
 
 [![Crates.io](https://img.shields.io/crates/v/bob.svg)](https://crates.io/crates/bob)
 [![Documentation](https://docs.rs/bob/badge.svg)](https://docs.rs/bob)
 [![License](https://img.shields.io/crates/l/bob.svg)](https://github.com/jperkin/bob)
 
-Bob is a comprehensive utility for building pkgsrc packages inside sandboxes.
-Bob is designed to be an easy to use replacement for alternative build tools
+Bob is a comprehensive utility for building pkgsrc packages in parallel inside
+sandboxes.
+
+Bob is designed to be an easy-to-use and complete replacement for build tools
 such as pbulk, pkg\_chk, or pkg\_rolling-replace, while providing a modern
-interface and many additional features for local pkgsrc development, bulk build
-reporting and publishing, and failure analysis.
+intuitive interface and many additional features for local pkgsrc development,
+bulk build reporting and publishing, and failure analysis.
 
 ## Screencasts
 
