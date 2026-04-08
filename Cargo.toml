@@ -8,7 +8,7 @@ license = "ISC"
 repository = "https://github.com/jperkin/bob"
 homepage = "https://github.com/jperkin/bob"
 documentation = "https://docs.rs/bob"
-rust-version = "1.85.1"
+rust-version = "1.86.0"
 edition = "2024"
 
 [dependencies]
