@@ -1736,10 +1736,11 @@ fn write_diff_section(
 }
 
 /**
- * Build a compare URL and revision pair for two builds.
+ * Build a compare URL and short revision pair for two builds.
  *
- * If both builds have revisions and a web URL is available, returns
- * a GitHub-style compare URL and the two revision strings.
+ * Returns the GitHub-style compare URL (constructed from full SHAs)
+ * plus the two short revision strings used for display.  Returns None
+ * if any prerequisite is missing.
  */
 fn build_compare_url(
     db: &Database,
@@ -1747,17 +1748,20 @@ fn build_compare_url(
     build1_id: &str,
 ) -> Option<(String, String, String)> {
     let web_url = vcs_info.web_url()?;
-    let old_rev = db.get_build_revision(build1_id).ok()??;
-    let new_rev = vcs_info.revision.as_deref()?;
-    let url = format!("{}/compare/{}..{}", web_url, old_rev, new_rev);
-    Some((url, old_rev, new_rev.to_string()))
+    let old_rev_full = db.get_build_revision(build1_id).ok()??;
+    let new_rev_full = vcs_info.revision_full.as_deref()?;
+    let new_rev_short = vcs_info.revision.as_deref()?;
+    let old_rev_short = &old_rev_full[..12.min(old_rev_full.len())];
+    let url = format!("{}/compare/{}..{}", web_url, old_rev_full, new_rev_full);
+    Some((url, old_rev_short.to_string(), new_rev_short.to_string()))
 }
 
 /**
  * For each pkgpath in `diff.new_failures`, compute the list of commits
  * in the pkgsrc tree that touched that pkgpath since the previous build.
  * Returns None if any prerequisite is missing (no git, missing previous
- * revision, walk failure).
+ * revision, walk failure).  Each early-return path logs at debug level
+ * so the reason is visible with `RUST_LOG=bob=debug`.
  */
 fn compute_diff_commits(
     db: &Database,
@@ -1765,19 +1769,66 @@ fn compute_diff_commits(
     vcs_info: &bob::vcs::VcsInfo,
     diff: &bob::db::BuildDiff,
 ) -> Option<HashMap<String, Vec<bob::vcs::CommitInfo>>> {
-    let old_rev = db.get_build_revision(&diff.build1_id).ok()??;
-    let new_rev = vcs_info.revision_full.as_deref()?;
+    let old_rev = match db.get_build_revision(&diff.build1_id) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            debug!(
+                build1_id = %diff.build1_id,
+                "Skipping per-pkgpath commit lookup: no revision stored \
+                 for previous build"
+            );
+            return None;
+        }
+        Err(e) => {
+            debug!(
+                build1_id = %diff.build1_id,
+                error = %e,
+                "Skipping per-pkgpath commit lookup: failed to query \
+                 previous build revision"
+            );
+            return None;
+        }
+    };
+    let Some(new_rev) = vcs_info.revision_full.as_deref() else {
+        debug!(
+            "Skipping per-pkgpath commit lookup: no current revision \
+             from VcsInfo (not a git tree?)"
+        );
+        return None;
+    };
     let pkgpaths: HashSet<String> = diff
         .new_failures
         .iter()
         .map(|e| e.pkgpath.clone())
         .collect();
     if pkgpaths.is_empty() {
+        debug!("Skipping per-pkgpath commit lookup: no new failures in diff");
         return None;
     }
+    debug!(
+        old_rev = %old_rev,
+        new_rev = %new_rev,
+        pkgpath_count = pkgpaths.len(),
+        repo = %config.pkgsrc().display(),
+        "Computing per-pkgpath commit list"
+    );
     match bob::vcs::commits_for_pkgpaths(config.pkgsrc(), &old_rev, new_rev, &pkgpaths) {
-        Ok(map) if !map.is_empty() => Some(map),
-        Ok(_) => None,
+        Ok(map) if !map.is_empty() => {
+            let total: usize = map.values().map(|v| v.len()).sum();
+            debug!(
+                pkgpaths_with_commits = map.len(),
+                total_commits = total,
+                "Per-pkgpath commit list ready"
+            );
+            Some(map)
+        }
+        Ok(_) => {
+            debug!(
+                "Per-pkgpath commit list is empty: walk succeeded but no \
+                 commits touched any of the failing pkgpaths"
+            );
+            None
+        }
         Err(e) => {
             debug!(error = %e, "Failed to compute per-pkgpath commit list");
             None

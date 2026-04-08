@@ -254,13 +254,17 @@ pub fn commits_for_pkgpaths(
         return Ok(result);
     }
 
-    let repo = gix::open(repo_path)
+    let repo = gix::discover(repo_path)
         .with_context(|| format!("Failed to open git repository at {}", repo_path.display()))?;
 
-    let new_id = gix::ObjectId::from_hex(new_rev.as_bytes())
-        .with_context(|| format!("Failed to parse revision {}", new_rev))?;
-    let old_id = gix::ObjectId::from_hex(old_rev.as_bytes())
-        .with_context(|| format!("Failed to parse revision {}", old_rev))?;
+    let new_id = repo
+        .rev_parse_single(new_rev)
+        .with_context(|| format!("Failed to resolve revision {}", new_rev))?
+        .detach();
+    let old_id = repo
+        .rev_parse_single(old_rev)
+        .with_context(|| format!("Failed to resolve revision {}", old_rev))?
+        .detach();
 
     let walk = repo
         .rev_walk([new_id])

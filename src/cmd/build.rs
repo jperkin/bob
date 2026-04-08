@@ -323,7 +323,7 @@ pub fn run_build_with(
      */
     let build_id = db.build_id().ok();
     if let Some(bid) = &build_id {
-        if let Some(rev) = db.load_vcs_info().ok().and_then(|v| v.revision) {
+        if let Some(rev) = db.load_vcs_info().ok().and_then(|v| v.revision_full) {
             if let Err(e) = db.store_build_revision(bid, &rev) {
                 tracing::warn!(error = %e, "Failed to save build revision");
             }
