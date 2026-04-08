@@ -1,11 +1,14 @@
-# Bob - A Package Builder
+# Bob - A fast, robust, powerful, user-friendly, pkgsrc package builder
 
 [![Crates.io](https://img.shields.io/crates/v/bob.svg)](https://crates.io/crates/bob)
 [![Documentation](https://docs.rs/bob/badge.svg)](https://docs.rs/bob)
 [![License](https://img.shields.io/crates/l/bob.svg)](https://github.com/jperkin/bob)
 
-Bob is a powerful and user-friendly utility for building pkgsrc packages inside
-sandboxes.
+Bob is a comprehensive utility for building pkgsrc packages inside sandboxes.
+Bob is designed to be an easy to use replacement for alternative build tools
+such as pbulk, pkg\_chk, or pkg\_rolling-replace, while providing a modern
+interface and many additional features for local pkgsrc development, bulk build
+reporting and publishing, and failure analysis.
 
 ## Screencasts
 
@@ -19,12 +22,13 @@ sandboxes.
 
 ## Features
 
-- [x] Powerful and fast, but easy to use.
-- [x] Native sandbox implementation for common operating systems.
-- [x] Threaded scan and build processes inside concurrent sandboxes.
+- [x] Powerful, fast, and robust, while remaining easy to use.
+- [x] Native, customisable sandbox implementations for common operating systems.
+- [x] Parallel scan and build processes inside concurrent sandboxes.
+- [x] Dynamic `MAKE_JOBS` and `WRKOBJDIR` scheduler for optimal performance.
 - [x] [Ratatui](https://ratatui.rs)-based user interface.
-- [x] Simple, flexible, and powerful Lua-based configuration.
-- [x] Easily support multiple build configurations.
+- [x] Simple, flexible, and extendable Lua-based configuration.
+- [x] Easily support multiple branch builds or different OS targets.
 
 Bob works out-of-the-box on NetBSD, Linux, macOS[^1], and illumos.
 
@@ -32,40 +36,61 @@ Bob works out-of-the-box on NetBSD, Linux, macOS[^1], and illumos.
 
 ## Getting Started
 
-Install bob, or upgrade an existing install to the latest release.
+There are two ways to install bob.  The preferred method is to install using
+cargo so that bob is kept independent of the pkgsrc installation that you may
+be building for.  However there is also a package available for users who
+prefer to only use software installed via pkgsrc.
+
+### Install via cargo
+
+Cargo-installed bob uses an XDG directory layout by default:
+
+| Path                       | What it stores                  |
+| -------------------------- | ------------------------------- |
+| `~/.cargo/bin/bob`         | The `bob` binary                |
+| `~/.config/bob/config.lua` | Default configuration file      |
+| `~/.local/share/bob/`      | Database, build state, and logs |
+
+Install the binary using cargo:
 
 ```
 $ cargo install bob
 ```
 
-Create configuration directory.  This is also where by default all log data
-will be generated.  `/data/bob` here is used as an example, but this can be any
-location.
-
-You may wish to build multiple package sets (e.g. `netbsd-x86_64` and
-`netbsd-i386`) in which case you can simply create a configuration directory
-for each set.
+Then create a default configuration file using `bob init`:
 
 ```
-$ bob init /data/bob
-Initialising new configuration directory /data/bob:
-        /data/bob/config.lua
-        /data/bob/scripts/post-build
-        /data/bob/scripts/pre-build
+$ bob init
+Created ~/.config/bob/config.lua
 ```
 
-Customise the config.  The defaults are designed to work out of the box, but
-you are likely to want to change some things, for example which packages to
-build, enable an unprivileged build user, or add any additional mount points
+### Install via pkgsrc
+
+Bob installed using pkgsrc uses a standard pkgsrc layout, for example:
+
+| Path                          | What it stores                  |
+| ----------------------------- | ------------------------------- |
+| `/usr/pkg/bin/bob`            | The `bob` binary                |
+| `/usr/pkg/etc/bob/config.lua` | Default configuration file      |
+| `/var/db/bob/`                | Database, build state, and logs |
+
+The package installs a default `config.lua` ready to edit, so `bob init` is not
 required.
 
-```
-$ cd /data/bob
-$ vi config.lua
-```
+### Customise
 
-On non-NetBSD systems you will also need a pkgsrc bootstrap kit.  By default
-bob will look for `bootstrap.tar.gz` inside the init directory.
+The defaults are designed to work out of the box, but you are likely to want to
+change some things, for example which packages to build, enable an unprivileged
+build user, or add any additional mount points required.
+
+On non-NetBSD systems you will also need a pkgsrc bootstrap kit, with the
+absolute path set in the `pkgsrc.bootstrap` config option.
+
+For a complete example, have a look at
+<https://github.com/jperkin/bob/blob/main/examples/smartos-trunk.lua>.  This is
+the exact configuration file used to publish the daily SmartOS trunk builds.
+
+### Build
 
 When you are happy with the configuration:
 
@@ -74,9 +99,9 @@ $ bob build
 ```
 
 will proceed to build all of the packages you have requested.  At the end of a
-successful build run bob will automatically create a `pkg_summary.gz` file, so
-if you have configured [pkgin](https://github.com/NetBSDfr/pkgin) to look
-there, a full upgrade to the latest pkgsrc packages is as simple as:
+successful build run bob will automatically create a `pkg_summary` file, so if
+you have configured [pkgin](https://github.com/NetBSDfr/pkgin) to look there, a
+full upgrade to the latest pkgsrc packages is as simple as:
 
 ```
 $ bob build && pkgin upgrade
@@ -86,9 +111,9 @@ During the build phase you can press 'v' to toggle between the default inline
 progress bars and a full-screen paned layout that shows live build logs to
 track progress.
 
-Bob should handle interruptions gracefully, and automatically clean up
-sandboxes, etc.  If the build is interrupted, you can resume with `bob build,
-and bob should continue from where it left off.
+Bob handles interruptions gracefully, and automatically cleans up sandboxes,
+etc.  If the build is interrupted, you can resume with `bob build`, and bob
+will continue from where it left off.
 
 After a build has completed, and some time later you wish to update pkgsrc to
 build updated packages, you will first need to run:
@@ -103,10 +128,10 @@ to clear the previous database state, before running a new `bob build`.
 
 There are two main methods currently used to update a pkgsrc installation.
 
-Update-in-place using tools such as `pkg_chk` or `pkg_rolling-replace`.
-These tools operate directly on the target host, upgrading packages in
-turn.  These are the simplest to set up and use, and so are reasonable
-popular amongst users, but have some major drawbacks:
+Update-in-place using tools such as `pkg_chk` or `pkg_rolling-replace`.  These
+tools operate directly on the target host, upgrading packages in turn.  These
+are the simplest to set up and use, and thus reasonably popular, but have some
+major drawbacks:
 
  * Upgrading in place means that if a build error is encountered, the
    system may be left in a degraded state until the issue is fixed.
@@ -147,4 +172,7 @@ Bob combines these methods into a best-of-both approach:
 
  * Provide a very flexible configuration interface for local customisation.
 
-all with a user-friendly and easy to configure interface.
+Bob doesn't stop there though, and also provides many unique features such as
+easily spinning up pkgsrc development sandboxes, significant improvements to
+bulk build reports including diffs to previous builds, built-in build history,
+and much, much more.
