@@ -23,6 +23,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use tracing_appender::non_blocking::WorkerGuard;
+use tracing_appender::rolling::{Builder, Rotation};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
@@ -57,9 +58,14 @@ pub fn init_stderr_if_enabled() {
  * Creates the dbdir and writes bob.log there.
  */
 pub fn init(dbdir: &PathBuf, log_level: &str) -> Result<()> {
-    fs::create_dir_all(dbdir).with_context(|| format!("Failed to create dbdir {:?}", dbdir))?;
+    fs::create_dir_all(dbdir)
+        .with_context(|| format!("Failed to create dbdir {}", dbdir.display()))?;
 
-    let file_appender = tracing_appender::rolling::never(dbdir, "bob.log");
+    let file_appender = Builder::new()
+        .rotation(Rotation::NEVER)
+        .filename_prefix("bob.log")
+        .build(dbdir)
+        .with_context(|| format!("Failed to open log file {}/bob.log", dbdir.display()))?;
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     // Store the guard to keep the writer alive
