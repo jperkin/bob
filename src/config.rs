@@ -1347,7 +1347,7 @@ fn script_value_from_table(field: &str, t: &Table) -> LuaResult<ScriptValue> {
     Ok(ScriptValue { run, env })
 }
 
-/*
+/**
  * A valid shell identifier matches [A-Za-z_][A-Za-z0-9_]*.  Used to
  * validate env var names so they can be safely interpolated into shell
  * preludes and referenced as ${name} from script bodies.
