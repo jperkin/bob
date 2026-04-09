@@ -194,6 +194,29 @@ impl std::fmt::Display for BuildReason {
 }
 
 /**
+ * Measure the actual disk usage of a directory using du(1).
+ *
+ * Walking the tree and summing file sizes (as fs_extra::dir::get_size
+ * does) returns logical sizes that can significantly undercount the
+ * actual space consumed due to block alignment and filesystem metadata,
+ * and overcount due to hardlinks being measured per-link rather than
+ * per-inode.  du handles all of these correctly.
+ */
+fn dir_disk_usage(path: &Path) -> Option<u64> {
+    let output = std::process::Command::new("du")
+        .arg("-sk")
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let s = std::str::from_utf8(&output.stdout).ok()?;
+    let kb: u64 = s.split_whitespace().next()?.parse().ok()?;
+    Some(kb * 1024)
+}
+
+/**
  * Convert a pkgdir path to a &str for passing to bmake's `-C` flag.
  * Errors cleanly if the path is not valid UTF-8 rather than panicking.
  */
@@ -732,13 +755,13 @@ impl<'a> PkgBuilder<'a> {
 
         // Measure disk usage before clean destroys WRKDIR
         match self.wrkdir {
-            Some(ref wrkdir) => match fs_extra::dir::get_size(wrkdir) {
-                Ok(size) => {
+            Some(ref wrkdir) => match dir_disk_usage(wrkdir) {
+                Some(size) => {
                     debug!(wrkdir = %wrkdir.display(), size, "Measured WRKDIR disk usage");
                     stats.disk_usage = Some(size);
                 }
-                Err(e) => {
-                    debug!(wrkdir = %wrkdir.display(), error = %e, "Failed to measure disk usage")
+                None => {
+                    debug!(wrkdir = %wrkdir.display(), "Failed to measure disk usage")
                 }
             },
             None => debug!("No WRKDIR available for disk usage measurement"),
@@ -1531,7 +1554,7 @@ impl PackageBuild {
 
         let measure_wrkdir = || -> Option<u64> {
             let w = wrkdir.as_ref()?;
-            fs_extra::dir::get_size(w).ok()
+            dir_disk_usage(w)
         };
         let wrkobjdir = wrkobjdir_kind.cloned();
 
