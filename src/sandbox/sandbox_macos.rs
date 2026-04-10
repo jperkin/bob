@@ -123,14 +123,19 @@ impl Sandbox {
     ) -> anyhow::Result<Option<ExitStatus>> {
         fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
         let cmd = "/sbin/mount_tmpfs";
-        Ok(Some(
-            Command::new(cmd)
-                .args(opts)
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        let status = Command::new(cmd)
+            .args(opts)
+            .args(["-o", "nobrowse"])
+            .arg(dest)
+            .process_group(0)
+            .status()
+            .context(format!("Unable to execute {}", cmd))?;
+        if status.success() {
+            let fseventsd = dest.join(".fseventsd");
+            let _ = fs::create_dir_all(&fseventsd);
+            let _ = fs::File::create(fseventsd.join("no_log"));
+        }
+        Ok(Some(status))
     }
 
     /*
