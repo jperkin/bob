@@ -28,7 +28,10 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
+        if !dest.exists() {
+            fs::create_dir_all(dest)
+                .with_context(|| format!("Failed to create {}", dest.display()))?;
+        }
         let cmd = "/bin/mount";
         // Build mount options: start with "bind", add any user-specified opts
         let mut mount_opts = vec!["bind"];
