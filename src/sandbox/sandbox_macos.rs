@@ -29,7 +29,10 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
+        if !dest.exists() {
+            fs::create_dir_all(dest)
+                .with_context(|| format!("Failed to create {}", dest.display()))?;
+        }
         let cmd = self.config.bindfs();
         /*
          * pre_exec raises the NOFILE limit for the bindfs process so it

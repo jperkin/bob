@@ -28,7 +28,10 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
+        if !dest.exists() {
+            fs::create_dir_all(dest)
+                .with_context(|| format!("Failed to create {}", dest.display()))?;
+        }
         let cmd = "/sbin/mount_null";
         Ok(Some(
             Command::new(cmd)
