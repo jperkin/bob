@@ -336,6 +336,8 @@ Examples:
         #[command(subcommand)]
         cmd: cmd::list::ListCmd,
     },
+    /// Create a sandbox and start an interactive shell
+    Dev,
     /// Create and destroy build sandboxes
     Sandbox {
         #[command(subcommand)]
@@ -605,6 +607,10 @@ fn run() -> Result<()> {
             let config = Config::load(args.config.as_deref())?;
             let db = Database::open(config.dbdir())?;
             cmd::list::run(&db, cmd)?;
+        }
+        Cmd::Dev => {
+            let config = Config::load(args.config.as_deref())?;
+            cmd::sandbox::run(&config, cmd::sandbox::SandboxCmd::Exec)?;
         }
         Cmd::Sandbox { cmd: sandbox_cmd } => {
             let config = Config::load(args.config.as_deref())?;
