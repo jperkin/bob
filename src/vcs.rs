@@ -307,7 +307,11 @@ pub fn commits_for_pkgpaths(
         }
     }
 
-    tracing::debug!(walk_count, match_count, "commits_for_pkgpaths walk complete");
+    tracing::debug!(
+        walk_count,
+        match_count,
+        "commits_for_pkgpaths walk complete"
+    );
     Ok(result)
 }
 
