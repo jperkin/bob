@@ -268,7 +268,7 @@ pub fn commits_for_pkgpaths(
 
     let walk = repo
         .rev_walk([new_id])
-        .with_pruned([old_id])
+        .with_hidden([old_id])
         .all()
         .context("Failed to start revision walk")?;
 
@@ -323,7 +323,8 @@ fn changed_pkgpaths(
     old_tree: Option<&gix::Tree<'_>>,
     pkgpaths: &HashSet<String>,
 ) -> anyhow::Result<HashSet<String>> {
-    use gix::object::tree::diff::{Action, Change};
+    use gix::object::tree::diff::Change;
+    use std::ops::ControlFlow;
 
     let mut touched: HashSet<String> = HashSet::new();
     let empty_tree;
@@ -360,7 +361,7 @@ fn changed_pkgpaths(
                     touched.insert(pp);
                 }
             }
-            Ok::<_, std::convert::Infallible>(Action::Continue)
+            Ok::<_, std::convert::Infallible>(ControlFlow::Continue(()))
         })
         .context("Tree diff failed")?;
 
