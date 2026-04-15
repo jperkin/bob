@@ -67,6 +67,7 @@ pub enum ListCmd {
         path: bool,
     },
     /// Show packages blocked by a failed package
+    #[command(alias = "broken-by")]
     BlockedBy {
         /// Package name or pkgpath pattern (regex)
         package: String,
