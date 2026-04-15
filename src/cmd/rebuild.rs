@@ -78,7 +78,7 @@ pub fn prepare(
 
     let buildable: IndexMap<_, _> = all_resolved
         .into_iter()
-        .filter(|p| to_rebuild.contains(p.pkgname().pkgname()))
+        .filter(|p| args.all || to_rebuild.contains(p.pkgname().pkgname()))
         .map(|p| (p.pkgname().clone(), p))
         .collect();
 
