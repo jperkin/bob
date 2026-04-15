@@ -272,8 +272,11 @@ pub fn commits_for_pkgpaths(
         .all()
         .context("Failed to start revision walk")?;
 
+    let mut walk_count = 0usize;
+    let mut match_count = 0usize;
     for info in walk {
         let info = info.context("Revision walk error")?;
+        walk_count += 1;
         let commit = info
             .object()
             .with_context(|| format!("Failed to load commit {}", info.id))?;
@@ -293,6 +296,7 @@ pub fn commits_for_pkgpaths(
         if touched.is_empty() {
             continue;
         }
+        match_count += 1;
         let entry = CommitInfo {
             author,
             sha_full,
@@ -303,6 +307,7 @@ pub fn commits_for_pkgpaths(
         }
     }
 
+    tracing::debug!(walk_count, match_count, "commits_for_pkgpaths walk complete");
     Ok(result)
 }
 
