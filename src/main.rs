@@ -553,6 +553,7 @@ fn run() -> Result<()> {
             dry_run,
         } => {
             let config = Config::load(args.config.as_deref())?;
+            logging::init(config.dbdir(), config.log_level())?;
             let db_path = config.dbdir().join("bob.db");
 
             if !db_path.exists() {
