@@ -373,10 +373,13 @@ pub struct WrkObjDir {
     pub disk: Option<PathBuf>,
     /// Size threshold in bytes for routing between tmpfs and disk.
     pub threshold: Option<u64>,
-    /// Use historical disk usage for routing even when the previous
-    /// build failed.  Without this, a failed build always routes to
-    /// disk regardless of recorded size.
-    pub use_failed_history: bool,
+    /// Size threshold in bytes for routing failed builds.  When set,
+    /// a previously-failed package whose recorded disk usage is at or
+    /// below this value is routed to tmpfs; above it (or with no
+    /// history) goes to disk.  Should be well below `threshold` to
+    /// account for temporary build artifacts not captured by du.
+    /// When `None`, all failed builds default to disk.
+    pub failed_threshold: Option<u64>,
 }
 
 impl WrkObjDir {
@@ -1432,7 +1435,7 @@ fn parse_dynamic(globals: &Table) -> LuaResult<Option<DynamicConfig>> {
     let wrkobjdir = match table.get::<Value>("wrkobjdir")? {
         Value::Nil => None,
         Value::Table(t) => {
-            const WRK_KEYS: &[&str] = &["tmpfs", "disk", "threshold", "use_failed_history"];
+            const WRK_KEYS: &[&str] = &["tmpfs", "disk", "threshold", "failed_threshold"];
             warn_unknown_keys(&t, "dynamic.wrkobjdir", WRK_KEYS);
 
             let tmpfs: Option<PathBuf> = t.get::<Option<String>>("tmpfs")?.map(PathBuf::from);
@@ -1445,14 +1448,20 @@ fn parse_dynamic(globals: &Table) -> LuaResult<Option<DynamicConfig>> {
                     })
                 })
                 .transpose()?;
-            let use_failed_history =
-                matches!(t.get::<Option<bool>>("use_failed_history")?, Some(true));
+            let failed_threshold: Option<u64> = t
+                .get::<Option<String>>("failed_threshold")?
+                .map(|s| {
+                    parse_size(&s).map_err(|e| {
+                        mlua::Error::runtime(format!("dynamic.wrkobjdir.failed_threshold: {}", e))
+                    })
+                })
+                .transpose()?;
 
             Some(WrkObjDir {
                 tmpfs,
                 disk,
                 threshold,
-                use_failed_history,
+                failed_threshold,
             })
         }
         _ => return Err(mlua::Error::runtime("dynamic.wrkobjdir must be a table")),

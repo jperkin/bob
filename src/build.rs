@@ -2076,10 +2076,13 @@ impl Build {
             let mut map = HashMap::new();
             for pkgname in self.scanpkgs.keys() {
                 let du = build_history.get(pkgname.pkgbase()).and_then(|h| {
-                    if w.use_failed_history || h.outcome == success {
+                    if h.outcome == success {
                         h.disk_usage
                     } else {
-                        None
+                        match (h.disk_usage, w.failed_threshold) {
+                            (Some(size), Some(ft)) if size <= ft => Some(size),
+                            _ => None,
+                        }
                     }
                 });
                 if let Some(kind) = w.route(du) {

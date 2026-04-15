@@ -197,10 +197,13 @@ fn print_build_status(
                     let du = history
                         .get(pkgsrc::PkgName::new(&r.pkgname).pkgbase())
                         .and_then(|h| {
-                            if w.use_failed_history || h.outcome == success {
+                            if h.outcome == success {
                                 h.disk_usage
                             } else {
-                                None
+                                match (h.disk_usage, w.failed_threshold) {
+                                    (Some(size), Some(ft)) if size <= ft => Some(size),
+                                    _ => None,
+                                }
                             }
                         });
                     w.route(du)
