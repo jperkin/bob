@@ -877,6 +877,9 @@ impl Config {
                 "bob_pkg_refcount_dbdir".to_string(),
                 env.pkg_refcount_dbdir.display().to_string(),
             ));
+            if let Some(varbase) = env.metadata.get("VARBASE") {
+                envs.push(("bob_varbase".to_string(), varbase.clone()));
+            }
             for (key, value) in &env.cachevars {
                 envs.push((key.clone(), value.clone()));
             }
