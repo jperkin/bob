@@ -34,6 +34,7 @@ use strum::{EnumCount, IntoEnumIterator};
     Clone,
     Copy,
     Debug,
+    Hash,
     PartialEq,
     Eq,
     strum::EnumCount,
@@ -47,28 +48,103 @@ use strum::{EnumCount, IntoEnumIterator};
 #[strum(serialize_all = "kebab-case")]
 #[repr(i32)]
 pub enum PackageStateKind {
-    #[strum(props(pbulk = "prefailed"))]
+    #[strum(props(pbulk = "prefailed", desc = "PKG_SKIP_REASON set"))]
     PreSkipped = 0,
-    #[strum(props(pbulk = "prefailed"))]
+    #[strum(props(pbulk = "prefailed", desc = "PKG_FAIL_REASON set"))]
     PreFailed = 1,
-    #[strum(props(pbulk = "prefailed"))]
+    #[strum(props(pbulk = "prefailed", desc = "Has unresolved dependencies"))]
     Unresolved = 2,
-    #[strum(props(pbulk = "indirect-prefailed"))]
+    #[strum(props(pbulk = "indirect-prefailed", desc = "Blocked by pre-skipped package"))]
     IndirectPreSkipped = 3,
-    #[strum(props(pbulk = "indirect-prefailed"))]
+    #[strum(props(pbulk = "indirect-prefailed", desc = "Blocked by pre-failed package"))]
     IndirectPreFailed = 4,
-    #[strum(props(pbulk = "indirect-prefailed"))]
+    #[strum(props(
+        pbulk = "indirect-prefailed",
+        desc = "Blocked by package with unresolved dependencies"
+    ))]
     IndirectUnresolved = 5,
-    #[strum(props(pbulk = "open"))]
+    #[strum(props(pbulk = "open", desc = "Ready to build"))]
     Pending = 6,
-    #[strum(props(pbulk = "done"))]
+    #[strum(props(pbulk = "done", desc = "Binary already exists"))]
     UpToDate = 7,
-    #[strum(props(pbulk = "done"))]
+    #[strum(props(pbulk = "done", desc = "Built successfully"))]
     Success = 8,
-    #[strum(props(pbulk = "failed"))]
+    #[strum(props(pbulk = "failed", desc = "Build attempted and failed"))]
     Failed = 9,
-    #[strum(props(pbulk = "indirect-failed"))]
+    #[strum(props(
+        pbulk = "indirect-failed",
+        desc = "Blocked by package that failed to build"
+    ))]
     IndirectFailed = 10,
+}
+
+impl PackageStateKind {
+    /// One-line description of the state, from the `desc` strum property.
+    pub fn desc(self) -> &'static str {
+        use strum::EnumProperty;
+        self.get_str("desc").expect("desc prop")
+    }
+}
+
+/// Aliases for filtering on multiple [`PackageStateKind`] values at once.
+///
+/// Used by the `bob status -s` filter and by aggregated count output.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    strum::EnumIter,
+    strum::EnumProperty,
+    strum::EnumString,
+    strum::AsRefStr,
+    strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "kebab-case")]
+pub enum PackageStateAlias {
+    #[strum(props(desc = "Any pre-skipped or pre-failed package"))]
+    Skipped,
+    #[strum(props(desc = "Any package blocked by another"))]
+    Blocked,
+}
+
+impl PackageStateAlias {
+    /// The set of [`PackageStateKind`] values this alias expands to.
+    pub fn expands_to(self) -> &'static [PackageStateKind] {
+        use PackageStateKind::*;
+        match self {
+            Self::Skipped => &[PreSkipped, PreFailed],
+            Self::Blocked => &[
+                IndirectPreSkipped,
+                IndirectPreFailed,
+                IndirectUnresolved,
+                IndirectFailed,
+            ],
+        }
+    }
+
+    /// One-line description of the alias.
+    pub fn desc(self) -> &'static str {
+        use strum::EnumProperty;
+        self.get_str("desc").expect("desc prop")
+    }
+}
+
+/**
+ * Parse a status filter string into one or more [`PackageStateKind`] values.
+ *
+ * Accepts either a canonical kind name (e.g. `pre-failed`) or an alias
+ * (e.g. `blocked`), returning the expanded set of kinds.
+ */
+pub fn parse_status_filter(s: &str) -> Result<Vec<PackageStateKind>, String> {
+    if let Ok(k) = s.parse::<PackageStateKind>() {
+        return Ok(vec![k]);
+    }
+    if let Ok(a) = s.parse::<PackageStateAlias>() {
+        return Ok(a.expands_to().to_vec());
+    }
+    Err(format!("unknown status '{s}'"))
 }
 
 /// State of a package across the scan and build lifecycle.
@@ -260,6 +336,11 @@ impl PackageCounts {
     /// Packages whose existing binary was up to date.
     pub fn up_to_date(&self) -> usize {
         self[PackageStateKind::UpToDate]
+    }
+
+    /// Sum of counts for all kinds in an alias expansion.
+    pub fn count_alias(&self, alias: PackageStateAlias) -> usize {
+        alias.expands_to().iter().map(|k| self[*k]).sum()
     }
 
     /// Packages not attempted: skip/fail reasons and indirect

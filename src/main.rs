@@ -292,30 +292,7 @@ enum Cmd {
         args: cmd::diff::DiffArgs,
     },
     /// Show comprehensive package build status
-    #[command(after_long_help = "\
-Status values:
-  pending              Ready to build
-  success              Built successfully
-  up-to-date           Binary already exists
-  failed               Build attempted and failed
-  preskipped           PKG_SKIP_REASON set
-  prefailed            PKG_FAIL_REASON set
-  unresolved           Has unresolved dependencies
-  indirect-failed      Blocked by package that failed to build
-  indirect-preskipped  Blocked by preskipped package
-  indirect-prefailed   Blocked by prefailed package
-  indirect-unresolved  Blocked by package with unresolved dependencies
-
-Examples:
-  bob status                           Show pending/failed packages
-  bob status -a                        Show all packages
-  bob status -s preskipped,prefailed   Show all pre-* packages
-  bob status py-                       Show packages matching 'py-'
-  bob status flim glib2 mutt           Show multiple package matches
-  bob status -s failed -o pkgpath      Show failed with pkgpath column
-  bob status -Ho pkgpath -s pending    Show all pending pkgpath builds
-  bob status -o pkgpath,multi_version  Show MULTI_VERSION flags
-")]
+    #[command(after_long_help = cmd::status::after_help())]
     Status {
         #[command(flatten)]
         args: cmd::status::StatusArgs,

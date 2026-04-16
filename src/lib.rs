@@ -109,7 +109,9 @@ pub use db::Database;
 pub use history::{History, HistoryKind, format_duration};
 pub use init::Init;
 pub use makejobs::PkgMakeJobs;
-pub use pkgstate::{PackageCounts, PackageState, PackageStateKind};
+pub use pkgstate::{
+    PackageCounts, PackageState, PackageStateAlias, PackageStateKind, parse_status_filter,
+};
 pub use sandbox::Sandbox;
 pub use scan::{ResolvedPackage, Scan, ScanResult, ScanSummary};
 pub use scheduler::{PackageNode, ScheduledPackage, Scheduler};

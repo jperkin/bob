@@ -286,34 +286,48 @@ impl ScanSummary {
     /**
      * Print package counts.
      *
-     * If `up_to_date` is provided, shows "to build" and "up-to-date" counts.
-     * Otherwise shows "buildable" count.
+     * Every count label is drawn directly from [`crate::PackageStateKind`]
+     * or [`crate::PackageStateAlias`] so the output stays in lockstep with
+     * the strings accepted by filter parsers.
+     *
+     * If `up_to_date` is provided (i.e. the up-to-date check has run),
+     * the pending count is split into `pending` and `up-to-date`.
+     * Otherwise every buildable package is still in `Pending` by the
+     * state machine, so only `pending` is shown.
      */
     pub fn print_counts(&self, up_to_date: Option<usize>) {
-        use crate::PackageStateKind::*;
+        use crate::{PackageStateAlias, PackageStateKind};
+        use std::fmt::Write as _;
         let c = self.counts();
         let s = &c.states;
-        let indirect = s[IndirectPreSkipped]
-            + s[IndirectPreFailed]
-            + s[IndirectUnresolved]
-            + s[IndirectFailed];
-        match up_to_date {
-            Some(n) => println!(
-                "{} to build, {} up-to-date, {} prefailed, {} blocked, {} unresolved",
-                c.buildable.saturating_sub(n),
-                n,
-                s[PreSkipped] + s[PreFailed],
-                indirect,
-                s[Unresolved]
-            ),
-            None => println!(
-                "{} buildable, {} prefailed, {} blocked, {} unresolved",
-                c.buildable,
-                s[PreSkipped] + s[PreFailed],
-                indirect,
-                s[Unresolved]
-            ),
+        let pending_count = match up_to_date {
+            Some(n) => c.buildable.saturating_sub(n),
+            None => c.buildable,
+        };
+        let mut line = String::new();
+        let mut append = |n: usize, label: &str| {
+            if !line.is_empty() {
+                line.push_str(", ");
+            }
+            let _ = write!(line, "{n} {label}");
+        };
+        append(pending_count, PackageStateKind::Pending.into());
+        if let Some(n) = up_to_date {
+            append(n, PackageStateKind::UpToDate.into());
         }
+        append(
+            s.count_alias(PackageStateAlias::Skipped),
+            PackageStateAlias::Skipped.into(),
+        );
+        append(
+            s.count_alias(PackageStateAlias::Blocked),
+            PackageStateAlias::Blocked.into(),
+        );
+        append(
+            s[PackageStateKind::Unresolved],
+            PackageStateKind::Unresolved.into(),
+        );
+        println!("{line}");
     }
 }
 
@@ -1716,7 +1730,12 @@ impl Scan {
 
         let errors: Vec<_> = result.errors().collect();
         if !errors.is_empty() {
-            eprintln!("Scan/resolve errors:\n  {}", errors.join("\n  "));
+            eprintln!("Scan/resolve errors:");
+            for e in &errors {
+                for line in e.lines() {
+                    eprintln!("  {line}");
+                }
+            }
             if strict {
                 bail!("Aborting due to scan/resolve errors (strict_scan enabled)");
             }

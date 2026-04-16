@@ -123,7 +123,12 @@ pub fn print_presolve(config: &Config, output: Option<&PathBuf>, sort: bool) -> 
 
     let errors: Vec<_> = result.errors().collect();
     if !errors.is_empty() {
-        eprintln!("Scan/resolve errors:\n  {}", errors.join("\n  "));
+        eprintln!("Scan/resolve errors:");
+        for e in &errors {
+            for line in e.lines() {
+                eprintln!("  {line}");
+            }
+        }
     }
 
     if sort {

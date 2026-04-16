@@ -21,9 +21,9 @@ use anyhow::{Result, bail};
 use clap::Subcommand;
 use crossterm::terminal;
 
-use bob::PackageState;
 use bob::db::Database;
 use bob::try_println;
+use bob::{PackageState, PackageStateKind};
 
 use super::util::pkg_pattern;
 
@@ -266,8 +266,10 @@ fn print_build_tree(
         }
     };
 
+    let up_to_date_label: &str = PackageStateKind::UpToDate.into();
+
     if packages.is_empty() {
-        println!("All packages are up-to-date");
+        println!("All packages are {up_to_date_label}");
         return Ok(());
     }
 
@@ -325,8 +327,13 @@ fn print_build_tree(
         }
     };
 
+    let up_to_date_suffix = format!(" ({up_to_date_label})");
     let term_width = terminal::size().map(|(w, _)| w as usize).unwrap_or(80);
-    let suffix_len = if include_all { 13 } else { 0 };
+    let suffix_len = if include_all {
+        up_to_date_suffix.len()
+    } else {
+        0
+    };
 
     let mut indent_width = 1;
     for try_indent in [3, 2, 1] {
@@ -378,7 +385,7 @@ fn print_build_tree(
         for (i, pkg) in pkgs.iter().enumerate() {
             let name = display_name(pkg);
             let suffix = if include_all && up_to_date.contains(pkg) {
-                " (up-to-date)"
+                up_to_date_suffix.as_str()
             } else {
                 ""
             };

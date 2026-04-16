@@ -14,15 +14,21 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
+use std::io::IsTerminal;
 
 use anyhow::{Result, bail};
 use clap::Args;
+use clap::builder::styling::Style;
 use regex::Regex;
-use strum::{EnumProperty, VariantArray};
+use strum::{EnumCount, EnumProperty, IntoEnumIterator, VariantArray};
 
 use bob::db::{Database, PackageStatusRow};
-use bob::{ColumnAlign, Config, PackageState, PackageStateKind, Scheduler};
+use bob::{
+    ColumnAlign, Config, PackageState, PackageStateAlias, PackageStateKind, Scheduler,
+    parse_status_filter,
+};
 
 use super::util::pkg_pattern;
 use super::{Col, Formatter, OutputFormat};
@@ -30,24 +36,25 @@ use super::{Col, Formatter, OutputFormat};
 #[derive(Clone, Copy, strum::EnumProperty, strum::IntoStaticStr, strum::VariantArray)]
 #[strum(serialize_all = "snake_case")]
 enum StatusCol {
-    #[strum(props(default = "true", max = "40"))]
+    #[strum(props(default = "true", max = "40", desc = "Package name"))]
     Pkgname,
-    #[strum(props(max = "35"))]
+    #[strum(props(max = "35", desc = "Package path (category/name)"))]
     Pkgpath,
-    #[strum(props(default = "true"))]
+    #[strum(props(default = "true", desc = "Current build status"))]
     Status,
-    #[strum(props(default = "true"))]
+    #[strum(props(default = "true", desc = "Status detail or reason"))]
     Reason,
+    #[strum(props(desc = "MULTI_VERSION package build variables"))]
     MultiVersion,
-    #[strum(props(max = "6", align = "right"))]
+    #[strum(props(max = "6", align = "right", desc = "Number of dependent packages"))]
     Deps,
-    #[strum(props(max = "8", align = "right"))]
+    #[strum(props(max = "8", align = "right", desc = "Scheduler priority order"))]
     Priority,
-    #[strum(props(max = "8", align = "right"))]
+    #[strum(props(max = "8", align = "right", desc = "Previous build CPU time"))]
     Cpu,
-    #[strum(props(max = "9", align = "right"))]
+    #[strum(props(max = "9", align = "right", desc = "MAKE_JOBS allocation"))]
     MakeJobs,
-    #[strum(props(max = "9"))]
+    #[strum(props(max = "9", desc = "WRKOBJDIR routing (tmpfs or disk)"))]
     Wrkobjdir,
 }
 
@@ -67,6 +74,10 @@ impl StatusCol {
         self.get_str("default").is_some()
     }
 
+    fn desc(self) -> &'static str {
+        self.get_str("desc").expect("desc prop")
+    }
+
     fn find(name: &str) -> Option<Self> {
         Self::VARIANTS
             .iter()
@@ -75,8 +86,188 @@ impl StatusCol {
     }
 }
 
-fn parse_status(s: &str) -> Result<PackageStateKind, String> {
-    s.parse().map_err(|_| format!("unknown status '{}'", s))
+/**
+ * Order in which `Status values:` are listed in `--help`, by outcome
+ * relevance.  Sized by [`PackageStateKind::COUNT`] so adding a variant
+ * without extending this array fails to compile.
+ */
+const STATUS_DISPLAY_ORDER: [PackageStateKind; PackageStateKind::COUNT] = {
+    use PackageStateKind::*;
+    [
+        Pending,
+        UpToDate,
+        Success,
+        Failed,
+        PreSkipped,
+        PreFailed,
+        Unresolved,
+        IndirectFailed,
+        IndirectPreSkipped,
+        IndirectPreFailed,
+        IndirectUnresolved,
+    ]
+};
+
+/**
+ * Length of the longest item in an iterator of names, used by
+ * [`write_item`] so each section pads to its own longest value (matching
+ * clap's per-block alignment for `Possible values:`).
+ */
+fn longest<'a, I: IntoIterator<Item = &'a str>>(names: I) -> usize {
+    names.into_iter().map(str::len).fold(0, usize::max)
+}
+
+/**
+ * Whether to emit ANSI styling.  clap passes long_help/after_long_help
+ * through verbatim with no terminal detection, so we do it ourselves to
+ * keep piped output free of escape codes.
+ */
+fn styled() -> bool {
+    std::io::stdout().is_terminal()
+}
+
+/// clap's "header" style (bold + underline), or plain when not a tty.
+fn header_style() -> Style {
+    if styled() {
+        Style::new().bold().underline()
+    } else {
+        Style::new()
+    }
+}
+
+/// clap's "literal" style (bold), or plain when not a tty.
+fn literal_style() -> Style {
+    if styled() {
+        Style::new().bold()
+    } else {
+        Style::new()
+    }
+}
+
+/**
+ * Append a single `- name: description` line in clap's possible-values
+ * style.  `name_pad` is the longest name across the section so colons
+ * align and descriptions start at a uniform column.
+ */
+fn write_item(out: &mut String, name: &str, desc: &str, name_pad: usize, literal: Style) {
+    let padding = " ".repeat(name_pad.saturating_sub(name.len()) + 1);
+    let _ = writeln!(out, "- {literal}{name}{literal:#}:{padding}{desc}");
+}
+
+/**
+ * Render the `Possible values:` block listing every [`StatusCol`] variant.
+ *
+ * Heading wording and styling match clap's auto-generated possible-values
+ * block (see `-f, --format` in this command), so all flags read the same.
+ */
+fn columns_section() -> String {
+    let literal = literal_style();
+    let width = longest(StatusCol::VARIANTS.iter().map(<&str>::from));
+    let mut out = String::from("Possible values:\n");
+    for c in StatusCol::VARIANTS {
+        write_item(&mut out, <&str>::from(c), c.desc(), width, literal);
+    }
+    out
+}
+
+/**
+ * Render the `Possible values:` block for `-s`, combining canonical
+ * [`PackageStateKind`] values with [`PackageStateAlias`] entries marked
+ * `(alias)` inline.  Single combined block matches clap's possible-values
+ * format.
+ */
+fn status_section() -> String {
+    let literal = literal_style();
+    let width = longest(
+        PackageStateKind::iter()
+            .map(<&str>::from)
+            .chain(PackageStateAlias::iter().map(<&str>::from)),
+    );
+    let mut out = String::from("Possible values:\n");
+    for &k in &STATUS_DISPLAY_ORDER {
+        write_item(&mut out, <&str>::from(k), k.desc(), width, literal);
+    }
+    for a in PackageStateAlias::iter() {
+        let alias_desc = a.desc();
+        let desc = format!("{alias_desc} (alias)");
+        write_item(&mut out, <&str>::from(a), &desc, width, literal);
+    }
+    out
+}
+
+/**
+ * Render the `Examples:` section.
+ */
+fn examples_section() -> String {
+    let header = header_style();
+    let pending: &str = PackageStateKind::Pending.into();
+    let failed: &str = PackageStateKind::Failed.into();
+    let skipped: &str = PackageStateAlias::Skipped.into();
+    let pre_skipped: &str = PackageStateKind::PreSkipped.into();
+    let pre_failed: &str = PackageStateKind::PreFailed.into();
+
+    let examples = [
+        (
+            "bob status".into(),
+            format!("Show {pending}/{failed} packages"),
+        ),
+        ("bob status -a".into(), "Show all packages".into()),
+        (
+            format!("bob status -s {skipped}"),
+            format!("Show {pre_skipped} and {pre_failed}"),
+        ),
+        (
+            "bob status ^mutt- meta-pkgs/bulk".into(),
+            "Show multiple package or pkgpath matches".into(),
+        ),
+        (
+            format!("bob status -Ho pkgpath -s {pending}"),
+            format!("Show all {pending} pkgpath builds"),
+        ),
+    ];
+    let ex_width = examples
+        .iter()
+        .map(|(cmd, _)| cmd.len())
+        .fold(0, usize::max);
+    let mut out = format!("{header}Examples:{header:#}\n");
+    for (cmd, desc) in &examples {
+        let _ = writeln!(out, "  {cmd:w$}  {desc}", w = ex_width);
+    }
+    out
+}
+
+/**
+ * Long help for `-o`: short summary followed by the inline
+ * `Possible values:` block of column names.
+ *
+ * Trailing newline trimmed; clap adds its own paragraph break.
+ */
+fn columns_long_help() -> String {
+    format!(
+        "Columns to display (comma-separated; use -l to see all)\n\n{}",
+        columns_section().trim_end()
+    )
+}
+
+/**
+ * Long help for `-s`: short summary followed by the inline
+ * `Possible values:` block of status kinds and aliases.
+ *
+ * Trailing newline trimmed; clap adds its own paragraph break.
+ */
+fn status_long_help() -> String {
+    format!(
+        "Filter by status (repeatable or comma-separated)\n\n{}",
+        status_section().trim_end()
+    )
+}
+
+/**
+ * `after_long_help` for `bob status`.  Only the Examples section lives
+ * here; per-flag value lists are inline on their flags via `long_help`.
+ */
+pub fn after_help() -> String {
+    examples_section()
 }
 
 #[derive(Debug, Args)]
@@ -94,16 +285,17 @@ pub struct StatusArgs {
     #[arg(short = 'f', long, value_enum, default_value_t = OutputFormat::Table)]
     format: OutputFormat,
     /// Columns to display (comma-separated; use -l to see all)
-    #[arg(short = 'o', value_delimiter = ',')]
+    #[arg(short = 'o', long_help = columns_long_help(), value_delimiter = ',')]
     columns: Option<Vec<String>>,
     /// Filter by status (repeatable or comma-separated)
     #[arg(
         short = 's',
         long = "status",
-        value_parser = parse_status,
+        long_help = status_long_help(),
+        value_parser = parse_status_filter,
         value_delimiter = ',',
     )]
-    statuses: Vec<PackageStateKind>,
+    statuses: Vec<Vec<PackageStateKind>>,
     /// Package filters (regex on name or path)
     packages: Vec<String>,
 }
@@ -112,10 +304,11 @@ pub fn run(db: &Database, config: &Config, args: StatusArgs) -> Result<()> {
     if db.count_packages()? == 0 {
         bail!("No packages in database. Run 'bob scan' first.");
     }
+    let statuses: HashSet<PackageStateKind> = args.statuses.iter().flatten().copied().collect();
     print_build_status(
         db,
         config,
-        &args.statuses,
+        &statuses,
         args.columns.as_deref(),
         args.no_header,
         args.long,
@@ -135,7 +328,7 @@ pub fn run(db: &Database, config: &Config, args: StatusArgs) -> Result<()> {
 fn print_build_status(
     db: &Database,
     config: &Config,
-    statuses: &[PackageStateKind],
+    statuses: &HashSet<PackageStateKind>,
     columns: Option<&[String]>,
     no_header: bool,
     long: bool,
@@ -217,40 +410,38 @@ fn print_build_status(
         HashMap::new()
     };
 
-    let get_status = |pkg: &PackageStatusRow| -> (&'static str, String) {
+    let get_status = |pkg: &PackageStatusRow| -> (PackageStateKind, String) {
         if let Some(state) = pkg
             .build_outcome
             .and_then(|id| PackageState::from_db(id, pkg.outcome_detail.clone()))
         {
             let reason = state.detail().map(String::from).unwrap_or_default();
-            (state.status(), reason)
+            (state.kind(), reason)
         } else if let Some(reason) = &pkg.build_reason {
-            (PackageStateKind::Pending.into(), reason.clone())
+            (PackageStateKind::Pending, reason.clone())
         } else if let Some(reason) = &pkg.fail_reason {
             (
-                PackageStateKind::PreFailed.into(),
+                PackageStateKind::PreFailed,
                 format!("PKG_FAIL_REASON: {}", reason),
             )
         } else if let Some(reason) = &pkg.skip_reason {
             (
-                PackageStateKind::PreSkipped.into(),
+                PackageStateKind::PreSkipped,
                 format!("PKG_SKIP_REASON: {}", reason),
             )
         } else {
-            (PackageStateKind::Pending.into(), String::new())
+            (PackageStateKind::Pending, String::new())
         }
     };
 
-    let matches_status = |status: &str| -> bool {
+    let matches_status = |kind: PackageStateKind| -> bool {
         if !statuses.is_empty() {
-            return statuses.iter().any(|f| <&str>::from(f) == status);
+            return statuses.contains(&kind);
         }
         if show_all || !pkg_patterns.is_empty() {
             return true;
         }
-        let success: &str = PackageStateKind::Success.into();
-        let up_to_date: &str = PackageStateKind::UpToDate.into();
-        status != success && status != up_to_date
+        !matches!(kind, PackageStateKind::Success | PackageStateKind::UpToDate)
     };
 
     let mut rows: Vec<Vec<String>> = Vec::new();
@@ -267,9 +458,9 @@ fn print_build_status(
             continue;
         }
 
-        let (status, reason) = get_status(pkg);
+        let (kind, reason) = get_status(pkg);
 
-        if !matches_status(status) {
+        if !matches_status(kind) {
             continue;
         }
 
@@ -287,7 +478,7 @@ fn print_build_status(
             .map(|&col| match col {
                 "pkgname" => pkg.pkgname.clone(),
                 "pkgpath" => pkg.pkgpath.clone(),
-                "status" => status.to_string(),
+                "status" => <&str>::from(kind).to_string(),
                 "reason" => reason.clone(),
                 "multi_version" => multi_version.clone(),
                 "deps" => sp.dep_count.to_string(),
