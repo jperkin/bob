@@ -323,9 +323,10 @@ impl PackageCounts {
         self.0[state.kind() as usize] += 1;
     }
 
-    /// Packages that built successfully.
-    pub fn succeeded(&self) -> usize {
-        self[PackageStateKind::Success]
+    /// Packages with a successful outcome: freshly built (`Success`) plus
+    /// already-current binaries (`UpToDate`).
+    pub fn successful(&self) -> usize {
+        self[PackageStateKind::Success] + self[PackageStateKind::UpToDate]
     }
 
     /// Packages that failed to build.
@@ -356,10 +357,10 @@ impl PackageCounts {
             + self[IndirectFailed]
     }
 
-    /// Total packages: succeeded + failed + up-to-date + masked.
+    /// Total packages: successful + failed + masked.
     /// Excludes scan failures and unresolved (listed separately).
     pub fn total(&self) -> usize {
-        self.succeeded() + self.failed() + self.up_to_date() + self.masked()
+        self.successful() + self.failed() + self.masked()
     }
 }
 

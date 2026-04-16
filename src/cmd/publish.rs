@@ -706,19 +706,35 @@ fn write_text_report(
 
     let left = [
         ("Total", c.states.total()),
-        ("Succeeded", c.states.succeeded()),
+        ("Successful", c.states.successful()),
         ("Failed", c.states.failed()),
         ("UpToDate", c.states.up_to_date()),
         ("Masked", c.states.masked()),
     ];
 
+    /* Width = longest "Label:" + 1 trailing space. */
+    let left_label_w = left.iter().map(|(k, _)| k.len()).fold(0, usize::max) + 2;
+    let right_label_w = right.iter().map(|(k, _)| k.len()).fold(0, usize::max) + 2;
+
     for (i, (lk, lv)) in left.iter().enumerate() {
         let right_part = if i < right.len() {
-            format!("  {:<13}{}", format!("{}:", right[i].0), right[i].1)
+            format!(
+                "  {:<w$}{}",
+                format!("{}:", right[i].0),
+                right[i].1,
+                w = right_label_w
+            )
         } else {
             String::new()
         };
-        writeln!(file, "{:<12}{:>5}{}", format!("{}:", lk), lv, right_part)?;
+        writeln!(
+            file,
+            "{:<w$}{:>5}{}",
+            format!("{}:", lk),
+            lv,
+            right_part,
+            w = left_label_w
+        )?;
     }
 
     let mut maintainers: HashMap<String, String> = HashMap::new();
@@ -900,9 +916,10 @@ fn write_variables_json(
         pkgsrc.insert(key.clone(), value.clone().into());
     }
 
-    let counts: serde_json::Map<_, _> = PackageStateKind::iter()
+    let mut counts: serde_json::Map<_, _> = PackageStateKind::iter()
         .map(|kind| (kind.as_ref().to_string(), states[kind].into()))
         .collect();
+    counts.insert("total".to_string(), states.total().into());
 
     let mut report = serde_json::Map::new();
     report.insert("date".to_string(), build_id.into());
@@ -1311,7 +1328,7 @@ fn write_statistics_table(file: &mut std::fs::File, summary: &BuildSummary) -> R
     writeln!(file, "<table class=\"vars stats\">")?;
     writeln!(file, "<tr><th colspan=\"2\">Statistics</th></tr>")?;
     write_var_row(file, "Total", &c.states.total().to_string())?;
-    write_var_row(file, "Succeeded", &c.states.succeeded().to_string())?;
+    write_var_row(file, "Successful", &c.states.successful().to_string())?;
     write_var_row(file, "Failed", &c.states.failed().to_string())?;
     write_var_row(file, "UpToDate", &c.states.up_to_date().to_string())?;
     write_var_row(file, "Masked", &c.states.masked().to_string())?;
