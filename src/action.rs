@@ -17,8 +17,8 @@
 //! Sandbox action configuration.
 //!
 //! This module defines the types used to configure sandbox setup and per-build
-//! actions.  Actions are specified in the `sandboxes.setup` and
-//! `sandboxes.build` tables of the Lua configuration file.
+//! actions.  Actions are specified in the `sandboxes.setup` table (sandbox-level)
+//! and the `sandboxes.hooks` table (per-package) of the Lua configuration file.
 //!
 //! # Action Types
 //!
@@ -27,7 +27,7 @@
 //! - **mount**: Mount a filesystem inside the sandbox
 //! - **copy**: Copy files or directories into the sandbox
 //! - **symlink**: Create a symbolic link inside the sandbox
-//! - **cmd**: Execute shell commands during setup/teardown
+//! - **cmd**: Execute shell commands during create/destroy
 //! - **macos-mdns-listener**: Configure macOS DNS resolution (no-op elsewhere)
 //!
 //! # Execution Order

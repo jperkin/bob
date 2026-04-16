@@ -1549,7 +1549,7 @@ impl PackageBuild {
 
         let _ = status_tx.send(ChannelCommand::StageUpdate(
             self.worker_id,
-            Some("teardown".to_string()),
+            Some("post-build destroy hooks".to_string()),
         ));
 
         let measure_wrkdir = || -> Option<u64> {
@@ -2204,8 +2204,10 @@ impl Build {
                             );
                             let _guard = span.enter();
 
-                            let _ = manager_tx
-                                .send(ChannelCommand::StageUpdate(i, Some("setup".to_string())));
+                            let _ = manager_tx.send(ChannelCommand::StageUpdate(
+                                i,
+                                Some("pre-build create hooks".to_string()),
+                            ));
                             let log_dir = pkg.session.config.logdir().join(pkgname.pkgname());
                             /* Can only fail if the clock is before 1970. */
                             let timestamp = crate::epoch_secs().unwrap_or(0);

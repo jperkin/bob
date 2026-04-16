@@ -603,8 +603,8 @@ impl Scan {
 
         /*
          * For non-full-tree scans, prune already-cached packages from
-         * incoming before sandbox creation to avoid unnecessary
-         * setup/teardown.  If all initial packages are cached, check
+         * incoming before sandbox creation to avoid unnecessary sandbox
+         * create/destroy work.  If all initial packages are cached, check
          * for unscanned dependencies (resume after interrupt) before
          * deciding there's nothing to do.
          */
