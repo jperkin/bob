@@ -780,7 +780,7 @@ fn write_text_report(
             for e in &sorted {
                 let pkgname = e.build2_pkgname.as_deref().unwrap_or("-");
                 let breaks = breaks_counts.get(pkgname).copied().unwrap_or(0);
-                let previously: &str = e.build1_outcome.map(|o| o.into()).unwrap_or("");
+                let previously: &str = e.build1_outcome.map_or("absent", |o| o.into());
                 let breaks_str = if breaks > 0 {
                     breaks.to_string()
                 } else {
@@ -1700,7 +1700,7 @@ fn write_diff_section(
             None => (0, String::new()),
         };
 
-        let previously: &str = e.build1_outcome.map(|o| o.into()).unwrap_or("");
+        let previously: &str = e.build1_outcome.map_or("absent", |o| o.into());
 
         let escaped = escape_html(pkgname);
         let pkg_link = match info.and_then(|i| i.failed_log.as_deref()) {
