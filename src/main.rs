@@ -339,6 +339,9 @@ enum UtilCmd {
     ImportScan {
         /// Path to the scan file (pscan or presolve format)
         file: PathBuf,
+        /// Import only; skip the resolve step
+        #[arg(long)]
+        no_resolve: bool,
     },
     /// Output raw scan data from the database (without resolution)
     PrintPscan {
@@ -660,10 +663,10 @@ fn run() -> Result<()> {
             cmd::util::print_presolve(&config, output.as_ref(), sort)?;
         }
         Cmd::Util {
-            cmd: UtilCmd::ImportScan { file },
+            cmd: UtilCmd::ImportScan { file, no_resolve },
         } => {
             let config = Config::load(args.config.as_deref())?;
-            cmd::util::import_scan(&config, &file)?;
+            cmd::util::import_scan(&config, &file, no_resolve)?;
         }
         Cmd::Util {
             cmd: UtilCmd::PrintPscan { output },

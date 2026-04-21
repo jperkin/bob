@@ -107,7 +107,7 @@ pub fn presolve(file: &PathBuf, output: Option<&PathBuf>, strict: bool, verbose:
     Ok(())
 }
 
-pub fn import_scan(config: &Config, file: &PathBuf) -> Result<()> {
+pub fn import_scan(config: &Config, file: &PathBuf, no_resolve: bool) -> Result<()> {
     let db = Database::open(config.dbdir())?;
 
     println!("Importing scan data from {}", file.display());
@@ -148,6 +148,10 @@ pub fn import_scan(config: &Config, file: &PathBuf) -> Result<()> {
             "Warning: {} record(s) failed to parse, continuing anyway",
             error_count
         );
+    }
+
+    if no_resolve {
+        return Ok(());
     }
 
     let mut scan = Scan::new(config);
