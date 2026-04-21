@@ -69,7 +69,7 @@ pub fn presolve(file: &PathBuf, output: Option<&PathBuf>, strict: bool, verbose:
 
     let mut scan = Scan::default();
     scan.set_verbosity(verbose);
-    let result = scan.resolve(scan_data)?;
+    let result = scan.resolve(scan_data.into_iter().map(Ok))?;
 
     let resolve_errors: Vec<_> = result.errors().collect();
     if !resolve_errors.is_empty() {
@@ -107,6 +107,57 @@ pub fn presolve(file: &PathBuf, output: Option<&PathBuf>, strict: bool, verbose:
     Ok(())
 }
 
+pub fn import_scan(config: &Config, file: &PathBuf) -> Result<()> {
+    let db = Database::open(config.dbdir())?;
+
+    println!("Importing scan data from {}", file.display());
+
+    let f = File::open(file).with_context(|| format!("Failed to open {}", file.display()))?;
+    let reader = BufReader::new(f);
+
+    let mut error_count: usize = 0;
+
+    let tx = db.transaction()?;
+    db.clear_scan()?;
+    for result in ScanIndex::from_reader(reader) {
+        match result {
+            Ok(index) => {
+                let pkgpath = index
+                    .pkg_location
+                    .as_ref()
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                db.store_package(&pkgpath, &index).with_context(|| {
+                    format!("Failed to store package {}", index.pkgname.pkgname())
+                })?;
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                error_count += 1;
+            }
+        }
+    }
+
+    if error_count > 0 && config.strict_scan() {
+        bail!("{} record(s) failed to parse", error_count);
+    }
+    tx.commit()?;
+
+    if error_count > 0 {
+        eprintln!(
+            "Warning: {} record(s) failed to parse, continuing anyway",
+            error_count
+        );
+    }
+
+    let mut scan = Scan::new(config);
+    let result = scan.resolve_with_report(&db, config.strict_scan())?;
+    result.print_resolved();
+    result.print_counts(None);
+
+    Ok(())
+}
+
 pub fn print_presolve(config: &Config, output: Option<&PathBuf>, sort: bool) -> Result<()> {
     let db = Database::open(config.dbdir())?;
 
@@ -118,8 +169,8 @@ pub fn print_presolve(config: &Config, output: Option<&PathBuf>, sort: bool) -> 
     let mut scan = Scan::new(config);
     scan.init_from_db(&db)?;
 
-    let scan_data = db.get_all_scan_data()?;
-    let mut result = scan.resolve(scan_data)?;
+    let mut result =
+        db.with_scan_data(|pull| scan.resolve(std::iter::from_fn(|| pull().transpose())))?;
 
     let errors: Vec<_> = result.errors().collect();
     if !errors.is_empty() {

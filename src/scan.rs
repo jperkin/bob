@@ -1144,17 +1144,17 @@ impl Scan {
          * to the missing set. If a match exists, add it to the active set.
          * Continue until no new packages are activated.
          */
-        let all_scan_data = db.get_all_scan_data()?;
-
         let mut available_pkgnames: HashSet<PkgName> = HashSet::new();
         let mut packages: IndexMap<PkgName, ScanIndex> = IndexMap::new();
-
-        for pkg in all_scan_data {
-            if !packages.contains_key(&pkg.pkgname) {
-                available_pkgnames.insert(pkg.pkgname.clone());
-                packages.insert(pkg.pkgname.clone(), pkg);
+        db.with_scan_data(|pull| {
+            while let Some(pkg) = pull()? {
+                if !packages.contains_key(&pkg.pkgname) {
+                    available_pkgnames.insert(pkg.pkgname.clone());
+                    packages.insert(pkg.pkgname.clone(), pkg);
+                }
             }
-        }
+            Ok(())
+        })?;
 
         let pkgbase_map = Self::build_pkgbase_map(&available_pkgnames);
 
@@ -1425,7 +1425,10 @@ impl Scan {
      * presolve behavior. This avoids scanning/resolving thousands of unneeded
      * packages when building a small subset.
      */
-    pub fn resolve(&mut self, scan_data: Vec<ScanIndex>) -> Result<ScanSummary> {
+    pub fn resolve<I>(&mut self, scan_data: I) -> Result<ScanSummary>
+    where
+        I: IntoIterator<Item = Result<ScanIndex>>,
+    {
         info!(
             done_pkgpaths = self.done.len(),
             "Starting dependency resolution"
@@ -1437,6 +1440,7 @@ impl Scan {
         let use_active_filter = !self.full_tree && !self.initial_pkgpaths.is_empty();
 
         for pkg in scan_data {
+            let pkg = pkg?;
             if self.packages.contains_key(&pkg.pkgname) {
                 debug!(pkgname = %pkg.pkgname.pkgname(), "Skipping duplicate PKGNAME");
                 continue;
@@ -1637,6 +1641,17 @@ impl Scan {
             }
         }
 
+        /*
+         * Release resolver-only caches before constructing the result
+         * Vec, which otherwise doubles peak memory for large scans.
+         */
+        drop(match_cache);
+        drop(patterns);
+        drop(pkg_locations);
+        drop(pkgbase_map);
+        drop(pkgnames);
+        drop(resolved);
+
         Self::propagate_failures(&depends, &mut skip_reasons);
 
         let mut packages: Vec<ScanResult> = Vec::new();
@@ -1720,8 +1735,27 @@ impl Scan {
     ) -> Result<ScanSummary> {
         crate::print_status("Resolving dependencies");
         let start = std::time::Instant::now();
-        let scan_data = db.get_all_scan_data()?;
-        let result = self.resolve(scan_data)?;
+        let mut result =
+            db.with_scan_data(|pull| self.resolve(std::iter::from_fn(|| pull().transpose())))?;
+        /*
+         * Release ALL_DEPENDS now that resolution is done; the DB
+         * writers below only need the resolved names, and keeping
+         * the pattern strings alive through the write phase
+         * measurably raises peak memory on large trees.
+         */
+        for pkg in &mut result.packages {
+            match pkg {
+                ScanResult::Buildable(resolved) => {
+                    resolved.index.all_depends = None;
+                }
+                ScanResult::Skipped { index, .. } => {
+                    if let Some(idx) = index {
+                        idx.all_depends = None;
+                    }
+                }
+                ScanResult::ScanFail { .. } => {}
+            }
+        }
         db.store_resolved_selection(&result)?;
         db.store_resolved_deps(&result)?;
         db.store_scan_skipped(&result)?;

@@ -274,9 +274,7 @@ impl Database {
         self.conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
-             PRAGMA cache_size = -64000;
              PRAGMA temp_store = MEMORY;
-             PRAGMA mmap_size = 268435456;
              PRAGMA foreign_keys = ON;",
         )?;
         Ok(())
@@ -513,23 +511,6 @@ impl Database {
     }
 
     /**
-     * Get package ID by name.
-     */
-    pub fn get_package_id(&self, pkgname: &str) -> Result<Option<i64>> {
-        let result = self.conn.query_row(
-            "SELECT id FROM packages WHERE pkgname = ?1",
-            [pkgname],
-            |row| row.get(0),
-        );
-
-        match result {
-            Ok(id) => Ok(Some(id)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /**
      * Get pkgname by package ID.
      */
     pub fn get_pkgname(&self, package_id: i64) -> Result<String> {
@@ -677,25 +658,34 @@ impl Database {
     }
 
     /**
-     * Load all ScanIndex data in one query.
+     * Stream ScanIndex rows from the packages table to a caller-supplied
+     * scope without buffering the full result set.
      */
-    pub fn get_all_scan_data(&self) -> Result<Vec<ScanIndex>> {
+    pub fn with_scan_data<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&mut dyn FnMut() -> Result<Option<ScanIndex>>) -> Result<R>,
+    {
         let mut stmt = self
             .conn
             .prepare("SELECT id, scan_data FROM packages ORDER BY id")?;
-        let rows = stmt.query_map([], |row| {
+        let mut rows = stmt.query([])?;
+        let mut pull = || {
+            let Some(row) = rows.next()? else {
+                return Ok(None);
+            };
             let id: i64 = row.get(0)?;
             let json: String = row.get(1)?;
-            Ok((id, json))
-        })?;
-        let mut results = Vec::new();
-        for row in rows {
-            let (id, json) = row?;
-            let index: ScanIndex = serde_json::from_str(&json)
+            let mut index: ScanIndex = serde_json::from_str(&json)
                 .with_context(|| format!("Failed to deserialize scan data for package {}", id))?;
-            results.push(index);
-        }
-        Ok(results)
+            index.scan_depends = None;
+            index.no_bin_on_ftp = None;
+            index.restricted = None;
+            index.categories = None;
+            index.maintainer = None;
+            index.use_destdir = None;
+            Ok(Some(index))
+        };
+        f(&mut pull)
     }
 
     /**
@@ -775,39 +765,41 @@ impl Database {
      * Store resolved dependencies from a ScanSummary.
      */
     pub fn store_resolved_deps(&self, summary: &crate::scan::ScanSummary) -> Result<()> {
-        let mut resolved_deps: Vec<(i64, i64)> = Vec::new();
+        let id_map: HashMap<String, i64> = self
+            .conn
+            .prepare("SELECT pkgname, id FROM packages")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+
+        let tx = self.transaction()?;
+        let mut stmt = self.conn.prepare(
+            "INSERT OR IGNORE INTO resolved_depends (package_id, depends_on_id) VALUES (?1, ?2)",
+        )?;
+        let mut count: usize = 0;
         for pkg in &summary.packages {
-            match pkg {
-                ScanResult::Buildable(resolved) => {
-                    if let Some(pkg_id) = self.get_package_id(resolved.pkgname().pkgname())? {
-                        for dep in resolved.depends() {
-                            if let Some(dep_id) = self.get_package_id(dep.pkgname())? {
-                                resolved_deps.push((pkg_id, dep_id));
-                            }
-                        }
-                    }
-                }
+            let (pkgname, deps): (&str, &[PkgName]) = match pkg {
+                ScanResult::Buildable(r) => (r.pkgname().pkgname(), r.depends()),
                 ScanResult::Skipped {
-                    index,
+                    index: Some(idx),
                     resolved_depends,
                     ..
-                } => {
-                    let Some(idx) = index else { continue };
-                    if let Some(pkg_id) = self.get_package_id(idx.pkgname.pkgname())? {
-                        for dep in resolved_depends {
-                            if let Some(dep_id) = self.get_package_id(dep.pkgname())? {
-                                resolved_deps.push((pkg_id, dep_id));
-                            }
-                        }
-                    }
+                } => (idx.pkgname.pkgname(), resolved_depends),
+                _ => continue,
+            };
+            let Some(&pkg_id) = id_map.get(pkgname) else {
+                continue;
+            };
+            for dep in deps {
+                if let Some(&dep_id) = id_map.get(dep.pkgname()) {
+                    stmt.execute(params![pkg_id, dep_id])?;
+                    count += 1;
                 }
-                ScanResult::ScanFail { .. } => {}
             }
         }
-
-        if !resolved_deps.is_empty() {
-            self.store_resolved_dependencies_batch(&resolved_deps)?;
-            debug!(count = resolved_deps.len(), "Stored resolved dependencies");
+        drop(stmt);
+        tx.commit()?;
+        if count > 0 {
+            debug!(count, "Stored resolved dependencies");
         }
         Ok(())
     }
@@ -895,21 +887,6 @@ impl Database {
                 continue;
             };
             stmt.execute([pkgname.pkgname()])?;
-        }
-        drop(stmt);
-        tx.commit()
-    }
-
-    /**
-     * Store resolved dependencies in batch.
-     */
-    fn store_resolved_dependencies_batch(&self, deps: &[(i64, i64)]) -> Result<()> {
-        let tx = self.transaction()?;
-        let mut stmt = self.conn.prepare(
-            "INSERT OR IGNORE INTO resolved_depends (package_id, depends_on_id) VALUES (?1, ?2)",
-        )?;
-        for (package_id, depends_on_id) in deps {
-            stmt.execute(params![package_id, depends_on_id])?;
         }
         drop(stmt);
         tx.commit()

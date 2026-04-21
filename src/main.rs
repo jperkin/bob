@@ -26,10 +26,6 @@ use bob::logging;
 use bob::sandbox::{Sandbox, SandboxScope};
 use bob::scan::Scan;
 use clap::{Parser, Subcommand};
-use indexmap::IndexMap;
-use pkgsrc::ScanIndex;
-use std::fs::File;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -608,8 +604,8 @@ fn run() -> Result<()> {
             let mut scan = Scan::new(&config);
             scan.init_from_db(&db)?;
 
-            let scan_data = db.get_all_scan_data()?;
-            let result = scan.resolve(scan_data)?;
+            let result =
+                db.with_scan_data(|pull| scan.resolve(std::iter::from_fn(|| pull().transpose())))?;
 
             // Build DAG output
             let mut edges: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -667,58 +663,7 @@ fn run() -> Result<()> {
             cmd: UtilCmd::ImportScan { file },
         } => {
             let config = Config::load(args.config.as_deref())?;
-            let db = Database::open(config.dbdir())?;
-
-            println!("Importing scan data from {}", file.display());
-
-            let f = File::open(&file)?;
-            let reader = BufReader::new(f);
-
-            // Parse all ScanIndex entries and group by pkgpath (preserving order)
-            let mut by_pkgpath: IndexMap<String, Vec<ScanIndex>> = IndexMap::new();
-            let mut errors: Vec<String> = Vec::new();
-            for result in ScanIndex::from_reader(reader) {
-                match result {
-                    Ok(index) => {
-                        let pkgpath = index
-                            .pkg_location
-                            .as_ref()
-                            .map(|p| p.to_string())
-                            .unwrap_or_else(|| "unknown".to_string());
-                        by_pkgpath.entry(pkgpath).or_default().push(index);
-                    }
-                    Err(e) => {
-                        errors.push(e.to_string());
-                    }
-                }
-            }
-
-            if !errors.is_empty() {
-                eprintln!();
-                for err in &errors {
-                    eprintln!("{}", err);
-                }
-                if config.strict_scan() {
-                    bail!("{} record(s) failed to parse", errors.len());
-                }
-                eprintln!(
-                    "Warning: {} record(s) failed to parse, continuing anyway",
-                    errors.len()
-                );
-                eprintln!();
-            }
-
-            // Clear existing data and import
-            db.clear_scan()?;
-            for (pkgpath, indexes) in &by_pkgpath {
-                db.store_scan_pkgpath(pkgpath, indexes)?;
-            }
-
-            // Resolve dependencies (consistent with manual scan)
-            let mut scan = Scan::new(&config);
-            let result = scan.resolve_with_report(&db, config.strict_scan())?;
-            result.print_resolved();
-            result.print_counts(None);
+            cmd::util::import_scan(&config, &file)?;
         }
         Cmd::Util {
             cmd: UtilCmd::PrintPscan { output },

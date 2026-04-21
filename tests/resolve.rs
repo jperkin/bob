@@ -21,7 +21,9 @@ fn get_scan_result() -> &'static (ScanSummary, usize) {
         let count = scan_data.len();
 
         let mut scan = Scan::default();
-        let result = scan.resolve(scan_data).expect("failed to resolve");
+        let result = scan
+            .resolve(scan_data.into_iter().map(Ok))
+            .expect("failed to resolve");
 
         (result, count)
     })
@@ -164,7 +166,7 @@ PKG_FAIL_REASON=
 
     let scan_data = parse_scan_data(data);
     let mut scan = Scan::default();
-    let result = scan.resolve(scan_data);
+    let result = scan.resolve(scan_data.into_iter().map(Ok));
 
     // Should fail with circular dependency error
     assert!(result.is_err(), "circular dependencies should be detected");
