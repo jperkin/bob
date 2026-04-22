@@ -275,6 +275,9 @@ enum Cmd {
         /// Show what would be done without uploading
         #[arg(short = 'n', long)]
         dry_run: bool,
+        /// Build ID to use as baseline for diff (default: previous build)
+        #[arg(short, long, value_name = "BUILD_ID")]
+        baseline: Option<String>,
     },
     /// Remove current build state (database and build logs)
     Clean {
@@ -527,6 +530,7 @@ fn run() -> Result<()> {
             report,
             email,
             dry_run,
+            baseline,
         } => {
             let config = Config::load(args.config.as_deref())?;
             logging::init(config.dbdir(), config.log_level())?;
@@ -540,7 +544,15 @@ fn run() -> Result<()> {
             }
 
             let db = Database::open(config.dbdir())?;
-            cmd::publish::run(&config, &db, packages, report, email, dry_run)?;
+            cmd::publish::run(
+                &config,
+                &db,
+                packages,
+                report,
+                email,
+                dry_run,
+                baseline.as_deref(),
+            )?;
         }
         Cmd::Clean { logs_only } => {
             let config = Config::load(args.config.as_deref())?;

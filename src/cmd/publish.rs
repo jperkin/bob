@@ -68,6 +68,7 @@ pub fn run(
     report: bool,
     email: bool,
     dry_run: bool,
+    baseline: Option<&str>,
 ) -> Result<()> {
     let build_id = db.build_id()?;
 
@@ -80,7 +81,7 @@ pub fn run(
     }
 
     if report || email {
-        generate_reports(config, db, &build_id)?;
+        generate_reports(config, db, &build_id, baseline)?;
     }
 
     if report {
@@ -166,7 +167,12 @@ fn publish_packages(config: &Config, db: &Database, dry_run: bool) -> Result<Pub
     })
 }
 
-fn generate_reports(config: &Config, db: &Database, build_id: &str) -> Result<()> {
+fn generate_reports(
+    config: &Config,
+    db: &Database,
+    build_id: &str,
+    baseline: Option<&str>,
+) -> Result<()> {
     let publish = config
         .publish()
         .ok_or_else(|| anyhow::anyhow!("No publish section in configuration"))?;
@@ -196,12 +202,8 @@ fn generate_reports(config: &Config, db: &Database, build_id: &str) -> Result<()
         .as_ref()
         .map(|u| format!("{}/{}", u, build_id));
 
-    let diff = match db.list_history_builds() {
-        Ok(builds) if builds.len() >= 2 => db
-            .compute_build_diff(&builds[1].build_id, &builds[0].build_id)
-            .ok(),
-        _ => None,
-    };
+    let diff = resolve_baseline(db, build_id, baseline)?
+        .and_then(|b| db.compute_build_diff(&b, build_id).ok());
 
     let commits = diff
         .as_ref()
@@ -247,6 +249,29 @@ fn generate_reports(config: &Config, db: &Database, build_id: &str) -> Result<()
     )?;
 
     Ok(())
+}
+
+fn resolve_baseline(
+    db: &Database,
+    build_id: &str,
+    baseline: Option<&str>,
+) -> Result<Option<String>> {
+    let builds = db.list_history_builds()?;
+    match baseline {
+        Some(b) => {
+            if b == build_id {
+                bail!("--baseline must differ from the current build ({build_id})");
+            }
+            if !builds.iter().any(|h| h.build_id == b) {
+                bail!("Build ID '{b}' not found in history");
+            }
+            Ok(Some(b.to_string()))
+        }
+        None => Ok(builds
+            .iter()
+            .find(|h| h.build_id != build_id)
+            .map(|h| h.build_id.clone())),
+    }
 }
 
 fn publish_report(config: &Config, build_id: &str, dry_run: bool) -> Result<()> {
