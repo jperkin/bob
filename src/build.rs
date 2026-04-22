@@ -319,7 +319,6 @@ pub fn pkg_up_to_date(
     let recorded_deps: HashSet<&str> = pkg
         .plist()
         .build_depends()
-        .into_iter()
         .filter(|l| !l.is_empty())
         .collect();
     let expected_deps: HashSet<&str> = depends.iter().copied().collect();

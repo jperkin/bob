@@ -1876,7 +1876,7 @@ fn test_multi_version_multiple_records_build_all_variants() -> Result<()> {
         );
     }
 
-    let all_status = db.get_all_package_status(true)?;
+    let all_status = db.get_all_package_status()?;
     let lingering_pending: Vec<_> = all_status
         .into_iter()
         .filter(|p| {
@@ -1983,7 +1983,7 @@ SCAN_DEPENDS=
     .parse()?;
     db.store_package("test/extra", &extra)?;
 
-    let status_rows = db.get_all_package_status(true)?;
+    let status_rows = db.get_all_package_status()?;
     assert!(
         !status_rows.iter().any(|p| p.pkgname == "extra-1.0"),
         "unselected package should not appear in status rows"

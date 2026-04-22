@@ -367,8 +367,7 @@ fn print_build_status(
         .map(pkg_pattern)
         .collect::<Result<Vec<_>>>()?;
 
-    let need_multi = cols.contains(&"multi_version");
-    let status_rows = db.get_all_package_status(need_multi)?;
+    let status_rows = db.get_all_package_status()?;
     let status_map: HashMap<&str, &PackageStatusRow> = status_rows
         .iter()
         .map(|r| (r.pkgname.as_str(), r))

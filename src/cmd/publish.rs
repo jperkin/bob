@@ -738,13 +738,9 @@ fn write_text_report(
     }
 
     let mut maintainers: HashMap<String, String> = HashMap::new();
-    for (pkgname, _, scan_data, _, _) in db.get_report_data()? {
-        if let Some(json_str) = scan_data {
-            if let Ok(idx) = serde_json::from_str::<pkgsrc::ScanIndex>(&json_str) {
-                if let Some(m) = idx.maintainer {
-                    maintainers.insert(pkgname, m);
-                }
-            }
+    for (pkgname, idx, _, _) in db.get_report_data()? {
+        if let Some(m) = idx.maintainer {
+            maintainers.insert(pkgname, m);
         }
     }
 
@@ -867,12 +863,8 @@ fn write_machine_report(db: &Database, logdir: &Path) -> Result<()> {
         .map(|sp| (sp.pkg.to_string(), sp.dep_count))
         .collect();
 
-    for (pkgname, _, scan_data, outcome_id, detail) in db.get_report_data()? {
-        if let Some(ref json_str) = scan_data {
-            if let Ok(idx) = serde_json::from_str::<pkgsrc::ScanIndex>(json_str) {
-                write!(encoder, "{}", idx)?;
-            }
-        }
+    for (pkgname, idx, outcome_id, detail) in db.get_report_data()? {
+        write!(encoder, "{}", idx)?;
 
         // TODO: packages not in the scheduler (e.g. skipped at scan time)
         // won't have a dep_count entry.  These default to 1 (just themselves).
@@ -1170,13 +1162,9 @@ fn write_html_report(
     }
 
     let mut maintainers: HashMap<String, String> = HashMap::new();
-    for (pkgname, _, scan_data, _, _) in db.get_report_data()? {
-        if let Some(json_str) = scan_data {
-            if let Ok(idx) = serde_json::from_str::<pkgsrc::ScanIndex>(&json_str) {
-                if let Some(m) = idx.maintainer {
-                    maintainers.insert(pkgname, m);
-                }
-            }
+    for (pkgname, idx, _, _) in db.get_report_data()? {
+        if let Some(m) = idx.maintainer {
+            maintainers.insert(pkgname, m);
         }
     }
     write_failed_table(

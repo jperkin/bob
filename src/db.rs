@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use pkgsrc::{PkgName, PkgPath, ScanIndex};
+use pkgsrc::{AllDepends, PkgName, PkgPath, ScanIndex};
 use rusqlite::{Connection, params};
 use tracing::{debug, warn};
 
@@ -51,14 +51,8 @@ use crate::try_println;
 use crate::{HistoryKind, PackageState, PackageStateKind};
 
 /// Row type for [`Database::get_report_data`]:
-/// (pkgname, pkgpath, scan_data_json, outcome_id, outcome_detail).
-pub type ReportRow = (
-    String,
-    Option<String>,
-    Option<String>,
-    Option<i32>,
-    Option<String>,
-);
+/// (pkgname, scan_index, outcome_id, outcome_detail).
+pub type ReportRow = (String, ScanIndex, Option<i32>, Option<String>);
 
 fn stage_values() -> String {
     Stage::VARIANTS
@@ -101,7 +95,7 @@ fn history_schema() -> String {
 /**
  * Schema version for bob.db - update when schema changes.
  */
-const SCHEMA_VERSION: i32 = 20260317;
+const SCHEMA_VERSION: i32 = 20260421;
 
 /**
  * Schema version for history.db - update when history schema changes.
@@ -125,7 +119,7 @@ pub struct PkgBuildHistory {
  * Use [`Database::get_full_scan_index`] when the complete
  * [`ScanIndex`] is needed.
  */
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize)]
 pub struct PackageRow {
     /// Database row ID.
     pub id: i64,
@@ -151,7 +145,7 @@ pub struct PackageRow {
  * Returned by [`Database::get_all_package_status`] which fetches
  * package metadata and build results in a single query.
  */
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize)]
 pub struct PackageStatusRow {
     pub id: i64,
     pub pkgname: String,
@@ -164,22 +158,25 @@ pub struct PackageStatusRow {
     pub outcome_detail: Option<String>,
 }
 
-impl PackageRow {
-    /**
-     * Construct a PackageRow from a database row.
-     */
-    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
-        Ok(Self {
-            id: row.get(0)?,
-            pkgname: row.get(1)?,
-            pkgpath: row.get(2)?,
-            skip_reason: row.get(3)?,
-            fail_reason: row.get(4)?,
-            is_bootstrap: row.get::<_, i32>(5)? != 0,
-            pbulk_weight: row.get(6)?,
-            multi_version: row.get(7)?,
-        })
-    }
+fn build_result_from_row(row: &rusqlite::Row) -> rusqlite::Result<Option<BuildResult>> {
+    let Some(state) = PackageState::from_db(row.get("outcome")?, row.get("outcome_detail")?) else {
+        return Ok(None);
+    };
+    Ok(Some(BuildResult {
+        pkgname: PkgName::new(&row.get::<_, String>("pkgname")?),
+        pkgpath: row
+            .get::<_, Option<String>>("pkgpath")?
+            .and_then(|p| PkgPath::new(&p).ok()),
+        state,
+        log_dir: row.get::<_, Option<String>>("log_dir")?.map(PathBuf::from),
+        build_stats: PkgBuildStats {
+            stage: row
+                .get::<_, Option<i32>>("stage")?
+                .and_then(Stage::from_repr),
+            duration: Duration::from_millis(row.get::<_, i64>("duration_ms")? as u64),
+            ..PkgBuildStats::default()
+        },
+    }))
 }
 
 /**
@@ -257,6 +254,35 @@ impl Database {
     /** Borrow the underlying database connection. */
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    /**
+     * Run a query and deserialize every row into `T` via
+     * [`serde_rusqlite`].  Columns are matched to fields by name, so
+     * `SELECT *` works for any struct whose fields are a subset of the
+     * table's columns.
+     */
+    fn query_rows<T, P>(&self, sql: &str, params: P) -> Result<Vec<T>>
+    where
+        T: for<'de> serde::Deserialize<'de>,
+        P: rusqlite::Params,
+    {
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query(params)?;
+        Ok(serde_rusqlite::from_rows::<T>(rows).collect::<Result<_, _>>()?)
+    }
+
+    /**
+     * Run a query expected to return at most one row.
+     */
+    fn query_one<T, P>(&self, sql: &str, params: P) -> Result<Option<T>>
+    where
+        T: for<'de> serde::Deserialize<'de>,
+        P: rusqlite::Params,
+    {
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query(params)?;
+        Ok(serde_rusqlite::from_rows::<T>(rows).next().transpose()?)
     }
 
     /**
@@ -348,7 +374,10 @@ impl Database {
                  is_bootstrap INTEGER DEFAULT 0,
                  pbulk_weight INTEGER DEFAULT 100,
                  make_jobs_safe INTEGER NOT NULL DEFAULT 1,
-                 scan_data TEXT
+                 multi_version TEXT,
+                 no_bin_on_ftp TEXT,
+                 maintainer TEXT,
+                 usergroup_phase TEXT
              );
 
              CREATE INDEX idx_packages_pkgpath ON packages(pkgpath);
@@ -438,15 +467,15 @@ impl Database {
             .as_ref()
             .map(|v| !v.eq_ignore_ascii_case("no"))
             .unwrap_or(true);
-
-        let scan_data = serde_json::to_string(index)?;
+        let multi_version = index.multi_version.as_ref().map(|v| v.join(" "));
 
         {
             let mut stmt = self.conn.prepare_cached(
                 "INSERT OR REPLACE INTO packages
                  (pkgname, pkgpath, skip_reason, fail_reason,
-                  is_bootstrap, pbulk_weight, make_jobs_safe, scan_data)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  is_bootstrap, pbulk_weight, make_jobs_safe,
+                  multi_version, no_bin_on_ftp, maintainer, usergroup_phase)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )?;
             stmt.execute(params![
                 pkgname,
@@ -456,7 +485,10 @@ impl Database {
                 is_bootstrap,
                 pbulk_weight,
                 make_jobs_safe,
-                scan_data
+                multi_version,
+                index.no_bin_on_ftp,
+                index.maintainer,
+                index.usergroup_phase,
             ])?;
         }
 
@@ -495,19 +527,7 @@ impl Database {
      * Get package by name.
      */
     pub fn get_package_by_name(&self, pkgname: &str) -> Result<Option<PackageRow>> {
-        let result = self.conn.query_row(
-            "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight,
-                    json_extract(scan_data, '$.MULTI_VERSION')
-             FROM packages WHERE pkgname = ?1",
-            [pkgname],
-            PackageRow::from_row,
-        );
-
-        match result {
-            Ok(pkg) => Ok(Some(pkg)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        self.query_one("SELECT * FROM packages WHERE pkgname = ?1", [pkgname])
     }
 
     /**
@@ -527,15 +547,7 @@ impl Database {
      * Get packages by pkgpath.
      */
     pub fn get_packages_by_path(&self, pkgpath: &str) -> Result<Vec<PackageRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight,
-                    json_extract(scan_data, '$.MULTI_VERSION')
-             FROM packages WHERE pkgpath = ?1",
-        )?;
-
-        let rows = stmt.query_map([pkgpath], PackageRow::from_row)?;
-
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        self.query_rows("SELECT * FROM packages WHERE pkgpath = ?1", [pkgpath])
     }
 
     /**
@@ -575,86 +587,91 @@ impl Database {
      * Get all packages (lightweight).
      */
     pub fn get_all_packages(&self) -> Result<Vec<PackageRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight,
-                    json_extract(scan_data, '$.MULTI_VERSION')
-             FROM packages ORDER BY id",
-        )?;
-
-        let rows = stmt.query_map([], PackageRow::from_row)?;
-
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        self.query_rows("SELECT * FROM packages ORDER BY id", [])
     }
 
     /**
      * Get all package data with build results in a single query.
      *
      * Combines packages, build outcomes, and build reasons into one
-     * LEFT JOIN, avoiding multiple round-trips.  Set `need_multi`
-     * to include the expensive `json_extract` for MULTI_VERSION.
+     * LEFT JOIN, avoiding multiple round-trips.
      */
-    pub fn get_all_package_status(&self, need_multi: bool) -> Result<Vec<PackageStatusRow>> {
-        let sql = if need_multi {
-            "SELECT p.id, p.pkgname, p.pkgpath, p.skip_reason,
-                    p.fail_reason, p.build_reason,
-                    json_extract(p.scan_data, '$.MULTI_VERSION'),
-                    b.outcome, b.outcome_detail
+    pub fn get_all_package_status(&self) -> Result<Vec<PackageStatusRow>> {
+        self.query_rows(
+            "SELECT p.*, b.outcome AS build_outcome, b.outcome_detail
              FROM packages p
              LEFT JOIN builds b ON b.package_id = p.id
-             WHERE p.selected = 1"
-        } else {
-            "SELECT p.id, p.pkgname, p.pkgpath, p.skip_reason,
-                    p.fail_reason, p.build_reason,
-                    NULL,
-                    b.outcome, b.outcome_detail
-             FROM packages p
-             LEFT JOIN builds b ON b.package_id = p.id
-             WHERE p.selected = 1"
-        };
-        let mut stmt = self.conn.prepare(sql)?;
-
-        let mapped = stmt.query_map([], |row| {
-            Ok(PackageStatusRow {
-                id: row.get(0)?,
-                pkgname: row.get(1)?,
-                pkgpath: row.get(2)?,
-                skip_reason: row.get(3)?,
-                fail_reason: row.get(4)?,
-                build_reason: row.get(5)?,
-                multi_version: row.get(6)?,
-                build_outcome: row.get(7)?,
-                outcome_detail: row.get(8)?,
-            })
-        })?;
-        mapped.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+             WHERE p.selected = 1",
+            [],
+        )
     }
 
     /**
      * Get all buildable packages (no skip/fail reason).
      */
     pub fn get_buildable_packages(&self) -> Result<Vec<PackageRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, pkgname, pkgpath, skip_reason, fail_reason, is_bootstrap, pbulk_weight,
-                    json_extract(scan_data, '$.MULTI_VERSION')
-             FROM packages
+        self.query_rows(
+            "SELECT * FROM packages
              WHERE selected = 1 AND skip_reason IS NULL AND fail_reason IS NULL",
+            [],
+        )
+    }
+
+    fn scan_index_from_row(
+        row: &rusqlite::Row,
+        all_depends: Option<AllDepends>,
+    ) -> rusqlite::Result<ScanIndex> {
+        Ok(ScanIndex {
+            pkgname: row.get::<_, String>("pkgname")?.into(),
+            pkg_location: row.get::<_, String>("pkgpath")?.parse().ok(),
+            all_depends,
+            pkg_skip_reason: row.get("skip_reason")?,
+            pkg_fail_reason: row.get("fail_reason")?,
+            no_bin_on_ftp: row.get("no_bin_on_ftp")?,
+            maintainer: row.get("maintainer")?,
+            bootstrap_pkg: (row.get::<_, i32>("is_bootstrap")? != 0).then(|| "yes".to_string()),
+            usergroup_phase: row.get("usergroup_phase")?,
+            make_jobs_safe: (row.get::<_, i32>("make_jobs_safe")? == 0).then(|| "no".to_string()),
+            pbulk_weight: row
+                .get::<_, Option<i32>>("pbulk_weight")?
+                .map(|w| w.to_string()),
+            multi_version: row
+                .get::<_, Option<String>>("multi_version")?
+                .map(|s| s.split_ascii_whitespace().map(str::to_string).collect()),
+            ..Default::default()
+        })
+    }
+
+    fn fetch_all_depends(&self, package_id: i64) -> Result<Option<AllDepends>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT depend_pattern, depend_pkgpath FROM depends
+             WHERE package_id = ?1 ORDER BY id",
         )?;
-
-        let rows = stmt.query_map([], PackageRow::from_row)?;
-
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let deps: AllDepends = stmt
+            .query_map([package_id], |row| {
+                Ok(format!(
+                    "{}:{}",
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok((!deps.is_empty()).then_some(deps))
     }
 
     /**
      * Load full ScanIndex for a package.
      */
     pub fn get_full_scan_index(&self, package_id: i64) -> Result<ScanIndex> {
-        let json: String = self.conn.query_row(
-            "SELECT scan_data FROM packages WHERE id = ?1",
-            [package_id],
-            |row| row.get(0),
-        )?;
-        serde_json::from_str(&json).context("Failed to deserialize scan data")
+        let all_depends = self.fetch_all_depends(package_id)?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT * FROM packages WHERE id = ?1")?;
+        let mut rows = stmt.query([package_id])?;
+        let row = rows
+            .next()?
+            .ok_or_else(|| anyhow::anyhow!("Package {package_id} not found"))?;
+        Self::scan_index_from_row(row, all_depends).map_err(Into::into)
     }
 
     /**
@@ -665,24 +682,16 @@ impl Database {
     where
         F: FnOnce(&mut dyn FnMut() -> Result<Option<ScanIndex>>) -> Result<R>,
     {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, scan_data FROM packages ORDER BY id")?;
+        let mut stmt = self.conn.prepare("SELECT * FROM packages ORDER BY id")?;
         let mut rows = stmt.query([])?;
-        let mut pull = || {
+        let mut pull = || -> Result<Option<ScanIndex>> {
             let Some(row) = rows.next()? else {
                 return Ok(None);
             };
-            let id: i64 = row.get(0)?;
-            let json: String = row.get(1)?;
-            let mut index: ScanIndex = serde_json::from_str(&json)
-                .with_context(|| format!("Failed to deserialize scan data for package {}", id))?;
-            index.scan_depends = None;
-            index.no_bin_on_ftp = None;
-            index.restricted = None;
-            index.categories = None;
-            index.maintainer = None;
-            index.use_destdir = None;
+            let id: i64 = row.get("id")?;
+            let all_depends = self.fetch_all_depends(id)?;
+            let index = Self::scan_index_from_row(row, all_depends)
+                .with_context(|| format!("Failed to read package {id}"))?;
             Ok(Some(index))
         };
         f(&mut pull)
@@ -745,16 +754,9 @@ impl Database {
             .conn
             .prepare("SELECT pkgname, build_reason FROM packages WHERE build_reason IS NOT NULL")?;
         let rows = stmt.query_map([], |row| {
-            let pkgname: String = row.get(0)?;
-            let reason: String = row.get(1)?;
-            Ok((pkgname, reason))
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
-        let mut result = HashMap::new();
-        for row in rows {
-            let (pkgname, reason) = row?;
-            result.insert(pkgname, reason);
-        }
-        Ok(result)
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     // ========================================================================
@@ -1063,57 +1065,17 @@ impl Database {
      * Get build result for a package.
      */
     pub fn get_build_result(&self, package_id: i64) -> Result<Option<BuildResult>> {
-        let result = self.conn.query_row(
+        let mut stmt = self.conn.prepare(
             "SELECT p.pkgname, p.pkgpath, b.outcome, b.outcome_detail,
                     b.stage, b.duration_ms, b.log_dir
              FROM builds b
              JOIN packages p ON b.package_id = p.id
              WHERE b.package_id = ?1",
-            [package_id],
-            |row| {
-                let pkgname: String = row.get(0)?;
-                let pkgpath: Option<String> = row.get(1)?;
-                let outcome_id: i32 = row.get(2)?;
-                let detail: Option<String> = row.get(3)?;
-                let stage_id: Option<i32> = row.get(4)?;
-                let duration_ms: i64 = row.get(5)?;
-                let log_dir: Option<String> = row.get(6)?;
-                Ok((
-                    pkgname,
-                    pkgpath,
-                    outcome_id,
-                    detail,
-                    stage_id,
-                    duration_ms,
-                    log_dir,
-                ))
-            },
-        );
-
-        match result {
-            Ok((pkgname, pkgpath, outcome_id, detail, stage_id, duration_ms, log_dir)) => {
-                let outcome = PackageState::from_db(outcome_id, detail)
-                    .ok_or_else(|| anyhow::anyhow!("Unknown outcome type id: {}", outcome_id))?;
-                let stage = stage_id
-                    .map(|id| {
-                        Stage::from_repr(id)
-                            .ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", id))
-                    })
-                    .transpose()?;
-                Ok(Some(BuildResult {
-                    pkgname: PkgName::new(&pkgname),
-                    pkgpath: pkgpath.and_then(|p| PkgPath::new(&p).ok()),
-                    state: outcome,
-                    log_dir: log_dir.map(std::path::PathBuf::from),
-                    build_stats: PkgBuildStats {
-                        stage,
-                        duration: Duration::from_millis(duration_ms as u64),
-                        ..PkgBuildStats::default()
-                    },
-                }))
-            }
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
+        )?;
+        let mut rows = stmt.query([package_id])?;
+        match rows.next()? {
+            Some(row) => Ok(build_result_from_row(row)?),
+            None => Ok(None),
         }
     }
 
@@ -1159,45 +1121,13 @@ impl Database {
              ORDER BY p.pkgname",
         )?;
 
-        let rows = stmt.query_map([], |row| {
-            let pkgname: String = row.get(0)?;
-            let pkgpath: Option<String> = row.get(1)?;
-            let outcome_id: i32 = row.get(2)?;
-            let detail: Option<String> = row.get(3)?;
-            let stage_id: Option<i32> = row.get(4)?;
-            let duration_ms: i64 = row.get(5)?;
-            let log_dir: Option<String> = row.get(6)?;
-            Ok((
-                pkgname,
-                pkgpath,
-                outcome_id,
-                detail,
-                stage_id,
-                duration_ms,
-                log_dir,
-            ))
-        })?;
-
+        let mut rows = stmt.query([])?;
         let mut results = Vec::new();
-        for row in rows {
-            let (pkgname, pkgpath, outcome_id, detail, stage_id, duration_ms, log_dir) = row?;
-            let Some(outcome) = PackageState::from_db(outcome_id, detail) else {
-                continue;
-            };
-            let stage = stage_id.and_then(Stage::from_repr);
-            results.push(BuildResult {
-                pkgname: PkgName::new(&pkgname),
-                pkgpath: pkgpath.and_then(|p| PkgPath::new(&p).ok()),
-                state: outcome,
-                log_dir: log_dir.map(std::path::PathBuf::from),
-                build_stats: PkgBuildStats {
-                    stage,
-                    duration: Duration::from_millis(duration_ms as u64),
-                    ..PkgBuildStats::default()
-                },
-            });
+        while let Some(row) = rows.next()? {
+            if let Some(r) = build_result_from_row(row)? {
+                results.push(r);
+            }
         }
-
         Ok(results)
     }
 
@@ -1366,21 +1296,17 @@ impl Database {
                AND NOT EXISTS (SELECT 1 FROM builds b WHERE b.package_id = p.id)
              ORDER BY p.pkgname",
         )?;
-
         let rows = stmt.query_map([], |row| {
-            let pkgname: String = row.get(0)?;
-            let pkgpath: Option<String> = row.get(1)?;
-            let skip: Option<String> = row.get(2)?;
-            let fail: Option<String> = row.get(3)?;
+            let fail: Option<String> = row.get("fail_reason")?;
+            let skip: Option<String> = row.get("skip_reason")?;
             let state = match (fail, skip) {
-                (Some(r), _) => PackageState::PreFailed(r),
-                (_, Some(r)) => PackageState::PreSkipped(r),
+                (Some(s), _) => PackageState::PreFailed(s),
+                (_, Some(s)) => PackageState::PreSkipped(s),
                 _ => PackageState::PreFailed(String::new()),
             };
-            Ok((pkgname, pkgpath, state))
+            Ok((row.get("pkgname")?, row.get("pkgpath")?, state))
         })?;
-
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /**
@@ -1707,8 +1633,7 @@ impl Database {
     pub fn get_restricted_packages(&self) -> Result<HashSet<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT pkgname FROM packages
-             WHERE json_extract(scan_data, '$.NO_BIN_ON_FTP') IS NOT NULL
-               AND json_extract(scan_data, '$.NO_BIN_ON_FTP') != ''",
+             WHERE no_bin_on_ftp IS NOT NULL AND no_bin_on_ftp != ''",
         )?;
         let restricted = stmt
             .query_map([], |row| row.get::<_, String>(0))?
@@ -1718,31 +1643,28 @@ impl Database {
     }
 
     /**
-     * Get all packages with their scan data and build status for reporting.
-     *
-     * Returns (pkgname, pkgpath, scan_data_json, outcome_id, detail).
+     * Get all packages with their scan data and build status for
+     * reporting.  Returns `(pkgname, pkgpath, scan_index, outcome_id,
+     * detail)` rows ordered by pkgname.
      */
     pub fn get_report_data(&self) -> Result<Vec<ReportRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT p.pkgname, p.pkgpath, p.scan_data, b.outcome, b.outcome_detail
+            "SELECT p.*, b.outcome, b.outcome_detail
              FROM packages p
              LEFT JOIN builds b ON b.package_id = p.id
              ORDER BY p.pkgname",
         )?;
-
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<i32>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(rows)
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get("id")?;
+            let pkgname: String = row.get("pkgname")?;
+            let outcome: Option<i32> = row.get("outcome")?;
+            let detail: Option<String> = row.get("outcome_detail")?;
+            let index = Self::scan_index_from_row(row, self.fetch_all_depends(id)?)?;
+            out.push((pkgname, index, outcome, detail));
+        }
+        Ok(out)
     }
 
     /**
