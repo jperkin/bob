@@ -1648,6 +1648,7 @@ impl Database {
      * detail)` rows ordered by pkgname.
      */
     pub fn get_report_data(&self) -> Result<Vec<ReportRow>> {
+        let resolved = self.get_all_resolved_deps()?;
         let mut stmt = self.conn.prepare(
             "SELECT p.*, b.outcome, b.outcome_detail
              FROM packages p
@@ -1661,7 +1662,14 @@ impl Database {
             let pkgname: String = row.get("pkgname")?;
             let outcome: Option<i32> = row.get("outcome")?;
             let detail: Option<String> = row.get("outcome_detail")?;
-            let index = Self::scan_index_from_row(row, self.fetch_all_depends(id)?)?;
+            let mut index = Self::scan_index_from_row(row, self.fetch_all_depends(id)?)?;
+            if let Some(deps) = resolved.get(&pkgname) {
+                index.resolved_depends = Some(deps.iter().map(|d| d.parse()).collect::<Result<
+                    Vec<PkgName>,
+                    _,
+                >>(
+                )?);
+            }
             out.push((pkgname, index, outcome, detail));
         }
         Ok(out)
