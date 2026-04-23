@@ -107,6 +107,8 @@ pub enum PackageStateAlias {
     Skipped,
     #[strum(props(desc = "Any package blocked by another"))]
     Blocked,
+    #[strum(props(desc = "Any successful outcome (freshly built or up-to-date)"))]
+    Ok,
 }
 
 impl PackageStateAlias {
@@ -121,6 +123,7 @@ impl PackageStateAlias {
                 IndirectUnresolved,
                 IndirectFailed,
             ],
+            Self::Ok => &[Success, UpToDate],
         }
     }
 

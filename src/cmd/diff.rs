@@ -14,12 +14,12 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
 
 use bob::db::{BuildDiff, Database, DiffEntry};
-use bob::try_println;
+use bob::{PackageStateKind, parse_status_filter, try_println};
 
 use super::{Col, Formatter, OutputFormat};
 
@@ -52,6 +52,22 @@ pub struct DiffArgs {
     /// Columns to display (comma-separated, see --help for full list)
     #[arg(short = 'o', value_delimiter = ',')]
     pub columns: Option<Vec<String>>,
+    /// Filter by baseline status (see `bob status -s` for valid values)
+    #[arg(
+        short = 'f',
+        long = "from",
+        value_parser = parse_status_filter,
+        value_delimiter = ',',
+    )]
+    pub from: Vec<Vec<PackageStateKind>>,
+    /// Filter by current status (see `bob status -s` for valid values)
+    #[arg(
+        short = 't',
+        long = "to",
+        value_parser = parse_status_filter,
+        value_delimiter = ',',
+    )]
+    pub to: Vec<Vec<PackageStateKind>>,
 }
 
 fn diff_after_help() -> String {
@@ -117,8 +133,109 @@ pub fn run(db: &Database, args: DiffArgs) -> Result<()> {
         Err(_) => HashMap::new(),
     };
 
-    print_diff(&diff, &breaks, args.all, &col_names);
+    let from: Option<HashSet<PackageStateKind>> =
+        (!args.from.is_empty()).then(|| args.from.iter().flatten().copied().collect());
+    let to: Option<HashSet<PackageStateKind>> =
+        (!args.to.is_empty()).then(|| args.to.iter().flatten().copied().collect());
+
+    if from.is_some() || to.is_some() {
+        print_filtered(&diff, &breaks, &col_names, from.as_ref(), to.as_ref());
+    } else {
+        print_diff(&diff, &breaks, args.all, &col_names);
+    }
     Ok(())
+}
+
+fn matches_filter(
+    e: &DiffEntry,
+    from: Option<&HashSet<PackageStateKind>>,
+    to: Option<&HashSet<PackageStateKind>>,
+) -> bool {
+    let ok = |set: Option<&HashSet<PackageStateKind>>, state: Option<PackageStateKind>| match set {
+        Some(s) => state.is_some_and(|k| s.contains(&k)),
+        None => true,
+    };
+    ok(from, e.build1_outcome) && ok(to, e.build2_outcome)
+}
+
+fn print_filtered(
+    diff: &BuildDiff,
+    breaks: &HashMap<String, usize>,
+    col_names: &[&str],
+    from: Option<&HashSet<PackageStateKind>>,
+    to: Option<&HashSet<PackageStateKind>>,
+) {
+    if !try_println(&format!("--- {}", diff.build1_id)) {
+        return;
+    }
+    if !try_println(&format!("+++ {}", diff.build2_id)) {
+        return;
+    }
+
+    let mut entries: Vec<&DiffEntry> = diff
+        .new_failures
+        .iter()
+        .chain(diff.version_changes.iter())
+        .chain(diff.fixes.iter())
+        .chain(diff.other_changes.iter())
+        .filter(|e| matches_filter(e, from, to))
+        .collect();
+
+    let label = |set: Option<&HashSet<PackageStateKind>>| -> String {
+        set.map(|s| {
+            let mut names: Vec<&str> = s.iter().map(<&str>::from).collect();
+            names.sort_unstable();
+            names.join(",")
+        })
+        .unwrap_or_else(|| "any".into())
+    };
+    let summary = format!(
+        "@@ {}: from {} to {} @@",
+        entries.len(),
+        label(from),
+        label(to),
+    );
+    if !try_println(&summary) {
+        return;
+    }
+    if entries.is_empty() {
+        return;
+    }
+
+    let widths: Vec<usize> = col_names
+        .iter()
+        .map(|name| {
+            entries
+                .iter()
+                .map(|e| format_col(e, name, breaks).len())
+                .max()
+                .unwrap_or(0)
+                .max(name.len())
+        })
+        .collect();
+
+    let header: String = col_names
+        .iter()
+        .zip(&widths)
+        .map(|(name, w)| format!("{:<w$}", name.to_uppercase(), w = w))
+        .collect::<Vec<_>>()
+        .join("  ");
+    if !try_println(&format!(" {}", header)) {
+        return;
+    }
+
+    entries.sort_by_key(|e| std::cmp::Reverse(get_breaks(e, breaks)));
+    for e in &entries {
+        let row: String = col_names
+            .iter()
+            .zip(&widths)
+            .map(|(name, w)| format!("{:<w$}", format_col(e, name, breaks), w = w))
+            .collect::<Vec<_>>()
+            .join("  ");
+        if !try_println(&format!(" {}", row)) {
+            return;
+        }
+    }
 }
 
 fn list_builds(db: &Database) -> Result<()> {
