@@ -132,14 +132,18 @@ fn list_builds(db: &Database) -> Result<()> {
         Col::new("build_id", bob::Align::Left),
         Col::new("packages", bob::Align::Right),
         Col::new("succeeded", bob::Align::Right),
+        Col::new("uptodate", bob::Align::Right),
         Col::new("failed", bob::Align::Right),
+        Col::new("masked", bob::Align::Right),
     ]);
     for b in &builds {
         fmt.push(vec![
             b.build_id.clone(),
             b.package_count.to_string(),
             b.succeeded.to_string(),
+            b.up_to_date.to_string(),
             b.failed.to_string(),
+            b.masked.to_string(),
         ]);
     }
     fmt.print(OutputFormat::Table, false);

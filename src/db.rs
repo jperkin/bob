@@ -2049,8 +2049,10 @@ impl Database {
                  WHERE build_id IS NOT NULL \
              ) \
              SELECT build_id, COUNT(*) AS packages, \
-                    SUM(CASE WHEN outcome IN (?1, ?2) THEN 1 ELSE 0 END), \
-                    SUM(CASE WHEN outcome = ?3 THEN 1 ELSE 0 END) \
+                    SUM(CASE WHEN outcome = ?1 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN outcome = ?2 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN outcome = ?3 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN outcome NOT IN (?1, ?2, ?3) THEN 1 ELSE 0 END) \
              FROM latest \
              WHERE rn = 1 \
              GROUP BY build_id \
@@ -2061,7 +2063,9 @@ impl Database {
                 build_id: row.get(0)?,
                 package_count: row.get::<_, i64>(1)? as usize,
                 succeeded: row.get::<_, i64>(2)? as usize,
-                failed: row.get::<_, i64>(3)? as usize,
+                up_to_date: row.get::<_, i64>(3)? as usize,
+                failed: row.get::<_, i64>(4)? as usize,
+                masked: row.get::<_, i64>(5)? as usize,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -2258,7 +2262,9 @@ pub struct BuildListEntry {
     pub build_id: String,
     pub package_count: usize,
     pub succeeded: usize,
+    pub up_to_date: usize,
     pub failed: usize,
+    pub masked: usize,
 }
 
 /**
