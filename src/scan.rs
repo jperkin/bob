@@ -72,7 +72,7 @@ impl ResolvedPackage {
 
     /// Returns resolved dependencies.
     pub fn depends(&self) -> &[PkgName] {
-        self.index.resolved_depends.as_deref().unwrap_or(&[])
+        self.index.depends()
     }
 
     /// Returns bootstrap_pkg if set.
@@ -102,7 +102,7 @@ impl ResolvedPackage {
 
 impl std::fmt::Display for ResolvedPackage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.index)
+        write!(f, "{}", self.index.presolve())
     }
 }
 
@@ -118,9 +118,9 @@ pub enum ScanResult {
         /// Package state (skip reason).
         state: PackageState,
         /// Scan index if available (present for most skipped packages).
+        /// `index.resolved_depends` holds the resolved deps for the package,
+        /// including partial resolutions when `state` is `Unresolved`.
         index: Option<ScanIndex>,
-        /// Resolved dependencies (may be partial for unresolved deps).
-        resolved_depends: Vec<PkgName>,
     },
     /// Package failed to scan (bmake pbulk-index failed).
     ScanFail {
@@ -168,9 +168,9 @@ impl ScanResult {
         match self {
             ScanResult::Buildable(pkg) => pkg.depends(),
             ScanResult::Skipped {
-                resolved_depends, ..
-            } => resolved_depends,
-            ScanResult::ScanFail { .. } => &[],
+                index: Some(idx), ..
+            } => idx.depends(),
+            _ => &[],
         }
     }
 }
@@ -179,26 +179,9 @@ impl std::fmt::Display for ScanResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ScanResult::Buildable(pkg) => write!(f, "{}", pkg),
-            ScanResult::Skipped {
-                index,
-                pkgpath,
-                state,
-                resolved_depends,
-            } => {
+            ScanResult::Skipped { index, pkgpath, .. } => {
                 if let Some(idx) = index {
-                    write!(f, "{}", idx)?;
-                    // Don't emit DEPENDS for unresolved deps (pbulk compat)
-                    if !matches!(state, PackageState::Unresolved(_)) && !resolved_depends.is_empty()
-                    {
-                        write!(f, "DEPENDS=")?;
-                        for (i, d) in resolved_depends.iter().enumerate() {
-                            if i > 0 {
-                                write!(f, " ")?;
-                            }
-                            write!(f, "{d}")?;
-                        }
-                        writeln!(f)?;
-                    }
+                    write!(f, "{}", idx.presolve())?;
                 } else {
                     writeln!(f, "PKGPATH={}", pkgpath)?;
                 }
@@ -1250,13 +1233,14 @@ impl Scan {
         pkgbase_map: &HashMap<&str, Vec<&'a PkgName>>,
         all_pkgnames: impl Iterator<Item = &'a PkgName>,
     ) -> Vec<&'a PkgName> {
-        if let Some(base) = pattern.pkgbase() {
-            pkgbase_map.get(base).map_or(Vec::new(), |v| {
-                v.iter()
-                    .filter(|c| pattern.matches(c.pkgname()))
-                    .copied()
-                    .collect()
-            })
+        if let Some(bases) = pattern.pkgbases() {
+            let mut out = Vec::new();
+            for base in bases {
+                if let Some(v) = pkgbase_map.get(base) {
+                    out.extend(v.iter().filter(|c| pattern.matches(c.pkgname())).copied());
+                }
+            }
+            out
         } else {
             all_pkgnames
                 .filter(|c| pattern.matches(c.pkgname()))
@@ -1282,10 +1266,12 @@ impl Scan {
         pkgnames: &'a [PkgName],
     ) -> Result<Option<&'a str>, pkgsrc::PatternError> {
         let mut best = None;
-        if let Some(pkgbase) = pattern.pkgbase() {
-            if let Some(candidates) = pkgbase_map.get(pkgbase) {
-                for candidate in candidates {
-                    best = pattern.best_match_pbulk(best, candidate.pkgname())?;
+        if let Some(bases) = pattern.pkgbases() {
+            for base in bases {
+                if let Some(candidates) = pkgbase_map.get(base) {
+                    for candidate in candidates {
+                        best = pattern.best_match_pbulk(best, candidate.pkgname())?;
+                    }
                 }
             }
         } else {
@@ -1669,16 +1655,23 @@ impl Scan {
                 continue;
             };
             let resolved_depends = depends.remove(&pkgname).unwrap_or_default();
-            let result = match skip_reasons.remove(&pkgname) {
+            let skip = skip_reasons.remove(&pkgname);
+            /*
+             * pbulk compat: a directly-unresolvable package omits the
+             * DEPENDS line entirely, so leave resolved_depends as None.
+             */
+            let complete = !matches!(skip, Some(PackageState::Unresolved(_)));
+            if complete && !resolved_depends.is_empty() {
+                index.resolved_depends = Some(resolved_depends);
+            }
+            let result = match skip {
                 Some(state) => ScanResult::Skipped {
                     pkgpath,
                     state,
                     index: Some(index),
-                    resolved_depends,
                 },
                 None => {
                     count_buildable += 1;
-                    index.resolved_depends = Some(resolved_depends);
                     ScanResult::Buildable(ResolvedPackage { index, pkgpath })
                 }
             };

@@ -696,7 +696,7 @@ fn run() -> Result<()> {
             let mut count = 0;
             for pkg in &packages {
                 if let Ok(idx) = db.get_full_scan_index(pkg.id) {
-                    out.push_str(&idx.to_string());
+                    out.push_str(&idx.pscan().to_string());
                     count += 1;
                 }
             }

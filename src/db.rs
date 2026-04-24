@@ -779,19 +779,13 @@ impl Database {
         )?;
         let mut count: usize = 0;
         for pkg in &summary.packages {
-            let (pkgname, deps): (&str, &[PkgName]) = match pkg {
-                ScanResult::Buildable(r) => (r.pkgname().pkgname(), r.depends()),
-                ScanResult::Skipped {
-                    index: Some(idx),
-                    resolved_depends,
-                    ..
-                } => (idx.pkgname.pkgname(), resolved_depends),
-                _ => continue,
-            };
-            let Some(&pkg_id) = id_map.get(pkgname) else {
+            let Some(pkgname) = pkg.pkgname() else {
                 continue;
             };
-            for dep in deps {
+            let Some(&pkg_id) = id_map.get(pkgname.pkgname()) else {
+                continue;
+            };
+            for dep in pkg.depends() {
                 if let Some(&dep_id) = id_map.get(dep.pkgname()) {
                     stmt.execute(params![pkg_id, dep_id])?;
                     count += 1;

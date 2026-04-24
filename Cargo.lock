@@ -2984,9 +2984,9 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "pkgsrc"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f75e5af8b9d945aa25c946d836c676b6581ddbabcee1f1464cbb2e86bb4737eb"
+checksum = "122142f203671d62c353c2a89e581d777474da37b94feda3696540339220881a"
 dependencies = [
  "ar",
  "blake2",

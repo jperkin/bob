@@ -889,7 +889,7 @@ fn write_machine_report(db: &Database, logdir: &Path) -> Result<()> {
         .collect();
 
     for (pkgname, idx, outcome_id, detail) in db.get_report_data()? {
-        write!(encoder, "{}", idx)?;
+        write!(encoder, "{}", idx.report())?;
 
         // TODO: packages not in the scheduler (e.g. skipped at scan time)
         // won't have a dep_count entry.  These default to 1 (just themselves).
