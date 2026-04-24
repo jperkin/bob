@@ -418,12 +418,12 @@ fn print_build_status(
             (state.kind(), reason)
         } else if let Some(reason) = &pkg.build_reason {
             (PackageStateKind::Pending, reason.clone())
-        } else if let Some(reason) = &pkg.fail_reason {
+        } else if let Some(reason) = &pkg.pkg_fail_reason {
             (
                 PackageStateKind::PreFailed,
                 format!("PKG_FAIL_REASON: {}", reason),
             )
-        } else if let Some(reason) = &pkg.skip_reason {
+        } else if let Some(reason) = &pkg.pkg_skip_reason {
             (
                 PackageStateKind::PreSkipped,
                 format!("PKG_SKIP_REASON: {}", reason),
@@ -452,7 +452,7 @@ fn print_build_status(
         if !pkg_patterns.is_empty()
             && !pkg_patterns
                 .iter()
-                .any(|re| re.is_match(&pkg.pkgname) || re.is_match(&pkg.pkgpath))
+                .any(|re| re.is_match(&pkg.pkgname) || re.is_match(&pkg.pkg_location))
         {
             continue;
         }
@@ -476,7 +476,7 @@ fn print_build_status(
             .iter()
             .map(|&col| match col {
                 "pkgname" => pkg.pkgname.clone(),
-                "pkgpath" => pkg.pkgpath.clone(),
+                "pkgpath" => pkg.pkg_location.clone(),
                 "status" => <&str>::from(kind).to_string(),
                 "reason" => reason.clone(),
                 "multi_version" => multi_version.clone(),

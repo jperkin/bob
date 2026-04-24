@@ -100,7 +100,7 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
             let matches = match_packages(db, &package)?;
             let multi = matches.len() > 1;
             for pkg in matches {
-                if multi && !try_println(&format!("{} ({}):", pkg.pkgname, pkg.pkgpath)) {
+                if multi && !try_println(&format!("{} ({}):", pkg.pkgname, pkg.pkg_location)) {
                     return Ok(());
                 }
                 for (pkgname, pkgpath, reason) in db.get_blockers(pkg.id)? {
@@ -119,7 +119,7 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
             let matches = match_packages(db, &package)?;
             let multi = matches.len() > 1;
             for pkg in matches {
-                if multi && !try_println(&format!("{} ({}):", pkg.pkgname, pkg.pkgpath)) {
+                if multi && !try_println(&format!("{} ({}):", pkg.pkgname, pkg.pkg_location)) {
                     return Ok(());
                 }
                 for (pkgname, pkgpath) in db.get_blocked_by(pkg.id)? {
@@ -148,7 +148,7 @@ fn match_packages(db: &Database, pattern: &str) -> Result<Vec<bob::db::PackageRo
     let matches: Vec<bob::db::PackageRow> = db
         .get_all_packages()?
         .into_iter()
-        .filter(|p| re.is_match(&p.pkgname) || re.is_match(&p.pkgpath))
+        .filter(|p| re.is_match(&p.pkgname) || re.is_match(&p.pkg_location))
         .collect();
     if matches.is_empty() {
         bail!("No packages match '{}'", pattern);
@@ -192,7 +192,7 @@ fn print_build_tree(
     // Build map for pkgname -> pkgpath lookup
     let pkgname_to_pkgpath: HashMap<String, String> = buildable_pkgs
         .iter()
-        .map(|pkg| (pkg.pkgname.clone(), pkg.pkgpath.clone()))
+        .map(|pkg| (pkg.pkgname.clone(), pkg.pkg_location.clone()))
         .collect();
 
     // Get resolved dependencies from database

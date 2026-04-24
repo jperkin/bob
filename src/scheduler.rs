@@ -120,7 +120,7 @@ impl Scheduler<PkgName> {
 
         for row in crate::db::query_selected_packages(db.conn())? {
             id_to_name.insert(row.id, row.pkgname.clone());
-            pkg_paths.insert(row.pkgname.clone(), row.pkgpath);
+            pkg_paths.insert(row.pkgname.clone(), row.pkg_location);
             pkg_make_jobs.insert(
                 row.pkgname.clone(),
                 makejobs::PkgMakeJobs::new(row.make_jobs_safe),

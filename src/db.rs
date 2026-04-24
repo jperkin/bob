@@ -25,8 +25,9 @@
  *
  * # Schema
  *
- * - `packages` - Core package identity and status
- * - `depends` - Raw dependency patterns from scans
+ * - `scan_index` - `ScanIndex` data, one row per package, columns verbatim
+ *   from the `pkgsrc::ScanIndex` struct
+ * - `package_state` - bob's per-package state (selected, build_reason)
  * - `resolved_depends` - Resolved dependencies after pattern matching
  * - `builds` - Build results with indexed outcome
  * - `metadata` - Key-value store for flags and cached data
@@ -38,7 +39,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use pkgsrc::{AllDepends, PkgName, PkgPath, ScanIndex};
+use pkgsrc::{AllDepends, PkgName, PkgPath, ScanDepends, ScanIndex};
 use rusqlite::{Connection, params};
 use tracing::{debug, warn};
 
@@ -95,7 +96,7 @@ fn history_schema() -> String {
 /**
  * Schema version for bob.db - update when schema changes.
  */
-const SCHEMA_VERSION: i32 = 20260421;
+const SCHEMA_VERSION: i32 = 20260424;
 
 /**
  * Schema version for history.db - update when history schema changes.
@@ -126,15 +127,15 @@ pub struct PackageRow {
     /// Package name with version (e.g., `"curl-8.7.1"`).
     pub pkgname: String,
     /// Package path in the pkgsrc tree (e.g., `"www/curl"`).
-    pub pkgpath: String,
+    pub pkg_location: String,
     /// `PKG_SKIP_REASON` from scan, if set.
-    pub skip_reason: Option<String>,
+    pub pkg_skip_reason: Option<String>,
     /// `PKG_FAIL_REASON` from scan, if set.
-    pub fail_reason: Option<String>,
-    /// Whether this is a bootstrap package.
-    pub is_bootstrap: bool,
-    /// Build priority weight from `PBULK_WEIGHT`.
-    pub pbulk_weight: i32,
+    pub pkg_fail_reason: Option<String>,
+    /// `BOOTSTRAP_PKG` value if set (typically `"yes"`).
+    pub bootstrap_pkg: Option<String>,
+    /// `PBULK_WEIGHT` value as a string, parsed on demand.
+    pub pbulk_weight: Option<String>,
     /// `MULTI_VERSION` value, if this package has multiple versions.
     pub multi_version: Option<String>,
 }
@@ -149,9 +150,9 @@ pub struct PackageRow {
 pub struct PackageStatusRow {
     pub id: i64,
     pub pkgname: String,
-    pub pkgpath: String,
-    pub skip_reason: Option<String>,
-    pub fail_reason: Option<String>,
+    pub pkg_location: String,
+    pub pkg_skip_reason: Option<String>,
+    pub pkg_fail_reason: Option<String>,
     pub build_reason: Option<String>,
     pub multi_version: Option<String>,
     pub build_outcome: Option<i32>,
@@ -363,41 +364,41 @@ impl Database {
              );
              INSERT INTO stage_types (id, name) VALUES {stages};
 
-             CREATE TABLE packages (
+             CREATE TABLE scan_index (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  pkgname TEXT UNIQUE NOT NULL,
-                 pkgpath TEXT NOT NULL,
-                 skip_reason TEXT,
-                 fail_reason TEXT,
-                 build_reason TEXT,
-                 selected INTEGER NOT NULL DEFAULT 0,
-                 is_bootstrap INTEGER DEFAULT 0,
-                 pbulk_weight INTEGER DEFAULT 100,
-                 make_jobs_safe INTEGER NOT NULL DEFAULT 1,
-                 multi_version TEXT,
+                 pkg_location TEXT NOT NULL,
+                 all_depends TEXT,
+                 pkg_skip_reason TEXT,
+                 pkg_fail_reason TEXT,
                  no_bin_on_ftp TEXT,
+                 restricted TEXT,
+                 categories TEXT,
                  maintainer TEXT,
-                 usergroup_phase TEXT
+                 use_destdir TEXT,
+                 bootstrap_pkg TEXT,
+                 usergroup_phase TEXT,
+                 scan_depends TEXT,
+                 make_jobs_safe TEXT,
+                 pbulk_weight TEXT,
+                 multi_version TEXT
              );
 
-             CREATE INDEX idx_packages_pkgpath ON packages(pkgpath);
-             CREATE INDEX idx_packages_status ON packages(skip_reason, fail_reason);
+             CREATE INDEX idx_scan_index_pkg_location ON scan_index(pkg_location);
+             CREATE INDEX idx_scan_index_status
+                 ON scan_index(pkg_skip_reason, pkg_fail_reason);
 
-             CREATE TABLE depends (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
-                 depend_pattern TEXT NOT NULL,
-                 depend_pkgpath TEXT NOT NULL,
-                 UNIQUE(package_id, depend_pattern)
+             CREATE TABLE package_state (
+                 package_id INTEGER PRIMARY KEY
+                     REFERENCES scan_index(id) ON DELETE CASCADE,
+                 selected INTEGER NOT NULL DEFAULT 0,
+                 build_reason TEXT
              );
-
-             CREATE INDEX idx_depends_package ON depends(package_id);
-             CREATE INDEX idx_depends_pkgpath ON depends(depend_pkgpath);
 
              CREATE TABLE resolved_depends (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
-                 depends_on_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
+                 package_id INTEGER NOT NULL REFERENCES scan_index(id) ON DELETE CASCADE,
+                 depends_on_id INTEGER NOT NULL REFERENCES scan_index(id) ON DELETE CASCADE,
                  UNIQUE(package_id, depends_on_id)
              );
 
@@ -406,13 +407,13 @@ impl Database {
 
              CREATE TABLE builds (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
+                 package_id INTEGER NOT NULL REFERENCES scan_index(id) ON DELETE CASCADE,
                  outcome INTEGER NOT NULL REFERENCES outcome_types(id),
                  outcome_detail TEXT,
                  stage INTEGER REFERENCES stage_types(id),
                  duration_ms INTEGER NOT NULL DEFAULT 0,
                  log_dir TEXT,
-                 failed_dep_id INTEGER REFERENCES packages(id),
+                 failed_dep_id INTEGER REFERENCES scan_index(id),
                  UNIQUE(package_id)
              );
 
@@ -453,61 +454,46 @@ impl Database {
      */
     pub fn store_package(&self, pkgpath: &str, index: &ScanIndex) -> Result<i64> {
         let pkgname = index.pkgname.pkgname();
-
-        let skip_reason = index.pkg_skip_reason.as_ref().filter(|s| !s.is_empty());
-        let fail_reason = index.pkg_fail_reason.as_ref().filter(|s| !s.is_empty());
-        let is_bootstrap = index.bootstrap_pkg.as_deref() == Some("yes");
-        let pbulk_weight: i32 = index
-            .pbulk_weight
-            .as_ref()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(100);
-        let make_jobs_safe = index
-            .make_jobs_safe
-            .as_ref()
-            .map(|v| !v.eq_ignore_ascii_case("no"))
-            .unwrap_or(true);
+        let skip_reason = index.pkg_skip_reason.as_deref().filter(|s| !s.is_empty());
+        let fail_reason = index.pkg_fail_reason.as_deref().filter(|s| !s.is_empty());
+        let all_depends = index.all_depends.as_ref().map(|d| d.as_str());
         let multi_version = index.multi_version.as_ref().map(|v| v.join(" "));
 
-        {
-            let mut stmt = self.conn.prepare_cached(
-                "INSERT OR REPLACE INTO packages
-                 (pkgname, pkgpath, skip_reason, fail_reason,
-                  is_bootstrap, pbulk_weight, make_jobs_safe,
-                  multi_version, no_bin_on_ftp, maintainer, usergroup_phase)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            )?;
-            stmt.execute(params![
-                pkgname,
-                pkgpath,
-                skip_reason,
-                fail_reason,
-                is_bootstrap,
-                pbulk_weight,
-                make_jobs_safe,
-                multi_version,
-                index.no_bin_on_ftp,
-                index.maintainer,
-                index.usergroup_phase,
-            ])?;
-        }
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT OR REPLACE INTO scan_index
+             (pkgname, pkg_location, all_depends,
+              pkg_skip_reason, pkg_fail_reason, no_bin_on_ftp,
+              restricted, categories, maintainer, use_destdir,
+              bootstrap_pkg, usergroup_phase, scan_depends,
+              make_jobs_safe, pbulk_weight, multi_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                     ?11, ?12, ?13, ?14, ?15, ?16)",
+        )?;
+        stmt.execute(params![
+            pkgname,
+            pkgpath,
+            all_depends,
+            skip_reason,
+            fail_reason,
+            index.no_bin_on_ftp,
+            index.restricted,
+            index.categories,
+            index.maintainer,
+            index.use_destdir,
+            index.bootstrap_pkg,
+            index.usergroup_phase,
+            index.scan_depends.as_ref().map(|d| d.as_str()),
+            index.make_jobs_safe,
+            index.pbulk_weight,
+            multi_version,
+        ])?;
+        drop(stmt);
 
         let package_id = self.conn.last_insert_rowid();
-
-        // Store raw dependencies
-        if let Some(ref deps) = index.all_depends {
-            let mut stmt = self.conn.prepare_cached(
-                "INSERT OR IGNORE INTO depends (package_id, depend_pattern, depend_pkgpath)
-                 VALUES (?1, ?2, ?3)",
-            )?;
-            for dep in deps.depends().flatten() {
-                stmt.execute(params![
-                    package_id,
-                    dep.pattern().pattern(),
-                    dep.pkgpath().as_str()
-                ])?;
-            }
-        }
+        self.conn.execute(
+            "INSERT OR IGNORE INTO package_state (package_id) VALUES (?1)",
+            params![package_id],
+        )?;
 
         debug!(pkgname = pkgname, package_id = package_id, "Stored package");
         Ok(package_id)
@@ -527,7 +513,7 @@ impl Database {
      * Get package by name.
      */
     pub fn get_package_by_name(&self, pkgname: &str) -> Result<Option<PackageRow>> {
-        self.query_one("SELECT * FROM packages WHERE pkgname = ?1", [pkgname])
+        self.query_one("SELECT * FROM scan_index WHERE pkgname = ?1", [pkgname])
     }
 
     /**
@@ -536,7 +522,7 @@ impl Database {
     pub fn get_pkgname(&self, package_id: i64) -> Result<String> {
         self.conn
             .query_row(
-                "SELECT pkgname FROM packages WHERE id = ?1",
+                "SELECT pkgname FROM scan_index WHERE id = ?1",
                 [package_id],
                 |row| row.get(0),
             )
@@ -547,14 +533,19 @@ impl Database {
      * Get packages by pkgpath.
      */
     pub fn get_packages_by_path(&self, pkgpath: &str) -> Result<Vec<PackageRow>> {
-        self.query_rows("SELECT * FROM packages WHERE pkgpath = ?1", [pkgpath])
+        self.query_rows(
+            "SELECT * FROM scan_index WHERE pkg_location = ?1",
+            [pkgpath],
+        )
     }
 
     /**
      * Get all scanned pkgpaths.
      */
     pub fn get_scanned_pkgpaths(&self) -> Result<HashSet<String>> {
-        let mut stmt = self.conn.prepare("SELECT DISTINCT pkgpath FROM packages")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT pkg_location FROM scan_index")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect::<Result<HashSet<_>, _>>().map_err(Into::into)
     }
@@ -565,13 +556,23 @@ impl Database {
      * scan was interrupted before they could be processed.
      */
     pub fn get_unscanned_dependencies(&self) -> Result<HashSet<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT d.depend_pkgpath
-             FROM depends d
-             WHERE d.depend_pkgpath NOT IN (SELECT pkgpath FROM packages)",
-        )?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        rows.collect::<Result<HashSet<_>, _>>().map_err(Into::into)
+        let scanned = self.get_scanned_pkgpaths()?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT all_depends FROM scan_index WHERE all_depends IS NOT NULL")?;
+        let mut rows = stmt.query([])?;
+        let mut unscanned = HashSet::new();
+        while let Some(row) = rows.next()? {
+            let raw: String = row.get(0)?;
+            let deps = AllDepends::from(raw.as_str());
+            for entry in deps.iter().flatten() {
+                let pkgpath: String = entry.pkgpath().to_string();
+                if !scanned.contains(&pkgpath) {
+                    unscanned.insert(pkgpath);
+                }
+            }
+        }
+        Ok(unscanned)
     }
 
     /**
@@ -579,7 +580,7 @@ impl Database {
      */
     pub fn count_packages(&self) -> Result<i64> {
         self.conn
-            .query_row("SELECT COUNT(*) FROM packages", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM scan_index", [], |row| row.get(0))
             .context("Failed to count packages")
     }
 
@@ -587,7 +588,7 @@ impl Database {
      * Get all packages (lightweight).
      */
     pub fn get_all_packages(&self) -> Result<Vec<PackageRow>> {
-        self.query_rows("SELECT * FROM packages ORDER BY id", [])
+        self.query_rows("SELECT * FROM scan_index ORDER BY id", [])
     }
 
     /**
@@ -598,10 +599,14 @@ impl Database {
      */
     pub fn get_all_package_status(&self) -> Result<Vec<PackageStatusRow>> {
         self.query_rows(
-            "SELECT p.*, b.outcome AS build_outcome, b.outcome_detail
-             FROM packages p
+            "SELECT p.id, p.pkgname, p.pkg_location,
+                    p.pkg_skip_reason, p.pkg_fail_reason, p.multi_version,
+                    s.build_reason,
+                    b.outcome AS build_outcome, b.outcome_detail
+             FROM scan_index p
+             JOIN package_state s ON s.package_id = p.id
              LEFT JOIN builds b ON b.package_id = p.id
-             WHERE p.selected = 1",
+             WHERE s.selected = 1",
             [],
         )
     }
@@ -611,86 +616,75 @@ impl Database {
      */
     pub fn get_buildable_packages(&self) -> Result<Vec<PackageRow>> {
         self.query_rows(
-            "SELECT * FROM packages
-             WHERE selected = 1 AND skip_reason IS NULL AND fail_reason IS NULL",
+            "SELECT p.* FROM scan_index p
+             JOIN package_state s ON s.package_id = p.id
+             WHERE s.selected = 1
+               AND p.pkg_skip_reason IS NULL
+               AND p.pkg_fail_reason IS NULL",
             [],
         )
     }
 
-    fn scan_index_from_row(
-        row: &rusqlite::Row,
-        all_depends: Option<AllDepends>,
-    ) -> rusqlite::Result<ScanIndex> {
+    fn scan_index_from_row(row: &rusqlite::Row) -> rusqlite::Result<ScanIndex> {
         Ok(ScanIndex {
             pkgname: row.get::<_, String>("pkgname")?.into(),
-            pkg_location: row.get::<_, String>("pkgpath")?.parse().ok(),
-            all_depends,
-            pkg_skip_reason: row.get("skip_reason")?,
-            pkg_fail_reason: row.get("fail_reason")?,
+            pkg_location: row
+                .get::<_, Option<String>>("pkg_location")?
+                .and_then(|s| s.parse().ok()),
+            all_depends: row
+                .get::<_, Option<String>>("all_depends")?
+                .map(|s| AllDepends::from(s.as_str())),
+            pkg_skip_reason: row.get("pkg_skip_reason")?,
+            pkg_fail_reason: row.get("pkg_fail_reason")?,
             no_bin_on_ftp: row.get("no_bin_on_ftp")?,
+            restricted: row.get("restricted")?,
+            categories: row.get("categories")?,
             maintainer: row.get("maintainer")?,
-            bootstrap_pkg: (row.get::<_, i32>("is_bootstrap")? != 0).then(|| "yes".to_string()),
+            use_destdir: row.get("use_destdir")?,
+            bootstrap_pkg: row.get("bootstrap_pkg")?,
             usergroup_phase: row.get("usergroup_phase")?,
-            make_jobs_safe: (row.get::<_, i32>("make_jobs_safe")? == 0).then(|| "no".to_string()),
-            pbulk_weight: row
-                .get::<_, Option<i32>>("pbulk_weight")?
-                .map(|w| w.to_string()),
+            scan_depends: row
+                .get::<_, Option<String>>("scan_depends")?
+                .map(|s| ScanDepends::from(s.as_str())),
+            make_jobs_safe: row.get("make_jobs_safe")?,
+            pbulk_weight: row.get("pbulk_weight")?,
             multi_version: row
                 .get::<_, Option<String>>("multi_version")?
                 .map(|s| s.split_ascii_whitespace().map(str::to_string).collect()),
-            ..Default::default()
+            resolved_depends: None,
         })
-    }
-
-    fn fetch_all_depends(&self, package_id: i64) -> Result<Option<AllDepends>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT depend_pattern, depend_pkgpath FROM depends
-             WHERE package_id = ?1 ORDER BY id",
-        )?;
-        let deps: AllDepends = stmt
-            .query_map([package_id], |row| {
-                Ok(format!(
-                    "{}:{}",
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?
-                ))
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok((!deps.is_empty()).then_some(deps))
     }
 
     /**
      * Load full ScanIndex for a package.
      */
     pub fn get_full_scan_index(&self, package_id: i64) -> Result<ScanIndex> {
-        let all_depends = self.fetch_all_depends(package_id)?;
         let mut stmt = self
             .conn
-            .prepare_cached("SELECT * FROM packages WHERE id = ?1")?;
+            .prepare_cached("SELECT * FROM scan_index WHERE id = ?1")?;
         let mut rows = stmt.query([package_id])?;
         let row = rows
             .next()?
             .ok_or_else(|| anyhow::anyhow!("Package {package_id} not found"))?;
-        Self::scan_index_from_row(row, all_depends).map_err(Into::into)
+        Self::scan_index_from_row(row).map_err(Into::into)
     }
 
     /**
-     * Stream ScanIndex rows from the packages table to a caller-supplied
-     * scope without buffering the full result set.
+     * Stream ScanIndex rows to a caller-supplied scope without buffering
+     * the full result set.
      */
     pub fn with_scan_data<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&mut dyn FnMut() -> Result<Option<ScanIndex>>) -> Result<R>,
     {
-        let mut stmt = self.conn.prepare("SELECT * FROM packages ORDER BY id")?;
+        let mut stmt = self.conn.prepare("SELECT * FROM scan_index ORDER BY id")?;
         let mut rows = stmt.query([])?;
         let mut pull = || -> Result<Option<ScanIndex>> {
             let Some(row) = rows.next()? else {
                 return Ok(None);
             };
             let id: i64 = row.get("id")?;
-            let all_depends = self.fetch_all_depends(id)?;
-            let index = Self::scan_index_from_row(row, all_depends)
+            let index = Self::scan_index_from_row(row)
                 .with_context(|| format!("Failed to read package {id}"))?;
             Ok(Some(index))
         };
@@ -701,7 +695,7 @@ impl Database {
      * Clear all scan data.
      */
     pub fn clear_scan(&self) -> Result<()> {
-        self.conn.execute("DELETE FROM packages", [])?;
+        self.conn.execute("DELETE FROM scan_index", [])?;
         self.clear_full_scan_complete()?;
         Ok(())
     }
@@ -715,7 +709,8 @@ impl Database {
      */
     pub fn store_build_reason(&self, pkgname: &str, reason: &str) -> Result<()> {
         self.conn.execute(
-            "UPDATE packages SET build_reason = ?1 WHERE pkgname = ?2",
+            "UPDATE package_state SET build_reason = ?1
+             WHERE package_id = (SELECT id FROM scan_index WHERE pkgname = ?2)",
             params![reason, pkgname],
         )?;
         Ok(())
@@ -726,7 +721,7 @@ impl Database {
      */
     pub fn clear_build_reasons(&self) -> Result<()> {
         self.conn
-            .execute("UPDATE packages SET build_reason = NULL", [])?;
+            .execute("UPDATE package_state SET build_reason = NULL", [])?;
         Ok(())
     }
 
@@ -735,7 +730,9 @@ impl Database {
      */
     pub fn get_build_reason(&self, pkgname: &str) -> Result<Option<String>> {
         let result = self.conn.query_row(
-            "SELECT build_reason FROM packages WHERE pkgname = ?1",
+            "SELECT s.build_reason FROM package_state s
+             JOIN scan_index p ON p.id = s.package_id
+             WHERE p.pkgname = ?1",
             [pkgname],
             |row| row.get(0),
         );
@@ -750,9 +747,11 @@ impl Database {
      * Get all packages with their build reasons.
      */
     pub fn get_all_build_reasons(&self) -> Result<HashMap<String, String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT pkgname, build_reason FROM packages WHERE build_reason IS NOT NULL")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT p.pkgname, s.build_reason FROM scan_index p
+             JOIN package_state s ON s.package_id = p.id
+             WHERE s.build_reason IS NOT NULL",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
@@ -769,7 +768,7 @@ impl Database {
     pub fn store_resolved_deps(&self, summary: &crate::scan::ScanSummary) -> Result<()> {
         let id_map: HashMap<String, i64> = self
             .conn
-            .prepare("SELECT pkgname, id FROM packages")?
+            .prepare("SELECT pkgname, id FROM scan_index")?
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
 
@@ -874,10 +873,12 @@ impl Database {
 
     pub fn store_resolved_selection(&self, summary: &crate::scan::ScanSummary) -> Result<()> {
         let tx = self.transaction()?;
-        self.conn.execute("UPDATE packages SET selected = 0", [])?;
-        let mut stmt = self
-            .conn
-            .prepare("UPDATE packages SET selected = 1 WHERE pkgname = ?1")?;
+        self.conn
+            .execute("UPDATE package_state SET selected = 0", [])?;
+        let mut stmt = self.conn.prepare(
+            "UPDATE package_state SET selected = 1
+             WHERE package_id = (SELECT id FROM scan_index WHERE pkgname = ?1)",
+        )?;
         for pkg in &summary.packages {
             let Some(pkgname) = pkg.pkgname() else {
                 continue;
@@ -921,8 +922,8 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT p1.pkgname, p2.pkgname
              FROM resolved_depends rd
-             JOIN packages p1 ON rd.package_id = p1.id
-             JOIN packages p2 ON rd.depends_on_id = p2.id
+             JOIN scan_index p1 ON rd.package_id = p1.id
+             JOIN scan_index p2 ON rd.depends_on_id = p2.id
              ORDER BY p1.pkgname, p2.pkgname",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -979,7 +980,7 @@ impl Database {
                     .collect::<Result<Vec<PkgName>, _>>()?,
             );
             packages.push(crate::scan::ResolvedPackage {
-                pkgpath: row.pkgpath.parse()?,
+                pkgpath: row.pkg_location.parse()?,
                 index,
             });
         }
@@ -1036,7 +1037,7 @@ impl Database {
         let success = PackageStateKind::Success as i32;
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM builds b
-             JOIN packages p ON b.package_id = p.id
+             JOIN scan_index p ON b.package_id = p.id
              WHERE p.pkgname = ?1 AND b.outcome = ?2",
             params![pkgname, success],
             |row| row.get::<_, i64>(0),
@@ -1060,10 +1061,11 @@ impl Database {
      */
     pub fn get_build_result(&self, package_id: i64) -> Result<Option<BuildResult>> {
         let mut stmt = self.conn.prepare(
-            "SELECT p.pkgname, p.pkgpath, b.outcome, b.outcome_detail,
+            "SELECT p.pkgname, p.pkg_location AS pkgpath,
+                    b.outcome, b.outcome_detail,
                     b.stage, b.duration_ms, b.log_dir
              FROM builds b
-             JOIN packages p ON b.package_id = p.id
+             JOIN scan_index p ON b.package_id = p.id
              WHERE b.package_id = ?1",
         )?;
         let mut rows = stmt.query([package_id])?;
@@ -1078,7 +1080,7 @@ impl Database {
      */
     pub fn delete_build_by_name(&self, pkgname: &str) -> Result<bool> {
         let rows = self.conn.execute(
-            "DELETE FROM builds WHERE package_id IN (SELECT id FROM packages WHERE pkgname = ?1)",
+            "DELETE FROM builds WHERE package_id IN (SELECT id FROM scan_index WHERE pkgname = ?1)",
             params![pkgname],
         )?;
         Ok(rows > 0)
@@ -1089,7 +1091,7 @@ impl Database {
      */
     pub fn delete_build_by_pkgpath(&self, pkgpath: &str) -> Result<usize> {
         let rows = self.conn.execute(
-            "DELETE FROM builds WHERE package_id IN (SELECT id FROM packages WHERE pkgpath = ?1)",
+            "DELETE FROM builds WHERE package_id IN (SELECT id FROM scan_index WHERE pkg_location = ?1)",
             params![pkgpath],
         )?;
         Ok(rows)
@@ -1108,10 +1110,11 @@ impl Database {
      */
     pub fn get_all_build_results(&self) -> Result<Vec<BuildResult>> {
         let mut stmt = self.conn.prepare(
-            "SELECT p.pkgname, p.pkgpath, b.outcome, b.outcome_detail,
+            "SELECT p.pkgname, p.pkg_location AS pkgpath,
+                    b.outcome, b.outcome_detail,
                     b.stage, b.duration_ms, b.log_dir
              FROM builds b
-             JOIN packages p ON b.package_id = p.id
+             JOIN scan_index p ON b.package_id = p.id
              ORDER BY p.pkgname",
         )?;
 
@@ -1135,7 +1138,7 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT p.pkgname, COUNT(*)
              FROM builds b
-             JOIN packages p ON b.failed_dep_id = p.id
+             JOIN scan_index p ON b.failed_dep_id = p.id
              WHERE b.outcome = ?1
              GROUP BY b.failed_dep_id",
         )?;
@@ -1211,9 +1214,9 @@ impl Database {
                  JOIN builds b ON b.package_id = rd.depends_on_id
                  WHERE b.outcome NOT IN (?2, ?3)
              )
-             SELECT DISTINCT p.pkgname, p.pkgpath, bl.outcome
+             SELECT DISTINCT p.pkgname, p.pkg_location, bl.outcome
              FROM blocking bl
-             JOIN packages p ON bl.id = p.id
+             JOIN scan_index p ON bl.id = p.id
              -- Only show root causes (failed or prefailed/preskipped), not indirect
              WHERE bl.outcome IN (?4, ?5, ?6, ?7)
              ORDER BY p.pkgname",
@@ -1266,9 +1269,9 @@ impl Database {
                  FROM resolved_depends rd
                  JOIN affected a ON rd.depends_on_id = a.id
              )
-             SELECT p.pkgname, p.pkgpath
+             SELECT p.pkgname, p.pkg_location
              FROM affected a
-             JOIN packages p ON a.id = p.id
+             JOIN scan_index p ON a.id = p.id
              ORDER BY p.pkgname",
         )?;
 
@@ -1284,21 +1287,21 @@ impl Database {
      */
     pub fn get_prefailskip_packages(&self) -> Result<Vec<(String, Option<String>, PackageState)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT p.pkgname, p.pkgpath, p.skip_reason, p.fail_reason
-             FROM packages p
-             WHERE (p.skip_reason IS NOT NULL OR p.fail_reason IS NOT NULL)
+            "SELECT p.pkgname, p.pkg_location, p.pkg_skip_reason, p.pkg_fail_reason
+             FROM scan_index p
+             WHERE (p.pkg_skip_reason IS NOT NULL OR p.pkg_fail_reason IS NOT NULL)
                AND NOT EXISTS (SELECT 1 FROM builds b WHERE b.package_id = p.id)
              ORDER BY p.pkgname",
         )?;
         let rows = stmt.query_map([], |row| {
-            let fail: Option<String> = row.get("fail_reason")?;
-            let skip: Option<String> = row.get("skip_reason")?;
+            let fail: Option<String> = row.get("pkg_fail_reason")?;
+            let skip: Option<String> = row.get("pkg_skip_reason")?;
             let state = match (fail, skip) {
                 (Some(s), _) => PackageState::PreFailed(s),
                 (_, Some(s)) => PackageState::PreSkipped(s),
                 _ => PackageState::PreFailed(String::new()),
             };
-            Ok((row.get("pkgname")?, row.get("pkgpath")?, state))
+            Ok((row.get("pkgname")?, row.get("pkg_location")?, state))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
@@ -1333,15 +1336,15 @@ impl Database {
                  JOIN affected a ON rd.depends_on_id = a.id
                  WHERE rd.package_id NOT IN (SELECT id FROM failed_pkgs)
              )
-             SELECT p.pkgname, p.pkgpath, GROUP_CONCAT(DISTINCT fp.pkgname) as failed_deps
+             SELECT p.pkgname, p.pkg_location, GROUP_CONCAT(DISTINCT fp.pkgname) as failed_deps
              FROM affected a
-             JOIN packages p ON a.id = p.id
-             JOIN packages fp ON a.root_id = fp.id
+             JOIN scan_index p ON a.id = p.id
+             JOIN scan_index fp ON a.root_id = fp.id
              WHERE a.id != a.root_id
                AND NOT EXISTS (SELECT 1 FROM builds b WHERE b.package_id = a.id)
-               AND p.skip_reason IS NULL
-               AND p.fail_reason IS NULL
-             GROUP BY p.id, p.pkgname, p.pkgpath
+               AND p.pkg_skip_reason IS NULL
+               AND p.pkg_fail_reason IS NULL
+             GROUP BY p.id, p.pkgname, p.pkg_location
              ORDER BY p.pkgname",
         )?;
 
@@ -1578,7 +1581,7 @@ impl Database {
     pub fn get_failed_packages(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT p.pkgname FROM builds b
-             JOIN packages p ON b.package_id = p.id
+             JOIN scan_index p ON b.package_id = p.id
              WHERE b.outcome = ?1
              ORDER BY p.pkgname",
         )?;
@@ -1598,7 +1601,7 @@ impl Database {
     pub fn get_successful_packages(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT p.pkgname FROM builds b
-             JOIN packages p ON b.package_id = p.id
+             JOIN scan_index p ON b.package_id = p.id
              WHERE b.outcome IN (?1, ?2)
              ORDER BY p.pkgname",
         )?;
@@ -1626,7 +1629,7 @@ impl Database {
      */
     pub fn get_restricted_packages(&self) -> Result<HashSet<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT pkgname FROM packages
+            "SELECT pkgname FROM scan_index
              WHERE no_bin_on_ftp IS NOT NULL AND no_bin_on_ftp != ''",
         )?;
         let restricted = stmt
@@ -1645,18 +1648,17 @@ impl Database {
         let resolved = self.get_all_resolved_deps()?;
         let mut stmt = self.conn.prepare(
             "SELECT p.*, b.outcome, b.outcome_detail
-             FROM packages p
+             FROM scan_index p
              LEFT JOIN builds b ON b.package_id = p.id
              ORDER BY p.pkgname",
         )?;
         let mut rows = stmt.query([])?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
-            let id: i64 = row.get("id")?;
             let pkgname: String = row.get("pkgname")?;
             let outcome: Option<i32> = row.get("outcome")?;
             let detail: Option<String> = row.get("outcome_detail")?;
-            let mut index = Self::scan_index_from_row(row, self.fetch_all_depends(id)?)?;
+            let mut index = Self::scan_index_from_row(row)?;
             if let Some(deps) = resolved.get(&pkgname) {
                 index.resolved_depends = Some(deps.iter().map(|d| d.parse()).collect::<Result<
                     Vec<PkgName>,
@@ -2481,7 +2483,7 @@ pub(crate) fn record_history_to(conn: &Connection, rec: &crate::History) -> Resu
 pub(crate) struct SelectedPackage {
     pub id: i64,
     pub pkgname: PkgName,
-    pub pkgpath: String,
+    pub pkg_location: String,
     pub pbulk_weight: usize,
     pub make_jobs_safe: bool,
 }
@@ -2491,16 +2493,24 @@ pub(crate) struct SelectedPackage {
  */
 pub(crate) fn query_selected_packages(conn: &Connection) -> Result<Vec<SelectedPackage>> {
     let mut stmt = conn.prepare(
-        "SELECT id, pkgname, pkgpath, pbulk_weight, make_jobs_safe \
-         FROM packages WHERE selected = 1",
+        "SELECT p.id, p.pkgname, p.pkg_location, p.pbulk_weight, p.make_jobs_safe \
+         FROM scan_index p \
+         JOIN package_state s ON s.package_id = p.id \
+         WHERE s.selected = 1",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(SelectedPackage {
             id: row.get(0)?,
             pkgname: PkgName::from(row.get::<_, String>(1)?),
-            pkgpath: row.get(2)?,
-            pbulk_weight: row.get::<_, i32>(3)? as usize,
-            make_jobs_safe: row.get::<_, bool>(4)?,
+            pkg_location: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            pbulk_weight: row
+                .get::<_, Option<String>>(3)?
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(100),
+            make_jobs_safe: !matches!(
+                row.get::<_, Option<String>>(4)?.as_deref(),
+                Some(s) if s.eq_ignore_ascii_case("no")
+            ),
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()

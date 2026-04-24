@@ -1880,7 +1880,7 @@ fn test_multi_version_multiple_records_build_all_variants() -> Result<()> {
     let lingering_pending: Vec<_> = all_status
         .into_iter()
         .filter(|p| {
-            p.pkgpath == "test/dual" && p.build_outcome.is_none() && p.build_reason.is_none()
+            p.pkg_location == "test/dual" && p.build_outcome.is_none() && p.build_reason.is_none()
         })
         .map(|p| p.pkgname)
         .collect();
