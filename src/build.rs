@@ -1371,7 +1371,8 @@ pub struct Build {
     pkgsrc_env: PkgsrcEnv,
     /// Sandbox scope - owns created sandboxes, destroys on drop.
     scope: SandboxScope,
-    /// List of packages to build, as input from Scan::resolve.
+    /// Packages to build with minimal [`ResolvedPackage`] data populated
+    /// by [`Database::load_buildable_packages`].
     scanpkgs: IndexMap<PkgName, ResolvedPackage>,
     /// Cached build results from previous run.
     cached: IndexMap<PkgName, BuildResult>,
@@ -1890,11 +1891,11 @@ impl BuildJobs {
         self.results.push(result);
 
         for pkg in indirect {
-            let scanpkg = self.scanpkgs.get(&pkg);
+            let pkgpath = self.scanpkgs.get(&pkg).map(|r| r.pkgpath.clone());
             let log_dir = Some(self.logdir.join(pkg.pkgname()));
             self.results.push(BuildResult {
                 pkgname: pkg,
-                pkgpath: scanpkg.map(|s| s.pkgpath.clone()),
+                pkgpath,
                 state: PackageState::IndirectFailed(format!(
                     "dependency {} failed",
                     pkgname.pkgname()
@@ -1927,14 +1928,6 @@ impl Build {
             build_threads = config.build_threads(),
             "Creating new Build instance"
         );
-        for (pkgname, index) in &scanpkgs {
-            debug!(pkgname = %pkgname.pkgname(),
-                pkgpath = ?index.pkgpath,
-                depends_count = index.depends().len(),
-                depends = ?index.depends().iter().map(|d| d.pkgname()).collect::<Vec<_>>(),
-                "Package in build queue"
-            );
-        }
         Build {
             config: config.clone(),
             pkgsrc_env,
@@ -1950,12 +1943,10 @@ impl Build {
     /// for packages that are in our build queue.
     pub fn load_cached_from_db(&mut self, db: &crate::db::Database) -> anyhow::Result<usize> {
         let mut count = 0;
-        for pkgname in self.scanpkgs.keys() {
-            if let Some(pkg) = db.get_package_by_name(pkgname.pkgname())? {
-                if let Some(result) = db.get_build_result(pkg.id)? {
-                    self.cached.insert(pkgname.clone(), result);
-                    count += 1;
-                }
+        for result in db.get_all_build_results()? {
+            if self.scanpkgs.contains_key(&result.pkgname) {
+                self.cached.insert(result.pkgname.clone(), result);
+                count += 1;
             }
         }
         if count > 0 {
@@ -2360,8 +2351,11 @@ impl Build {
                         let client = clients.get(&c).expect("client not in map");
                         match jobs.scheduler.poll() {
                             Poll::Ready(Some(sp)) => {
-                                let pkginfo =
-                                    jobs.scanpkgs.get(&sp.pkg).expect("pkg not in scanpkgs");
+                                let pkginfo = jobs
+                                    .scanpkgs
+                                    .get(&sp.pkg)
+                                    .expect("pkg not in scanpkgs")
+                                    .clone();
 
                                 thread_packages.insert(c, sp.pkg.clone());
                                 let hist = build_history.get(sp.pkg.pkgbase());
@@ -2397,7 +2391,7 @@ impl Build {
                                         session: Arc::clone(&session),
                                         sandbox_id: sandbox_ids.as_ref().map(|ids| ids[c]),
                                         worker_id: c,
-                                        pkginfo: pkginfo.clone(),
+                                        pkginfo,
                                         make_jobs: sp.make_jobs,
                                     })));
                             }

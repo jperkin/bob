@@ -72,15 +72,12 @@ pub fn prepare(
         println!("Cleared {} cached build result(s)", cleared);
     }
 
-    let all_resolved = db
-        .load_resolved_packages()
+    let mut buildable = db
+        .load_buildable_packages()
         .context("No scan data cached - run 'bob scan' first")?;
-
-    let buildable: IndexMap<_, _> = all_resolved
-        .into_iter()
-        .filter(|p| args.all || to_rebuild.contains(p.pkgname().pkgname()))
-        .map(|p| (p.pkgname().clone(), p))
-        .collect();
+    if !args.all {
+        buildable.retain(|k, _| to_rebuild.contains(k.pkgname()));
+    }
 
     if buildable.is_empty() {
         bail!("No buildable packages found");

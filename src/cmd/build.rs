@@ -257,15 +257,12 @@ pub fn run_build_with(
         bail!("No packages to build");
     }
 
-    let mut buildable = indexmap::IndexMap::new();
     let mut skipped_results: Vec<build::BuildResult> = Vec::new();
     let mut scanfail_results: Vec<(pkgsrc::PkgPath, String)> = Vec::new();
 
     for pkg in scan_result.packages {
         match pkg {
-            ScanResult::Buildable(resolved) => {
-                buildable.insert(resolved.pkgname().clone(), resolved);
-            }
+            ScanResult::Buildable(_) => {}
             ScanResult::Skipped {
                 pkgpath,
                 state,
@@ -294,6 +291,7 @@ pub fn run_build_with(
         .load_pkgsrc_env()
         .context("PkgsrcEnv not cached - try 'bob clean' first")?;
 
+    let buildable = db.load_buildable_packages()?;
     let mut build = Build::new(config, pkgsrc_env, scope, buildable);
     build.load_cached_from_db(db)?;
 

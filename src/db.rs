@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use indexmap::IndexMap;
 use pkgsrc::{AllDepends, PkgName, PkgPath, ScanDepends, ScanIndex};
 use rusqlite::{Connection, params};
 use tracing::{debug, warn};
@@ -96,7 +97,7 @@ fn history_schema() -> String {
 /**
  * Schema version for bob.db - update when schema changes.
  */
-const SCHEMA_VERSION: i32 = 20260424;
+const SCHEMA_VERSION: i32 = 20260425;
 
 /**
  * Schema version for history.db - update when history schema changes.
@@ -381,7 +382,9 @@ impl Database {
                  scan_depends TEXT,
                  make_jobs_safe TEXT,
                  pbulk_weight TEXT,
-                 multi_version TEXT
+                 multi_version TEXT,
+                 scan_outcome INTEGER REFERENCES outcome_types(id),
+                 scan_outcome_detail TEXT
              );
 
              CREATE INDEX idx_scan_index_pkg_location ON scan_index(pkg_location);
@@ -807,28 +810,22 @@ impl Database {
      */
     pub fn store_scan_skipped(&self, summary: &crate::scan::ScanSummary) -> Result<()> {
         let tx = self.transaction()?;
-
+        let mut stmt = self.conn.prepare(
+            "UPDATE scan_index
+             SET scan_outcome = ?1, scan_outcome_detail = ?2
+             WHERE pkgname = ?3",
+        )?;
         for pkg in &summary.packages {
             if let ScanResult::Skipped { state, index, .. } = pkg {
                 let Some(idx) = index else { continue };
-                let pkgname = idx.pkgname.pkgname();
-
-                let Some(pkg_row) = self.get_package_by_name(pkgname)? else {
-                    continue;
-                };
-
-                let outcome = state.db_id();
-                let detail = state.to_string();
-
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO builds
-                     (package_id, outcome, outcome_detail, duration_ms)
-                     VALUES (?1, ?2, ?3, 0)",
-                    params![pkg_row.id, outcome, detail],
-                )?;
+                stmt.execute(params![
+                    state.db_id(),
+                    state.to_string(),
+                    idx.pkgname.pkgname(),
+                ])?;
             }
         }
-
+        drop(stmt);
         tx.commit()
     }
 
@@ -939,52 +936,56 @@ impl Database {
     }
 
     /**
-     * Load buildable packages with their resolved dependencies.
+     * Load buildable selected packages as an [`IndexMap`] keyed by pkgname.
      *
-     * Reconstructs [`ResolvedPackage`] objects from the database without
-     * re-running dependency resolution.  Excludes packages that were
-     * skipped during resolution (stored in the builds table).
+     * Only the [`ScanIndex`] fields the build pipeline needs
+     * (`bootstrap_pkg`, `usergroup_phase`, `multi_version`,
+     * `resolved_depends`) are populated; the rest stay at their defaults.
+     * Two queries total regardless of package count.
      */
-    pub fn load_resolved_packages(&self) -> Result<Vec<crate::scan::ResolvedPackage>> {
-        let skipped_ids: HashSet<i64> = {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT package_id, outcome FROM builds")?;
-            let rows =
-                stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i32>(1)?)))?;
-            let mut ids = HashSet::new();
-            for row in rows {
-                let (id, outcome_id) = row?;
-                if let Some(state) = PackageState::from_db(outcome_id, None) {
-                    if state.is_skip() {
-                        ids.insert(id);
-                    }
-                }
-            }
-            ids
-        };
-
-        let buildable = self.get_buildable_packages()?;
+    pub fn load_buildable_packages(
+        &self,
+    ) -> Result<IndexMap<PkgName, crate::scan::ResolvedPackage>> {
         let all_deps = self.get_all_resolved_deps()?;
-
-        let mut packages = Vec::with_capacity(buildable.len());
-        for row in &buildable {
-            if skipped_ids.contains(&row.id) {
-                continue;
-            }
-            let mut index = self.get_full_scan_index(row.id)?;
-            let deps = all_deps.get(&row.pkgname).cloned().unwrap_or_default();
-            index.resolved_depends = Some(
-                deps.into_iter()
-                    .map(|d| d.parse())
-                    .collect::<Result<Vec<PkgName>, _>>()?,
+        let mut stmt = self.conn.prepare(
+            "SELECT p.pkgname, p.pkg_location, p.bootstrap_pkg,
+                    p.usergroup_phase, p.multi_version
+             FROM scan_index p
+             JOIN package_state s ON s.package_id = p.id
+             WHERE s.selected = 1
+               AND p.scan_outcome IS NULL
+             ORDER BY p.id",
+        )?;
+        let mut out = IndexMap::new();
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let pkgname: String = row.get("pkgname")?;
+            let pkg_location: String = row.get("pkg_location")?;
+            let multi_version = row
+                .get::<_, Option<String>>("multi_version")?
+                .map(|s| s.split_ascii_whitespace().map(str::to_string).collect());
+            let resolved_depends: Vec<PkgName> = all_deps
+                .get(&pkgname)
+                .map(|ds| ds.iter().map(|d| d.parse()).collect::<Result<Vec<_>, _>>())
+                .transpose()?
+                .unwrap_or_default();
+            let key: PkgName = pkgname.clone().into();
+            out.insert(
+                key,
+                crate::scan::ResolvedPackage {
+                    pkgpath: pkg_location.parse()?,
+                    index: ScanIndex {
+                        pkgname: pkgname.into(),
+                        bootstrap_pkg: row.get("bootstrap_pkg")?,
+                        usergroup_phase: row.get("usergroup_phase")?,
+                        multi_version,
+                        resolved_depends: Some(resolved_depends),
+                        ..Default::default()
+                    },
+                },
             );
-            packages.push(crate::scan::ResolvedPackage {
-                pkgpath: row.pkg_location.parse()?,
-                index,
-            });
         }
-        Ok(packages)
+        Ok(out)
     }
 
     /**
@@ -1281,26 +1282,26 @@ impl Database {
     }
 
     /**
-     * Get pre-failed and pre-skipped packages (those with fail_reason or
-     * skip_reason but no build result). Returns (pkgname, pkgpath, state)
-     * where state is PreFailed or PreSkipped depending on which reason is set.
+     * Get scan-phase outcomes (pre-skipped/pre-failed/unresolved + their
+     * indirect propagations) recorded on `scan_index`.
      */
     pub fn get_prefailskip_packages(&self) -> Result<Vec<(String, Option<String>, PackageState)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT p.pkgname, p.pkg_location, p.pkg_skip_reason, p.pkg_fail_reason
-             FROM scan_index p
-             WHERE (p.pkg_skip_reason IS NOT NULL OR p.pkg_fail_reason IS NOT NULL)
-               AND NOT EXISTS (SELECT 1 FROM builds b WHERE b.package_id = p.id)
-             ORDER BY p.pkgname",
+            "SELECT pkgname, pkg_location, scan_outcome, scan_outcome_detail
+             FROM scan_index
+             WHERE scan_outcome IS NOT NULL
+             ORDER BY pkgname",
         )?;
         let rows = stmt.query_map([], |row| {
-            let fail: Option<String> = row.get("pkg_fail_reason")?;
-            let skip: Option<String> = row.get("pkg_skip_reason")?;
-            let state = match (fail, skip) {
-                (Some(s), _) => PackageState::PreFailed(s),
-                (_, Some(s)) => PackageState::PreSkipped(s),
-                _ => PackageState::PreFailed(String::new()),
-            };
+            let outcome: i32 = row.get("scan_outcome")?;
+            let detail: Option<String> = row.get("scan_outcome_detail")?;
+            let state = PackageState::from_db(outcome, detail).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Integer,
+                    format!("unknown scan_outcome id: {outcome}").into(),
+                )
+            })?;
             Ok((row.get("pkgname")?, row.get("pkg_location")?, state))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -1342,8 +1343,7 @@ impl Database {
              JOIN scan_index fp ON a.root_id = fp.id
              WHERE a.id != a.root_id
                AND NOT EXISTS (SELECT 1 FROM builds b WHERE b.package_id = a.id)
-               AND p.pkg_skip_reason IS NULL
-               AND p.pkg_fail_reason IS NULL
+               AND p.scan_outcome IS NULL
              GROUP BY p.id, p.pkgname, p.pkg_location
              ORDER BY p.pkgname",
         )?;
@@ -1647,7 +1647,9 @@ impl Database {
     pub fn get_report_data(&self) -> Result<Vec<ReportRow>> {
         let resolved = self.get_all_resolved_deps()?;
         let mut stmt = self.conn.prepare(
-            "SELECT p.*, b.outcome, b.outcome_detail
+            "SELECT p.*,
+                    COALESCE(b.outcome, p.scan_outcome) AS outcome,
+                    COALESCE(b.outcome_detail, p.scan_outcome_detail) AS outcome_detail
              FROM scan_index p
              LEFT JOIN builds b ON b.package_id = p.id
              ORDER BY p.pkgname",

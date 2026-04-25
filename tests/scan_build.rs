@@ -682,13 +682,10 @@ fn test_full_build() -> Result<()> {
     let mut scan = Scan::new(&config);
     scan.init_from_db(&db)?;
     scan.start(&db, &mut scan_scope)?;
-    let scan_result = scan.resolve_with_report(&db, false)?;
+    scan.resolve_with_report(&db, false)?;
 
     // Collect buildable packages for the build
-    let scanpkgs = scan_result
-        .buildable()
-        .map(|p| (p.pkgname().clone(), p.clone()))
-        .collect();
+    let scanpkgs = db.load_buildable_packages()?;
 
     // Fetch pkgsrc env (or use our known paths)
     let pkgsrc_env = h.pkgsrc_env();
@@ -852,14 +849,11 @@ fn test_build_bootstrap_skips_deinstall() -> Result<()> {
     let mut scan = Scan::new(&config);
     scan.init_from_db(&db)?;
     scan.start(&db, &mut scan_scope)?;
-    let scan_result = scan.resolve_with_report(&db, false)?;
+    scan.resolve_with_report(&db, false)?;
 
     // Only build test/base (bootstrap package)
-    let scanpkgs = scan_result
-        .buildable()
-        .filter(|p| p.pkgpath.as_path().to_string_lossy() == "test/base")
-        .map(|p| (p.pkgname().clone(), p.clone()))
-        .collect();
+    let mut scanpkgs = db.load_buildable_packages()?;
+    scanpkgs.retain(|_, p| p.pkgpath.as_path().to_string_lossy() == "test/base");
 
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
@@ -945,9 +939,8 @@ fn test_scan_resume() -> Result<()> {
     Ok(())
 }
 
-/// Run a full scan + build using the test harness, returning the DB, scan
-/// summary, and build summary for further assertions.
-fn run_scan_and_build(h: &TestHarness) -> Result<(Database, ScanSummary, bob::BuildSummary)> {
+/// Run a full scan + build using the test harness.
+fn run_scan_and_build(h: &TestHarness) -> Result<(Database, bob::BuildSummary)> {
     let config = h.load_config()?;
     let db = h.open_db()?;
     let state = h.run_state();
@@ -957,19 +950,16 @@ fn run_scan_and_build(h: &TestHarness) -> Result<(Database, ScanSummary, bob::Bu
     let mut scan = Scan::new(&config);
     scan.init_from_db(&db)?;
     scan.start(&db, &mut scan_scope)?;
-    let scan_result = scan.resolve_with_report(&db, false)?;
+    scan.resolve_with_report(&db, false)?;
 
-    let scanpkgs = scan_result
-        .buildable()
-        .map(|p| (p.pkgname().clone(), p.clone()))
-        .collect();
+    let scanpkgs = db.load_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
     let build = Build::new(&config, pkgsrc_env, build_scope, scanpkgs);
     let build_result = build.start(&state, &db)?;
 
-    Ok((db, scan_result, build_result))
+    Ok((db, build_result))
 }
 
 #[test]
@@ -977,17 +967,14 @@ fn test_cached_build_resume() -> Result<()> {
     let h = TestHarness::new()?;
 
     // First scan + build
-    let (_, scan_result, _) = run_scan_and_build(&h)?;
+    let (_, _) = run_scan_and_build(&h)?;
 
     // Second build using the same DB (results are cached)
     let config = h.load_config()?;
     let db = h.open_db()?;
     let state = h.run_state();
 
-    let scanpkgs = scan_result
-        .buildable()
-        .map(|p| (p.pkgname().clone(), p.clone()))
-        .collect();
+    let scanpkgs = db.load_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
@@ -1009,7 +996,7 @@ fn test_cached_build_resume() -> Result<()> {
 #[test]
 fn test_build_results_in_db() -> Result<()> {
     let h = TestHarness::new()?;
-    let (db, _, _) = run_scan_and_build(&h)?;
+    let (db, _) = run_scan_and_build(&h)?;
 
     // Verify successful package
     let base = db
@@ -1290,7 +1277,7 @@ show-subdir-var:
 #[test]
 fn test_build_failure_at_each_phase() -> Result<()> {
     let h = TestHarness::new()?;
-    let (_, _, build_result) = run_scan_and_build(&h)?;
+    let (_, build_result) = run_scan_and_build(&h)?;
 
     let outcomes: HashMap<&str, &PackageState> = build_result
         .results
@@ -1419,7 +1406,7 @@ fn test_build_logs() -> Result<()> {
 #[test]
 fn test_cascading_failure_chain() -> Result<()> {
     let h = TestHarness::new()?;
-    let (_, _, build_result) = run_scan_and_build(&h)?;
+    let (_, build_result) = run_scan_and_build(&h)?;
 
     let outcomes: HashMap<&str, &PackageState> = build_result
         .results
@@ -1464,7 +1451,7 @@ fn test_cascading_failure_chain() -> Result<()> {
 #[test]
 fn test_build_order() -> Result<()> {
     let h = TestHarness::new()?;
-    let (_, _, build_result) = run_scan_and_build(&h)?;
+    let (_, build_result) = run_scan_and_build(&h)?;
 
     // Build position map: earlier index = completed earlier
     let positions: HashMap<&str, usize> = build_result
@@ -1539,10 +1526,7 @@ fn test_limited_build() -> Result<()> {
     assert_eq!(c.buildable, 4);
 
     // Build them
-    let scanpkgs = scan_result
-        .buildable()
-        .map(|p| (p.pkgname().clone(), p.clone()))
-        .collect();
+    let scanpkgs = db.load_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
@@ -1611,17 +1595,14 @@ fn test_build_resume_no_new_work() -> Result<()> {
     let h = TestHarness::new()?;
 
     // First full scan + build
-    let (_, scan_result, first_build) = run_scan_and_build(&h)?;
+    let (_, first_build) = run_scan_and_build(&h)?;
     assert_eq!(first_build.counts().states[Success], 7);
 
     // Second build with same config - should produce no new results
     let config = h.load_config()?;
     let db = h.open_db()?;
     let state = h.run_state();
-    let scanpkgs = scan_result
-        .buildable()
-        .map(|p| (p.pkgname().clone(), p.clone()))
-        .collect();
+    let scanpkgs = db.load_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
@@ -1675,12 +1656,9 @@ pkgsrc = {{
     let mut scan = Scan::new(&config);
     scan.init_from_db(&db)?;
     scan.start(&db, &mut scan_scope)?;
-    let scan_result = scan.resolve_with_report(&db, false)?;
+    scan.resolve_with_report(&db, false)?;
 
-    let scanpkgs = scan_result
-        .buildable()
-        .map(|p| (p.pkgname().clone(), p.clone()))
-        .collect();
+    let scanpkgs = db.load_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
@@ -1701,7 +1679,7 @@ fn test_rebuild_after_clear() -> Result<()> {
     let h = TestHarness::new()?;
 
     // First build
-    let (db, scan_result, first) = run_scan_and_build(&h)?;
+    let (db, first) = run_scan_and_build(&h)?;
     assert_eq!(first.counts().states[Success], 7);
 
     // Clear all build results
@@ -1711,10 +1689,7 @@ fn test_rebuild_after_clear() -> Result<()> {
     // Rebuild - should produce new results
     let config = h.load_config()?;
     let state = h.run_state();
-    let scanpkgs = scan_result
-        .buildable()
-        .map(|p| (p.pkgname().clone(), p.clone()))
-        .collect();
+    let scanpkgs = db.load_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
@@ -1739,7 +1714,7 @@ fn test_rebuild_after_clear() -> Result<()> {
 #[test]
 fn test_selective_rebuild_after_failure() -> Result<()> {
     let h = TestHarness::new()?;
-    let (db, scan_result, first) = run_scan_and_build(&h)?;
+    let (db, first) = run_scan_and_build(&h)?;
 
     // Verify build-fail is in the failed list
     let failed = db.get_failed_packages()?;
@@ -1758,10 +1733,7 @@ fn test_selective_rebuild_after_failure() -> Result<()> {
     // Rebuild with cached results (most will be cached)
     let config = h.load_config()?;
     let state = h.run_state();
-    let scanpkgs = scan_result
-        .buildable()
-        .map(|p| (p.pkgname().clone(), p.clone()))
-        .collect();
+    let scanpkgs = db.load_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
@@ -1801,7 +1773,7 @@ fn test_selective_rebuild_after_failure() -> Result<()> {
 #[test]
 fn test_multi_version_package() -> Result<()> {
     let h = TestHarness::new()?;
-    let (_, _, build_result) = run_scan_and_build(&h)?;
+    let (_, build_result) = run_scan_and_build(&h)?;
 
     let multi = build_result
         .results
@@ -1847,10 +1819,7 @@ fn test_multi_version_multiple_records_build_all_variants() -> Result<()> {
         "expected both dual variants in resolved buildable set"
     );
 
-    let scanpkgs = scan_result
-        .buildable()
-        .map(|p| (p.pkgname().clone(), p.clone()))
-        .collect();
+    let scanpkgs = db.load_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
@@ -1963,7 +1932,7 @@ fn test_cli_scan_marks_multi_version_variants_up_to_date() -> Result<()> {
 #[test]
 fn test_unselected_packages_are_hidden_from_status_queries() -> Result<()> {
     let h = TestHarness::new()?;
-    let (db, _, _) = run_scan_and_build(&h)?;
+    let (db, _) = run_scan_and_build(&h)?;
 
     let extra: pkgsrc::ScanIndex = "\
 PKGNAME=extra-1.0
@@ -1995,9 +1964,9 @@ SCAN_DEPENDS=
         "unselected package should not appear in buildable rows"
     );
 
-    let loaded = db.load_resolved_packages()?;
+    let loaded = db.load_buildable_packages()?;
     assert!(
-        !loaded.iter().any(|p| p.pkgname().pkgname() == "extra-1.0"),
+        !loaded.keys().any(|k| k.pkgname() == "extra-1.0"),
         "unselected package should not appear in resolved rebuild set"
     );
 
@@ -2010,14 +1979,14 @@ SCAN_DEPENDS=
 #[test]
 fn test_usergroup_phase_package() -> Result<()> {
     let h = TestHarness::new()?;
-    let (_, scan_result, _) = run_scan_and_build(&h)?;
+    let (db, _) = run_scan_and_build(&h)?;
 
     // Verify mid's scan data includes USERGROUP_PHASE
-    let mid = scan_result
-        .buildable()
-        .find(|p| p.pkgpath.as_path().to_string_lossy() == "test/mid");
-    assert!(mid.is_some(), "mid should be in scan results");
-    let mid = mid.expect("mid exists");
+    let buildable = db.load_buildable_packages()?;
+    let mid = buildable
+        .values()
+        .find(|p| p.pkgpath.as_path().to_string_lossy() == "test/mid")
+        .expect("mid should be in buildable set");
     assert_eq!(
         mid.usergroup_phase(),
         Some("configure"),
@@ -2047,9 +2016,9 @@ fn test_load_resolved_packages_matches_scan() -> Result<()> {
         .map(|p| to_depset(p.pkgname().pkgname(), p.depends()))
         .collect();
 
-    let loaded = db.load_resolved_packages()?;
+    let loaded = db.load_buildable_packages()?;
     let actual: HashMap<String, Vec<String>> = loaded
-        .iter()
+        .values()
         .map(|p| to_depset(p.pkgname().pkgname(), p.depends()))
         .collect();
 
@@ -2063,7 +2032,7 @@ fn test_load_resolved_packages_matches_scan() -> Result<()> {
 #[test]
 fn test_build_durations() -> Result<()> {
     let h = TestHarness::new()?;
-    let (_, _, build_result) = run_scan_and_build(&h)?;
+    let (_, build_result) = run_scan_and_build(&h)?;
 
     for r in &build_result.results {
         match &r.state {
@@ -2136,17 +2105,10 @@ fn maybe_generate(db: &Database, prior: &[String], summary: &bob::BuildSummary) 
 }
 
 /// Run a build loading cached results, simulating a rebuild or re-run.
-fn run_cached_build(
-    h: &TestHarness,
-    db: &Database,
-    scan_result: &ScanSummary,
-) -> Result<bob::BuildSummary> {
+fn run_cached_build(h: &TestHarness, db: &Database) -> Result<bob::BuildSummary> {
     let config = h.load_config()?;
     let state = h.run_state();
-    let scanpkgs = scan_result
-        .buildable()
-        .map(|p| (p.pkgname().clone(), p.clone()))
-        .collect();
+    let scanpkgs = db.load_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let sandbox = Sandbox::new(&config);
     let scope = SandboxScope::new(sandbox, state.clone());
@@ -2160,7 +2122,7 @@ fn run_cached_build(
 #[test]
 fn test_pkg_summary_generated_after_first_build() -> Result<()> {
     let h = TestHarness::new()?;
-    let (db, _, summary) = run_scan_and_build(&h)?;
+    let (db, summary) = run_scan_and_build(&h)?;
 
     let prior: Vec<String> = vec![];
     let generated = maybe_generate(&db, &prior, &summary)?;
@@ -2196,14 +2158,14 @@ fn test_pkg_summary_generated_after_first_build() -> Result<()> {
 #[test]
 fn test_pkg_summary_skipped_when_up_to_date() -> Result<()> {
     let h = TestHarness::new()?;
-    let (db, scan_result, _) = run_scan_and_build(&h)?;
+    let (db, _) = run_scan_and_build(&h)?;
 
     bob::generate_pkg_summary(&db, 2)?;
     let mtime_before = pkg_summary_gz_mtime(&h).expect("pkg_summary.gz should exist");
     std::thread::sleep(std::time::Duration::from_millis(50));
 
     let prior = db.get_successful_packages()?;
-    let summary = run_cached_build(&h, &db, &scan_result)?;
+    let summary = run_cached_build(&h, &db)?;
     let generated = maybe_generate(&db, &prior, &summary)?;
 
     assert!(!generated, "should not regenerate when all up-to-date");
@@ -2221,7 +2183,7 @@ fn test_pkg_summary_skipped_when_up_to_date() -> Result<()> {
 #[test]
 fn test_pkg_summary_skipped_when_rebuild_fails_again() -> Result<()> {
     let h = TestHarness::new()?;
-    let (db, scan_result, _) = run_scan_and_build(&h)?;
+    let (db, _) = run_scan_and_build(&h)?;
 
     bob::generate_pkg_summary(&db, 2)?;
     let mtime_before = pkg_summary_gz_mtime(&h).expect("pkg_summary.gz should exist");
@@ -2230,7 +2192,7 @@ fn test_pkg_summary_skipped_when_rebuild_fails_again() -> Result<()> {
     let prior = db.get_successful_packages()?;
     db.delete_build_by_name("build-fail-1.0")?;
 
-    let summary = run_cached_build(&h, &db, &scan_result)?;
+    let summary = run_cached_build(&h, &db)?;
     let generated = maybe_generate(&db, &prior, &summary)?;
 
     assert!(
@@ -2250,7 +2212,7 @@ fn test_pkg_summary_skipped_when_rebuild_fails_again() -> Result<()> {
 #[test]
 fn test_pkg_summary_regenerated_when_rebuild_succeeds() -> Result<()> {
     let h = TestHarness::new()?;
-    let (db, scan_result, _) = run_scan_and_build(&h)?;
+    let (db, _) = run_scan_and_build(&h)?;
 
     bob::generate_pkg_summary(&db, 2)?;
     let mtime_before = pkg_summary_gz_mtime(&h).expect("pkg_summary.gz should exist");
@@ -2267,7 +2229,7 @@ fn test_pkg_summary_regenerated_when_rebuild_succeeds() -> Result<()> {
     db.delete_build_by_name("build-fail-1.0")?;
     db.delete_build_by_name("dep-bfail-1.0")?;
 
-    let summary = run_cached_build(&h, &db, &scan_result)?;
+    let summary = run_cached_build(&h, &db)?;
     let generated = maybe_generate(&db, &prior, &summary)?;
 
     assert!(
@@ -2314,7 +2276,7 @@ fn test_pkg_summary_regenerated_when_rebuild_succeeds() -> Result<()> {
 #[test]
 fn test_pkg_summary_regenerated_when_successful_pkg_fails() -> Result<()> {
     let h = TestHarness::new()?;
-    let (db, scan_result, _) = run_scan_and_build(&h)?;
+    let (db, _) = run_scan_and_build(&h)?;
 
     bob::generate_pkg_summary(&db, 2)?;
     let mtime_before = pkg_summary_gz_mtime(&h).expect("pkg_summary.gz should exist");
@@ -2331,7 +2293,7 @@ fn test_pkg_summary_regenerated_when_successful_pkg_fails() -> Result<()> {
     assert!(prior.contains(&"top-1.0".to_string()));
     db.delete_build_by_name("top-1.0")?;
 
-    let summary = run_cached_build(&h, &db, &scan_result)?;
+    let summary = run_cached_build(&h, &db)?;
 
     let current = db.get_successful_packages()?;
     assert!(
@@ -2369,7 +2331,7 @@ fn test_pkg_summary_regenerated_when_successful_pkg_fails() -> Result<()> {
 #[test]
 fn test_pkg_summary_regenerated_on_same_name_rebuild() -> Result<()> {
     let h = TestHarness::new()?;
-    let (db, scan_result, _) = run_scan_and_build(&h)?;
+    let (db, _) = run_scan_and_build(&h)?;
 
     bob::generate_pkg_summary(&db, 2)?;
     let mtime_before = pkg_summary_gz_mtime(&h).expect("pkg_summary.gz should exist");
@@ -2379,7 +2341,7 @@ fn test_pkg_summary_regenerated_on_same_name_rebuild() -> Result<()> {
     assert!(prior.contains(&"top-1.0".to_string()));
     db.delete_build_by_name("top-1.0")?;
 
-    let summary = run_cached_build(&h, &db, &scan_result)?;
+    let summary = run_cached_build(&h, &db)?;
 
     let top = summary
         .results
@@ -2437,12 +2399,9 @@ fn test_pkg_summary_skipped_when_all_fail() -> Result<()> {
     scan.add(&pkgsrc::PkgPath::new("test/build-fail")?);
     scan.init_from_db(&db)?;
     scan.start(&db, &mut scope)?;
-    let scan_result = scan.resolve_with_report(&db, false)?;
+    scan.resolve_with_report(&db, false)?;
 
-    let scanpkgs = scan_result
-        .buildable()
-        .map(|p| (p.pkgname().clone(), p.clone()))
-        .collect();
+    let scanpkgs = db.load_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
@@ -2480,12 +2439,9 @@ fn test_pkg_summary_regenerated_when_new_packages_added() -> Result<()> {
     scan.add(&pkgsrc::PkgPath::new("test/base")?);
     scan.init_from_db(&db)?;
     scan.start(&db, &mut scope)?;
-    let scan_result = scan.resolve_with_report(&db, false)?;
+    scan.resolve_with_report(&db, false)?;
 
-    let scanpkgs = scan_result
-        .buildable()
-        .map(|p| (p.pkgname().clone(), p.clone()))
-        .collect();
+    let scanpkgs = db.load_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
@@ -2508,7 +2464,7 @@ fn test_pkg_summary_regenerated_when_new_packages_added() -> Result<()> {
     scan2.add(&pkgsrc::PkgPath::new("test/top")?);
     scan2.init_from_db(&db)?;
     scan2.start(&db, &mut scope2)?;
-    let scan_result2 = scan2.resolve_with_report(&db, false)?;
+    scan2.resolve_with_report(&db, false)?;
 
     let prior = db.get_successful_packages()?;
     assert_eq!(
@@ -2517,10 +2473,7 @@ fn test_pkg_summary_regenerated_when_new_packages_added() -> Result<()> {
         "only base should be successful so far"
     );
 
-    let scanpkgs2 = scan_result2
-        .buildable()
-        .map(|p| (p.pkgname().clone(), p.clone()))
-        .collect();
+    let scanpkgs2 = db.load_buildable_packages()?;
     let pkgsrc_env2 = h.pkgsrc_env();
     let build_sandbox2 = Sandbox::new(&config);
     let build_scope2 = SandboxScope::new(build_sandbox2, state2.clone());
@@ -2554,7 +2507,7 @@ fn test_pkg_summary_regenerated_when_new_packages_added() -> Result<()> {
 #[test]
 fn test_pkg_summary_skipped_when_new_packages_fail() -> Result<()> {
     let h = TestHarness::new()?;
-    let (db, _, _) = run_scan_and_build(&h)?;
+    let (db, _) = run_scan_and_build(&h)?;
 
     bob::generate_pkg_summary(&db, 2)?;
     let mtime_before = pkg_summary_gz_mtime(&h).expect("should exist");
@@ -2579,9 +2532,9 @@ fn test_pkg_summary_skipped_when_new_packages_fail() -> Result<()> {
     let mut scan = Scan::new(&config);
     scan.init_from_db(&db)?;
     scan.start(&db, &mut scope)?;
-    let scan_result = scan.resolve_with_report(&db, false)?;
+    scan.resolve_with_report(&db, false)?;
 
-    let summary = run_cached_build(&h, &db, &scan_result)?;
+    let summary = run_cached_build(&h, &db)?;
     let generated = maybe_generate(&db, &prior, &summary)?;
 
     assert!(
@@ -2601,7 +2554,7 @@ fn test_pkg_summary_skipped_when_new_packages_fail() -> Result<()> {
 #[test]
 fn test_pkg_summary_skipped_when_interrupted() -> Result<()> {
     let h = TestHarness::new()?;
-    let (db, scan_result, _) = run_scan_and_build(&h)?;
+    let (db, _) = run_scan_and_build(&h)?;
 
     bob::generate_pkg_summary(&db, 2)?;
     let mtime_before = pkg_summary_gz_mtime(&h).expect("should exist");
@@ -2616,10 +2569,7 @@ fn test_pkg_summary_skipped_when_interrupted() -> Result<()> {
     let state = h.run_state();
     state.shutdown();
 
-    let scanpkgs = scan_result
-        .buildable()
-        .map(|p| (p.pkgname().clone(), p.clone()))
-        .collect();
+    let scanpkgs = db.load_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let sandbox = Sandbox::new(&config);
     let scope = SandboxScope::new(sandbox, state.clone());
@@ -2658,7 +2608,7 @@ fn test_pkg_summary_skipped_when_interrupted() -> Result<()> {
 #[test]
 fn test_pkg_summary_recovered_after_interrupt() -> Result<()> {
     let h = TestHarness::new()?;
-    let (db, scan_result, _) = run_scan_and_build(&h)?;
+    let (db, _) = run_scan_and_build(&h)?;
 
     bob::generate_pkg_summary(&db, 2)?;
     let mtime_before = pkg_summary_gz_mtime(&h).expect("should exist");
@@ -2672,10 +2622,7 @@ fn test_pkg_summary_recovered_after_interrupt() -> Result<()> {
     let state = h.run_state();
     state.shutdown();
 
-    let scanpkgs = scan_result
-        .buildable()
-        .map(|p| (p.pkgname().clone(), p.clone()))
-        .collect();
+    let scanpkgs = db.load_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let sandbox = Sandbox::new(&config);
     let scope = SandboxScope::new(sandbox, state.clone());
@@ -2694,7 +2641,7 @@ fn test_pkg_summary_recovered_after_interrupt() -> Result<()> {
     let prior = db.get_successful_packages()?;
     assert!(!prior.contains(&"top-1.0".to_string()));
 
-    let summary = run_cached_build(&h, &db, &scan_result)?;
+    let summary = run_cached_build(&h, &db)?;
     let generated = maybe_generate(&db, &prior, &summary)?;
 
     assert!(generated, "should regenerate on recovery after interrupt");
@@ -2792,14 +2739,11 @@ show-vars:
     let mut scan = Scan::new(&config);
     scan.init_from_db(&db)?;
     scan.start(&db, &mut scan_scope)?;
-    let scan_result = scan.resolve_with_report(&db, false)?;
+    scan.resolve_with_report(&db, false)?;
 
     // Build only the orphan-stdout package
-    let scanpkgs = scan_result
-        .buildable()
-        .filter(|p| p.pkgpath.as_path().to_string_lossy() == "test/orphan-stdout")
-        .map(|p| (p.pkgname().clone(), p.clone()))
-        .collect();
+    let mut scanpkgs = db.load_buildable_packages()?;
+    scanpkgs.retain(|_, p| p.pkgpath.as_path().to_string_lossy() == "test/orphan-stdout");
 
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config);
