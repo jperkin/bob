@@ -562,12 +562,6 @@ impl<'a> PkgBuilder<'a> {
             ..PkgBuildStats::default()
         };
 
-        // Clean up and create log directory
-        if self.logdir.exists() {
-            fs::remove_dir_all(&self.logdir)?;
-        }
-        fs::create_dir_all(&self.logdir)?;
-
         let pkgdir = self.session.config.pkgsrc().join(pkgpath.as_path());
 
         // Pre-clean
@@ -1012,14 +1006,11 @@ impl<'a> PkgBuilder<'a> {
             &[],
         )?;
 
-        let bob_log = File::options()
-            .create(true)
-            .append(true)
-            .open(self.logdir.join("bob.log"))?;
-        let output = cmd.args(&make_args).stderr(Stdio::from(bob_log)).output()?;
+        let output = cmd.args(&make_args).stderr(Stdio::piped()).output()?;
 
         if !output.status.success() {
-            bail!("Failed to get make variable {}", varname);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("Failed to get make variable {varname}: {}", stderr.trim());
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -1480,11 +1471,23 @@ impl<'a> MakeQuery<'a> {
 impl PackageBuild {
     fn build(&mut self, status_tx: &Sender<ChannelCommand>) -> anyhow::Result<PkgBuildResult> {
         let pkgname = self.pkginfo.index.pkgname.pkgname();
+        let logdir = self.session.config.logdir();
+
+        /*
+         * Wipe the per-package logdir before any tracing events arrive
+         * so setup.log (written by the per-package log layer) lands in
+         * a clean directory.  Doing this any later means the wipe
+         * removes setup.log mid-build.
+         */
+        let pkg_logdir = logdir.join(pkgname);
+        if pkg_logdir.exists() {
+            fs::remove_dir_all(&pkg_logdir)?;
+        }
+        fs::create_dir_all(&pkg_logdir)?;
+
         info!("Starting package build");
 
         let pkgpath = &self.pkginfo.pkgpath;
-
-        let logdir = self.session.config.logdir();
 
         let mut envs = self
             .session

@@ -1097,12 +1097,24 @@ fn write_html_report(
                 .get(result.pkgname.pkgname())
                 .copied()
                 .unwrap_or(0);
-            let failed_log = result.build_stats.stage.and_then(|stage| {
-                BUILD_PHASES
-                    .iter()
-                    .find(|(name, _)| *name == stage.into_str())
-                    .map(|(_, log)| (*log).to_string())
-            });
+            let failed_log = result
+                .build_stats
+                .stage
+                .and_then(|stage| {
+                    BUILD_PHASES
+                        .iter()
+                        .find(|(name, _)| *name == stage.into_str())
+                        .map(|(_, log)| (*log).to_string())
+                })
+                .or_else(|| {
+                    /*
+                     * No build phase reached -- e.g. sandbox or bootstrap
+                     * setup failed before bmake.  Fall back to setup.log
+                     * if the per-package layer wrote one.
+                     */
+                    let setup_log = logdir.join(result.pkgname.pkgname()).join("setup.log");
+                    setup_log.exists().then(|| "setup.log".to_string())
+                });
             FailedPackageInfo {
                 result,
                 breaks_count,
@@ -1483,12 +1495,16 @@ fn generate_phase_links(pkg_name: &str, log_dir: &Path) -> String {
         return String::new();
     }
     let mut links = Vec::new();
+    if log_dir.join("setup.log").exists() {
+        links.push(format!(
+            "<a href=\"{pkg_name}/setup.log\" class=\"phase\">setup</a>"
+        ));
+    }
     for (phase_name, log_file) in BUILD_PHASES {
         let log_path = log_dir.join(log_file);
         if log_path.exists() {
             links.push(format!(
-                "<a href=\"{}/{}\" class=\"phase\">{}</a>",
-                pkg_name, log_file, phase_name
+                "<a href=\"{pkg_name}/{log_file}\" class=\"phase\">{phase_name}</a>"
             ));
         }
     }
