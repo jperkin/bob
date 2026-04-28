@@ -770,7 +770,7 @@ impl Sandbox {
                 bail!("hooks require sandboxes to be enabled");
             };
             if let Err(e) = self.perform_actions(sandbox_id, hooks, &envs) {
-                warn!(error = %e, "Hook action failed");
+                warn!(error = format!("{e:#}"), "Hook action failed");
                 return Ok(false);
             }
         }
@@ -798,7 +798,7 @@ impl Sandbox {
                 bail!("hooks require sandboxes to be enabled");
             };
             if let Err(e) = self.reverse_actions(sandbox_id, hooks, &envs) {
-                warn!(error = %e, "Hook destroy action failed");
+                warn!(error = format!("{e:#}"), "Hook destroy action failed");
                 return Ok(false);
             }
         }
@@ -814,7 +814,7 @@ impl Sandbox {
                     if let Err(e) = fs::remove_dir_all(&target) {
                         warn!(
                             path = %target.display(),
-                            error = %e,
+                            error = format!("{e:#}"),
                             "Failed to remove directory"
                         );
                     }
@@ -969,7 +969,7 @@ impl Sandbox {
                         warn!("post-build failed for sandbox {}", id)
                     }
                     Err(e) => {
-                        warn!(error = %e, sandbox = id, "post-build error")
+                        warn!(error = format!("{e:#}"), sandbox = id, "post-build error")
                     }
                 }
             }
@@ -1618,7 +1618,7 @@ impl Drop for SandboxScope {
                         warn!("post-build failed for sandbox {}", id)
                     }
                     Err(e) => {
-                        warn!(error = %e, sandbox = id, "post-build error")
+                        warn!(error = format!("{e:#}"), sandbox = id, "post-build error")
                     }
                 }
             }

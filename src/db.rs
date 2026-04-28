@@ -1890,7 +1890,10 @@ impl Database {
         let conn = match self.history_conn() {
             Ok(c) => c,
             Err(e) => {
-                warn!(error = %e, "build_history_by_pkg_all: failed to open history db");
+                warn!(
+                    error = format!("{e:#}"),
+                    "build_history_by_pkg_all: failed to open history db"
+                );
                 return HashMap::new();
             }
         };
@@ -1916,7 +1919,10 @@ impl Database {
         let mut stmt = match conn.prepare(&sql) {
             Ok(s) => s,
             Err(e) => {
-                warn!(error = %e, "build_history_by_pkg_all: failed to prepare query");
+                warn!(
+                    error = format!("{e:#}"),
+                    "build_history_by_pkg_all: failed to prepare query"
+                );
                 return HashMap::new();
             }
         };
@@ -1929,7 +1935,10 @@ impl Database {
         }) {
             Ok(r) => r,
             Err(e) => {
-                warn!(error = %e, "build_history_by_pkg_all: query failed");
+                warn!(
+                    error = format!("{e:#}"),
+                    "build_history_by_pkg_all: query failed"
+                );
                 return HashMap::new();
             }
         };
@@ -1957,7 +1966,10 @@ impl Database {
         let conn = match self.history_conn() {
             Ok(c) => c,
             Err(e) => {
-                warn!(error = %e, "duration_by_pkg_all: failed to open history db");
+                warn!(
+                    error = format!("{e:#}"),
+                    "duration_by_pkg_all: failed to open history db"
+                );
                 return HashMap::new();
             }
         };
@@ -1992,7 +2004,10 @@ impl Database {
         let mut stmt = match conn.prepare(&sql) {
             Ok(s) => s,
             Err(e) => {
-                warn!(error = %e, "duration_by_pkg_all: failed to prepare query");
+                warn!(
+                    error = format!("{e:#}"),
+                    "duration_by_pkg_all: failed to prepare query"
+                );
                 return HashMap::new();
             }
         };
@@ -2001,7 +2016,10 @@ impl Database {
         }) {
             Ok(r) => r,
             Err(e) => {
-                warn!(error = %e, "duration_by_pkg_all: query failed");
+                warn!(
+                    error = format!("{e:#}"),
+                    "duration_by_pkg_all: query failed"
+                );
                 return HashMap::new();
             }
         };
@@ -2580,7 +2598,10 @@ pub(crate) fn query_build_stage_timings(
     let mut stmt = match conn.prepare(&sql) {
         Ok(s) => s,
         Err(e) => {
-            warn!(error = %e, "query_build_stage_timings: failed to prepare query");
+            warn!(
+                error = format!("{e:#}"),
+                "query_build_stage_timings: failed to prepare query"
+            );
             return HashMap::new();
         }
     };
@@ -2593,7 +2614,10 @@ pub(crate) fn query_build_stage_timings(
     }) {
         Ok(r) => r,
         Err(e) => {
-            warn!(error = %e, "query_build_stage_timings: query failed");
+            warn!(
+                error = format!("{e:#}"),
+                "query_build_stage_timings: query failed"
+            );
             return HashMap::new();
         }
     };

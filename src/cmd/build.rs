@@ -219,7 +219,7 @@ pub fn check_up_to_date(
             Err(e) => {
                 tracing::debug!(
                     pkgname,
-                    error = %e,
+                    error = format!("{e:#}"),
                     "Error checking up-to-date status"
                 );
                 db.store_build_reason(pkgname, &format!("check failed: {}", e))?;
@@ -323,7 +323,7 @@ pub fn run_build_with(
     if let Some(bid) = &build_id {
         if let Some(rev) = db.load_vcs_info().ok().and_then(|v| v.revision_full) {
             if let Err(e) = db.store_build_revision(bid, &rev) {
-                tracing::warn!(error = %e, "Failed to save build revision");
+                tracing::warn!(error = format!("{e:#}"), "Failed to save build revision");
             }
         }
     }
@@ -336,7 +336,7 @@ pub fn run_build_with(
                 input.timestamp = now;
             }
             if let Err(e) = db.record_history(&input) {
-                tracing::warn!(error = %e, "Failed to save skipped history");
+                tracing::warn!(error = format!("{e:#}"), "Failed to save skipped history");
             }
         }
     }

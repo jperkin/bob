@@ -1445,7 +1445,7 @@ impl<'a> MakeQuery<'a> {
                 return HashMap::new();
             }
             Err(e) => {
-                warn!(error = %e, ?names, "show-vars exec error");
+                warn!(error = format!("{e:#}"), ?names, "show-vars exec error");
                 return HashMap::new();
             }
         };
@@ -1580,7 +1580,7 @@ impl PackageBuild {
                 PkgBuildResult::Failed(stats)
             }
             Err(e) => {
-                error!(error = %e, "Package build error");
+                error!(error = format!("{e:#}"), "Package build error");
                 let disk_usage = measure_wrkdir();
                 self.cleanup_after_failure(
                     status_tx,
@@ -1609,7 +1609,7 @@ impl PackageBuild {
             Ok(true) => {}
             Ok(false) => warn!("post-build failed"),
             Err(e) => {
-                warn!(error = %e, "post-build error")
+                warn!(error = format!("{e:#}"), "post-build error")
             }
         }
 
@@ -1689,7 +1689,7 @@ impl PackageBuild {
 
         let save_dir = logdir.join(pkgname).join("wrkdir-files");
         if let Err(e) = fs::create_dir_all(&save_dir) {
-            warn!(%pkgname, error = %e, "Failed to create wrkdir-files directory");
+            warn!(%pkgname, error = format!("{e:#}"), "Failed to create wrkdir-files directory");
             return;
         }
 
@@ -1717,7 +1717,7 @@ impl PackageBuild {
             &compiled_patterns,
             &mut saved_count,
         ) {
-            warn!(%pkgname, error = %e, "Error while saving wrkdir files");
+            warn!(%pkgname, error = format!("{e:#}"), "Error while saving wrkdir files");
         }
 
         if saved_count > 0 {
@@ -1744,7 +1744,7 @@ impl PackageBuild {
             .status();
 
         if let Err(e) = result {
-            debug!(error = %e, "Failed to run bmake clean");
+            debug!(error = format!("{e:#}"), "Failed to run bmake clean");
         }
     }
 }
@@ -1799,7 +1799,7 @@ fn walk_and_save(
                     if let Err(e) = fs::copy(&path, &dest_path) {
                         warn!(src = %path.display(),
                             dest = %dest_path.display(),
-                            error = %e,
+                            error = format!("{e:#}"),
                             "Failed to copy file"
                         );
                     } else {
@@ -2243,7 +2243,7 @@ impl Build {
                                 Err(e) => {
                                     if !state_for_worker.is_shutdown() {
                                         tracing::error!(
-                                            error = %e,
+                                            error = format!("{e:#}"),
                                             pkgname = %pkgname.pkgname(),
                                             "Build error"
                                         );
@@ -2526,7 +2526,7 @@ impl Build {
             if let Err(e) = db.store_build_by_name(&result) {
                 warn!(
                     pkgname = %result.pkgname.pkgname(),
-                    error = %e,
+                    error = format!("{e:#}"),
                     "Failed to save build result"
                 );
                 if db_error.is_none() {
@@ -2541,7 +2541,7 @@ impl Build {
                 if let Err(e) = db.record_history(&input) {
                     warn!(
                         pkgname = %result.pkgname.pkgname(),
-                        error = %e,
+                        error = format!("{e:#}"),
                         "Failed to save build history"
                     );
                 }
@@ -2567,7 +2567,7 @@ impl Build {
             let samples = sampler.stop();
             if !samples.is_empty() {
                 if let Err(e) = db.store_cpu_usage(&samples) {
-                    warn!(error = %e, "Failed to save CPU usage samples");
+                    warn!(error = format!("{e:#}"), "Failed to save CPU usage samples");
                 } else {
                     debug!(count = samples.len(), "Saved CPU usage samples");
                 }

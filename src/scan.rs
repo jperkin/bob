@@ -540,7 +540,7 @@ impl Scan {
                             vec![]
                         }
                         Err(e) => {
-                            debug!(category = *category, error = %e, "Failed to run make in category");
+                            debug!(category = *category, error = format!("{e:#}"), "Failed to run make in category");
                             vec![]
                         }
                     }
@@ -850,7 +850,7 @@ impl Scan {
                     // Save to database
                     if !scanpkgs.is_empty() {
                         if let Err(e) = db.store_scan_pkgpath(&pkgpath.to_string(), &scanpkgs) {
-                            error!(error = %e, "Failed to store scan results");
+                            error!(error = format!("{e:#}"), "Failed to store scan results");
                             if db_error.is_none() {
                                 db_error = Some(e);
                             }
@@ -911,7 +911,7 @@ impl Scan {
                         );
                     }
                     Err(e) => {
-                        warn!(error = %e, "Failed to find missing pkgpaths");
+                        warn!(error = format!("{e:#}"), "Failed to find missing pkgpaths");
                     }
                     _ => {}
                 }
@@ -1171,7 +1171,7 @@ impl Scan {
                         Err(e) => {
                             warn!(
                                 pkg = %pkg.pkgname.pkgname(),
-                                error = %e,
+                                error = format!("{e:#}"),
                                 "Malformed dependency"
                             );
                             continue;
@@ -1510,7 +1510,7 @@ impl Scan {
                         Err(e) => {
                             warn!(
                                 pkg = %pkg.pkgname.pkgname(),
-                                error = %e,
+                                error = format!("{e:#}"),
                                 "Malformed dependency"
                             );
                             continue;

@@ -1812,7 +1812,7 @@ fn compute_diff_commits(
         Err(e) => {
             debug!(
                 build1_id = %diff.build1_id,
-                error = %e,
+                error = format!("{e:#}"),
                 "Skipping per-pkgpath commit lookup: failed to query \
                  previous build revision"
             );
@@ -1860,7 +1860,10 @@ fn compute_diff_commits(
             None
         }
         Err(e) => {
-            debug!(error = %e, "Failed to compute per-pkgpath commit list");
+            debug!(
+                error = format!("{e:#}"),
+                "Failed to compute per-pkgpath commit list"
+            );
             None
         }
     }

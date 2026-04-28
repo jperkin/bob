@@ -146,7 +146,10 @@ impl Scheduler<PkgName> {
         let stage_timings = match db.history_conn() {
             Ok(conn) => crate::db::query_build_stage_timings(conn),
             Err(e) => {
-                warn!(error = %e, "Scheduler::new: failed to open history db");
+                warn!(
+                    error = format!("{e:#}"),
+                    "Scheduler::new: failed to open history db"
+                );
                 HashMap::new()
             }
         };

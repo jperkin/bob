@@ -100,7 +100,7 @@ fn generate_summary_entry(pkgfile: &Path) -> Option<String> {
             Err(e) => {
                 warn!(
                     path = %pkgfile.display(),
-                    error = %e,
+                    error = format!("{e:#}"),
                     "Failed to generate summary"
                 );
                 None
@@ -109,7 +109,7 @@ fn generate_summary_entry(pkgfile: &Path) -> Option<String> {
         Err(e) => {
             warn!(
                 path = %pkgfile.display(),
-                error = %e,
+                error = format!("{e:#}"),
                 "Failed to open package"
             );
             None

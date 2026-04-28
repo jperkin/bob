@@ -94,7 +94,10 @@ impl BuildRunner {
             let samples = sampler.stop();
             if !samples.is_empty() {
                 if let Err(e) = self.db.store_cpu_usage(&samples) {
-                    tracing::warn!(error = %e, "Failed to save scan CPU usage samples");
+                    tracing::warn!(
+                        error = format!("{e:#}"),
+                        "Failed to save scan CPU usage samples"
+                    );
                 } else {
                     tracing::debug!(count = samples.len(), "Saved scan CPU usage samples");
                 }
