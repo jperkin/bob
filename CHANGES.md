@@ -1,5 +1,51 @@
 # Changelog
 
+## Version 0.99.3 (2026-05-01)
+
+* Switch to an upstream commit with illumos support for lua-src so that we can
+  use the bundled version.  OmniOS is now supported, as it does not provide a
+  native lua package.
+
+* Generate setup.log for bob's internal handling of preparing for a build, and
+  include them in the report, so that users are made aware of any failures that
+  prevented a package build from starting.
+
+* Various logging and error handling improvements.
+
+* Add `--from` and `--to` support to `bob diff`.
+
+* Add `bob publish --baseline` to compare against a specific build run instead
+  of the previous, useful if the previous build ended up being unusable.
+
+* Support `bob util import-pscan --no-resolve`
+
+* Significantly reduce memory usage during the scan phase.  The tests that
+  perform a full import of pre-generate pscan input go from 13 seconds and
+  543MB peak RSS to 3 seconds and 113MB RSS.
+
+* Add links to offending commits to the report for each newly failed package,
+  and other minor report improvements.
+
+* Add `broken-by` alias for `blocked-by` as it is so commonly mis-typed.
+
+* Fix `bob rebuild -a`.
+
+* Replace `use_failed_history` with `failed_threshold` using the same
+  semantics as `threshold`.  This avoids the problem where failed builds that
+  are caused by tmpfs filling don't end up constantly retrying.  Users may
+  want to set this to something like 50% of `threshold` to ensure temporary
+  artefacts don't cause tmpfs full failures.
+
+* Add `bob dev` as an alias for `bob sandbox exec` as it is used so frequently.
+
+* Allow overlay mounts on top of existing mount points.
+
+* Use du(1) for calculating disk usage, `fs_extra` used logical size and would
+  often come up short.
+
+* Add `dedent()` function for config sections that use inline shell scripts
+  to better support e.g. `cat <<-EOF`.
+
 ## Version 0.99.2 (2026-04-08)
 
 * Improve documentation.
