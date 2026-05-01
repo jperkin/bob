@@ -29,10 +29,6 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        if !dest.exists() {
-            fs::create_dir_all(dest)
-                .with_context(|| format!("Failed to create {}", dest.display()))?;
-        }
         let cmd = self.config.bindfs();
         /*
          * pre_exec raises the NOFILE limit for the bindfs process so it
@@ -68,7 +64,6 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
         let cmd = "/sbin/mount_devfs";
         Ok(Some(
             Command::new(cmd)
@@ -96,7 +91,6 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
         let cmd = "/sbin/mount_nfs";
         Ok(Some(
             Command::new(cmd)
@@ -124,7 +118,6 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
         let cmd = "/sbin/mount_tmpfs";
         let status = Command::new(cmd)
             .args(opts)

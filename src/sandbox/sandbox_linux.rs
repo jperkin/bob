@@ -16,7 +16,6 @@
 
 use crate::sandbox::Sandbox;
 use anyhow::Context;
-use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
@@ -28,10 +27,6 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        if !dest.exists() {
-            fs::create_dir_all(dest)
-                .with_context(|| format!("Failed to create {}", dest.display()))?;
-        }
         let cmd = "/bin/mount";
         // Build mount options: start with "bind", add any user-specified opts
         let mut mount_opts = vec!["bind"];
@@ -55,7 +50,6 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
         let cmd = "/bin/mount";
         Ok(Some(
             Command::new(cmd)
@@ -76,7 +70,6 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
         let cmd = "/bin/mount";
         // Build mount options: start with "bind", add any user-specified opts
         let mut mount_opts = vec!["bind"];
@@ -100,7 +93,6 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
         let cmd = "/bin/mount";
         Ok(Some(
             Command::new(cmd)
@@ -121,7 +113,6 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
         let cmd = "/bin/mount";
         Ok(Some(
             Command::new(cmd)
@@ -142,7 +133,6 @@ impl Sandbox {
         dest: &Path,
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
-        fs::create_dir_all(dest).with_context(|| format!("Failed to create {}", dest.display()))?;
         let cmd = "/bin/mount";
         let mut c = Command::new(cmd);
         c.args(["-t", "tmpfs"]);

@@ -1158,6 +1158,16 @@ impl Sandbox {
                         dest = %dest.display(),
                         "Mounting"
                     );
+                    /*
+                     * Create the mount point only if it doesn't already
+                     * exist.  This allows mounts to overlay paths within
+                     * an earlier read-only mount (e.g. an fdfs mount on
+                     * /dev/fd inside a read-only lofs /dev).
+                     */
+                    if !dest.exists() {
+                        fs::create_dir_all(&dest)
+                            .with_context(|| format!("Failed to create {}", dest.display()))?;
+                    }
                     match fs_type {
                         FSType::Bind => self.mount_bindfs(src, &dest, &opts)?,
                         FSType::Dev => self.mount_devfs(src, &dest, &opts)?,
