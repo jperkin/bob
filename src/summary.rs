@@ -30,7 +30,7 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use pkgsrc::archive::BinaryPackage;
 use rayon::prelude::*;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 use zstd::stream::raw::CParameter;
 
 use crate::config::PkgsrcEnv;
@@ -54,7 +54,13 @@ pub fn generate_pkg_summary(db: &Database, threads: usize) -> Result<()> {
     let pkgnames: Vec<String> = db
         .get_successful_packages()?
         .into_iter()
-        .filter(|p| !restricted.contains(p.as_str()))
+        .filter(|p| match restricted.get(p.as_str()) {
+            Some(reason) => {
+                trace!(pkgname = %p, %reason, "Excluding restricted package from pkg_summary");
+                false
+            }
+            None => true,
+        })
         .collect();
 
     if pkgnames.is_empty() {
@@ -96,7 +102,15 @@ fn generate_summary_entry(pkgfile: &Path) -> Option<String> {
 
     match BinaryPackage::open(pkgfile) {
         Ok(pkg) => match pkg.to_summary() {
-            Ok(summary) => Some(format!("{}\n", summary)),
+            Ok(summary) => {
+                let entry = format!("{}\n", summary);
+                trace!(
+                    path = %pkgfile.display(),
+                    bytes = entry.len(),
+                    "Adding package to pkg_summary"
+                );
+                Some(entry)
+            }
             Err(e) => {
                 warn!(
                     path = %pkgfile.display(),

@@ -122,7 +122,7 @@ fn publish_packages(config: &Config, db: &Database, dry_run: bool) -> Result<Pub
 
     let uploadable: Vec<&String> = successful
         .iter()
-        .filter(|p| !restricted.contains(p.as_str()))
+        .filter(|p| !restricted.contains_key(p.as_str()))
         .collect();
 
     info!(

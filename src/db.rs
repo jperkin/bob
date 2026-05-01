@@ -1627,14 +1627,16 @@ impl Database {
      * users can build the restricted packages locally and still use
      * the published dependents.
      */
-    pub fn get_restricted_packages(&self) -> Result<HashSet<String>> {
+    pub fn get_restricted_packages(&self) -> Result<HashMap<String, String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT pkgname FROM scan_index
+            "SELECT pkgname, no_bin_on_ftp FROM scan_index
              WHERE no_bin_on_ftp IS NOT NULL AND no_bin_on_ftp != ''",
         )?;
         let restricted = stmt
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<std::result::Result<HashSet<_>, _>>()?;
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<HashMap<_, _>, _>>()?;
 
         Ok(restricted)
     }
