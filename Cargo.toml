@@ -23,6 +23,7 @@ glob = "0.3"
 indexmap = "2.12.1"
 lettre = { version = "0.11", default-features = false, features = ["sendmail-transport", "builder"] }
 libc = "0.2"
+mlua = { version = "0.11", features = ["lua54", "vendored", "send"] }
 petgraph = "0.8"
 pkgsrc = { version = "0.11.0", features = ["serde"] }
 ratatui = { version = "0.30", features = ["scrolling-regions"] }
@@ -45,17 +46,12 @@ unicode-width = "0.2"
 xdg = "3.0"
 zstd = "0.13"
 
-# Use vendored Lua on platforms where lua-src supports building
-[target.'cfg(not(target_os = "illumos"))'.dependencies]
-mlua = { version = "0.11", features = ["lua54", "vendored", "send"] }
-
-# Use system Lua on illumos (lua-src doesn't support it)
 [target.'cfg(target_os = "illumos")'.dependencies]
 kstat-rs = "0.2"
-mlua = { version = "0.11", features = ["lua54", "send"] }
 
 [dev-dependencies]
 tempfile = "3.24.0"
 
 [patch.crates-io]
+lua-src = { git = "https://github.com/mlua-rs/lua-src-rs.git", rev = "c641952" }
 systemstat = { git = "https://github.com/jperkin/systemstat", branch = "platform-support" }

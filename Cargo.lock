@@ -1429,9 +1429,9 @@ dependencies = [
 
 [[package]]
 name = "gix-fs"
-version = "0.21.0"
+version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b5d9f7e55a0f9a936a877fa4f9758692a308550a39a45684286941a20a8e5c0"
+checksum = "1e1967daac9848757c47c2aef0c57bcadc1a897347f559778249bf286a536c86"
 dependencies = [
  "bstr",
  "fastrand",
@@ -2530,8 +2530,7 @@ dependencies = [
 [[package]]
 name = "lua-src"
 version = "550.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e836dc8ae16806c9bdcf42003a88da27d163433e3f9684c52f0301258004a4fb"
+source = "git+https://github.com/mlua-rs/lua-src-rs.git?rev=c641952#c64195236aa2ca498ffba254f3d0b8c4c236cade"
 dependencies = [
  "cc",
 ]
