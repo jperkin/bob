@@ -21,36 +21,45 @@
  * files containing metadata for binary packages tracked in the database.
  */
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use pkgsrc::archive::BinaryPackage;
+use pkgsrc::archive::{BinaryPackage, SummaryOptions};
 use rayon::prelude::*;
 use tracing::{debug, trace, warn};
 use zstd::stream::raw::CParameter;
 
-use crate::config::PkgsrcEnv;
+use crate::config::{PkgsrcEnv, Summary};
 use crate::db::Database;
 
 /**
- * Generate pkg_summary.gz and pkg_summary.zst for all successful packages.
+ * Generate compressed pkg_summary files for all successful packages.
  *
  * Queries the database for packages with successful build outcomes, generates
  * Summary entries using pkgsrc::archive::BinaryPackage, and writes the
- * concatenated output to `PACKAGES/All/pkg_summary.{gz,zst}`.
+ * concatenated output to `PACKAGES/All/pkg_summary.<ext>` for each
+ * compression format listed in `summary.compression`.
  *
- * Restricted packages (those with `NO_BIN_ON_FTP` set) are excluded so the
- * summary only advertises packages that can be distributed.
+ * Honours the [`Summary`] config:
  *
- * The gz and zst files are written in parallel.
+ * - Restricted packages (those with `NO_BIN_ON_FTP` set) are excluded
+ *   unless `include_restricted` is true.
+ * - `FILE_CKSUM` is computed and embedded when `file_cksum` is true.
+ * - One output file is produced per entry in `compression`, written in
+ *   parallel.
  */
-pub fn generate_pkg_summary(db: &Database, threads: usize) -> Result<()> {
+pub fn generate_pkg_summary(db: &Database, threads: usize, summary: &Summary) -> Result<()> {
     let pkgsrc_env = db.load_pkgsrc_env()?;
-    let restricted = db.get_restricted_packages()?;
+    let restricted = if summary.include_restricted {
+        HashMap::new()
+    } else {
+        db.get_restricted_packages()?
+    };
     let pkgnames: Vec<String> = db
         .get_successful_packages()?
         .into_iter()
@@ -81,27 +90,31 @@ pub fn generate_pkg_summary(db: &Database, threads: usize) -> Result<()> {
         .build()
         .context("Failed to build thread pool for pkg_summary generation")?;
 
+    let opts = SummaryOptions {
+        compute_file_cksum: summary.file_cksum,
+    };
+
     let results: Vec<String> = pool.install(|| {
         pkgnames
             .par_iter()
             .filter_map(|pkgname| {
                 let pkgfile = packages_dir.join(format!("{}.tgz", pkgname));
-                generate_summary_entry(&pkgfile)
+                generate_summary_entry(&pkgfile, &opts)
             })
             .collect()
     });
 
-    write_pkg_summary(&pkgsrc_env, &results)
+    write_pkg_summary(&pkgsrc_env, &results, &summary.compression)
 }
 
-fn generate_summary_entry(pkgfile: &Path) -> Option<String> {
+fn generate_summary_entry(pkgfile: &Path, opts: &SummaryOptions) -> Option<String> {
     if !pkgfile.exists() {
         warn!(path = %pkgfile.display(), "Package file not found");
         return None;
     }
 
     match BinaryPackage::open(pkgfile) {
-        Ok(pkg) => match pkg.to_summary() {
+        Ok(pkg) => match pkg.to_summary_with_opts(opts) {
             Ok(summary) => {
                 let entry = format!("{}\n", summary);
                 trace!(
@@ -131,17 +144,24 @@ fn generate_summary_entry(pkgfile: &Path) -> Option<String> {
     }
 }
 
-fn write_pkg_summary(pkgsrc_env: &PkgsrcEnv, entries: &[String]) -> Result<()> {
+fn write_pkg_summary(pkgsrc_env: &PkgsrcEnv, entries: &[String], formats: &[String]) -> Result<()> {
     let all_dir = pkgsrc_env.packages.join("All");
 
     std::thread::scope(|s| {
-        let gz = s.spawn(|| write_pkg_summary_gz(&all_dir, entries));
-        let zst = s.spawn(|| write_pkg_summary_zst(&all_dir, entries));
-
-        gz.join()
-            .map_err(|_| anyhow::anyhow!("gz thread panicked"))??;
-        zst.join()
-            .map_err(|_| anyhow::anyhow!("zst thread panicked"))??;
+        let mut handles = Vec::with_capacity(formats.len());
+        for fmt in formats {
+            let dir = &all_dir;
+            let writer: fn(&Path, &[String]) -> Result<()> = match fmt.as_str() {
+                "gz" => write_pkg_summary_gz,
+                "zst" => write_pkg_summary_zst,
+                other => return Err(anyhow!("unsupported summary.compression value: {}", other)),
+            };
+            handles.push((fmt.as_str(), s.spawn(move || writer(dir, entries))));
+        }
+        for (fmt, h) in handles {
+            h.join()
+                .map_err(|_| anyhow!("{} compression thread panicked", fmt))??;
+        }
         Ok(())
     })
 }

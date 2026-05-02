@@ -2097,7 +2097,7 @@ fn count_pkg_summary_entries(content: &str) -> usize {
 fn maybe_generate(db: &Database, prior: &[String], summary: &bob::BuildSummary) -> Result<bool> {
     let current = db.get_successful_packages()?;
     if prior != current || summary.counts().states[Success] > 0 {
-        bob::generate_pkg_summary(db, 2)?;
+        bob::generate_pkg_summary(db, 2, &bob::Summary::default())?;
         Ok(true)
     } else {
         Ok(false)
@@ -2160,7 +2160,7 @@ fn test_pkg_summary_skipped_when_up_to_date() -> Result<()> {
     let h = TestHarness::new()?;
     let (db, _) = run_scan_and_build(&h)?;
 
-    bob::generate_pkg_summary(&db, 2)?;
+    bob::generate_pkg_summary(&db, 2, &bob::Summary::default())?;
     let mtime_before = pkg_summary_gz_mtime(&h).expect("pkg_summary.gz should exist");
     std::thread::sleep(std::time::Duration::from_millis(50));
 
@@ -2185,7 +2185,7 @@ fn test_pkg_summary_skipped_when_rebuild_fails_again() -> Result<()> {
     let h = TestHarness::new()?;
     let (db, _) = run_scan_and_build(&h)?;
 
-    bob::generate_pkg_summary(&db, 2)?;
+    bob::generate_pkg_summary(&db, 2, &bob::Summary::default())?;
     let mtime_before = pkg_summary_gz_mtime(&h).expect("pkg_summary.gz should exist");
     std::thread::sleep(std::time::Duration::from_millis(50));
 
@@ -2214,7 +2214,7 @@ fn test_pkg_summary_regenerated_when_rebuild_succeeds() -> Result<()> {
     let h = TestHarness::new()?;
     let (db, _) = run_scan_and_build(&h)?;
 
-    bob::generate_pkg_summary(&db, 2)?;
+    bob::generate_pkg_summary(&db, 2, &bob::Summary::default())?;
     let mtime_before = pkg_summary_gz_mtime(&h).expect("pkg_summary.gz should exist");
     std::thread::sleep(std::time::Duration::from_millis(50));
 
@@ -2278,7 +2278,7 @@ fn test_pkg_summary_regenerated_when_successful_pkg_fails() -> Result<()> {
     let h = TestHarness::new()?;
     let (db, _) = run_scan_and_build(&h)?;
 
-    bob::generate_pkg_summary(&db, 2)?;
+    bob::generate_pkg_summary(&db, 2, &bob::Summary::default())?;
     let mtime_before = pkg_summary_gz_mtime(&h).expect("pkg_summary.gz should exist");
     std::thread::sleep(std::time::Duration::from_millis(50));
 
@@ -2333,7 +2333,7 @@ fn test_pkg_summary_regenerated_on_same_name_rebuild() -> Result<()> {
     let h = TestHarness::new()?;
     let (db, _) = run_scan_and_build(&h)?;
 
-    bob::generate_pkg_summary(&db, 2)?;
+    bob::generate_pkg_summary(&db, 2, &bob::Summary::default())?;
     let mtime_before = pkg_summary_gz_mtime(&h).expect("pkg_summary.gz should exist");
     std::thread::sleep(std::time::Duration::from_millis(50));
 
@@ -2509,7 +2509,7 @@ fn test_pkg_summary_skipped_when_new_packages_fail() -> Result<()> {
     let h = TestHarness::new()?;
     let (db, _) = run_scan_and_build(&h)?;
 
-    bob::generate_pkg_summary(&db, 2)?;
+    bob::generate_pkg_summary(&db, 2, &bob::Summary::default())?;
     let mtime_before = pkg_summary_gz_mtime(&h).expect("should exist");
     std::thread::sleep(std::time::Duration::from_millis(50));
 
@@ -2556,7 +2556,7 @@ fn test_pkg_summary_skipped_when_interrupted() -> Result<()> {
     let h = TestHarness::new()?;
     let (db, _) = run_scan_and_build(&h)?;
 
-    bob::generate_pkg_summary(&db, 2)?;
+    bob::generate_pkg_summary(&db, 2, &bob::Summary::default())?;
     let mtime_before = pkg_summary_gz_mtime(&h).expect("should exist");
     std::thread::sleep(std::time::Duration::from_millis(50));
 
@@ -2610,7 +2610,7 @@ fn test_pkg_summary_recovered_after_interrupt() -> Result<()> {
     let h = TestHarness::new()?;
     let (db, _) = run_scan_and_build(&h)?;
 
-    bob::generate_pkg_summary(&db, 2)?;
+    bob::generate_pkg_summary(&db, 2, &bob::Summary::default())?;
     let mtime_before = pkg_summary_gz_mtime(&h).expect("should exist");
     std::thread::sleep(std::time::Duration::from_millis(50));
 

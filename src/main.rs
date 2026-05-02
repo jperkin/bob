@@ -179,7 +179,11 @@ impl BuildRunner {
         bob::print_status("Generating pkg_summary");
         tracing::debug!("Generating pkg_summary");
         let start = std::time::Instant::now();
-        match bob::generate_pkg_summary(&self.db, self.config.build_threads()) {
+        match bob::generate_pkg_summary(
+            &self.db,
+            self.config.build_threads(),
+            self.config.summary(),
+        ) {
             Ok(()) => {
                 bob::print_elapsed("Generating pkg_summary", start.elapsed());
                 tracing::debug!(

@@ -315,6 +315,8 @@ pub struct ConfigFile {
     pub dynamic: Option<DynamicConfig>,
     /// The `publish` section.
     pub publish: Option<Publish>,
+    /// The `summary` section.
+    pub summary: Summary,
 }
 
 /// General build options from the `options` section.
@@ -339,6 +341,42 @@ pub struct Options {
     pub log_level: Option<String>,
     /// Enable TUI progress display (default: true). Set to false for plain output.
     pub tui: Option<bool>,
+}
+
+/**
+ * pkg_summary generation options from the `summary` section.
+ *
+ * Controls what `bob` writes to `PACKAGES/All/pkg_summary.{gz,zst}`
+ * after a build:
+ *
+ * - `include_restricted`: by default, packages with `NO_BIN_ON_FTP`
+ *   set are excluded so the published index advertises only
+ *   redistributable packages.  Set to true on private/internal
+ *   mirrors where redistribution restrictions do not apply.
+ * - `file_cksum`: include a `FILE_CKSUM` entry (SHA256) for each
+ *   package so clients can verify integrity at install time.
+ *   Off by default since it requires re-reading every package file.
+ * - `compression`: which compressed forms to write.  Valid values
+ *   are `gz` and `zst`.  Both are written by default.
+ */
+#[derive(Clone, Debug)]
+pub struct Summary {
+    /// Include packages with NO_BIN_ON_FTP set.
+    pub include_restricted: bool,
+    /// Compute and include FILE_CKSUM for each package.
+    pub file_cksum: bool,
+    /// Compression formats to emit (subset of "gz", "zst").
+    pub compression: Vec<String>,
+}
+
+impl Default for Summary {
+    fn default() -> Self {
+        Self {
+            include_restricted: false,
+            file_cksum: false,
+            compression: vec!["gz".to_string(), "zst".to_string()],
+        }
+    }
 }
 
 /// Dynamic resource allocation from the `dynamic` section.
@@ -785,6 +823,10 @@ impl Config {
         self.file.publish.as_ref()
     }
 
+    pub fn summary(&self) -> &Summary {
+        &self.file.summary
+    }
+
     pub fn report_branch(&self) -> Option<&str> {
         self.file
             .publish
@@ -1093,6 +1135,8 @@ fn load_lua(filename: &Path) -> Result<ConfigFile, String> {
         parse_dynamic(&globals).map_err(|e| format!("Error parsing dynamic config: {}", e))?;
     let publish =
         parse_publish(&globals).map_err(|e| format!("Error parsing publish config: {}", e))?;
+    let summary =
+        parse_summary(&globals).map_err(|e| format!("Error parsing summary config: {}", e))?;
 
     Ok(ConfigFile {
         options,
@@ -1100,6 +1144,7 @@ fn load_lua(filename: &Path) -> Result<ConfigFile, String> {
         sandboxes,
         dynamic,
         publish,
+        summary,
     })
 }
 
@@ -1192,6 +1237,61 @@ fn reject_old_config(globals: &Table) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Compression formats supported by `summary.compression`.
+const VALID_COMPRESSION: &[&str] = &["gz", "zst"];
+
+fn parse_summary(globals: &Table) -> LuaResult<Summary> {
+    let value: Value = globals.get("summary")?;
+    if value.is_nil() {
+        return Ok(Summary::default());
+    }
+
+    let table = value
+        .as_table()
+        .ok_or_else(|| mlua::Error::runtime("'summary' must be a table"))?;
+
+    const KNOWN_KEYS: &[&str] = &["compression", "file_cksum", "include_restricted"];
+    warn_unknown_keys(table, "summary", KNOWN_KEYS);
+
+    let defaults = Summary::default();
+
+    let include_restricted = table
+        .get::<Option<bool>>("include_restricted")?
+        .unwrap_or(defaults.include_restricted);
+    let file_cksum = table
+        .get::<Option<bool>>("file_cksum")?
+        .unwrap_or(defaults.file_cksum);
+    let compression = match table.get::<Value>("compression")? {
+        Value::Nil => defaults.compression,
+        Value::Table(t) => {
+            let list: Vec<String> = t
+                .sequence_values::<String>()
+                .collect::<LuaResult<Vec<_>>>()?;
+            if list.is_empty() {
+                return Err(mlua::Error::runtime(
+                    "summary.compression must list at least one format",
+                ));
+            }
+            for c in &list {
+                if !VALID_COMPRESSION.contains(&c.as_str()) {
+                    return Err(mlua::Error::runtime(format!(
+                        "summary.compression value '{}' is not supported (valid: gz, zst)",
+                        c
+                    )));
+                }
+            }
+            list
+        }
+        _ => return Err(mlua::Error::runtime("summary.compression must be a table")),
+    };
+
+    Ok(Summary {
+        include_restricted,
+        file_cksum,
+        compression,
+    })
 }
 
 fn parse_options(globals: &Table) -> LuaResult<Option<Options>> {
