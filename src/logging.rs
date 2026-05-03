@@ -19,9 +19,8 @@
  */
 
 use anyhow::{Context, Result};
-use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use tracing::field::{Field, Visit};
@@ -44,20 +43,17 @@ static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
  */
 struct PerPackageLayer {
     logdir: PathBuf,
-    files: Mutex<HashMap<String, BufWriter<File>>>,
 }
 
 impl PerPackageLayer {
     fn new(logdir: PathBuf) -> Self {
-        Self {
-            logdir,
-            files: Mutex::new(HashMap::new()),
-        }
+        Self { logdir }
     }
 }
 
-#[derive(Clone)]
-struct SpanPkgname(String);
+struct SetupLog {
+    writer: Mutex<File>,
+}
 
 #[derive(Default)]
 struct PkgnameVisitor(Option<String>);
@@ -105,51 +101,48 @@ where
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: LayerContext<'_, S>) {
         let mut visitor = PkgnameVisitor::default();
         attrs.record(&mut visitor);
-        if let Some(name) = visitor.0
-            && let Some(span) = ctx.span(id)
-        {
-            span.extensions_mut().insert(SpanPkgname(name));
+        let Some(pkgname) = visitor.0 else {
+            return;
+        };
+        let Some(span) = ctx.span(id) else {
+            return;
+        };
+        let dir = self.logdir.join(&pkgname);
+        if fs::create_dir_all(&dir).is_err() {
+            return;
         }
+        let Ok(f) = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(dir.join("setup.log"))
+        else {
+            return;
+        };
+        span.extensions_mut().insert(SetupLog {
+            writer: Mutex::new(f),
+        });
     }
 
     fn on_event(&self, event: &Event<'_>, ctx: LayerContext<'_, S>) {
         let Some(scope) = ctx.event_scope(event) else {
             return;
         };
-        let Some(pkgname) = scope
-            .from_root()
-            .find_map(|span| span.extensions().get::<SpanPkgname>().map(|p| p.0.clone()))
-        else {
-            return;
-        };
-
-        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
-        let level = event.metadata().level();
-        let mut msg = String::new();
-        let mut formatter = EventFormatter { buf: &mut msg };
-        event.record(&mut formatter);
-
-        let mut files = self.files.lock().expect("per-package log mutex poisoned");
-        let writer = match files.entry(pkgname.clone()) {
-            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::hash_map::Entry::Vacant(v) => {
-                let dir = self.logdir.join(&pkgname);
-                if fs::create_dir_all(&dir).is_err() {
-                    return;
-                }
-                let Ok(f) = OpenOptions::new()
-                    .create(true)
-                    .truncate(true)
-                    .write(true)
-                    .open(dir.join("setup.log"))
-                else {
-                    return;
-                };
-                v.insert(BufWriter::new(f))
+        for span in scope.from_root() {
+            let exts = span.extensions();
+            let Some(log) = exts.get::<SetupLog>() else {
+                continue;
+            };
+            let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
+            let level = event.metadata().level();
+            let mut msg = String::new();
+            let mut formatter = EventFormatter { buf: &mut msg };
+            event.record(&mut formatter);
+            if let Ok(mut writer) = log.writer.lock() {
+                let _ = writeln!(writer, "{now} [{level:>5}] {msg}");
             }
-        };
-        let _ = writeln!(writer, "{now} [{level:>5}] {msg}");
-        let _ = writer.flush();
+            return;
+        }
     }
 }
 
