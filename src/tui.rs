@@ -377,7 +377,7 @@ fn status_msg(interrupt_announced: bool, title: &str) -> (&'static str, &'static
     if interrupt_announced {
         ("stopping", ", ^C to force quit")
     } else if title == "Building" {
-        ("", "press 'v' to toggle full-screen")
+        ("", "press 'v' to toggle panel view")
     } else {
         ("", "")
     }
