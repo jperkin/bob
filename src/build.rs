@@ -553,14 +553,13 @@ impl<'a> PkgBuilder<'a> {
     }
 
     /// Run the full build process.
-    fn build<C: BuildCallback>(&self, callback: &mut C) -> anyhow::Result<PkgBuildResult> {
+    fn build<C: BuildCallback>(
+        &self,
+        stats: &mut PkgBuildStats,
+        callback: &mut C,
+    ) -> anyhow::Result<PkgBuildResult> {
         let pkgname_str = self.pkginfo.pkgname().pkgname();
         let pkgpath = &self.pkginfo.pkgpath;
-
-        let mut stats = PkgBuildStats {
-            make_jobs: self.make_jobs,
-            ..PkgBuildStats::default()
-        };
 
         let pkgdir = self.session.config.pkgsrc().join(pkgpath.as_path());
 
@@ -584,7 +583,7 @@ impl<'a> PkgBuilder<'a> {
                 stats
                     .stage_durations
                     .push((Stage::Depends, stage_start.elapsed()));
-                return Ok(PkgBuildResult::Failed(stats));
+                return Ok(PkgBuildResult::Failed(std::mem::take(stats)));
             }
             stats
                 .stage_durations
@@ -602,7 +601,7 @@ impl<'a> PkgBuilder<'a> {
             .push((Stage::Checksum, stage_start.elapsed()));
         stats.stage_cpu_times.push((Stage::Checksum, cpu_time));
         if !ok {
-            return Ok(PkgBuildResult::Failed(stats));
+            return Ok(PkgBuildResult::Failed(std::mem::take(stats)));
         }
 
         let jobs_suffix = match (self.make_jobs.safe(), self.make_jobs.jobs()) {
@@ -620,7 +619,7 @@ impl<'a> PkgBuilder<'a> {
             stats
                 .stage_durations
                 .push((Stage::Configure, stage_start.elapsed()));
-            return Ok(PkgBuildResult::Failed(stats));
+            return Ok(PkgBuildResult::Failed(std::mem::take(stats)));
         }
         let (ok, cpu_time) = self.run_make_stage(
             Stage::Configure,
@@ -634,7 +633,7 @@ impl<'a> PkgBuilder<'a> {
             .push((Stage::Configure, stage_start.elapsed()));
         stats.stage_cpu_times.push((Stage::Configure, cpu_time));
         if !ok {
-            return Ok(PkgBuildResult::Failed(stats));
+            return Ok(PkgBuildResult::Failed(std::mem::take(stats)));
         }
 
         let build_phase_start = Instant::now();
@@ -645,7 +644,7 @@ impl<'a> PkgBuilder<'a> {
             stats
                 .stage_durations
                 .push((Stage::Build, build_phase_start.elapsed()));
-            return Ok(PkgBuildResult::Failed(stats));
+            return Ok(PkgBuildResult::Failed(std::mem::take(stats)));
         }
         let (build_ok, cpu_time) =
             self.run_make_stage(Stage::Build, &pkgdir, &["all"], self.build_run_as(), true)?;
@@ -654,7 +653,7 @@ impl<'a> PkgBuilder<'a> {
             .push((Stage::Build, build_phase_start.elapsed()));
         stats.stage_cpu_times.push((Stage::Build, cpu_time));
         if !build_ok {
-            return Ok(PkgBuildResult::Failed(stats));
+            return Ok(PkgBuildResult::Failed(std::mem::take(stats)));
         }
 
         // Install
@@ -666,7 +665,7 @@ impl<'a> PkgBuilder<'a> {
             stats
                 .stage_durations
                 .push((Stage::Install, stage_start.elapsed()));
-            return Ok(PkgBuildResult::Failed(stats));
+            return Ok(PkgBuildResult::Failed(std::mem::take(stats)));
         }
         let (ok, cpu_time) = self.run_make_stage(
             Stage::Install,
@@ -680,7 +679,7 @@ impl<'a> PkgBuilder<'a> {
             .push((Stage::Install, stage_start.elapsed()));
         stats.stage_cpu_times.push((Stage::Install, cpu_time));
         if !ok {
-            return Ok(PkgBuildResult::Failed(stats));
+            return Ok(PkgBuildResult::Failed(std::mem::take(stats)));
         }
 
         // Package
@@ -699,7 +698,7 @@ impl<'a> PkgBuilder<'a> {
             .push((Stage::Package, stage_start.elapsed()));
         stats.stage_cpu_times.push((Stage::Package, cpu_time));
         if !ok {
-            return Ok(PkgBuildResult::Failed(stats));
+            return Ok(PkgBuildResult::Failed(std::mem::take(stats)));
         }
 
         // Get the package file path
@@ -709,7 +708,7 @@ impl<'a> PkgBuilder<'a> {
         let is_bootstrap = self.pkginfo.bootstrap_pkg() == Some("yes");
         if !is_bootstrap {
             if !self.pkg_add(&pkgfile)? {
-                return Ok(PkgBuildResult::Failed(stats));
+                return Ok(PkgBuildResult::Failed(std::mem::take(stats)));
             }
 
             // Test package deinstall
@@ -720,7 +719,7 @@ impl<'a> PkgBuilder<'a> {
                 stats
                     .stage_durations
                     .push((Stage::Deinstall, stage_start.elapsed()));
-                return Ok(PkgBuildResult::Failed(stats));
+                return Ok(PkgBuildResult::Failed(std::mem::take(stats)));
             }
             stats
                 .stage_durations
@@ -774,7 +773,7 @@ impl<'a> PkgBuilder<'a> {
         // Remove log directory on success
         let _ = fs::remove_dir_all(&self.logdir);
 
-        Ok(PkgBuildResult::Success(stats))
+        Ok(PkgBuildResult::Success(std::mem::take(stats)))
     }
 
     /// Determine how to run build commands.
@@ -1548,7 +1547,11 @@ impl PackageBuild {
         );
 
         let mut callback = ChannelCallback::new(self.worker_id, status_tx);
-        let result = builder.build(&mut callback);
+        let mut stats = PkgBuildStats {
+            make_jobs: self.make_jobs,
+            ..PkgBuildStats::default()
+        };
+        let result = builder.build(&mut stats, &mut callback);
 
         let _ = status_tx.send(ChannelCommand::StageUpdate(
             self.worker_id,
@@ -1583,8 +1586,12 @@ impl PackageBuild {
                 PkgBuildResult::Failed(stats)
             }
             Err(e) => {
+                if self.session.state.is_shutdown() {
+                    return Err(e);
+                }
                 error!(error = format!("{e:#}"), "Package build error");
-                let disk_usage = measure_wrkdir();
+                stats.disk_usage = measure_wrkdir();
+                stats.wrkobjdir = wrkobjdir;
                 self.cleanup_after_failure(
                     status_tx,
                     pkgname,
@@ -1594,12 +1601,7 @@ impl PackageBuild {
                     &envs,
                     wrkdir.as_deref(),
                 );
-                PkgBuildResult::Failed(PkgBuildStats {
-                    make_jobs: self.make_jobs,
-                    disk_usage,
-                    wrkobjdir,
-                    ..PkgBuildStats::default()
-                })
+                PkgBuildResult::Failed(stats)
             }
         };
 
