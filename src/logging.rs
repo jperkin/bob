@@ -19,9 +19,9 @@
  */
 
 use anyhow::{Context, Result};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id};
@@ -36,38 +36,40 @@ static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 
 /**
  * Per-package log: a [`Layer`] that routes any tracing event whose enclosing
- * span chain carries a `pkgname` field to `<logdir>/<pkgname>/setup.log`.
+ * span chain carries `pkgname` and `logdir` fields to
+ * `<logdir>/<pkgname>/setup.log`.
  *
  * Indirect failures and unresolved packages never get a build span (they're
  * filtered out at scheduler load time), so they naturally produce no log.
  */
-struct PerPackageLayer {
-    logdir: PathBuf,
-}
-
-impl PerPackageLayer {
-    fn new(logdir: PathBuf) -> Self {
-        Self { logdir }
-    }
-}
+struct PerPackageLayer;
 
 struct SetupLog {
-    writer: Mutex<File>,
+    path: PathBuf,
+    writer: Mutex<Option<File>>,
 }
 
 #[derive(Default)]
-struct PkgnameVisitor(Option<String>);
+struct BuildSpanVisitor {
+    pkgname: Option<String>,
+    logdir: Option<String>,
+}
 
-impl Visit for PkgnameVisitor {
+impl Visit for BuildSpanVisitor {
     fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "pkgname" {
-            self.0 = Some(value.to_string());
+        match field.name() {
+            "pkgname" => self.pkgname = Some(value.to_string()),
+            "logdir" => self.logdir = Some(value.to_string()),
+            _ => {}
         }
     }
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "pkgname" && self.0.is_none() {
-            self.0 = Some(format!("{value:?}").trim_matches('"').to_string());
-        }
+        let target = match field.name() {
+            "pkgname" if self.pkgname.is_none() => &mut self.pkgname,
+            "logdir" if self.logdir.is_none() => &mut self.logdir,
+            _ => return,
+        };
+        *target = Some(format!("{value:?}").trim_matches('"').to_string());
     }
 }
 
@@ -99,28 +101,17 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: LayerContext<'_, S>) {
-        let mut visitor = PkgnameVisitor::default();
+        let mut visitor = BuildSpanVisitor::default();
         attrs.record(&mut visitor);
-        let Some(pkgname) = visitor.0 else {
+        let (Some(pkgname), Some(logdir)) = (visitor.pkgname, visitor.logdir) else {
             return;
         };
         let Some(span) = ctx.span(id) else {
             return;
         };
-        let dir = self.logdir.join(&pkgname);
-        if fs::create_dir_all(&dir).is_err() {
-            return;
-        }
-        let Ok(f) = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(dir.join("setup.log"))
-        else {
-            return;
-        };
         span.extensions_mut().insert(SetupLog {
-            writer: Mutex::new(f),
+            path: PathBuf::from(logdir).join(&pkgname).join("setup.log"),
+            writer: Mutex::new(None),
         });
     }
 
@@ -133,14 +124,22 @@ where
             let Some(log) = exts.get::<SetupLog>() else {
                 continue;
             };
+            let mut guard = log.writer.lock().expect("setup.log mutex poisoned");
+            let writer = match guard.as_mut() {
+                Some(w) => w,
+                None => {
+                    let f = File::create(&log.path).unwrap_or_else(|e| {
+                        panic!("Failed to create {}: {}", log.path.display(), e)
+                    });
+                    guard.insert(f)
+                }
+            };
             let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
             let level = event.metadata().level();
             let mut msg = String::new();
             let mut formatter = EventFormatter { buf: &mut msg };
             event.record(&mut formatter);
-            if let Ok(mut writer) = log.writer.lock() {
-                let _ = writeln!(writer, "{now} [{level:>5}] {msg}");
-            }
+            let _ = writeln!(writer, "{now} [{level:>5}] {msg}");
             return;
         }
     }
@@ -174,9 +173,9 @@ pub fn init_stderr_if_enabled() {
  * Initialize the logging system.
  *
  * Creates the dbdir and writes bob.log there, plus a per-package
- * setup.log under logdir for packages that hit a build span.
+ * setup.log driven by `pkgname` and `logdir` fields on build spans.
  */
-pub fn init(dbdir: &PathBuf, logdir: &Path, log_level: &str) -> Result<()> {
+pub fn init(dbdir: &PathBuf, log_level: &str) -> Result<()> {
     fs::create_dir_all(dbdir)
         .with_context(|| format!("Failed to create dbdir {}", dbdir.display()))?;
 
@@ -208,12 +207,10 @@ pub fn init(dbdir: &PathBuf, logdir: &Path, log_level: &str) -> Result<()> {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&default_filter));
 
-    let per_pkg_layer = PerPackageLayer::new(logdir.to_path_buf());
-
     tracing_subscriber::registry()
         .with(filter)
         .with(file_layer)
-        .with(per_pkg_layer)
+        .with(PerPackageLayer)
         .init();
 
     tracing::info!(dbdir = %dbdir.display(),

@@ -2194,6 +2194,7 @@ impl Build {
                                 sandbox_id = pkg.sandbox_id,
                                 pkgpath = %pkgpath,
                                 pkgname = %pkgname.pkgname(),
+                                logdir = %pkg.session.config.logdir().display(),
                             );
                             let _guard = span.enter();
 

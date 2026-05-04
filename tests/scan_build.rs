@@ -19,7 +19,15 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
 use tempfile::TempDir;
+
+/**
+ * Hold the bob.log tempdir for the lifetime of the test binary so the
+ * appender's writer stays valid after individual test tempdirs are cleaned
+ * up.  Initialized on the first `TestHarness::new()` call.
+ */
+static LOGGING_TMPDIR: OnceLock<TempDir> = OnceLock::new();
 
 struct PkgDef<'a> {
     pkgpath: &'a str,
@@ -108,6 +116,12 @@ impl TestHarness {
             Some(m) => m,
             None => anyhow::bail!("bmake not found, skipping integration test"),
         };
+
+        LOGGING_TMPDIR.get_or_init(|| {
+            let tmp = TempDir::new().expect("logging tempdir");
+            bob::logging::init(&tmp.path().to_path_buf(), "info").expect("logging init");
+            tmp
+        });
 
         let tmpdir = TempDir::new().context("Failed to create temp dir")?;
         let root = tmpdir.path().to_path_buf();
@@ -1328,6 +1342,10 @@ fn test_build_logs() -> Result<()> {
     // build-fail fails at configure: should have pre-clean.log, configure.log
     let bf_log = h.logdir().join("build-fail-1.0");
     assert!(bf_log.exists(), "build-fail log dir should exist");
+    assert!(
+        bf_log.join("setup.log").exists(),
+        "build-fail should have setup.log on disk"
+    );
     assert!(
         bf_log.join("pre-clean.log").exists(),
         "build-fail should have pre-clean.log"

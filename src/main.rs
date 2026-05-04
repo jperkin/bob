@@ -46,7 +46,7 @@ impl BuildRunner {
     fn new(config_path: Option<&Path>) -> Result<Self> {
         let config = Config::load(config_path)?;
 
-        logging::init(config.dbdir(), config.logdir(), config.log_level())?;
+        logging::init(config.dbdir(), config.log_level())?;
 
         if let Err(errors) = config.validate() {
             eprintln!("Configuration errors:");
@@ -540,7 +540,7 @@ fn run() -> Result<()> {
             baseline,
         } => {
             let config = Config::load(args.config.as_deref())?;
-            logging::init(config.dbdir(), config.logdir(), config.log_level())?;
+            logging::init(config.dbdir(), config.log_level())?;
             let db_path = config.dbdir().join("bob.db");
 
             if !db_path.exists() {

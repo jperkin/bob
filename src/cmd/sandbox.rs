@@ -63,7 +63,7 @@ pub fn run(config: &Config, cmd: SandboxCmd) -> Result<()> {
             sandbox.destroy_all(pkgsrc_env.as_ref())?;
         }
         SandboxCmd::Exec => {
-            logging::init(config.dbdir(), config.logdir(), config.log_level())?;
+            logging::init(config.dbdir(), config.log_level())?;
             exec(config)?;
         }
         SandboxCmd::List => {
