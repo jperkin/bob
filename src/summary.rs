@@ -31,7 +31,7 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use pkgsrc::archive::{BinaryPackage, SummaryOptions};
 use rayon::prelude::*;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 use zstd::stream::raw::CParameter;
 
 use crate::config::{PkgsrcEnv, Summary};
@@ -65,7 +65,7 @@ pub fn generate_pkg_summary(db: &Database, threads: usize, summary: &Summary) ->
         .into_iter()
         .filter(|p| match restricted.get(p.as_str()) {
             Some(reason) => {
-                trace!(pkgname = %p, %reason, "Excluding restricted package from pkg_summary");
+                info!(pkgname = %p, %reason, "Excluding restricted package from pkg_summary");
                 false
             }
             None => true,
