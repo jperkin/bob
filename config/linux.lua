@@ -67,6 +67,18 @@ pkgsrc = {
     ]]
 }
 
+--[[
+  Configure pkg_summary generation.  These are the default values.  Enable
+  include_restricted if you are not going to publish the packages and want
+  restricted NO_BIN_ON_* packages to be included in the pkg_summary file.
+
+summary = {
+    include_restricted = false,
+    file_cksum = false,
+    compression = { "gz", "zst" },
+}
+]]
+
 -- The sandboxes section defines where, and how, sandboxes will be created.
 sandboxes = {
     basedir = "/data/chroot",
