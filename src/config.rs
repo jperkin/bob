@@ -884,66 +884,6 @@ impl Config {
         self.file.pkgsrc.cachevars.as_slice()
     }
 
-    /// Return environment variables for script execution.
-    ///
-    /// If `pkgsrc_env` is provided, includes the pkgsrc-derived variables
-    /// (packages, pkgtools, prefix, pkg_dbdir, pkg_refcount_dbdir) as well
-    /// as the cached variables from the `cachevars` config option.
-    pub fn script_env(&self, pkgsrc_env: Option<&PkgsrcEnv>) -> Vec<(String, String)> {
-        let mut envs = vec![
-            (
-                "bob_logdir".to_string(),
-                format!("{}", self.logdir().display()),
-            ),
-            ("bob_make".to_string(), format!("{}", self.make().display())),
-            (
-                "bob_pkgsrc".to_string(),
-                format!("{}", self.pkgsrc().display()),
-            ),
-        ];
-        if let Some(env) = pkgsrc_env {
-            envs.push((
-                "bob_packages".to_string(),
-                env.packages.display().to_string(),
-            ));
-            envs.push((
-                "bob_pkgtools".to_string(),
-                env.pkgtools.display().to_string(),
-            ));
-            envs.push(("bob_prefix".to_string(), env.prefix.display().to_string()));
-            envs.push((
-                "bob_pkg_dbdir".to_string(),
-                env.pkg_dbdir.display().to_string(),
-            ));
-            envs.push((
-                "bob_pkg_refcount_dbdir".to_string(),
-                env.pkg_refcount_dbdir.display().to_string(),
-            ));
-            if let Some(varbase) = env.metadata.get("VARBASE") {
-                envs.push(("bob_varbase".to_string(), varbase.clone()));
-            }
-            for (key, value) in &env.cachevars {
-                envs.push((key.clone(), value.clone()));
-            }
-        }
-        if let Some(build_user) = self.build_user() {
-            envs.push(("bob_build_user".to_string(), build_user.to_string()));
-        }
-        if let Some(home) = self.build_user_home() {
-            envs.push((
-                "bob_build_user_home".to_string(),
-                home.display().to_string(),
-            ));
-        }
-        if let Some(bootstrap) = self.bootstrap() {
-            envs.push((
-                "bob_bootstrap".to_string(),
-                format!("{}", bootstrap.display()),
-            ));
-        }
-        envs
-    }
-
     /// Validate the configuration, checking that required paths and files exist.
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors: Vec<String> = Vec::new();

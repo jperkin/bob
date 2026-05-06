@@ -349,8 +349,6 @@ pub struct Scan {
     full_scan_complete: bool,
     /// Packages that failed to scan (pkgpath, error message).
     scan_failures: Vec<(PkgPath, String)>,
-    /// Pkgsrc environment variables (populated after pre-build).
-    pkgsrc_env: Option<PkgsrcEnv>,
     /// Initial pkgpaths from limited_list (for deferred dependency discovery).
     /// Only set for non-full-tree scans.
     initial_pkgpaths: HashSet<PkgPath>,
@@ -379,7 +377,6 @@ impl Scan {
             full_tree: true,
             full_scan_complete: false,
             scan_failures: Vec::new(),
-            pkgsrc_env: None,
             initial_pkgpaths: HashSet::new(),
             verbosity: 0,
             sandbox_id: None,
@@ -564,6 +561,14 @@ impl Scan {
         db: &crate::db::Database,
         scope: &mut SandboxScope,
     ) -> anyhow::Result<()> {
+        /*
+         * Adopt the scope's sandbox so the pkgsrc cell is shared.  After
+         * this, set_pkgsrc_env() on either sandbox is visible from both,
+         * which lets the scope's Drop run a correct post_build cleanup
+         * if scan exits via an error path.
+         */
+        self.sandbox = scope.sandbox().clone();
+
         info!(
             incoming_count = self.incoming.len(),
             sandbox_enabled = self.sandbox.enabled(),
@@ -617,11 +622,7 @@ impl Scan {
             let start = Instant::now();
             let ids = scope.ensure(1)?;
             self.sandbox_id = ids.first().copied();
-            if !self.sandbox.run_pre_build(
-                self.sandbox_id,
-                &self.config,
-                self.config.script_env(None),
-            )? {
+            if !self.sandbox.run_pre_build(self.sandbox_id)? {
                 warn!("pre-build failed");
             }
             crate::print_elapsed("Creating sandbox", start.elapsed());
@@ -640,7 +641,7 @@ impl Scan {
                 env
             }
         };
-        self.pkgsrc_env = Some(env);
+        self.sandbox.set_pkgsrc_env(env);
 
         // For full tree scans, always discover all packages
         if self.full_tree {
@@ -992,11 +993,7 @@ impl Scan {
 
     /// Run post-build operations (build actions + prefix cleanup).
     fn run_post_build(&self) -> anyhow::Result<()> {
-        if !self.sandbox.run_post_build(
-            self.sandbox_id,
-            &self.config,
-            self.config.script_env(self.pkgsrc_env.as_ref()),
-        )? {
+        if !self.sandbox.run_post_build(self.sandbox_id)? {
             warn!("post-build failed");
         }
         Ok(())
@@ -1008,8 +1005,8 @@ impl Scan {
     }
 
     fn scan_env(&self) -> Vec<(String, String)> {
-        self.pkgsrc_env
-            .as_ref()
+        self.sandbox
+            .pkgsrc_env()
             .map(|e| {
                 e.cachevars
                     .iter()

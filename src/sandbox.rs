@@ -85,6 +85,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc::RecvTimeoutError;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, info_span, warn};
 
@@ -230,6 +231,19 @@ pub fn wait_output_with_shutdown(child: Child, state: &RunState) -> Result<Outpu
 pub struct Sandbox {
     config: Config,
     context: ActionContext,
+    /**
+     * The pkgsrc environment, populated once via [`set_pkgsrc_env`].
+     *
+     * Cloning a [`Sandbox`] shares this cell -- there is exactly one
+     * instance per sandbox-tree, regardless of how many clones are made.
+     * Once set, the value is fixed; consumers read it through
+     * [`script_env`] and [`pkgsrc_env`].
+     *
+     * [`set_pkgsrc_env`]: Sandbox::set_pkgsrc_env
+     * [`script_env`]: Sandbox::script_env
+     * [`pkgsrc_env`]: Sandbox::pkgsrc_env
+     */
+    pkgsrc_env: Arc<OnceLock<PkgsrcEnv>>,
 }
 
 impl Sandbox {
@@ -259,7 +273,99 @@ impl Sandbox {
         Sandbox {
             config: config.clone(),
             context,
+            pkgsrc_env: Arc::new(OnceLock::new()),
         }
+    }
+
+    /**
+     * Store the pkgsrc environment for this sandbox.
+     *
+     * Once stored, subsequent calls are silently ignored: the value is
+     * fixed for the lifetime of the sandbox.  All consumers
+     * (script_env(), pkgsrc_env(), run_post_build()) read from this
+     * single cell.
+     */
+    pub fn set_pkgsrc_env(&self, env: PkgsrcEnv) {
+        let _ = self.pkgsrc_env.set(env);
+    }
+
+    /**
+     * Return the stored pkgsrc environment, if [`set_pkgsrc_env`] has
+     * been called.  Returns `None` before that point (e.g. during
+     * initial sandbox setup, before bootstrap unpack).
+     *
+     * [`set_pkgsrc_env`]: Sandbox::set_pkgsrc_env
+     */
+    pub fn pkgsrc_env(&self) -> Option<&PkgsrcEnv> {
+        self.pkgsrc_env.get()
+    }
+
+    /**
+     * Return script environment variables for use by hook commands and
+     * shell exports.
+     *
+     * Always includes host-side variables derived from config.  Once
+     * [`set_pkgsrc_env`] has been called, also includes the
+     * pkgsrc-derived variables and the configured cachevars.
+     *
+     * [`set_pkgsrc_env`]: Sandbox::set_pkgsrc_env
+     */
+    pub fn script_env(&self) -> Vec<(String, String)> {
+        let mut envs = vec![
+            (
+                "bob_logdir".to_string(),
+                format!("{}", self.config.logdir().display()),
+            ),
+            (
+                "bob_make".to_string(),
+                format!("{}", self.config.make().display()),
+            ),
+            (
+                "bob_pkgsrc".to_string(),
+                format!("{}", self.config.pkgsrc().display()),
+            ),
+        ];
+        if let Some(env) = self.pkgsrc_env.get() {
+            envs.push((
+                "bob_packages".to_string(),
+                env.packages.display().to_string(),
+            ));
+            envs.push((
+                "bob_pkgtools".to_string(),
+                env.pkgtools.display().to_string(),
+            ));
+            envs.push(("bob_prefix".to_string(), env.prefix.display().to_string()));
+            envs.push((
+                "bob_pkg_dbdir".to_string(),
+                env.pkg_dbdir.display().to_string(),
+            ));
+            envs.push((
+                "bob_pkg_refcount_dbdir".to_string(),
+                env.pkg_refcount_dbdir.display().to_string(),
+            ));
+            if let Some(varbase) = env.metadata.get("VARBASE") {
+                envs.push(("bob_varbase".to_string(), varbase.clone()));
+            }
+            for (key, value) in &env.cachevars {
+                envs.push((key.clone(), value.clone()));
+            }
+        }
+        if let Some(build_user) = self.config.build_user() {
+            envs.push(("bob_build_user".to_string(), build_user.to_string()));
+        }
+        if let Some(home) = self.config.build_user_home() {
+            envs.push((
+                "bob_build_user_home".to_string(),
+                home.display().to_string(),
+            ));
+        }
+        if let Some(bootstrap) = self.config.bootstrap() {
+            envs.push((
+                "bob_bootstrap".to_string(),
+                format!("{}", bootstrap.display()),
+            ));
+        }
+        envs
     }
 
     /// Return whether sandboxes have been enabled.
@@ -665,7 +771,7 @@ impl Sandbox {
         let Some(sandbox) = &self.config.sandboxes() else {
             bail!("Internal error: trying to create sandbox when sandboxes disabled.");
         };
-        let envs = self.config.script_env(None);
+        let envs = self.script_env();
         self.perform_actions(id, &sandbox.setup, &envs)?;
         self.mark_complete(id)?;
         Ok(true)
@@ -737,13 +843,8 @@ impl Sandbox {
      * Returns Ok(true) if all operations succeeded or none were configured,
      * Ok(false) if any operation failed.
      */
-    pub fn run_pre_build(
-        &self,
-        sandbox_id: Option<usize>,
-        config: &Config,
-        envs: Vec<(String, String)>,
-    ) -> Result<bool> {
-        if let Some(bootstrap) = config.bootstrap() {
+    pub fn run_pre_build(&self, sandbox_id: Option<usize>) -> Result<bool> {
+        if let Some(bootstrap) = self.config.bootstrap() {
             let Some(sandbox_id) = sandbox_id else {
                 bail!("bootstrap requires sandboxes to be enabled");
             };
@@ -764,11 +865,12 @@ impl Sandbox {
             })?;
         }
 
-        let hooks = config.hooks();
+        let hooks = self.config.hooks();
         if !hooks.is_empty() {
             let Some(sandbox_id) = sandbox_id else {
                 bail!("hooks require sandboxes to be enabled");
             };
+            let envs = self.script_env();
             if let Err(e) = self.perform_actions(sandbox_id, hooks, &envs) {
                 warn!(error = format!("{e:#}"), "Hook action failed");
                 return Ok(false);
@@ -785,29 +887,36 @@ impl Sandbox {
      *
      * Returns Ok(true) if all operations succeeded or none were configured,
      * Ok(false) if any operation failed.
+     *
+     * The pkgsrc paths are removed only when [`set_pkgsrc_env`] has
+     * been called, since they are unknown otherwise.  If they were
+     * populated without the cell ever being set, destroy()'s
+     * bail-on-non-empty watchdog surfaces the resulting state.
+     *
+     * [`set_pkgsrc_env`]: Sandbox::set_pkgsrc_env
      */
-    pub fn run_post_build(
-        &self,
-        sandbox_id: Option<usize>,
-        config: &Config,
-        envs: Vec<(String, String)>,
-    ) -> Result<bool> {
-        let hooks = config.hooks();
+    pub fn run_post_build(&self, sandbox_id: Option<usize>) -> Result<bool> {
+        let hooks = self.config.hooks();
         if !hooks.is_empty() {
             let Some(sandbox_id) = sandbox_id else {
                 bail!("hooks require sandboxes to be enabled");
             };
+            let envs = self.script_env();
             if let Err(e) = self.reverse_actions(sandbox_id, hooks, &envs) {
                 warn!(error = format!("{e:#}"), "Hook destroy action failed");
                 return Ok(false);
             }
         }
 
-        for var in ["bob_prefix", "bob_pkg_dbdir", "bob_pkg_refcount_dbdir"] {
-            if let Some((_, path)) = envs.iter().find(|(k, _)| k == var) {
+        if let Some(pkgsrc) = self.pkgsrc_env.get() {
+            for path in [
+                &pkgsrc.prefix,
+                &pkgsrc.pkg_dbdir,
+                &pkgsrc.pkg_refcount_dbdir,
+            ] {
                 let target = match sandbox_id {
-                    Some(id) => self.resolve_path(id, Path::new(path)),
-                    None => PathBuf::from(path),
+                    Some(id) => self.resolve_path(id, path),
+                    None => path.clone(),
                 };
                 if target.exists() {
                     debug!(path = %target.display(), "Removing");
@@ -901,7 +1010,7 @@ impl Sandbox {
         let Some(sandbox_config) = &self.config.sandboxes() else {
             bail!("Internal error: trying to destroy sandbox when sandboxes disabled.");
         };
-        let envs = self.config.script_env(None);
+        let envs = self.script_env();
         self.kill_processes_by_path(&self.path(id));
         self.reverse_actions(id, &sandbox_config.setup, &envs)?;
         /*
@@ -954,16 +1063,22 @@ impl Sandbox {
      * Destroy all discovered sandboxes in parallel.  Runs post-build cleanup
      * on each sandbox first, then destroys them.  Continue on errors to ensure
      * all sandboxes are attempted, printing each error as it occurs.
+     *
+     * Removal of pkgsrc paths uses the pkgsrc environment stored on
+     * this sandbox via [`set_pkgsrc_env`].  Callers that have a pkgsrc
+     * environment available (loaded from the database, fetched fresh)
+     * should call `set_pkgsrc_env` before invoking this method.
+     *
+     * [`set_pkgsrc_env`]: Sandbox::set_pkgsrc_env
      */
-    pub fn destroy_all(&self, pkgsrc_env: Option<&PkgsrcEnv>) -> Result<()> {
+    pub fn destroy_all(&self) -> Result<()> {
         let sandboxes = self.discover_sandboxes()?;
         if sandboxes.is_empty() {
             return Ok(());
         }
-        let envs = self.config.script_env(pkgsrc_env);
         for &id in &sandboxes {
             if self.path(id).exists() {
-                match self.run_post_build(Some(id), &self.config, envs.clone()) {
+                match self.run_post_build(Some(id)) {
                     Ok(true) => {}
                     Ok(false) => {
                         warn!("post-build failed for sandbox {}", id)
@@ -1616,13 +1731,9 @@ impl Drop for SandboxScope {
         if !self.sandbox.enabled() || self.owned.is_empty() {
             return;
         }
-        let envs = self.sandbox.config.script_env(None);
         for &id in &self.owned {
             if self.sandbox.path(id).exists() {
-                match self
-                    .sandbox
-                    .run_post_build(Some(id), &self.sandbox.config, envs.clone())
-                {
+                match self.sandbox.run_post_build(Some(id)) {
                     Ok(true) => {}
                     Ok(false) => {
                         warn!("post-build failed for sandbox {}", id)

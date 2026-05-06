@@ -54,13 +54,13 @@ pub fn run(config: &Config, cmd: SandboxCmd) -> Result<()> {
             if !sandbox.enabled() {
                 bail!("No sandboxes configured");
             }
-            let pkgsrc_env = bob::Database::open(config.dbdir())
-                .and_then(|db| db.load_pkgsrc_env())
-                .ok();
-            if pkgsrc_env.is_none() {
-                eprintln!("Warning: No database available, unable to remove pkgsrc directories.");
+            match bob::Database::open(config.dbdir()).and_then(|db| db.load_pkgsrc_env()) {
+                Ok(env) => sandbox.set_pkgsrc_env(env),
+                Err(_) => eprintln!(
+                    "Warning: No database available, unable to remove pkgsrc directories."
+                ),
             }
-            sandbox.destroy_all(pkgsrc_env.as_ref())?;
+            sandbox.destroy_all()?;
         }
         SandboxCmd::Exec => {
             logging::init(config.dbdir(), config.log_level())?;
@@ -85,15 +85,15 @@ fn exec(config: &Config) -> Result<()> {
     bob::print_status("Creating sandbox");
     let start = Instant::now();
     let id = sandbox.claim_id()?;
-    let basic_envs = config.script_env(None);
     let result = (|| -> Result<()> {
-        if !sandbox.run_pre_build(Some(id), config, basic_envs)? {
+        if !sandbox.run_pre_build(Some(id))? {
             bob::print_elapsed("Creating sandbox", start.elapsed());
             bail!("pre-build failed");
         }
         bob::print_elapsed("Creating sandbox", start.elapsed());
         let pkgsrc_env = PkgsrcEnv::fetch(config, &sandbox, Some(id))?;
-        let init_path = write_shell_init(config, &sandbox, &pkgsrc_env, id)?;
+        sandbox.set_pkgsrc_env(pkgsrc_env);
+        let init_path = write_shell_init(config, &sandbox, id)?;
         println!("Entering sandbox {}...", sandbox.path(id).display());
         let mut cmd = Command::new("/usr/sbin/chroot");
         cmd.arg(sandbox.path(id)).arg("/bin/sh").arg(&init_path);
@@ -107,9 +107,7 @@ fn exec(config: &Config) -> Result<()> {
         }
         Ok(())
     })();
-    let pkgsrc_env = PkgsrcEnv::fetch(config, &sandbox, Some(id)).ok();
-    let envs = config.script_env(pkgsrc_env.as_ref());
-    match sandbox.run_post_build(Some(id), config, envs) {
+    match sandbox.run_post_build(Some(id)) {
         Ok(true) => {}
         Ok(false) => eprintln!("Warning: post-build failed"),
         Err(e) => eprintln!("Warning: post-build error: {e}"),
@@ -132,12 +130,7 @@ fn exec(config: &Config) -> Result<()> {
  * defaulting to `/bin/sh`).  Returning the path inside the chroot lets
  * the caller invoke `chroot <path> /bin/sh /.bob/shell-init`.
  */
-fn write_shell_init(
-    config: &Config,
-    sandbox: &Sandbox,
-    pkgsrc_env: &PkgsrcEnv,
-    id: usize,
-) -> Result<String> {
+fn write_shell_init(config: &Config, sandbox: &Sandbox, id: usize) -> Result<String> {
     let dev_ctx = config.environment().and_then(|e| e.dev.as_ref());
     let interactive_shell = dev_ctx
         .and_then(|c| c.shell.as_ref())
@@ -147,7 +140,7 @@ fn write_shell_init(
     let mut script = String::new();
     script.push_str("#!/bin/sh\n");
 
-    let mut bob_vars = config.script_env(Some(pkgsrc_env));
+    let mut bob_vars = sandbox.script_env();
     bob_vars.push(("bob_sandbox_id".to_string(), id.to_string()));
     bob_vars.sort_by(|a, b| a.0.cmp(&b.0));
     for (name, value) in &bob_vars {

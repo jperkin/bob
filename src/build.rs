@@ -1488,10 +1488,7 @@ impl PackageBuild {
 
         let pkgpath = &self.pkginfo.pkgpath;
 
-        let mut envs = self
-            .session
-            .config
-            .script_env(Some(&self.session.pkgsrc_env));
+        let mut envs = self.session.sandbox.script_env();
 
         // Inject scheduler-computed WRKOBJDIR for this package.
         let wrkobjdir_kind =
@@ -1506,11 +1503,7 @@ impl PackageBuild {
 
         // Run pre-build operations (bootstrap unpack + build actions).
         // The sandbox is not usable until this completes.
-        if !self.session.sandbox.run_pre_build(
-            self.sandbox_id,
-            &self.session.config,
-            envs.clone(),
-        )? {
+        if !self.session.sandbox.run_pre_build(self.sandbox_id)? {
             warn!("pre-build failed");
         }
 
@@ -1606,11 +1599,7 @@ impl PackageBuild {
         };
 
         // Run post-build operations (build actions + prefix cleanup)
-        match self
-            .session
-            .sandbox
-            .run_post_build(self.sandbox_id, &self.session.config, envs)
-        {
+        match self.session.sandbox.run_post_build(self.sandbox_id) {
             Ok(true) => {}
             Ok(false) => warn!("post-build failed"),
             Err(e) => {
@@ -1933,6 +1922,7 @@ impl Build {
             build_threads = config.build_threads(),
             "Creating new Build instance"
         );
+        scope.sandbox().set_pkgsrc_env(pkgsrc_env.clone());
         Build {
             config: config.clone(),
             pkgsrc_env,
