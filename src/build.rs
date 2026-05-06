@@ -2059,7 +2059,14 @@ impl Build {
                 "WRKOBJDIR routing query results"
             );
             let mut map = HashMap::new();
-            for pkgname in self.scanpkgs.keys() {
+            for (pkgname, resolved) in &self.scanpkgs {
+                let pkgpath = resolved.pkgpath.as_str();
+                if w.always_disk.iter().any(|p| p == pkgpath) {
+                    if let Some(disk) = w.disk.clone() {
+                        map.insert(pkgname.clone(), WrkObjKind::Disk(disk));
+                    }
+                    continue;
+                }
                 let du = build_history.get(pkgname.pkgbase()).and_then(|h| {
                     if h.outcome == success {
                         h.disk_usage

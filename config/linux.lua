@@ -30,6 +30,20 @@ dynamic = {
         tmpfs = "/tmp/work",
         disk = "/home/builder/work",
         threshold = "1G",
+
+        -- By default, builds that failed previously will be assigned to disk
+        -- as we cannot guarantee they will fit tmpfs.  Set failed_threshold
+        -- to override this when the failed disk usage is under the threshold.
+        -- Recommended to be around 50% of the main threshold.
+        failed_threshold = "500M",
+
+        -- Some builds use significantly more disk space during the build than
+        -- is left at the end when the WRKDIR usage calculations are recorded.
+        -- There is no way to accurately catch this, so always_disk forces the
+        -- list of specified pkgpaths to always be assigned to disk.
+        always_disk = {
+            "sysutils/ansible",
+        },
     },
 }
 ]]

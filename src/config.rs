@@ -418,6 +418,13 @@ pub struct WrkObjDir {
     /// account for temporary build artifacts not captured by du.
     /// When `None`, all failed builds default to disk.
     pub failed_threshold: Option<u64>,
+    /// Pkgpaths whose builds must always use the disk WRKOBJDIR,
+    /// regardless of historical disk usage.  Escape hatch for
+    /// packages whose true peak disk usage is much larger than the
+    /// post-build measurement (e.g. wheel builds that materialize
+    /// the install tree twice before deleting one copy).  Exact
+    /// match against the package's pkgpath (e.g. `sysutils/ansible`).
+    pub always_disk: Vec<String>,
 }
 
 impl WrkObjDir {
@@ -956,6 +963,12 @@ impl Config {
                             .to_string(),
                     );
                 }
+                if !w.always_disk.is_empty() && w.disk.is_none() {
+                    errors.push(
+                        "dynamic.wrkobjdir.always_disk requires dynamic.wrkobjdir.disk to be set"
+                            .to_string(),
+                    );
+                }
             }
         }
 
@@ -1478,7 +1491,13 @@ fn parse_dynamic(globals: &Table) -> LuaResult<Option<DynamicConfig>> {
     let wrkobjdir = match table.get::<Value>("wrkobjdir")? {
         Value::Nil => None,
         Value::Table(t) => {
-            const WRK_KEYS: &[&str] = &["tmpfs", "disk", "threshold", "failed_threshold"];
+            const WRK_KEYS: &[&str] = &[
+                "tmpfs",
+                "disk",
+                "threshold",
+                "failed_threshold",
+                "always_disk",
+            ];
             warn_unknown_keys(&t, "dynamic.wrkobjdir", WRK_KEYS);
 
             let tmpfs: Option<PathBuf> = t.get::<Option<String>>("tmpfs")?.map(PathBuf::from);
@@ -1499,12 +1518,16 @@ fn parse_dynamic(globals: &Table) -> LuaResult<Option<DynamicConfig>> {
                     })
                 })
                 .transpose()?;
+            let always_disk: Vec<String> = t
+                .get::<Option<Vec<String>>>("always_disk")?
+                .unwrap_or_default();
 
             Some(WrkObjDir {
                 tmpfs,
                 disk,
                 threshold,
                 failed_threshold,
+                always_disk,
             })
         }
         _ => return Err(mlua::Error::runtime("dynamic.wrkobjdir must be a table")),

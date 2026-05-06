@@ -104,7 +104,7 @@ pub use build::{
     pkg_up_to_date,
 };
 pub use config::{
-    Config, DynamicConfig, Options, Pkgsrc, PkgsrcEnv, Sandboxes, Summary, WrkObjDir,
+    Config, DynamicConfig, Options, Pkgsrc, PkgsrcEnv, Sandboxes, Summary, WrkObjDir, WrkObjKind,
 };
 pub use cpu::{CpuSample, CpuSamplerHandle, start_cpu_sampler};
 pub use db::Database;

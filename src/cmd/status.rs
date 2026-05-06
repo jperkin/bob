@@ -26,7 +26,7 @@ use strum::{EnumCount, EnumProperty, IntoEnumIterator, VariantArray};
 
 use bob::db::{Database, PackageStatusRow};
 use bob::{
-    ColumnAlign, Config, PackageState, PackageStateAlias, PackageStateKind, Scheduler,
+    ColumnAlign, Config, PackageState, PackageStateAlias, PackageStateKind, Scheduler, WrkObjKind,
     parse_status_filter,
 };
 
@@ -425,10 +425,14 @@ fn print_build_status(
      * config (no historical disk_usage input), defaulting to the
      * routing's safe path when threshold-based routing is configured.
      */
-    let predicted_wrkobjdir: Option<String> = config
-        .wrkobjdir()
-        .and_then(|w| w.route(None))
-        .map(|kind| kind.to_string());
+    let predicted_wrkobjdir: Option<WrkObjKind> = config.wrkobjdir().and_then(|w| w.route(None));
+    let predicted_wrkobjdir_for = |pkgpath: &str| -> Option<WrkObjKind> {
+        let w = config.wrkobjdir()?;
+        if w.always_disk.iter().any(|p| p == pkgpath) {
+            return w.disk.clone().map(WrkObjKind::Disk);
+        }
+        predicted_wrkobjdir.clone()
+    };
 
     let get_status = |pkg: &PackageStatusRow| -> (PackageStateKind, String) {
         if let Some(state) = pkg
@@ -498,6 +502,20 @@ fn print_build_status(
         let actual_make_jobs = hist.and_then(|h| h.make_jobs);
         let actual_disk_usage = hist.and_then(|h| h.disk_usage);
 
+        let need_wrkobjdir = cols.contains(&"wrkobjdir")
+            || sort_specs
+                .iter()
+                .any(|(c, _)| matches!(c, StatusCol::Wrkobjdir));
+        let resolved_wrkobjdir: Option<String> = if need_wrkobjdir {
+            actual_wrkobjdir
+                .clone()
+                .or_else(|| predicted_wrkobjdir_for(&pkg.pkg_location).map(|k| k.to_string()))
+        } else {
+            None
+        };
+        let resolved_make_jobs: Option<u32> =
+            actual_make_jobs.or_else(|| sp.make_jobs.allocated().map(|n| n as u32));
+
         let row: Vec<String> = cols
             .iter()
             .map(|&col| match col {
@@ -515,13 +533,9 @@ fn print_build_status(
                         dash()
                     }
                 }
-                "wrkobjdir" => actual_wrkobjdir
-                    .clone()
-                    .or_else(|| predicted_wrkobjdir.clone())
-                    .unwrap_or_else(dash),
-                "make_jobs" => actual_make_jobs
+                "wrkobjdir" => resolved_wrkobjdir.clone().unwrap_or_else(dash),
+                "make_jobs" => resolved_make_jobs
                     .map(|n| n.to_string())
-                    .or_else(|| sp.make_jobs.allocated().map(|n| n.to_string()))
                     .unwrap_or_else(dash),
                 "disk_usage" => actual_disk_usage.map(bob::format_size).unwrap_or_else(dash),
                 _ => String::new(),
@@ -543,14 +557,8 @@ fn print_build_status(
                 } else {
                     None
                 }),
-                StatusCol::MakeJobs => SortKey::Num(
-                    actual_make_jobs
-                        .map(u64::from)
-                        .or_else(|| sp.make_jobs.allocated().map(|n| n as u64)),
-                ),
-                StatusCol::Wrkobjdir => SortKey::OptStr(
-                    actual_wrkobjdir.clone().or_else(|| predicted_wrkobjdir.clone()),
-                ),
+                StatusCol::MakeJobs => SortKey::Num(resolved_make_jobs.map(u64::from)),
+                StatusCol::Wrkobjdir => SortKey::OptStr(resolved_wrkobjdir.clone()),
                 StatusCol::DiskUsage => SortKey::Num(actual_disk_usage),
             })
             .collect();
