@@ -11,6 +11,97 @@ pub mod simulate;
 pub mod status;
 pub mod util;
 
+/**
+ * Sort key for one column of one row.  `Num`/`OptStr` order missing
+ * values last regardless of direction, since "no data" is rarely the
+ * first thing the reader wants to see.  `Idx` carries a precomputed
+ * ordinal for enum-like columns where domain ordering beats
+ * alphabetical (e.g. status outcome).
+ *
+ * Each variant carries a natural direction: `Num` defaults to
+ * descending (biggest first), everything else to ascending.  The
+ * user's `-` prefix inverts that default rather than meaning
+ * "descending" outright -- so `-S disk_usage` puts the largest
+ * package on top and `-S pkgname` is A-Z, with `-` flipping either.
+ */
+pub enum SortKey {
+    Str(String),
+    OptStr(Option<String>),
+    Num(Option<u64>),
+    Idx(usize),
+}
+
+impl SortKey {
+    fn natural_desc(&self) -> bool {
+        matches!(self, SortKey::Num(_))
+    }
+}
+
+fn cmp_keys(a: &SortKey, b: &SortKey, invert: bool) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    let ord = match (a, b) {
+        (SortKey::Str(x), SortKey::Str(y)) => x.cmp(y),
+        (SortKey::OptStr(Some(x)), SortKey::OptStr(Some(y))) => x.cmp(y),
+        (SortKey::OptStr(Some(_)), SortKey::OptStr(None)) => return Less,
+        (SortKey::OptStr(None), SortKey::OptStr(Some(_))) => return Greater,
+        (SortKey::OptStr(None), SortKey::OptStr(None)) => Equal,
+        (SortKey::Num(Some(x)), SortKey::Num(Some(y))) => x.cmp(y),
+        (SortKey::Num(Some(_)), SortKey::Num(None)) => return Less,
+        (SortKey::Num(None), SortKey::Num(Some(_))) => return Greater,
+        (SortKey::Num(None), SortKey::Num(None)) => Equal,
+        (SortKey::Idx(x), SortKey::Idx(y)) => x.cmp(y),
+        _ => Equal,
+    };
+    let desc = a.natural_desc() ^ invert;
+    if desc { ord.reverse() } else { ord }
+}
+
+/**
+ * Parse comma-separated sort specs of the form `col` or `-col`,
+ * mapping each name through `lookup`.  The boolean is the user's
+ * `-` prefix flag, interpreted as "invert this column's natural
+ * direction" by [`sort_indexed_rows`].
+ */
+pub fn parse_sort_specs<C>(
+    values: &[String],
+    lookup: impl Fn(&str) -> Option<C>,
+    valid_names: &[&str],
+) -> anyhow::Result<Vec<(C, bool)>> {
+    values
+        .iter()
+        .map(|s| {
+            let (invert, name) = match s.strip_prefix('-') {
+                Some(rest) => (true, rest),
+                None => (false, s.as_str()),
+            };
+            lookup(name).map(|c| (c, invert)).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unknown sort column '{}'. Valid columns: {}",
+                    name,
+                    valid_names.join(", ")
+                )
+            })
+        })
+        .collect()
+}
+
+/**
+ * Stable in-place multi-key sort of `(keys, payload)` pairs.  Each
+ * `inverts[i]` flag flips the natural direction of the corresponding
+ * key position.  Its length must match each row's keys vec.
+ */
+pub fn sort_indexed_rows<T>(rows: &mut [(Vec<SortKey>, T)], inverts: &[bool]) {
+    rows.sort_by(|(a, _), (b, _)| {
+        for (i, &invert) in inverts.iter().enumerate() {
+            let ord = cmp_keys(&a[i], &b[i], invert);
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum OutputFormat {
     /// Padded columns

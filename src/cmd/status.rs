@@ -31,7 +31,7 @@ use bob::{
 };
 
 use super::util::pkg_pattern;
-use super::{Col, Formatter, OutputFormat};
+use super::{Col, Formatter, OutputFormat, SortKey, parse_sort_specs, sort_indexed_rows};
 
 #[derive(Clone, Copy, strum::EnumProperty, strum::IntoStaticStr, strum::VariantArray)]
 #[strum(serialize_all = "snake_case")]
@@ -309,6 +309,9 @@ pub struct StatusArgs {
         value_delimiter = ',',
     )]
     statuses: Vec<Vec<PackageStateKind>>,
+    /// Sort by column(s); prefix '-' to reverse default order (numeric defaults descending, text ascending)
+    #[arg(short = 'S', long, value_delimiter = ',', allow_hyphen_values = true)]
+    sort: Option<Vec<String>>,
     /// Package filters (regex on name or path)
     packages: Vec<String>,
 }
@@ -328,6 +331,7 @@ pub fn run(db: &Database, config: &Config, args: StatusArgs) -> Result<()> {
         args.format,
         &args.packages,
         args.all,
+        args.sort.as_deref(),
     )
 }
 
@@ -348,6 +352,7 @@ fn print_build_status(
     format: OutputFormat,
     pkg_filters: &[String],
     show_all: bool,
+    sort: Option<&[String]>,
 ) -> Result<()> {
     let all_names: Vec<&str> = StatusCol::VARIANTS.iter().map(|v| v.into()).collect();
     let cols: Vec<&str> = if columns.is_some() {
@@ -373,6 +378,11 @@ fn print_build_status(
             );
         }
     }
+
+    let sort_specs: Vec<(StatusCol, bool)> = match sort {
+        Some(values) => parse_sort_specs(values, StatusCol::find, &all_names)?,
+        None => Vec::new(),
+    };
 
     let pkg_patterns: Vec<Regex> = pkg_filters
         .iter()
@@ -454,7 +464,7 @@ fn print_build_status(
         !matches!(kind, PackageStateKind::Success | PackageStateKind::UpToDate)
     };
 
-    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut indexed_rows: Vec<(Vec<SortKey>, Vec<String>)> = Vec::new();
     for sp in sched.iter() {
         let Some(pkg) = status_map.get(sp.pkg.pkgname()) else {
             continue;
@@ -483,6 +493,11 @@ fn print_build_status(
 
         let dash = || "-".to_string();
 
+        let hist = history.get(sp.pkg.pkgbase());
+        let actual_wrkobjdir = hist.and_then(|h| h.wrkobjdir.clone());
+        let actual_make_jobs = hist.and_then(|h| h.make_jobs);
+        let actual_disk_usage = hist.and_then(|h| h.disk_usage);
+
         let row: Vec<String> = cols
             .iter()
             .map(|&col| match col {
@@ -500,32 +515,62 @@ fn print_build_status(
                         dash()
                     }
                 }
-                "wrkobjdir" => history
-                    .get(sp.pkg.pkgbase())
-                    .and_then(|h| h.wrkobjdir.clone())
+                "wrkobjdir" => actual_wrkobjdir
+                    .clone()
                     .or_else(|| predicted_wrkobjdir.clone())
                     .unwrap_or_else(dash),
-                "make_jobs" => history
-                    .get(sp.pkg.pkgbase())
-                    .and_then(|h| h.make_jobs.map(|n| n.to_string()))
+                "make_jobs" => actual_make_jobs
+                    .map(|n| n.to_string())
                     .or_else(|| sp.make_jobs.allocated().map(|n| n.to_string()))
                     .unwrap_or_else(dash),
-                "disk_usage" => history
-                    .get(sp.pkg.pkgbase())
-                    .and_then(|h| h.disk_usage.map(bob::format_size))
-                    .unwrap_or_else(dash),
+                "disk_usage" => actual_disk_usage.map(bob::format_size).unwrap_or_else(dash),
                 _ => String::new(),
             })
             .collect();
-        rows.push(row);
+
+        let sort_keys: Vec<SortKey> = sort_specs
+            .iter()
+            .map(|(c, _)| match c {
+                StatusCol::Pkgname => SortKey::Str(pkg.pkgname.clone()),
+                StatusCol::Pkgpath => SortKey::Str(pkg.pkg_location.clone()),
+                StatusCol::Status => SortKey::Idx(kind as usize),
+                StatusCol::Reason => SortKey::Str(reason.clone()),
+                StatusCol::MultiVersion => SortKey::Str(multi_version.clone()),
+                StatusCol::Deps => SortKey::Num(Some(sp.dep_count as u64)),
+                StatusCol::Priority => SortKey::Num(Some(sp.total_pbulk_weight as u64)),
+                StatusCol::Cpu => SortKey::Num(if sp.cpu_time > 0 {
+                    Some(sp.cpu_time)
+                } else {
+                    None
+                }),
+                StatusCol::MakeJobs => SortKey::Num(
+                    actual_make_jobs
+                        .map(u64::from)
+                        .or_else(|| sp.make_jobs.allocated().map(|n| n as u64)),
+                ),
+                StatusCol::Wrkobjdir => SortKey::OptStr(
+                    actual_wrkobjdir.clone().or_else(|| predicted_wrkobjdir.clone()),
+                ),
+                StatusCol::DiskUsage => SortKey::Num(actual_disk_usage),
+            })
+            .collect();
+
+        indexed_rows.push((sort_keys, row));
     }
 
-    if rows.is_empty() {
+    if indexed_rows.is_empty() {
         if !statuses.is_empty() || !pkg_filters.is_empty() {
             bail!("No packages match the criteria");
         }
         return Ok(());
     }
+
+    if !sort_specs.is_empty() {
+        let descs: Vec<bool> = sort_specs.iter().map(|(_, d)| *d).collect();
+        sort_indexed_rows(&mut indexed_rows, &descs);
+    }
+
+    let rows: Vec<Vec<String>> = indexed_rows.into_iter().map(|(_, r)| r).collect();
 
     let fmt_cols: Vec<Col> = cols
         .iter()
