@@ -137,34 +137,34 @@ pub enum BuildReason {
 impl std::fmt::Display for BuildReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BuildReason::PackageNotFound => write!(f, "package not found"),
+            BuildReason::PackageNotFound => write!(f, "Package not found"),
             BuildReason::BuildFileRemoved(file) => {
-                write!(f, "build file removed: {}", file)
+                write!(f, "Build file removed: {}", file)
             }
             BuildReason::BuildFileChanged(file) => {
-                write!(f, "build file changed: {}", file)
+                write!(f, "Build file changed: {}", file)
             }
             BuildReason::DependencyAdded(dep) => {
-                write!(f, "dependency added: {}", dep)
+                write!(f, "Dependency added: {}", dep)
             }
             BuildReason::DependenciesAdded(deps) => {
-                write!(f, "dependencies added: {}", deps.join(", "))
+                write!(f, "Dependencies added: {}", deps.join(", "))
             }
             BuildReason::DependencyRemoved(dep) => {
-                write!(f, "dependency removed: {}", dep)
+                write!(f, "Dependency removed: {}", dep)
             }
             BuildReason::DependenciesRemoved(deps) => {
-                write!(f, "dependencies removed: {}", deps.join(", "))
+                write!(f, "Dependencies removed: {}", deps.join(", "))
             }
             BuildReason::DependencyUpdated(base, old, new) => {
-                write!(f, "dependency updated: {} {} -> {}", base, old, new)
+                write!(f, "Dependency updated: {} {} -> {}", base, old, new)
             }
             BuildReason::DependenciesUpdated(updates) => {
                 let parts: Vec<String> = updates
                     .iter()
                     .map(|(base, old, new)| format!("{} {} -> {}", base, old, new))
                     .collect();
-                write!(f, "dependencies updated: {}", parts.join(", "))
+                write!(f, "Dependencies updated: {}", parts.join(", "))
             }
             BuildReason::DependenciesChanged {
                 updated,
@@ -181,13 +181,13 @@ impl std::fmt::Display for BuildReason {
                 for (base, old, new) in updated {
                     parts.push(format!("{} {} -> {}", base, old, new));
                 }
-                write!(f, "dependencies changed: {}", parts.join(", "))
+                write!(f, "Dependencies changed: {}", parts.join(", "))
             }
             BuildReason::DependencyMissing(dep) => {
-                write!(f, "dependency missing: {}", dep)
+                write!(f, "Dependency missing: {}", dep)
             }
             BuildReason::DependencyRefresh(dep) => {
-                write!(f, "dependency refreshed: {}", dep)
+                write!(f, "Dependency refreshed: {}", dep)
             }
         }
     }
