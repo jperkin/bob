@@ -72,14 +72,6 @@ pub fn run(
 ) -> Result<()> {
     let build_id = db.build_id()?;
 
-    if packages {
-        let result = publish_packages(config, db, dry_run)?;
-        println!(
-            "Published {} packages ({} restricted excluded)",
-            result.uploaded, result.restricted
-        );
-    }
-
     if report || email {
         generate_reports(config, db, &build_id, baseline)?;
     }
@@ -90,6 +82,14 @@ pub fn run(
 
     if email {
         send_email(config, db, &build_id, dry_run)?;
+    }
+
+    if packages {
+        let result = publish_packages(config, db, dry_run)?;
+        println!(
+            "Published {} packages ({} restricted excluded)",
+            result.uploaded, result.restricted
+        );
     }
 
     Ok(())
