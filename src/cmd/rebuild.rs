@@ -116,10 +116,34 @@ fn collect_targets(db: &Database, args: &RebuildArgs) -> Result<Option<Vec<Strin
             }
             result.extend(db_pkgs.into_iter().map(|p| p.pkgname));
         } else {
-            if db.get_package_by_name(pkg)?.is_none() {
+            let mut exact: Vec<String> = Vec::new();
+            let mut partial: Vec<String> = Vec::new();
+            for p in db.get_all_packages()? {
+                let pkgbase = pkgsrc::pkgname::pkgbase(&p.pkgname);
+                if p.pkgname == *pkg || pkgbase == pkg {
+                    exact.push(p.pkgname);
+                } else if p.pkgname.contains(pkg.as_str()) || pkgbase.contains(pkg.as_str()) {
+                    partial.push(p.pkgname);
+                }
+            }
+            if !exact.is_empty() {
+                result.extend(exact);
+            } else if partial.len() == 1 {
+                bail!(
+                    "No exact match for '{}', did you mean '{}'?",
+                    pkg,
+                    partial[0]
+                );
+            } else if !partial.is_empty() {
+                partial.sort();
+                bail!(
+                    "'{}' is ambiguous, did you mean one of:\n  {}",
+                    pkg,
+                    partial.join("\n  ")
+                );
+            } else {
                 bail!("Package '{}' not in scan cache. Run 'bob scan' first.", pkg);
             }
-            result.push(pkg.clone());
         }
     }
     Ok(Some(result))
