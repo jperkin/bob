@@ -218,7 +218,7 @@ pub fn format_duration(ms: u64) -> String {
     }
 }
 
-fn format_size(bytes: u64) -> String {
+pub fn format_size(bytes: u64) -> String {
     const K: u64 = 1024;
     const M: u64 = 1024 * 1024;
     const G: u64 = 1024 * 1024 * 1024;

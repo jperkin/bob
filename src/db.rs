@@ -113,6 +113,11 @@ pub struct PkgBuildHistory {
     pub outcome: Option<PackageStateKind>,
     /// Disk usage in bytes, if recorded.
     pub disk_usage: Option<u64>,
+    /// MAKE_JOBS used, if recorded.
+    pub make_jobs: Option<u32>,
+    /// WRKOBJDIR type used (raw "tmpfs"/"disk" string from the
+    /// history column), if recorded.
+    pub wrkobjdir: Option<String>,
 }
 
 /**
@@ -1883,12 +1888,18 @@ impl Database {
     }
 
     /**
-     * Query the most recent build history for all packages.
+     * Query build history for all packages.
      *
-     * For each (pkgpath, pkgbase) returns the outcome and disk usage
-     * from the most recent build.  Returns an empty map on error.
+     * For each pkgbase returns the outcome, MAKE_JOBS, WRKOBJDIR, and
+     * disk usage from the most recent matching row.  When `build_id`
+     * is `Some`, only rows from that build session are considered;
+     * when `None`, all history is searched.  Returns an empty map on
+     * error.
      */
-    pub fn build_history_by_pkg_all(&self) -> HashMap<String, PkgBuildHistory> {
+    pub fn build_history_by_pkg_all(
+        &self,
+        build_id: Option<&str>,
+    ) -> HashMap<String, PkgBuildHistory> {
         let conn = match self.history_conn() {
             Ok(c) => c,
             Err(e) => {
@@ -1902,19 +1913,28 @@ impl Database {
 
         let du: &str = HistoryKind::DiskUsage.into();
         let out: &str = HistoryKind::Outcome.into();
+        let mj: &str = HistoryKind::MakeJobs.into();
+        let wo: &str = HistoryKind::Wrkobjdir.into();
         let pkgbase_col: &str = HistoryKind::Pkgbase.into();
         let pkgpath_col: &str = HistoryKind::Pkgpath.into();
 
+        let where_clause = if build_id.is_some() {
+            "WHERE h.build_id = ?1"
+        } else {
+            ""
+        };
+
         let sql = format!(
             "WITH latest AS ( \
-                 SELECT h.{pkgbase_col}, h.{du}, h.{out}, \
+                 SELECT h.{pkgbase_col}, h.{du}, h.{out}, h.{mj}, h.{wo}, \
                         ROW_NUMBER() OVER ( \
                             PARTITION BY h.{pkgpath_col}, h.{pkgbase_col} \
                             ORDER BY h.id DESC \
                         ) AS rn \
                  FROM build_history h \
+                 {where_clause} \
              ) \
-             SELECT {pkgbase_col}, {out}, {du} FROM latest \
+             SELECT {pkgbase_col}, {out}, {du}, {mj}, {wo} FROM latest \
              WHERE rn = 1",
         );
 
@@ -1928,13 +1948,20 @@ impl Database {
                 return HashMap::new();
             }
         };
-        let rows = match stmt.query_map([], |row| {
+        let map_row = |row: &rusqlite::Row<'_>| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i32>(1)?,
                 row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
-        }) {
+        };
+        let rows = match build_id {
+            Some(id) => stmt.query_map(params![id], map_row),
+            None => stmt.query_map([], map_row),
+        };
+        let rows = match rows {
             Ok(r) => r,
             Err(e) => {
                 warn!(
@@ -1947,12 +1974,14 @@ impl Database {
 
         let mut result = HashMap::new();
         for row in rows.flatten() {
-            let (pkgbase, outcome, du) = row;
+            let (pkgbase, outcome, du, mj, wo) = row;
             result.insert(
                 pkgbase,
                 PkgBuildHistory {
                     outcome: PackageStateKind::from_repr(outcome),
                     disk_usage: du.map(|v| v as u64),
+                    make_jobs: mj.map(|v| v as u32),
+                    wrkobjdir: wo,
                 },
             );
         }

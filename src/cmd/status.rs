@@ -52,10 +52,23 @@ enum StatusCol {
     Priority,
     #[strum(props(max = "8", align = "right", desc = "Previous build CPU time"))]
     Cpu,
-    #[strum(props(max = "9", align = "right", desc = "MAKE_JOBS allocation"))]
+    #[strum(props(
+        max = "9",
+        align = "right",
+        desc = "MAKE_JOBS used by current build, otherwise predicted allocation"
+    ))]
     MakeJobs,
-    #[strum(props(max = "9", desc = "WRKOBJDIR routing (tmpfs or disk)"))]
+    #[strum(props(
+        max = "9",
+        desc = "WRKOBJDIR used by current build, otherwise predicted routing"
+    ))]
     Wrkobjdir,
+    #[strum(props(
+        max = "10",
+        align = "right",
+        desc = "WRKDIR size at end of current build"
+    ))]
+    DiskUsage,
 }
 
 /**
@@ -379,35 +392,33 @@ fn print_build_status(
         sched.allocate_all();
     }
 
-    let wrkobjdir_map: HashMap<&str, String> = if cols.contains(&"wrkobjdir") {
-        if let Some(w) = config.wrkobjdir() {
-            let success = Some(PackageStateKind::Success);
-            let history = db.build_history_by_pkg_all();
-            status_rows
-                .iter()
-                .filter_map(|r| {
-                    let du = history
-                        .get(pkgsrc::PkgName::new(&r.pkgname).pkgbase())
-                        .and_then(|h| {
-                            if h.outcome == success {
-                                h.disk_usage
-                            } else {
-                                match (h.disk_usage, w.failed_threshold) {
-                                    (Some(size), Some(ft)) if size <= ft => Some(size),
-                                    _ => None,
-                                }
-                            }
-                        });
-                    w.route(du)
-                        .map(|kind| (r.pkgname.as_str(), kind.to_string()))
-                })
-                .collect()
-        } else {
-            HashMap::new()
+    let need_history = cols
+        .iter()
+        .any(|c| matches!(*c, "wrkobjdir" | "make_jobs" | "disk_usage"));
+    /*
+     * Scoped to the current build only -- rows from previous build
+     * sessions (different build_id) are deliberately excluded so the
+     * status view reflects this run, not historical state.
+     */
+    let history = if need_history {
+        match db.build_id() {
+            Ok(id) => db.build_history_by_pkg_all(Some(&id)),
+            Err(_) => HashMap::new(),
         }
     } else {
         HashMap::new()
     };
+
+    /*
+     * Predicted routing for packages without an actual entry in the
+     * current build's history.  The prediction uses only the current
+     * config (no historical disk_usage input), defaulting to the
+     * routing's safe path when threshold-based routing is configured.
+     */
+    let predicted_wrkobjdir: Option<String> = config
+        .wrkobjdir()
+        .and_then(|w| w.route(None))
+        .map(|kind| kind.to_string());
 
     let get_status = |pkg: &PackageStatusRow| -> (PackageStateKind, String) {
         if let Some(state) = pkg
@@ -489,14 +500,20 @@ fn print_build_status(
                         dash()
                     }
                 }
-                "wrkobjdir" => wrkobjdir_map
-                    .get(pkg.pkgname.as_str())
-                    .cloned()
+                "wrkobjdir" => history
+                    .get(sp.pkg.pkgbase())
+                    .and_then(|h| h.wrkobjdir.clone())
+                    .or_else(|| predicted_wrkobjdir.clone())
                     .unwrap_or_else(dash),
-                "make_jobs" => match sp.make_jobs.allocated() {
-                    Some(n) => n.to_string(),
-                    None => dash(),
-                },
+                "make_jobs" => history
+                    .get(sp.pkg.pkgbase())
+                    .and_then(|h| h.make_jobs.map(|n| n.to_string()))
+                    .or_else(|| sp.make_jobs.allocated().map(|n| n.to_string()))
+                    .unwrap_or_else(dash),
+                "disk_usage" => history
+                    .get(sp.pkg.pkgbase())
+                    .and_then(|h| h.disk_usage.map(bob::format_size))
+                    .unwrap_or_else(dash),
                 _ => String::new(),
             })
             .collect();

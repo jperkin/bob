@@ -2050,7 +2050,7 @@ impl Build {
          * Packages with no history or a recent failure default to
          * disk (safe choice since tmpfs is bounded).
          */
-        let build_history = db.build_history_by_pkg_all();
+        let build_history = db.build_history_by_pkg_all(None);
         let wrkobjdir_map: HashMap<PkgName, WrkObjKind> = if let Some(w) = self.config.wrkobjdir() {
             let success = Some(PackageStateKind::Success);
             debug!(

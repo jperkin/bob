@@ -108,7 +108,7 @@ pub use config::{
 };
 pub use cpu::{CpuSample, CpuSamplerHandle, start_cpu_sampler};
 pub use db::Database;
-pub use history::{History, HistoryKind, format_duration};
+pub use history::{History, HistoryKind, format_duration, format_size};
 pub use init::Init;
 pub use makejobs::PkgMakeJobs;
 pub use pkgstate::{
