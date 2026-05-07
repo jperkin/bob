@@ -1,5 +1,30 @@
 # Changelog
 
+## Version 0.99.4 (2026-05-07)
+
+* Support new `summary` section in the config file to configure restricted
+  package inclusion, `FILE_CKSUM` entries, and compression types for the
+  `pkg_summary` file.
+
+* Add `always_disk` table for dynamic WRKOBJDIR to force certain packages to
+  always build on disk.  Useful for packages such as ansible that can use well
+  over 1GB of temporary space that is not reflected by the WRKDIR usage stats.
+
+* Improve `bob rebuild` package matching logic and error messages.
+
+* Improve `bob status` to use actual values if available rather than predicted
+  allocations, add a disk usage column, and a new `--sort` option.
+
+* Ensure `bob publish -pe` sends the report email before starting the package
+  sync.
+
+* Improve shutdown handling and avoid the potential for packages to be marked
+  as failed when performing a forced shutdown.
+
+* Fix ability for all file system types to mount over an existing mount point.
+
+* Minor formatting tweaks and improvements.
+
 ## Version 0.99.3 (2026-05-01)
 
 * Switch to an upstream commit with illumos support for lua-src so that we can
