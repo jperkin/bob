@@ -109,7 +109,9 @@ fn list_logs(result: &BuildResult) -> Result<()> {
  * Return the path to a stage log file.
  *
  * If a stage is explicitly requested, use that.  Otherwise use the
- * stage that failed.
+ * stage that failed.  If no stage is recorded (the build failed before
+ * any stage ran, e.g. during the WRKDIR query) fall back to
+ * `setup.log`, which captures bob's pre-stage tracing output.
  */
 fn stage_log(result: &BuildResult, stage: Option<Stage>) -> Result<std::path::PathBuf> {
     let pkgname = result.pkgname.pkgname();
@@ -117,10 +119,10 @@ fn stage_log(result: &BuildResult, stage: Option<Stage>) -> Result<std::path::Pa
         .log_dir
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("No log directory for {}", pkgname))?;
-    let stage = stage
-        .or(result.build_stats.stage)
-        .ok_or_else(|| anyhow::anyhow!("No failed stage recorded for {}", pkgname))?;
-    let log_file = log_dir.join(format!("{}.log", stage.into_str()));
+    let log_file = match stage.or(result.build_stats.stage) {
+        Some(stage) => log_dir.join(format!("{}.log", stage.into_str())),
+        None => log_dir.join("setup.log"),
+    };
     if !log_file.exists() {
         bail!("Log file not found: {}", log_file.display());
     }
