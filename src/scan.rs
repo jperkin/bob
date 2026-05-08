@@ -999,10 +999,10 @@ impl Scan {
         Ok(())
     }
 
-    /// Run post-build operations (build actions + prefix cleanup).
+    /// Run post-build operations (hook destroy actions + prefix cleanup).
     fn run_post_build(&self) -> anyhow::Result<()> {
-        if !self.sandbox.run_post_build(self.sandbox_id)? {
-            warn!("post-build failed");
+        if let Err(e) = self.sandbox.run_post_build(self.sandbox_id) {
+            warn!(error = format!("{e:#}"), "post-build error");
         }
         Ok(())
     }

@@ -1446,13 +1446,11 @@ impl PackageBuild {
         // invoke the matching destroy hooks and clean up so subsequent
         // packages on this sandbox start fresh.
         if let Err(e) = self.session.sandbox.run_pre_build(self.sandbox_id) {
-            match self.session.sandbox.run_post_build(self.sandbox_id) {
-                Ok(true) => {}
-                Ok(false) => warn!("post-build failed during pre-build cleanup"),
-                Err(post_e) => warn!(
+            if let Err(post_e) = self.session.sandbox.run_post_build(self.sandbox_id) {
+                warn!(
                     error = format!("{post_e:#}"),
                     "post-build error during pre-build cleanup"
-                ),
+                );
             }
             return Err(e.context("pre-build failed"));
         }
@@ -1548,13 +1546,9 @@ impl PackageBuild {
             }
         };
 
-        // Run post-build operations (build actions + prefix cleanup)
-        match self.session.sandbox.run_post_build(self.sandbox_id) {
-            Ok(true) => {}
-            Ok(false) => warn!("post-build failed"),
-            Err(e) => {
-                warn!(error = format!("{e:#}"), "post-build error")
-            }
+        // Run post-build operations (hook destroy actions + prefix cleanup)
+        if let Err(e) = self.session.sandbox.run_post_build(self.sandbox_id) {
+            warn!(error = format!("{e:#}"), "post-build error");
         }
 
         Ok(result)

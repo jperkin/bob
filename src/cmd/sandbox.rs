@@ -115,10 +115,8 @@ fn exec(config: &Config) -> Result<()> {
         }
         Ok(())
     })();
-    match sandbox.run_post_build(Some(id)) {
-        Ok(true) => {}
-        Ok(false) => eprintln!("Warning: post-build failed"),
-        Err(e) => eprintln!("Warning: post-build error: {e}"),
+    if let Err(e) = sandbox.run_post_build(Some(id)) {
+        eprintln!("Warning: post-build error: {e:#}");
     }
     bob::print_status("Destroying sandbox");
     let start = Instant::now();

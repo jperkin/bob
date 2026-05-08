@@ -885,8 +885,10 @@ impl Sandbox {
      *  1. Execute hook destroy commands in reverse order
      *  2. Remove prefix, pkg_dbdir, and pkg_refcount_dbdir
      *
-     * Returns Ok(true) if all operations succeeded or none were configured,
-     * Ok(false) if any operation failed.
+     * Returns Err if a hook destroy command fails; the caller decides
+     * whether to log and continue or treat as fatal.  Failures during
+     * prefix/pkg_dbdir cleanup are best-effort (warned and skipped) so
+     * one bad path does not prevent the rest from being cleaned up.
      *
      * The pkgsrc paths are removed only when [`set_pkgsrc_env`] has
      * been called, since they are unknown otherwise.  If they were
@@ -895,18 +897,24 @@ impl Sandbox {
      *
      * [`set_pkgsrc_env`]: Sandbox::set_pkgsrc_env
      */
-    pub fn run_post_build(&self, sandbox_id: Option<usize>) -> Result<bool> {
-        let hooks = self.config.hooks();
-        if !hooks.is_empty() {
-            let Some(sandbox_id) = sandbox_id else {
-                bail!("hooks require sandboxes to be enabled");
-            };
-            let envs = self.script_env();
-            if let Err(e) = self.reverse_actions(sandbox_id, hooks, &envs) {
-                warn!(error = format!("{e:#}"), "Hook destroy action failed");
-                return Ok(false);
+    pub fn run_post_build(&self, sandbox_id: Option<usize>) -> Result<()> {
+        // Capture any hook destroy error but still run the
+        // best-effort prefix/pkgdb cleanup below so the sandbox is
+        // left as clean as possible for reuse.  The captured error is
+        // returned at the end.
+        let hook_result: Result<()> = if let Some(sandbox_id) = sandbox_id {
+            let hooks = self.config.hooks();
+            if hooks.is_empty() {
+                Ok(())
+            } else {
+                let envs = self.script_env();
+                self.reverse_actions(sandbox_id, hooks, &envs)
             }
-        }
+        } else if !self.config.hooks().is_empty() {
+            bail!("hooks require sandboxes to be enabled");
+        } else {
+            Ok(())
+        };
 
         if let Some(pkgsrc) = self.pkgsrc_env.get() {
             for path in [
@@ -931,7 +939,7 @@ impl Sandbox {
             }
         }
 
-        Ok(true)
+        hook_result
     }
 
     /**
@@ -1076,14 +1084,8 @@ impl Sandbox {
         }
         for &id in &sandboxes {
             if self.path(id).exists() {
-                match self.run_post_build(Some(id)) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        warn!("post-build failed for sandbox {}", id)
-                    }
-                    Err(e) => {
-                        warn!(error = format!("{e:#}"), sandbox = id, "post-build error")
-                    }
+                if let Err(e) = self.run_post_build(Some(id)) {
+                    warn!(error = format!("{e:#}"), sandbox = id, "post-build error");
                 }
             }
         }
@@ -1731,14 +1733,8 @@ impl Drop for SandboxScope {
         }
         for &id in &self.owned {
             if self.sandbox.path(id).exists() {
-                match self.sandbox.run_post_build(Some(id)) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        warn!("post-build failed for sandbox {}", id)
-                    }
-                    Err(e) => {
-                        warn!(error = format!("{e:#}"), sandbox = id, "post-build error")
-                    }
+                if let Err(e) = self.sandbox.run_post_build(Some(id)) {
+                    warn!(error = format!("{e:#}"), sandbox = id, "post-build error");
                 }
             }
         }
