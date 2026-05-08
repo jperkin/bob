@@ -841,12 +841,12 @@ impl Sandbox {
     /**
      * Run pre-build operations:
      *  1. Unpack bootstrap kit if configured
-     *  2. Execute build action create commands in order
+     *  2. Execute hook action create commands in order
      *
-     * Returns Ok(true) if all operations succeeded or none were configured,
-     * Ok(false) if any operation failed.
+     * Returns Err if any step fails; the caller decides whether the
+     * failure is fatal (sandbox-level) or per-package.
      */
-    pub fn run_pre_build(&self, sandbox_id: Option<usize>) -> Result<bool> {
+    pub fn run_pre_build(&self, sandbox_id: Option<usize>) -> Result<()> {
         if let Some(bootstrap) = self.config.bootstrap() {
             let Some(sandbox_id) = sandbox_id else {
                 bail!("bootstrap requires sandboxes to be enabled");
@@ -874,13 +874,10 @@ impl Sandbox {
                 bail!("hooks require sandboxes to be enabled");
             };
             let envs = self.script_env();
-            if let Err(e) = self.perform_actions(sandbox_id, hooks, &envs) {
-                warn!(error = format!("{e:#}"), "Hook action failed");
-                return Ok(false);
-            }
+            self.perform_actions(sandbox_id, hooks, &envs)?;
         }
 
-        Ok(true)
+        Ok(())
     }
 
     /**

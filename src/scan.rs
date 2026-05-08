@@ -620,12 +620,20 @@ impl Scan {
         if scope.enabled() {
             crate::print_status("Creating sandbox");
             let start = Instant::now();
-            let ids = scope.ensure(1)?;
-            self.sandbox_id = ids.first().copied();
-            if !self.sandbox.run_pre_build(self.sandbox_id)? {
-                warn!("pre-build failed");
+            let result = scope.ensure(1).and_then(|ids| {
+                self.sandbox_id = ids.first().copied();
+                self.sandbox
+                    .run_pre_build(self.sandbox_id)
+                    .context("pre-build failed")?;
+                Ok(())
+            });
+            match result {
+                Ok(()) => crate::print_elapsed("Creating sandbox", start.elapsed()),
+                Err(e) => {
+                    crate::print_failed("Creating sandbox", start.elapsed());
+                    return Err(e);
+                }
             }
-            crate::print_elapsed("Creating sandbox", start.elapsed());
         }
 
         let env = match db.load_pkgsrc_env() {

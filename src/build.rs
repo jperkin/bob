@@ -1281,7 +1281,7 @@ impl BuildSummary {
 }
 
 /**
- * Parallel package build orchestrator.
+ * Parallel package builder.
  *
  * Schedules packages for building using a dependency DAG, distributes
  * work across sandbox worker threads, and collects results into a
@@ -1438,10 +1438,23 @@ impl PackageBuild {
 
         let patterns = self.session.config.save_wrkdir_patterns();
 
-        // Run pre-build operations (bootstrap unpack + build actions).
-        // The sandbox is not usable until this completes.
-        if !self.session.sandbox.run_pre_build(self.sandbox_id)? {
-            warn!("pre-build failed");
+        // Run pre-build operations (bootstrap unpack + hook actions).
+        // The sandbox is not usable until this completes; failure here
+        // marks this package as failed and the build continues with
+        // the next.  Hooks may have partially mutated sandbox state by
+        // the time they fail, so post-build runs before returning to
+        // invoke the matching destroy hooks and clean up so subsequent
+        // packages on this sandbox start fresh.
+        if let Err(e) = self.session.sandbox.run_pre_build(self.sandbox_id) {
+            match self.session.sandbox.run_post_build(self.sandbox_id) {
+                Ok(true) => {}
+                Ok(false) => warn!("post-build failed during pre-build cleanup"),
+                Err(post_e) => warn!(
+                    error = format!("{post_e:#}"),
+                    "post-build error during pre-build cleanup"
+                ),
+            }
+            return Err(e.context("pre-build failed"));
         }
 
         if let Some(jobs) = self.make_jobs.allocated() {

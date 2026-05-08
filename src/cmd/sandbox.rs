@@ -84,13 +84,21 @@ fn exec(config: &Config) -> Result<()> {
     }
     bob::print_status("Creating sandbox");
     let start = Instant::now();
-    let id = sandbox.claim_id()?;
-    let result = (|| -> Result<()> {
-        if !sandbox.run_pre_build(Some(id))? {
-            bob::print_elapsed("Creating sandbox", start.elapsed());
-            bail!("pre-build failed");
+    let id = match sandbox.claim_id() {
+        Ok(id) => id,
+        Err(e) => {
+            bob::print_failed("Creating sandbox", start.elapsed());
+            return Err(e);
         }
-        bob::print_elapsed("Creating sandbox", start.elapsed());
+    };
+    let result = (|| -> Result<()> {
+        match sandbox.run_pre_build(Some(id)) {
+            Ok(()) => bob::print_elapsed("Creating sandbox", start.elapsed()),
+            Err(e) => {
+                bob::print_failed("Creating sandbox", start.elapsed());
+                return Err(e.context("pre-build failed"));
+            }
+        }
         let pkgsrc_env = PkgsrcEnv::fetch(config, &sandbox, Some(id))?;
         sandbox.set_pkgsrc_env(pkgsrc_env);
         let init_path = write_shell_init(config, &sandbox, id)?;

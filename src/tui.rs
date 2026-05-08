@@ -64,6 +64,19 @@ pub fn print_elapsed(msg: &str, elapsed: Duration) {
     }
 }
 
+/**
+ * Print the failure of a timed operation.  Same shape as
+ * [`print_elapsed`] but reports failure so the line started by
+ * [`print_status`] is closed honestly rather than left dangling.
+ */
+pub fn print_failed(msg: &str, elapsed: Duration) {
+    if io::stdout().is_terminal() {
+        println!(" failed ({:.1}s)", elapsed.as_secs_f32());
+    } else {
+        println!("{}... failed ({:.1}s)", msg, elapsed.as_secs_f32());
+    }
+}
+
 /// Default refresh interval for UI updates (10fps).
 /// Used for both event polling timeout and render throttling.
 pub const REFRESH_INTERVAL: Duration = Duration::from_millis(100);
