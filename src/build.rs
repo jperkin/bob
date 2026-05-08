@@ -516,7 +516,7 @@ struct PkgBuilder<'a> {
     logdir: PathBuf,
     build_user: Option<String>,
     envs: Vec<(String, String)>,
-    output_tx: Option<Sender<ChannelCommand>>,
+    output_tx: Sender<ChannelCommand>,
     make_jobs: PkgMakeJobs,
     wrkdir: Option<PathBuf>,
 }
@@ -529,7 +529,7 @@ impl<'a> PkgBuilder<'a> {
         worker_id: usize,
         pkginfo: &'a ResolvedPackage,
         envs: Vec<(String, String)>,
-        output_tx: Option<Sender<ChannelCommand>>,
+        output_tx: Sender<ChannelCommand>,
         make_jobs: PkgMakeJobs,
         wrkdir: Option<PathBuf>,
     ) -> Self {
@@ -844,149 +844,86 @@ impl<'a> PkgBuilder<'a> {
         let _ = writeln!(log, "=> {:?} {:?}", cmd, args);
         let _ = log.flush();
 
-        // Use tee-style pipe handling when output_tx is available for live view.
-        // Otherwise use direct file redirection.
-        if let Some(ref output_tx) = self.output_tx {
-            // Wrap command in shell to merge stdout/stderr with 2>&1, like the
-            // shell script's run_log function does.
-            let shell_cmd = self.build_shell_command(cmd, args, run_as, extra_envs);
-            let mut child = self
-                .session
-                .sandbox
-                .command(self.sandbox_id, Path::new("/bin/sh"))
-                .new_session()
-                .arg("-c")
-                .arg(&shell_cmd)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .context("Failed to spawn shell command")?;
+        // Wrap command in shell to merge stdout/stderr with 2>&1, like the
+        // shell script's run_log function does.
+        let shell_cmd = self.build_shell_command(cmd, args, run_as, extra_envs);
+        let mut child = self
+            .session
+            .sandbox
+            .command(self.sandbox_id, Path::new("/bin/sh"))
+            .new_session()
+            .arg("-c")
+            .arg(&shell_cmd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("Failed to spawn shell command")?;
 
-            let stdout = child.stdout.take().unwrap();
-            let output_tx = output_tx.clone();
-            let worker_id = self.worker_id;
-            let (tee_done_tx, tee_done_rx) = mpsc::sync_channel::<()>(1);
+        let stdout = child.stdout.take().unwrap();
+        let output_tx = self.output_tx.clone();
+        let worker_id = self.worker_id;
+        let (tee_done_tx, tee_done_rx) = mpsc::sync_channel::<()>(1);
 
-            // Spawn thread to read from pipe and tee to file + output channel.
-            // Batch lines and throttle sends to reduce channel overhead.
-            let tee_handle = std::thread::spawn(move || {
-                let mut reader = BufReader::new(stdout);
-                let mut buf = Vec::new();
-                let mut batch = Vec::with_capacity(50);
-                let mut last_send = Instant::now();
-                let send_interval = OUTPUT_BATCH_INTERVAL;
+        // Spawn thread to read from pipe and tee to file + output channel.
+        // Batch lines and throttle sends to reduce channel overhead.
+        let tee_handle = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut buf = Vec::new();
+            let mut batch = Vec::with_capacity(50);
+            let mut last_send = Instant::now();
+            let send_interval = OUTPUT_BATCH_INTERVAL;
 
-                loop {
-                    buf.clear();
-                    match reader.read_until(b'\n', &mut buf) {
-                        Ok(0) => break,
-                        Ok(_) => {}
-                        Err(_) => break,
-                    };
-                    // Write raw bytes to log file to preserve original output
-                    let _ = log.write_all(&buf);
-                    // Convert to lossy UTF-8 for live view
-                    let line = String::from_utf8_lossy(&buf);
-                    let line = line.trim_end_matches('\n').to_string();
-                    batch.push(line);
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(_) => break,
+                };
+                // Write raw bytes to log file to preserve original output
+                let _ = log.write_all(&buf);
+                // Convert to lossy UTF-8 for live view
+                let line = String::from_utf8_lossy(&buf);
+                let line = line.trim_end_matches('\n').to_string();
+                batch.push(line);
 
-                    // Send batch if interval elapsed or batch is large
-                    if last_send.elapsed() >= send_interval || batch.len() >= 50 {
-                        let _ = output_tx.send(ChannelCommand::OutputLines(
-                            worker_id,
-                            std::mem::take(&mut batch),
-                        ));
-                        last_send = Instant::now();
-                    }
+                // Send batch if interval elapsed or batch is large
+                if last_send.elapsed() >= send_interval || batch.len() >= 50 {
+                    let _ = output_tx.send(ChannelCommand::OutputLines(
+                        worker_id,
+                        std::mem::take(&mut batch),
+                    ));
+                    last_send = Instant::now();
                 }
-
-                // Send remaining lines
-                if !batch.is_empty() {
-                    let _ = output_tx.send(ChannelCommand::OutputLines(worker_id, batch));
-                }
-                let _ = tee_done_tx.send(());
-            });
-
-            let (status, cpu_time) = wait_with_shutdown(&mut child, &self.session.state)?;
-
-            /*
-             * Wait for the tee thread to see pipe EOF.  Normally this is
-             * immediate, but if an orphaned process (or zombie) holds the
-             * pipe open, time out rather than blocking forever.  The
-             * detached thread is cleaned up at exit.
-             */
-            if tee_done_rx.recv_timeout(Duration::from_secs(5)).is_ok() {
-                let _ = tee_handle.join();
-            } else {
-                warn!(
-                    pkg = %self.pkginfo.index.pkgname,
-                    "Tee thread stuck on pipe held by orphaned process, detaching"
-                );
             }
 
-            trace!(?cmd, ?status, "Command completed");
-            Ok((status, cpu_time))
+            // Send remaining lines
+            if !batch.is_empty() {
+                let _ = output_tx.send(ChannelCommand::OutputLines(worker_id, batch));
+            }
+            let _ = tee_done_tx.send(());
+        });
+
+        let (status, cpu_time) = wait_with_shutdown(&mut child, &self.session.state)?;
+
+        /*
+         * Wait for the tee thread to see pipe EOF.  Normally this is
+         * immediate, but if an orphaned process (or zombie) holds the
+         * pipe open, time out rather than blocking forever.  The
+         * detached thread is cleaned up at exit.
+         */
+        if tee_done_rx.recv_timeout(Duration::from_secs(5)).is_ok() {
+            let _ = tee_handle.join();
         } else {
-            let (status, cpu_time) =
-                self.spawn_command_to_file(cmd, args, run_as, extra_envs, log)?;
-            trace!(?cmd, ?status, "Command completed");
-            Ok((status, cpu_time))
+            warn!(
+                pkg = %self.pkginfo.index.pkgname,
+                "Tee thread stuck on pipe held by orphaned process, detaching"
+            );
         }
-    }
 
-    /// Spawn a command with stdout/stderr redirected to a file.
-    fn spawn_command_to_file(
-        &self,
-        cmd: &Path,
-        args: &[&str],
-        run_as: RunAs,
-        extra_envs: &[(&str, &str)],
-        log: File,
-    ) -> anyhow::Result<(ExitStatus, Duration)> {
-        // Clone file handle for stderr (stdout and stderr both go to same file)
-        let log_err = log.try_clone()?;
-
-        match run_as {
-            RunAs::Root => {
-                let mut command = self.session.sandbox.command(self.sandbox_id, cmd);
-                command.new_session();
-                command.args(args);
-                self.apply_envs(&mut command, extra_envs);
-                let mut child = command
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::from(log))
-                    .stderr(Stdio::from(log_err))
-                    .spawn()
-                    .with_context(|| format!("Failed to spawn {}", cmd.display()))?;
-                wait_with_shutdown(&mut child, &self.session.state)
-            }
-            RunAs::User => {
-                let user = self.build_user.as_ref().unwrap();
-                let mut parts = Vec::with_capacity(args.len() + 1);
-                parts.push(cmd.display().to_string());
-                parts.extend(args.iter().map(|arg| arg.to_string()));
-                let inner_cmd = parts
-                    .iter()
-                    .map(|part| Self::shell_escape(part))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let mut command = self
-                    .session
-                    .sandbox
-                    .command(self.sandbox_id, Path::new("su"));
-                command.new_session();
-                command.arg(user).arg("-c").arg(&inner_cmd);
-                self.apply_envs(&mut command, extra_envs);
-                let mut child = command
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::from(log))
-                    .stderr(Stdio::from(log_err))
-                    .spawn()
-                    .context("Failed to spawn su command")?;
-                wait_with_shutdown(&mut child, &self.session.state)
-            }
-        }
+        trace!(?cmd, ?status, "Command completed");
+        Ok((status, cpu_time))
     }
 
     /// Get a make variable value.
@@ -1534,7 +1471,7 @@ impl PackageBuild {
             self.worker_id,
             &self.pkginfo,
             envs.clone(),
-            Some(status_tx.clone()),
+            status_tx.clone(),
             self.make_jobs,
             wrkdir.clone(),
         );
