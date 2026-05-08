@@ -408,7 +408,10 @@ impl Sandbox {
             }
             None => Command::new(cmd),
         };
-        self.apply_build_environment(&mut c);
+        match self.context {
+            ActionContext::Build => self.apply_build_environment(&mut c),
+            ActionContext::Dev => self.apply_dev_environment(&mut c),
+        }
         c
     }
 
@@ -958,7 +961,6 @@ impl Sandbox {
         let sandbox_path = self.path(sandbox_id);
         let output = if chroot {
             let mut c = Command::new("/usr/sbin/chroot");
-            self.apply_build_environment(&mut c);
             for (key, val) in envs {
                 c.env(key, val);
             }
@@ -973,7 +975,6 @@ impl Sandbox {
             c.output()?
         } else {
             let mut c = Command::new("/bin/sh");
-            self.apply_build_environment(&mut c);
             for (key, val) in envs {
                 c.env(key, val);
             }
