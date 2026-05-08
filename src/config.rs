@@ -1222,28 +1222,24 @@ fn parse_summary(globals: &Table) -> LuaResult<Summary> {
     let file_cksum = table
         .get::<Option<bool>>("file_cksum")?
         .unwrap_or(defaults.file_cksum);
-    let compression = match table.get::<Value>("compression")? {
-        Value::Nil => defaults.compression,
-        Value::Table(t) => {
-            let list: Vec<String> = t
-                .sequence_values::<String>()
-                .collect::<LuaResult<Vec<_>>>()?;
-            if list.is_empty() {
-                return Err(mlua::Error::runtime(
-                    "summary.compression must list at least one format",
-                ));
-            }
-            for c in &list {
-                if !VALID_COMPRESSION.contains(&c.as_str()) {
-                    return Err(mlua::Error::runtime(format!(
-                        "summary.compression value '{}' is not supported (valid: gz, zst)",
-                        c
-                    )));
-                }
-            }
-            list
+    let compression = if table.contains_key("compression")? {
+        let list = get_string_list(table, "compression", "summary")?;
+        if list.is_empty() {
+            return Err(mlua::Error::runtime(
+                "summary.compression must list at least one format",
+            ));
         }
-        _ => return Err(mlua::Error::runtime("summary.compression must be a table")),
+        for c in &list {
+            if !VALID_COMPRESSION.contains(&c.as_str()) {
+                return Err(mlua::Error::runtime(format!(
+                    "summary.compression value '{}' is not supported (valid: gz, zst)",
+                    c
+                )));
+            }
+        }
+        list
+    } else {
+        defaults.compression
     };
 
     Ok(Summary {
@@ -1311,6 +1307,59 @@ fn get_required_string(table: &Table, field: &str) -> LuaResult<String> {
             "field '{}' must be a string, got {}",
             field,
             value.type_name()
+        ))),
+    }
+}
+
+fn get_string_list(t: &Table, key: &str, q: &str) -> LuaResult<Vec<String>> {
+    match t.get::<Value>(key)? {
+        Value::Nil => Ok(Vec::new()),
+        Value::Table(list) => {
+            if list.pairs::<Value, Value>().count() != list.raw_len() {
+                return Err(mlua::Error::runtime(format!(
+                    "'{}.{}' must be a list, not a keyed table",
+                    q, key
+                )));
+            }
+            list.sequence_values::<Value>()
+                .enumerate()
+                .map(|(i, v)| match v? {
+                    Value::String(s) => Ok(s.to_str()?.to_string()),
+                    _ => Err(mlua::Error::runtime(format!(
+                        "'{}.{}[{}]' must be a string",
+                        q,
+                        key,
+                        i + 1
+                    ))),
+                })
+                .collect()
+        }
+        _ => Err(mlua::Error::runtime(format!(
+            "'{}.{}' must be a table",
+            q, key
+        ))),
+    }
+}
+
+fn get_string_map(t: &Table, key: &str, q: &str) -> LuaResult<HashMap<String, String>> {
+    match t.get::<Value>(key)? {
+        Value::Nil => Ok(HashMap::new()),
+        Value::Table(map) => map
+            .pairs::<String, Value>()
+            .map(|p| {
+                let (k, v) = p?;
+                match v {
+                    Value::String(s) => Ok((k, s.to_str()?.to_string())),
+                    _ => Err(mlua::Error::runtime(format!(
+                        "'{}.{}.{}' must be a string",
+                        q, key, k
+                    ))),
+                }
+            })
+            .collect(),
+        _ => Err(mlua::Error::runtime(format!(
+            "'{}.{}' must be a table",
+            q, key
         ))),
     }
 }
@@ -1610,23 +1659,8 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         _ => None,
     };
 
-    let save_wrkdir_patterns: Vec<String> = match pkgsrc.get::<Value>("save_wrkdir_patterns")? {
-        Value::Nil => Vec::new(),
-        Value::Table(t) => t
-            .sequence_values::<String>()
-            .filter_map(|r| r.ok())
-            .collect(),
-        _ => Vec::new(),
-    };
-
-    let cachevars: Vec<String> = match pkgsrc.get::<Value>("cachevars")? {
-        Value::Nil => Vec::new(),
-        Value::Table(t) => t
-            .sequence_values::<String>()
-            .filter_map(|r| r.ok())
-            .collect(),
-        _ => Vec::new(),
-    };
+    let save_wrkdir_patterns = get_string_list(&pkgsrc, "save_wrkdir_patterns", "pkgsrc")?;
+    let cachevars = get_string_list(&pkgsrc, "cachevars", "pkgsrc")?;
 
     Ok(Pkgsrc {
         basedir: PathBuf::from(basedir),
@@ -1841,17 +1875,7 @@ fn parse_publish(globals: &Table) -> LuaResult<Option<Publish>> {
                 .filter(|s| !s.is_empty());
             let swapcmd: Option<ScriptValue> = get_optional_script(&t, "swapcmd")?;
             let minimum: Option<usize> = t.get::<Option<usize>>("minimum")?;
-            let required: Vec<String> = match t.get::<Value>("required")? {
-                Value::Nil => Vec::new(),
-                Value::Table(r) => r
-                    .sequence_values::<String>()
-                    .collect::<LuaResult<Vec<_>>>()?,
-                _ => {
-                    return Err(mlua::Error::runtime(
-                        "publish.packages.required must be a table",
-                    ));
-                }
-            };
+            let required = get_string_list(&t, "required", "publish.packages")?;
             let rsync_args: String = t
                 .get::<Option<String>>("rsync_args")?
                 .unwrap_or_else(|| "-av --delete-excluded -e ssh".to_string());
@@ -1980,37 +2004,8 @@ fn parse_env_context(parent: &Table, name: &str) -> LuaResult<Option<EnvContext>
 
     let clear: bool = table.get::<Option<bool>>("clear")?.unwrap_or(true);
 
-    let inherit: Vec<String> = match table.get::<Value>("inherit")? {
-        Value::Nil => Vec::new(),
-        Value::Table(t) => t
-            .sequence_values::<String>()
-            .filter_map(|r| r.ok())
-            .collect(),
-        _ => {
-            return Err(mlua::Error::runtime(format!(
-                "'{}.inherit' must be a table",
-                qualified
-            )));
-        }
-    };
-
-    let vars: HashMap<String, String> = match table.get::<Value>("vars")? {
-        Value::Nil => HashMap::new(),
-        Value::Table(t) => {
-            let mut map = HashMap::new();
-            for pair in t.pairs::<String, String>() {
-                let (k, v) = pair?;
-                map.insert(k, v);
-            }
-            map
-        }
-        _ => {
-            return Err(mlua::Error::runtime(format!(
-                "'{}.vars' must be a table",
-                qualified
-            )));
-        }
-    };
+    let inherit = get_string_list(&table, "inherit", &qualified)?;
+    let vars = get_string_map(&table, "vars", &qualified)?;
 
     let shell: Option<PathBuf> = if name == "dev" {
         table.get::<Option<String>>("shell")?.map(PathBuf::from)
@@ -2034,7 +2029,7 @@ mod tests {
         let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
         let path = dir.path().join("config.lua");
         std::fs::write(&path, lua_src).map_err(|e| e.to_string())?;
-        Config::load(Some(&path)).map_err(|e| e.to_string())
+        Config::load(Some(&path)).map_err(|e| format!("{e:#}"))
     }
 
     const MINIMAL: &str = r#"
@@ -2100,5 +2095,69 @@ mod tests {
         let lua = format!("{MINIMAL}\npkgsrc.pkgpaths = {{ 42 }}");
         let cfg = load_config(&lua);
         assert!(cfg.is_err(), "expected error, got: {:?}", cfg);
+    }
+
+    #[test]
+    fn cachevars_valid() {
+        let lua = format!("{MINIMAL}\npkgsrc.cachevars = {{ \"NATIVE_OPSYS\", \"PKGSRC\" }}");
+        let cfg = load_config(&lua);
+        assert!(cfg.is_ok(), "expected ok, got: {:?}", cfg);
+        assert_eq!(
+            cfg.unwrap().cachevars(),
+            &["NATIVE_OPSYS".to_string(), "PKGSRC".to_string()]
+        );
+    }
+
+    #[test]
+    fn cachevars_keyed_table_errors() {
+        let lua = format!("{MINIMAL}\npkgsrc.cachevars = {{ NATIVE_OPSYS = true }}");
+        let cfg = load_config(&lua);
+        let err = cfg.expect_err("expected error");
+        assert!(err.contains("must be a list"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn cachevars_non_string_element_errors() {
+        let lua = format!("{MINIMAL}\npkgsrc.cachevars = {{ \"OK\", 42 }}");
+        let cfg = load_config(&lua);
+        let err = cfg.expect_err("expected error");
+        assert!(
+            err.contains("[2]") && err.contains("must be a string"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn cachevars_non_table_errors() {
+        let lua = format!("{MINIMAL}\npkgsrc.cachevars = \"oops\"");
+        let cfg = load_config(&lua);
+        assert!(cfg.is_err(), "expected error, got: {:?}", cfg);
+    }
+
+    #[test]
+    fn environment_inherit_keyed_table_errors() {
+        let lua = format!(
+            "{MINIMAL}\nsandboxes = {{ basedir = \"/tmp/sb\", \
+             environment = {{ build = {{ inherit = {{ TERM = true }} }} }} }}"
+        );
+        let cfg = load_config(&lua);
+        let err = cfg.expect_err("expected error");
+        assert!(err.contains("must be a list"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn environment_vars_non_string_value_errors() {
+        let lua = format!(
+            "{MINIMAL}\nsandboxes = {{ basedir = \"/tmp/sb\", \
+             environment = {{ build = {{ vars = {{ PATH = 42 }} }} }} }}"
+        );
+        let cfg = load_config(&lua);
+        let err = cfg.expect_err("expected error");
+        assert!(
+            err.contains("vars.PATH") && err.contains("must be a string"),
+            "unexpected error: {}",
+            err
+        );
     }
 }
