@@ -91,26 +91,32 @@
 //! builds.  Either sub-table can be omitted; an omitted context inherits
 //! bob's parent environment unchanged.
 //!
-//! - `build` is used by every operation that `bob build` performs: sandbox
-//!   setup, pre- and post-build hooks, and the package builds themselves.
-//!   Values are passed directly to each process as literal strings; no
-//!   shell ever evaluates them.  This context typically wants a strict,
-//!   minimal environment for build reproducibility.
+//! - `build` governs per-package build commands and bob's own pkgsrc-querying
+//!   invocations (`PkgsrcEnv` fetch, `make show-var`, `make show-vars`) when
+//!   the sandbox is in build context.  Values are passed directly to each
+//!   process as literal strings; no shell ever evaluates them.  This context
+//!   typically wants a strict, minimal environment for build reproducibility.
 //!
-//! - `dev` is used only by interactive `bob sandbox shell` sessions.
-//!   Bob writes the values into a small init script
-//!   (`<sandbox>/.bob/shell-init`) that the chrooted shell runs at startup,
-//!   one `export NAME=value` line per entry.  Each value is emitted
-//!   verbatim, so what you write must be a valid shell assignment
-//!   right-hand side -- in particular, values containing whitespace or
-//!   shell metacharacters need to be quoted by the user.  Values can
-//!   reference `bob_*` variables (or any other shell variables) using
-//!   ordinary shell syntax, for example `PATH = "${bob_prefix}/bin:..."`.
-//!   This context typically wants a more generous `inherit` list (e.g.
-//!   `EDITOR`, `PAGER`, locale variables) than `build`, since interactive
-//!   sessions benefit from the developer's normal environment.  See the
-//!   [`action`](crate::action) module for the full list of `bob_*`
-//!   variables.
+//! - `dev` is used by interactive `bob dev` sessions.  Bob writes its `vars`
+//!   verbatim into a small init script (`<sandbox>/.bob/shell-init`) that the
+//!   chrooted shell runs at startup, one `export NAME=value` line per entry,
+//!   so values can reference `bob_*` variables or other shell variables --
+//!   for example `PATH = "${bob_prefix}/bin:..."`.  Each value is emitted
+//!   verbatim, so what you write must be a valid shell assignment right-hand
+//!   side; values containing whitespace or shell metacharacters need to be
+//!   quoted by the user.  `vars` are not set on commands directly -- only on
+//!   the interactive shell -- but the context's `clear`/`inherit` policy
+//!   still applies to the pkgsrc-querying invocations listed above when the
+//!   sandbox is in dev context.  This context typically wants a more generous
+//!   `inherit` list (e.g. `EDITOR`, `PAGER`, locale variables) than `build`,
+//!   since interactive sessions benefit from the developer's normal
+//!   environment.  See the [`action`](crate::action) module for the full
+//!   list of `bob_*` variables.
+//!
+//! Sandbox setup actions and per-package pre/post-build hook actions do not
+//! apply either context's policy.  They inherit bob's parent environment
+//! unchanged, plus the `bob_*` script env and any per-action `env = { ... }`
+//! additions.
 //!
 //! Each `build`/`dev` sub-table has the following fields:
 //!

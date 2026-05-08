@@ -83,7 +83,7 @@
 //!           ]],
 //!           destroy = "rm -rf ${bob_build_user_home}" },
 //!
-//!         -- Only run for `bob sandbox shell` interactive sessions
+//!         -- Only run for `bob dev` interactive sessions
 //!         { action = "copy", src = os.getenv("HOME") .. "/.vimrc",
 //!           dest = "/root/.vimrc",
 //!           only = { environment = "dev" } },
@@ -110,7 +110,7 @@
 //! | `bob_build_user_home` | Home directory of the build user (if configured). |
 //! | `bob_bootstrap` | Path to the bootstrap tarball (if configured). |
 //! | `bob_sandbox_path` | Absolute host path to the sandbox root (non-chroot commands only). |
-//! | `bob_sandbox_id` | Numeric sandbox id (`bob sandbox shell` only). |
+//! | `bob_sandbox_id` | Numeric sandbox id (`bob dev` only). |
 //! | `bob_packages` | Path to the packages directory (after bootstrap). |
 //! | `bob_pkgtools` | Path to the pkg tools directory (after bootstrap). |
 //! | `bob_prefix` | Installation prefix (after bootstrap). |
@@ -136,7 +136,7 @@
 //!
 //! | Predicate | Type | Description |
 //! |-----------|------|-------------|
-//! | `environment` | string | `"build"` to run only for automated build operations, or `"dev"` to run only for `bob sandbox shell` interactive sessions.  Mirrors the `sandboxes.environment.{build,dev}` distinction. |
+//! | `environment` | string | `"build"` to run only for automated build operations, or `"dev"` to run only for `bob dev` interactive sessions.  Mirrors the `sandboxes.environment.{build,dev}` distinction. |
 //! | `set` | string | Dotted Lua config path (e.g. `"pkgsrc.build_user"`).  Action is dropped at config load time if the variable is not set. |
 //! | `exists` | string | Host filesystem path.  Action is skipped at run time if the path does not exist. |
 
@@ -157,7 +157,7 @@ pub enum ActionContext {
     /// `bob sandbox destroy`).
     #[default]
     Build,
-    /// Interactive `bob sandbox shell` sessions.
+    /// Interactive `bob dev` sessions.
     Dev,
 }
 

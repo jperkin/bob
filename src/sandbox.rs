@@ -261,7 +261,7 @@ impl Sandbox {
     }
 
     /**
-     * Create a new [`Sandbox`] instance for `bob sandbox shell`
+     * Create a new [`Sandbox`] instance for `bob dev`
      * interactive sessions.  Actions whose `only.context` is set to
      * `"dev"` will run; actions restricted to `"build"` will be skipped.
      */
@@ -437,7 +437,7 @@ impl Sandbox {
      * Apply only the dev-context parent-environment policy
      * (`clear`/`inherit`) to a Command, without setting any variables.
      *
-     * Used by interactive `bob sandbox shell` sessions, where the user's
+     * Used by interactive `bob dev` sessions, where the user's
      * `environment.dev.vars` are written to a wrapper init script and
      * exported by the shell itself rather than via `cmd.env()`.
      */
