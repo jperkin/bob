@@ -1,5 +1,29 @@
 # Changelog
 
+## Version 0.99.5 (2026-05-09)
+
+* Sandbox setup actions and per-package pre/post-build hook `cmd` actions no
+  longer have any environment applied to them.  This allows setting variables
+  such as `LD_PRELOAD`, which otherwise would be applied directly to the chroot
+  command and likely lead to failures in the host environment.  This is a
+  breaking change, but is hopefully clearer overall and less surprising for the
+  common cases.
+
+* Ensure all `bob dev` sandbox commands use `environment.dev` rather than
+  `environment.build`.
+
+* `bob log <pkg>` falls back to `setup.log` when no failed stage was recorded,
+  so that failures that happen before any pkgsrc stage runs work as expected.
+
+* Improve error handling and output formatting for pre-build and post-build
+  scripts and hooks, as well as ensuring that the failure reasons are correctly
+  propagated to build status results.
+
+* Tighten up parsing of `config.lua` and error on invalid entries rather than
+  ignoring them.
+
+* Remove some dead code and other miscellaneous cleanups.
+
 ## Version 0.99.4 (2026-05-07)
 
 * Support new `summary` section in the config file to configure restricted
