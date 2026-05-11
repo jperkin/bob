@@ -18,7 +18,7 @@
 ]]
 
 options = {
-    build_threads = 24,
+    build_threads = 18,
     scan_threads = 32,
     log_level = "debug",
 }
@@ -33,6 +33,11 @@ publish = {
     },
 }
 
+--[[
+  Jenkins checks out the latest upstream revision, so we need to set branch
+  name as git cannot determine it.  Only do this if GIT_BRANCH is set in the
+  environment.  Strip leading remote e.g. "origin/", leaving just "trunk".
+]]
 local git_branch = os.getenv("GIT_BRANCH")
 if git_branch then
     publish.report.branch = git_branch:gsub("^[^/]*/", "")
@@ -44,7 +49,7 @@ dynamic = {
         tmpfs = "/tmp/work",
         disk = "/home/pbulk/work",
         threshold = "4G",
-        use_failed_history = true,
+        failed_threshold = "4G",
     },
 }
 
@@ -69,6 +74,7 @@ sandboxes = {
         dev = {
             clear = true,
             inherit = { "TERM", "HOME" },
+            shell = "/bin/bash",
             vars = {
                 BINPKG_SITES = "${bob_packages}",
                 DEPENDS_TARGET = "bin-install",
@@ -97,9 +103,18 @@ sandboxes = {
 
         { action = "mount", fs = "tmp", dir = "/opt/pkg" },
         { action = "mount", fs = "tmp", dir = "/etc/opt/pkg" },
-        { action = "mount", fs = "tmp", dir = "/opt/tools" },
 
-        { action = "cmd", chroot = true, create = "mkdir -m 1777 /var/tmp; chmod 1777 /tmp" },
+        { action = "cmd", chroot = true, create = [[
+            mkdir -m 1777 /var/tmp; chmod 1777 /tmp
+            mkdir -m 1775 /var/adm; chown root:sys /var/adm
+            touch /var/adm/utmpx; chown root:bin /var/adm/utmpx
+            mkdir -m 1775 /var/logadm
+            mkdir -m 1777 /var/mail
+            mkdir -p -m 0770 /var/spool/clientmqueue
+            chown smmsp:smmsp /var/spool/clientmqueue
+            mkdir -p -m 0755 /var/spool/locks
+            chown uucp:uucp /var/spool/clientmqueue
+          ]] },
 
         { action = "cmd", only = { set = "pkgsrc.build_user" }, create = [[
             mkdir -p ${bob_sandbox_path}${bob_build_user_home}
@@ -113,9 +128,38 @@ sandboxes = {
         { action = "mount", fs = "lofs", dir = "/data/packages" },
 
         { action = "cmd", chroot = true, create = [[
-            gtar -zxpvf /data/packages/SmartOS/bootstrap-pbulk/bootstrap-trunk-tools.tar.gz -C /
+            gtar -zxpf /data/packages/SmartOS/bootstrap-pbulk/bootstrap-trunk-tools.tar.gz -C /
             PKG_PATH=/data/packages/SmartOS/trunk/tools/All /opt/tools/sbin/pkg_add \
-                ctftools flex gcc14 gnupg20 gtexinfo libtool-base nbpatch nodejs pbulk smartos-build-tools
+                ctftools flex gcc14 gtexinfo libtool-base nbpatch smartos-build-tools xz
+          ]] },
+        { action = "cmd", destroy = "rm -rf ${bob_sandbox_path}/opt/tools" },
+
+        -- Additional packages in development environments.
+        { action = "cmd", chroot = true, only = { environment = "dev" }, create = dedent [[
+            PKG_PATH=/data/packages/SmartOS/trunk/tools/All /opt/tools/sbin/pkg_add \
+                git-base nodejs pkglint zsh
+            ed /opt/tools/etc/mk.conf <<-EOF
+            /^.include/d
+            w
+            q
+            EOF
           ]] },
     },
+    --[[
+      As the main bootstrap kit is extracted AFTER the sandbox setup actions run, these
+      modifications to the bootstrap files need to be done as a pre-build hook.
+    ]]
+    hooks = {
+        { action = "cmd", chroot = true, only = { environment = "dev" },
+          create = string.format(dedent([[
+            cat >>/etc/opt/pkg/mk.conf <<-EOF
+            MAKE_JOBS=%d
+            EOF
+            cat >>/etc/opt/pkg/pkg_install.conf <<-EOF
+            PKG_PATH=/data/packages/SmartOS/upstream/trunk/All
+            EOF
+            # Sometimes pkgdiff might not be available, ignore errors
+            /opt/pkg/sbin/pkg_add pkgdiff || true
+          ]]), dynamic.jobs) },
+    }
 }
