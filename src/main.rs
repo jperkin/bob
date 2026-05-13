@@ -314,10 +314,11 @@ enum Cmd {
         #[command(flatten)]
         args: cmd::history::HistoryArgs,
     },
-    /// Query package dependency information
+    /// List builds, packages, and dependency information
+    #[command(alias = "ls")]
     List {
         #[command(subcommand)]
-        cmd: cmd::list::ListCmd,
+        cmd: Option<cmd::list::ListCmd>,
     },
     /// Create a sandbox and start an interactive shell
     Dev,
@@ -602,7 +603,7 @@ fn run() -> Result<()> {
         Cmd::List { cmd } => {
             let config = Config::load(args.config.as_deref())?;
             let db = Database::open(config.dbdir())?;
-            cmd::list::run(&db, cmd)?;
+            cmd::list::run(&db, cmd.unwrap_or(cmd::list::ListCmd::Builds))?;
         }
         Cmd::Dev => {
             let config = Config::load(args.config.as_deref())?;

@@ -21,8 +21,6 @@ use anyhow::{Result, bail};
 use bob::db::{BuildDiff, Database, DiffEntry};
 use bob::{PackageStateKind, parse_status_filter, try_println};
 
-use super::{Col, Formatter, OutputFormat};
-
 const DIFF_COLUMNS: &[(&str, &str)] = &[
     ("pkgname", "Package name (current, or previous if absent)"),
     ("pkgpath", "Package path in pkgsrc"),
@@ -43,9 +41,6 @@ pub struct DiffArgs {
     pub build1: Option<String>,
     /// Second build ID. Default: most recent
     pub build2: Option<String>,
-    /// List available build IDs
-    #[arg(short, long)]
-    pub list: bool,
     /// Show all changes, not just failures and fixes
     #[arg(short, long)]
     pub all: bool,
@@ -81,10 +76,6 @@ fn diff_after_help() -> String {
 }
 
 pub fn run(db: &Database, args: DiffArgs) -> Result<()> {
-    if args.list {
-        return list_builds(db);
-    }
-
     let col_names: Vec<&str> = match &args.columns {
         Some(cols) => {
             for c in cols {
@@ -117,7 +108,10 @@ pub fn run(db: &Database, args: DiffArgs) -> Result<()> {
         (None, None) => {
             let builds = db.list_history_builds()?;
             if builds.len() < 2 {
-                bail!("Need at least two builds to compare. Use --list to see available builds.");
+                bail!(
+                    "Need at least two builds to compare. \
+                     Use 'bob list builds' to see available builds."
+                );
             }
             (builds[1].build_id.clone(), builds[0].build_id.clone())
         }
@@ -236,35 +230,6 @@ fn print_filtered(
             return;
         }
     }
-}
-
-fn list_builds(db: &Database) -> Result<()> {
-    let builds = db.list_history_builds()?;
-    if builds.is_empty() {
-        println!("No builds in history.");
-        return Ok(());
-    }
-
-    let mut fmt = Formatter::new(vec![
-        Col::new("build_id", bob::Align::Left),
-        Col::new("packages", bob::Align::Right),
-        Col::new("succeeded", bob::Align::Right),
-        Col::new("uptodate", bob::Align::Right),
-        Col::new("failed", bob::Align::Right),
-        Col::new("masked", bob::Align::Right),
-    ]);
-    for b in &builds {
-        fmt.push(vec![
-            b.build_id.clone(),
-            b.package_count.to_string(),
-            b.succeeded.to_string(),
-            b.up_to_date.to_string(),
-            b.failed.to_string(),
-            b.masked.to_string(),
-        ]);
-    }
-    fmt.print(OutputFormat::Table, false);
-    Ok(())
 }
 
 fn format_col(e: &DiffEntry, col: &str, breaks: &HashMap<String, usize>) -> String {

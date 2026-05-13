@@ -26,6 +26,7 @@ use bob::try_println;
 use bob::{PackageState, PackageStateKind};
 
 use super::util::pkg_pattern;
+use super::{Col, Formatter, OutputFormat};
 
 fn use_color() -> bool {
     std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
@@ -44,6 +45,8 @@ pub enum TreeOutput {
 
 #[derive(Debug, Subcommand)]
 pub enum ListCmd {
+    /// List builds recorded in history (default)
+    Builds,
     /// Show dependency tree of packages to build
     Tree {
         /// Include up-to-date packages
@@ -78,11 +81,12 @@ pub enum ListCmd {
 }
 
 pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
-    if db.count_packages()? == 0 {
+    if !matches!(cmd, ListCmd::Builds) && db.count_packages()? == 0 {
         bail!("No packages in database. Run 'bob scan' first.");
     }
 
     match cmd {
+        ListCmd::Builds => list_builds(db)?,
         ListCmd::Tree {
             all,
             format,
@@ -136,6 +140,34 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn list_builds(db: &Database) -> Result<()> {
+    let builds = db.list_history_builds()?;
+    if builds.is_empty() {
+        println!("No builds in history.");
+        return Ok(());
+    }
+    let mut fmt = Formatter::new(vec![
+        Col::new("build_id", bob::Align::Left),
+        Col::new("packages", bob::Align::Right),
+        Col::new("succeeded", bob::Align::Right),
+        Col::new("uptodate", bob::Align::Right),
+        Col::new("failed", bob::Align::Right),
+        Col::new("masked", bob::Align::Right),
+    ]);
+    for b in &builds {
+        fmt.push(vec![
+            b.build_id.clone(),
+            b.package_count.to_string(),
+            b.succeeded.to_string(),
+            b.up_to_date.to_string(),
+            b.failed.to_string(),
+            b.masked.to_string(),
+        ]);
+    }
+    fmt.print(OutputFormat::Table, false);
     Ok(())
 }
 
