@@ -2117,7 +2117,8 @@ impl Database {
                     a.succeeded, \
                     COALESCE(m.up_to_date, 0), \
                     a.failed, \
-                    a.masked \
+                    a.masked, \
+                    COALESCE(m.duration_ms, 0) \
              FROM attempted a \
              LEFT JOIN build_metadata m ON m.build_id = a.build_id \
              ORDER BY a.build_id DESC",
@@ -2130,6 +2131,7 @@ impl Database {
                 up_to_date: row.get::<_, i64>(3)? as usize,
                 failed: row.get::<_, i64>(4)? as usize,
                 masked: row.get::<_, i64>(5)? as usize,
+                duration_ms: row.get::<_, i64>(6)? as u64,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -2343,6 +2345,8 @@ pub struct BuildListEntry {
     pub up_to_date: usize,
     pub failed: usize,
     pub masked: usize,
+    /// Wall-clock duration of the build in milliseconds; 0 means unknown.
+    pub duration_ms: u64,
 }
 
 /**
