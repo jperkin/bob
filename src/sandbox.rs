@@ -400,13 +400,35 @@ impl Sandbox {
      * but forces `fork+exec` which is expensive on illumos).
      */
     pub fn command(&self, id: Option<usize>, cmd: &Path) -> Command {
+        let build_vars = matches!(self.context, ActionContext::Build)
+            .then(|| self.config.environment().and_then(|e| e.build.as_ref()))
+            .flatten()
+            .map(|ctx| &ctx.vars);
+
         let mut c = match id {
             Some(id) => {
                 let mut c = Command::new("/usr/sbin/chroot");
-                c.arg(self.path(id)).arg(cmd);
+                c.arg(self.path(id));
+                if let Some(vars) = build_vars
+                    && !vars.is_empty()
+                {
+                    c.arg("env");
+                    for (name, value) in vars {
+                        c.arg(format!("{name}={value}"));
+                    }
+                }
+                c.arg(cmd);
                 c
             }
-            None => Command::new(cmd),
+            None => {
+                let mut c = Command::new(cmd);
+                if let Some(vars) = build_vars {
+                    for (name, value) in vars {
+                        c.env(name, value);
+                    }
+                }
+                c
+            }
         };
         match self.context {
             ActionContext::Build => self.apply_build_environment(&mut c),
@@ -416,21 +438,13 @@ impl Sandbox {
     }
 
     /**
-     * Apply the build-time environment to a Command.
-     *
-     * Resolves to `environment.build` from the config.  If neither
-     * `environment` nor `environment.build` is configured, the parent
-     * environment is inherited unchanged.  Otherwise the context's
-     * `clear`/`inherit` policy is applied and its `vars` are set.
+     * Apply the build-time `clear` / `inherit` policy to a Command.
      */
     pub fn apply_build_environment(&self, cmd: &mut Command) {
         let Some(ctx) = self.config.environment().and_then(|e| e.build.as_ref()) else {
             return;
         };
         Self::apply_env_context(cmd, ctx);
-        for (name, value) in &ctx.vars {
-            cmd.env(name, value);
-        }
     }
 
     /**
