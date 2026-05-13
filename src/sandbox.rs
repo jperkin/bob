@@ -412,7 +412,7 @@ impl Sandbox {
                 if let Some(vars) = build_vars
                     && !vars.is_empty()
                 {
-                    c.arg("env");
+                    c.arg("/usr/bin/env");
                     for (name, value) in vars {
                         c.arg(format!("{name}={value}"));
                     }
