@@ -102,7 +102,7 @@ const SCHEMA_VERSION: i32 = 20260425;
 /**
  * Schema version for history.db - update when history schema changes.
  */
-const HISTORY_SCHEMA_VERSION: i32 = 20260406;
+const HISTORY_SCHEMA_VERSION: i32 = 20260513;
 
 /**
  * Summary of a package's most recent build from history.
@@ -1162,17 +1162,18 @@ impl Database {
     }
 
     /**
-     * Store the wall clock duration of the most recent build run.
+     * Add to the wall clock duration of the current build.
      *
-     * This is accumulated across build and rebuild invocations so
-     * the report shows total wall clock time, not per-invocation.
+     * Accumulates across build and rebuild invocations so the
+     * report shows total wall clock time, not per-invocation.
      */
     pub fn add_build_duration(&self, duration: Duration) -> Result<()> {
-        let existing = self.get_build_duration()?;
-        let total_ms = (existing + duration).as_millis() as i64;
-        self.conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('build_duration_ms', ?1)",
-            params![total_ms.to_string()],
+        let build_id = self.build_id()?;
+        let conn = self.history_conn()?;
+        conn.execute(
+            "INSERT INTO build_metadata (build_id, duration_ms) VALUES (?1, ?2) \
+             ON CONFLICT(build_id) DO UPDATE SET duration_ms = duration_ms + excluded.duration_ms",
+            params![build_id, duration.as_millis() as i64],
         )?;
         Ok(())
     }
@@ -1181,20 +1182,16 @@ impl Database {
      * Get the accumulated wall clock build duration.
      */
     pub fn get_build_duration(&self) -> Result<Duration> {
-        let ms: i64 = self
-            .conn
-            .query_row(
-                "SELECT COALESCE(
-                    (SELECT value FROM metadata WHERE key = 'build_duration_ms'),
-                    '0'
-                )",
-                [],
-                |row| {
-                    let s: String = row.get(0)?;
-                    Ok(s.parse::<i64>().unwrap_or(0))
-                },
-            )
-            .unwrap_or(0);
+        let build_id = self.build_id()?;
+        let conn = self.history_conn()?;
+        let ms: i64 = conn.query_row(
+            "SELECT COALESCE( \
+                 (SELECT duration_ms FROM build_metadata WHERE build_id = ?1), \
+                 0 \
+             )",
+            params![build_id],
+            |row| row.get(0),
+        )?;
         Ok(Duration::from_millis(ms as u64))
     }
 
@@ -2087,11 +2084,14 @@ impl Database {
 
     /**
      * List all build IDs in history, most recent first.
+     *
+     * Counts come from the latest `build_history` row per pkgpath
+     * except for up-to-date packages, which are tracked on
+     * `build_metadata.up_to_date` because they have no history row.
      */
     pub fn list_history_builds(&self) -> Result<Vec<BuildListEntry>> {
         let conn = self.history_conn()?;
         let success = PackageStateKind::Success as i32;
-        let up_to_date = PackageStateKind::UpToDate as i32;
         let failed = PackageStateKind::Failed as i32;
         let mut stmt = conn.prepare(
             "WITH latest AS ( \
@@ -2102,18 +2102,27 @@ impl Database {
                         ) AS rn \
                  FROM build_history \
                  WHERE build_id IS NOT NULL \
+             ), \
+             attempted AS ( \
+                 SELECT build_id, \
+                        SUM(CASE WHEN outcome = ?1 THEN 1 ELSE 0 END) AS succeeded, \
+                        SUM(CASE WHEN outcome = ?2 THEN 1 ELSE 0 END) AS failed, \
+                        SUM(CASE WHEN outcome NOT IN (?1, ?2) THEN 1 ELSE 0 END) AS masked \
+                 FROM latest \
+                 WHERE rn = 1 \
+                 GROUP BY build_id \
              ) \
-             SELECT build_id, COUNT(*) AS packages, \
-                    SUM(CASE WHEN outcome = ?1 THEN 1 ELSE 0 END), \
-                    SUM(CASE WHEN outcome = ?2 THEN 1 ELSE 0 END), \
-                    SUM(CASE WHEN outcome = ?3 THEN 1 ELSE 0 END), \
-                    SUM(CASE WHEN outcome NOT IN (?1, ?2, ?3) THEN 1 ELSE 0 END) \
-             FROM latest \
-             WHERE rn = 1 \
-             GROUP BY build_id \
-             ORDER BY build_id DESC",
+             SELECT a.build_id, \
+                    a.succeeded + a.failed + a.masked + COALESCE(m.up_to_date, 0), \
+                    a.succeeded, \
+                    COALESCE(m.up_to_date, 0), \
+                    a.failed, \
+                    a.masked \
+             FROM attempted a \
+             LEFT JOIN build_metadata m ON m.build_id = a.build_id \
+             ORDER BY a.build_id DESC",
         )?;
-        let rows = stmt.query_map(params![success, up_to_date, failed], |row| {
+        let rows = stmt.query_map(params![success, failed], |row| {
             Ok(BuildListEntry {
                 build_id: row.get(0)?,
                 package_count: row.get::<_, i64>(1)? as usize,
@@ -2133,8 +2142,22 @@ impl Database {
     pub fn store_build_revision(&self, build_id: &str, revision: &str) -> Result<()> {
         let conn = self.history_conn()?;
         conn.execute(
-            "INSERT OR REPLACE INTO build_metadata (build_id, revision) VALUES (?1, ?2)",
+            "INSERT INTO build_metadata (build_id, revision) VALUES (?1, ?2) \
+             ON CONFLICT(build_id) DO UPDATE SET revision = excluded.revision",
             params![build_id, revision],
+        )?;
+        Ok(())
+    }
+
+    /**
+     * Record the up-to-date package count for a build.
+     */
+    pub fn record_up_to_date_count(&self, build_id: &str, count: usize) -> Result<()> {
+        let conn = self.history_conn()?;
+        conn.execute(
+            "INSERT INTO build_metadata (build_id, up_to_date) VALUES (?1, ?2) \
+             ON CONFLICT(build_id) DO UPDATE SET up_to_date = excluded.up_to_date",
+            params![build_id, count as i64],
         )?;
         Ok(())
     }
@@ -2340,20 +2363,56 @@ fn check_history_schema(dbdir: &Path) -> Result<()> {
         [],
         |row| row.get::<_, i32>(0).map(|c| c > 0),
     )?;
-    if has_schema {
-        let version: i32 =
-            conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
-                row.get(0)
-            })?;
-        if version != HISTORY_SCHEMA_VERSION {
+    if !has_schema {
+        let table_count: i32 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
+            [],
+            |row| row.get(0),
+        )?;
+        if table_count > 0 {
             anyhow::bail!(
-                "History schema mismatch: found v{version}, expected v{expected}. \
-                 Remove {} to reset.",
+                "{} has tables but no schema_version. Remove the file to reset.",
                 path.display(),
-                expected = HISTORY_SCHEMA_VERSION
             );
         }
+        return Ok(());
     }
+    let version: i32 = conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+        row.get(0)
+    })?;
+    if version == HISTORY_SCHEMA_VERSION {
+        return Ok(());
+    }
+    if version == 20260406 {
+        migrate_history_20260406_to_20260513(&conn).with_context(|| {
+            format!("Failed to migrate history schema v{version} to v{HISTORY_SCHEMA_VERSION}")
+        })?;
+        return Ok(());
+    }
+    anyhow::bail!(
+        "History schema mismatch: found v{version}, expected v{expected}. \
+         Remove {} to reset.",
+        path.display(),
+        expected = HISTORY_SCHEMA_VERSION
+    );
+}
+
+/**
+ * Migrate history.db from v20260406 to v20260513.
+ *
+ * Adds the `up_to_date` and `duration_ms` columns to `build_metadata`.
+ */
+fn migrate_history_20260406_to_20260513(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
+        "ALTER TABLE build_metadata ADD COLUMN up_to_date  INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE build_metadata ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0;",
+    )?;
+    tx.execute(
+        "UPDATE schema_version SET version = ?1",
+        params![HISTORY_SCHEMA_VERSION],
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -2450,8 +2509,10 @@ pub(crate) fn create_history_schema(conn: &Connection) -> Result<()> {
          CREATE INDEX idx_cpu_timestamp ON cpu_usage(timestamp);
 
          CREATE TABLE build_metadata (
-             build_id TEXT PRIMARY KEY,
-             revision TEXT
+             build_id    TEXT PRIMARY KEY,
+             revision    TEXT,
+             up_to_date  INTEGER NOT NULL DEFAULT 0,
+             duration_ms INTEGER NOT NULL DEFAULT 0
          );",
         HISTORY_SCHEMA_VERSION,
         outcome_types = PackageState::db_values(),

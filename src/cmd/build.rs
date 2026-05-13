@@ -234,6 +234,8 @@ pub fn check_up_to_date(
 
     bob::print_elapsed("Calculating package build status", start.elapsed());
 
+    db.record_up_to_date_count(&db.build_id()?, up_to_date_count)?;
+
     Ok(up_to_date_count)
 }
 
