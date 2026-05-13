@@ -2111,17 +2111,24 @@ impl Database {
                  FROM latest \
                  WHERE rn = 1 \
                  GROUP BY build_id \
+             ), \
+             all_builds AS ( \
+                 SELECT build_id FROM attempted \
+                 UNION \
+                 SELECT build_id FROM build_metadata \
              ) \
-             SELECT a.build_id, \
-                    a.succeeded + a.failed + a.masked + COALESCE(m.up_to_date, 0), \
-                    a.succeeded, \
+             SELECT b.build_id, \
+                    COALESCE(a.succeeded, 0) + COALESCE(a.failed, 0) \
+                        + COALESCE(a.masked, 0) + COALESCE(m.up_to_date, 0), \
+                    COALESCE(a.succeeded, 0), \
                     COALESCE(m.up_to_date, 0), \
-                    a.failed, \
-                    a.masked, \
+                    COALESCE(a.failed, 0), \
+                    COALESCE(a.masked, 0), \
                     COALESCE(m.duration_ms, 0) \
-             FROM attempted a \
-             LEFT JOIN build_metadata m ON m.build_id = a.build_id \
-             ORDER BY a.build_id DESC",
+             FROM all_builds b \
+             LEFT JOIN attempted a ON a.build_id = b.build_id \
+             LEFT JOIN build_metadata m ON m.build_id = b.build_id \
+             ORDER BY b.build_id DESC",
         )?;
         let rows = stmt.query_map(params![success, failed], |row| {
             Ok(BuildListEntry {
