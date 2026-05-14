@@ -2097,7 +2097,7 @@ impl Database {
             "WITH latest AS ( \
                  SELECT build_id, outcome, \
                         ROW_NUMBER() OVER ( \
-                            PARTITION BY build_id, pkgpath \
+                            PARTITION BY build_id, pkgpath, pkgname \
                             ORDER BY id DESC \
                         ) AS rn \
                  FROM build_history \
@@ -2196,12 +2196,15 @@ impl Database {
     pub fn compute_build_diff(&self, build1_id: &str, build2_id: &str) -> Result<BuildDiff> {
         let conn = self.history_conn()?;
 
-        type PkgRecord = (String, i32, Option<i32>);
-        let query_build = |bid: &str| -> Result<HashMap<String, PkgRecord>> {
+        type PkgKey = (String, String);
+        type PkgRecord = (i32, Option<i32>);
+        let query_build = |bid: &str| -> Result<HashMap<PkgKey, PkgRecord>> {
             let mut stmt = conn.prepare(
                 "SELECT pkgpath, pkgname, outcome, stage FROM ( \
                      SELECT pkgpath, pkgname, outcome, stage, \
-                            ROW_NUMBER() OVER (PARTITION BY pkgpath ORDER BY id DESC) AS rn \
+                            ROW_NUMBER() OVER ( \
+                                PARTITION BY pkgpath, pkgname ORDER BY id DESC \
+                            ) AS rn \
                      FROM build_history WHERE build_id = ?1 \
                  ) WHERE rn = 1",
             )?;
@@ -2216,7 +2219,7 @@ impl Database {
             })?;
             for row in rows {
                 let (pkgpath, pkgname, outcome, stage) = row?;
-                map.insert(pkgpath, (pkgname, outcome, stage));
+                map.insert((pkgpath, pkgname), (outcome, stage));
             }
             Ok(map)
         };
@@ -2235,25 +2238,25 @@ impl Database {
 
         use PackageStateKind::*;
 
-        for (pkgpath, (b2_pkgname, b2_outcome_id, b2_stage_id)) in &b2 {
+        for ((pkgpath, pkgname), (b2_outcome_id, b2_stage_id)) in &b2 {
             let b2_outcome = PackageStateKind::from_repr(*b2_outcome_id);
             let b2_stage = b2_stage_id.and_then(Stage::from_repr);
 
             let entry_from = |b1_pkg: Option<&PkgRecord>| DiffEntry {
                 pkgpath: pkgpath.clone(),
-                build1_pkgname: b1_pkg.map(|(n, _, _)| n.clone()),
-                build2_pkgname: Some(b2_pkgname.clone()),
-                build1_outcome: b1_pkg.and_then(|(_, o, _)| PackageStateKind::from_repr(*o)),
+                build1_pkgname: b1_pkg.map(|_| pkgname.clone()),
+                build2_pkgname: Some(pkgname.clone()),
+                build1_outcome: b1_pkg.and_then(|(o, _)| PackageStateKind::from_repr(*o)),
                 build2_outcome: b2_outcome,
-                build1_stage: b1_pkg.and_then(|(_, _, s)| s.and_then(Stage::from_repr)),
+                build1_stage: b1_pkg.and_then(|(_, s)| s.and_then(Stage::from_repr)),
                 build2_stage: b2_stage,
             };
 
-            match b1.get(pkgpath) {
+            match b1.get(&(pkgpath.clone(), pkgname.clone())) {
                 Some(b1_rec) => {
-                    let b1_outcome = PackageStateKind::from_repr(b1_rec.1);
-                    let b1_stage = b1_rec.2.and_then(Stage::from_repr);
-                    if b1_outcome == b2_outcome && b1_rec.0 == *b2_pkgname && b1_stage == b2_stage {
+                    let b1_outcome = PackageStateKind::from_repr(b1_rec.0);
+                    let b1_stage = b1_rec.1.and_then(Stage::from_repr);
+                    if b1_outcome == b2_outcome && b1_stage == b2_stage {
                         continue;
                     }
                     let entry = entry_from(Some(b1_rec));
@@ -2286,14 +2289,14 @@ impl Database {
             }
         }
 
-        for (pkgpath, (b1_pkgname, b1_outcome_id, b1_stage_id)) in &b1 {
-            if b2.contains_key(pkgpath) {
+        for ((pkgpath, pkgname), (b1_outcome_id, b1_stage_id)) in &b1 {
+            if b2.contains_key(&(pkgpath.clone(), pkgname.clone())) {
                 continue;
             }
             let b1_outcome = PackageStateKind::from_repr(*b1_outcome_id);
             let entry = DiffEntry {
                 pkgpath: pkgpath.clone(),
-                build1_pkgname: Some(b1_pkgname.clone()),
+                build1_pkgname: Some(pkgname.clone()),
                 build2_pkgname: None,
                 build1_outcome: b1_outcome,
                 build2_outcome: None,

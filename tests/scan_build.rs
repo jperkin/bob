@@ -809,6 +809,33 @@ fn test_full_build() -> Result<()> {
         );
     }
 
+    /*
+     * `bob list builds` counts must match the live build counts.
+     * The fixture has multipackages (py27-dual, py314-dual share
+     * pkgpath test/dual), which previously collapsed to one because
+     * the partition key did not include pkgname.
+     */
+    let listed = db.list_history_builds()?;
+    assert_eq!(listed.len(), 1, "expected exactly one build in history");
+    let entry = &listed[0];
+    assert_eq!(
+        entry.succeeded, bc.states[Success],
+        "list_history_builds succeeded mismatch (live={}, listed={})",
+        bc.states[Success], entry.succeeded
+    );
+    assert_eq!(
+        entry.failed, bc.states[Failed],
+        "list_history_builds failed mismatch (live={}, listed={})",
+        bc.states[Failed], entry.failed
+    );
+    assert_eq!(
+        entry.masked,
+        bc.states.masked(),
+        "list_history_builds masked mismatch (live={}, listed={})",
+        bc.states.masked(),
+        entry.masked
+    );
+
     Ok(())
 }
 
