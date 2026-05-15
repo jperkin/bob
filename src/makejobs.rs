@@ -42,7 +42,7 @@ use std::collections::HashMap;
 use pkgsrc::PkgName;
 use tracing::debug;
 
-use crate::db::BuildStageTiming;
+use crate::db::{BuildStageTiming, PkgKey};
 
 /**
  * Maps historical CPU time to a job count for each package.
@@ -218,7 +218,7 @@ impl<'de> serde::Deserialize<'de> for PkgMakeJobs {
 }
 
 pub(crate) fn pkg_cpu_history(
-    stage_timings: &HashMap<(String, String), BuildStageTiming>,
+    stage_timings: &HashMap<PkgKey, BuildStageTiming>,
     pkg_paths: &HashMap<PkgName, String>,
 ) -> HashMap<PkgName, usize> {
     let mut result: HashMap<PkgName, usize> = HashMap::new();

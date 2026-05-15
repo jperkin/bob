@@ -2012,7 +2012,8 @@ impl Build {
                     }
                     continue;
                 }
-                let du = build_history.get(pkgname.pkgbase()).and_then(|h| {
+                let key = (pkgpath.to_string(), pkgname.pkgbase().to_string());
+                let du = build_history.get(&key).and_then(|h| {
                     if h.outcome == success {
                         h.disk_usage
                     } else {
@@ -2307,7 +2308,9 @@ impl Build {
                                     .clone();
 
                                 thread_packages.insert(c, sp.pkg.clone());
-                                let hist = build_history.get(sp.pkg.pkgbase());
+                                let hist_key =
+                                    (pkginfo.pkgpath.to_string(), sp.pkg.pkgbase().to_string());
+                                let hist = build_history.get(&hist_key);
                                 let wrkobjdir =
                                     session.wrkobjdir_map.get(&sp.pkg).map(|k| k.to_string());
                                 info!(

@@ -56,6 +56,29 @@ use crate::{HistoryKind, PackageState, PackageStateKind};
 /// (pkgname, scan_index, outcome_id, outcome_detail).
 pub type ReportRow = (String, ScanIndex, Option<i32>, Option<String>);
 
+/**
+ * `(pkgpath, pkgbase)` -- the identity key for matching
+ * `build_history` rows across builds.  Code that joins, diffs, or
+ * correlates history between builds must key on this pair, never on
+ * `pkgname`.  Within a single build, use [`latest_history_partition`]
+ * for the canonical `ROW_NUMBER()` window.
+ */
+pub type PkgKey = (String, String);
+
+/**
+ * SQL fragment for the `ROW_NUMBER()` partition that selects the
+ * latest `build_history` row per [`PkgKey`].
+ *
+ * Use as `ROW_NUMBER() OVER ({clause}) AS rn` inside a CTE, then
+ * filter `WHERE rn = 1`; always select `pkgpath` and `pkgbase` from
+ * the same partition so the result map can be keyed by [`PkgKey`].
+ */
+pub fn latest_history_partition() -> String {
+    let pkgpath: &str = HistoryKind::Pkgpath.into();
+    let pkgbase: &str = HistoryKind::Pkgbase.into();
+    format!("PARTITION BY {pkgpath}, {pkgbase} ORDER BY id DESC")
+}
+
 fn stage_values() -> String {
     Stage::VARIANTS
         .iter()
@@ -1887,16 +1910,16 @@ impl Database {
     /**
      * Query build history for all packages.
      *
-     * For each pkgbase returns the outcome, MAKE_JOBS, WRKOBJDIR, and
-     * disk usage from the most recent matching row.  When `build_id`
-     * is `Some`, only rows from that build session are considered;
-     * when `None`, all history is searched.  Returns an empty map on
-     * error.
+     * For each [`PkgKey`] returns the outcome, MAKE_JOBS, WRKOBJDIR,
+     * and disk usage from the most recent matching row.  When
+     * `build_id` is `Some`, only rows from that build session are
+     * considered; when `None`, all history is searched.  Returns an
+     * empty map on error.
      */
     pub fn build_history_by_pkg_all(
         &self,
         build_id: Option<&str>,
-    ) -> HashMap<String, PkgBuildHistory> {
+    ) -> HashMap<PkgKey, PkgBuildHistory> {
         let conn = match self.history_conn() {
             Ok(c) => c,
             Err(e) => {
@@ -1914,6 +1937,7 @@ impl Database {
         let wo: &str = HistoryKind::Wrkobjdir.into();
         let pkgbase_col: &str = HistoryKind::Pkgbase.into();
         let pkgpath_col: &str = HistoryKind::Pkgpath.into();
+        let partition = latest_history_partition();
 
         let where_clause = if build_id.is_some() {
             "WHERE h.build_id = ?1"
@@ -1923,16 +1947,14 @@ impl Database {
 
         let sql = format!(
             "WITH latest AS ( \
-                 SELECT h.{pkgbase_col}, h.{du}, h.{out}, h.{mj}, h.{wo}, \
-                        ROW_NUMBER() OVER ( \
-                            PARTITION BY h.{pkgpath_col}, h.{pkgbase_col} \
-                            ORDER BY h.id DESC \
-                        ) AS rn \
+                 SELECT h.{pkgpath_col}, h.{pkgbase_col}, \
+                        h.{du}, h.{out}, h.{mj}, h.{wo}, \
+                        ROW_NUMBER() OVER ({partition}) AS rn \
                  FROM build_history h \
                  {where_clause} \
              ) \
-             SELECT {pkgbase_col}, {out}, {du}, {mj}, {wo} FROM latest \
-             WHERE rn = 1",
+             SELECT {pkgpath_col}, {pkgbase_col}, {out}, {du}, {mj}, {wo} \
+             FROM latest WHERE rn = 1",
         );
 
         let mut stmt = match conn.prepare(&sql) {
@@ -1948,10 +1970,11 @@ impl Database {
         let map_row = |row: &rusqlite::Row<'_>| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, i32>(1)?,
-                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i32>(2)?,
                 row.get::<_, Option<i64>>(3)?,
-                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         };
         let rows = match build_id {
@@ -1971,9 +1994,9 @@ impl Database {
 
         let mut result = HashMap::new();
         for row in rows.flatten() {
-            let (pkgbase, outcome, du, mj, wo) = row;
+            let (pkgpath, pkgbase, outcome, du, mj, wo) = row;
             result.insert(
-                pkgbase,
+                (pkgpath, pkgbase),
                 PkgBuildHistory {
                     outcome: PackageStateKind::from_repr(outcome),
                     disk_usage: du.map(|v| v as u64),
@@ -2196,30 +2219,41 @@ impl Database {
     pub fn compute_build_diff(&self, build1_id: &str, build2_id: &str) -> Result<BuildDiff> {
         let conn = self.history_conn()?;
 
-        type PkgKey = (String, String);
-        type PkgRecord = (i32, Option<i32>);
+        struct PkgRecord {
+            pkgname: String,
+            outcome: i32,
+            stage: Option<i32>,
+        }
+        let partition = latest_history_partition();
+        let sql = format!(
+            "SELECT pkgpath, pkgbase, pkgname, outcome, stage FROM ( \
+                 SELECT pkgpath, pkgbase, pkgname, outcome, stage, \
+                        ROW_NUMBER() OVER ({partition}) AS rn \
+                 FROM build_history WHERE build_id = ?1 \
+             ) WHERE rn = 1",
+        );
         let query_build = |bid: &str| -> Result<HashMap<PkgKey, PkgRecord>> {
-            let mut stmt = conn.prepare(
-                "SELECT pkgpath, pkgname, outcome, stage FROM ( \
-                     SELECT pkgpath, pkgname, outcome, stage, \
-                            ROW_NUMBER() OVER ( \
-                                PARTITION BY pkgpath, pkgname ORDER BY id DESC \
-                            ) AS rn \
-                     FROM build_history WHERE build_id = ?1 \
-                 ) WHERE rn = 1",
-            )?;
+            let mut stmt = conn.prepare(&sql)?;
             let mut map = HashMap::new();
             let rows = stmt.query_map([bid], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, i32>(2)?,
-                    row.get::<_, Option<i32>>(3)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i32>(3)?,
+                    row.get::<_, Option<i32>>(4)?,
                 ))
             })?;
             for row in rows {
-                let (pkgpath, pkgname, outcome, stage) = row?;
-                map.insert((pkgpath, pkgname), (outcome, stage));
+                let (pkgpath, pkgbase, pkgname, outcome, stage) = row?;
+                map.insert(
+                    (pkgpath, pkgbase),
+                    PkgRecord {
+                        pkgname,
+                        outcome,
+                        stage,
+                    },
+                );
             }
             Ok(map)
         };
@@ -2238,25 +2272,26 @@ impl Database {
 
         use PackageStateKind::*;
 
-        for ((pkgpath, pkgname), (b2_outcome_id, b2_stage_id)) in &b2 {
-            let b2_outcome = PackageStateKind::from_repr(*b2_outcome_id);
-            let b2_stage = b2_stage_id.and_then(Stage::from_repr);
+        for ((pkgpath, pkgbase), b2_rec) in &b2 {
+            let b2_outcome = PackageStateKind::from_repr(b2_rec.outcome);
+            let b2_stage = b2_rec.stage.and_then(Stage::from_repr);
 
-            let entry_from = |b1_pkg: Option<&PkgRecord>| DiffEntry {
+            let entry_from = |b1_rec: Option<&PkgRecord>| DiffEntry {
                 pkgpath: pkgpath.clone(),
-                build1_pkgname: b1_pkg.map(|_| pkgname.clone()),
-                build2_pkgname: Some(pkgname.clone()),
-                build1_outcome: b1_pkg.and_then(|(o, _)| PackageStateKind::from_repr(*o)),
+                build1_pkgname: b1_rec.map(|r| r.pkgname.clone()),
+                build2_pkgname: Some(b2_rec.pkgname.clone()),
+                build1_outcome: b1_rec.and_then(|r| PackageStateKind::from_repr(r.outcome)),
                 build2_outcome: b2_outcome,
-                build1_stage: b1_pkg.and_then(|(_, s)| s.and_then(Stage::from_repr)),
+                build1_stage: b1_rec.and_then(|r| r.stage.and_then(Stage::from_repr)),
                 build2_stage: b2_stage,
             };
 
-            match b1.get(&(pkgpath.clone(), pkgname.clone())) {
+            match b1.get(&(pkgpath.clone(), pkgbase.clone())) {
                 Some(b1_rec) => {
-                    let b1_outcome = PackageStateKind::from_repr(b1_rec.0);
-                    let b1_stage = b1_rec.1.and_then(Stage::from_repr);
-                    if b1_outcome == b2_outcome && b1_stage == b2_stage {
+                    let b1_outcome = PackageStateKind::from_repr(b1_rec.outcome);
+                    let b1_stage = b1_rec.stage.and_then(Stage::from_repr);
+                    let pkgname_changed = b1_rec.pkgname != b2_rec.pkgname;
+                    if b1_outcome == b2_outcome && b1_stage == b2_stage && !pkgname_changed {
                         continue;
                     }
                     let entry = entry_from(Some(b1_rec));
@@ -2289,18 +2324,18 @@ impl Database {
             }
         }
 
-        for ((pkgpath, pkgname), (b1_outcome_id, b1_stage_id)) in &b1 {
-            if b2.contains_key(&(pkgpath.clone(), pkgname.clone())) {
+        for ((pkgpath, pkgbase), b1_rec) in &b1 {
+            if b2.contains_key(&(pkgpath.clone(), pkgbase.clone())) {
                 continue;
             }
-            let b1_outcome = PackageStateKind::from_repr(*b1_outcome_id);
+            let b1_outcome = PackageStateKind::from_repr(b1_rec.outcome);
             let entry = DiffEntry {
                 pkgpath: pkgpath.clone(),
-                build1_pkgname: Some(pkgname.clone()),
+                build1_pkgname: Some(b1_rec.pkgname.clone()),
                 build2_pkgname: None,
                 build1_outcome: b1_outcome,
                 build2_outcome: None,
-                build1_stage: b1_stage_id.and_then(Stage::from_repr),
+                build1_stage: b1_rec.stage.and_then(Stage::from_repr),
                 build2_stage: None,
             };
             if matches!(b1_outcome, Some(Failed)) {
@@ -2669,28 +2704,20 @@ pub(crate) struct BuildStageTiming {
  * Query build-stage wall time and CPU time for all packages.
  *
  * Returns the most recent successful build's timing data for the
- * build stage, keyed by `(pkgpath, pkgbase)`.  This compound key
- * ensures correct matching across version bumps (pkgbase strips
- * the version) while disambiguating packages that share a pkgbase
- * but live under different pkgpaths (e.g. `databases/mysql80-client`
- * vs `databases/mysql57-client`).
+ * build stage, keyed by [`PkgKey`].
  */
-pub(crate) fn query_build_stage_timings(
-    conn: &Connection,
-) -> HashMap<(String, String), BuildStageTiming> {
+pub(crate) fn query_build_stage_timings(conn: &Connection) -> HashMap<PkgKey, BuildStageTiming> {
     let out: &str = HistoryKind::Outcome.into();
     let pkgbase_col: &str = HistoryKind::Pkgbase.into();
     let pkgpath_col: &str = HistoryKind::Pkgpath.into();
     let success_outcome = PackageStateKind::Success as i32;
     let build_stage = Stage::Build as i32;
+    let partition = latest_history_partition();
 
     let sql = format!(
         "WITH matched AS ( \
              SELECT h.{pkgpath_col}, h.{pkgbase_col}, h.id, \
-                    ROW_NUMBER() OVER ( \
-                        PARTITION BY h.{pkgpath_col}, h.{pkgbase_col} \
-                        ORDER BY h.id DESC \
-                    ) AS rn \
+                    ROW_NUMBER() OVER ({partition}) AS rn \
              FROM build_history h \
              WHERE h.{out} = {success_outcome} \
          ) \

@@ -497,7 +497,8 @@ fn print_build_status(
 
         let dash = || "-".to_string();
 
-        let hist = history.get(sp.pkg.pkgbase());
+        let hist_key = (pkg.pkg_location.clone(), sp.pkg.pkgbase().to_string());
+        let hist = history.get(&hist_key);
         let actual_wrkobjdir = hist.and_then(|h| h.wrkobjdir.clone());
         let actual_make_jobs = hist.and_then(|h| h.make_jobs);
         let actual_disk_usage = hist.and_then(|h| h.disk_usage);
