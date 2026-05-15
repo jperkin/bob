@@ -197,7 +197,6 @@ pub fn check_up_to_date(
      * get DependencyRefresh.
      */
     let build_id = db.build_id()?;
-    let now = chrono::Utc::now().timestamp();
     for (pkg, result) in checked_results {
         let pkgname = pkg.pkgname().pkgname();
         match result {
@@ -210,10 +209,7 @@ pub fn check_up_to_date(
                     pkgpath: Some(pkg.pkgpath.clone()),
                     state: bob::PackageState::UpToDate,
                     log_dir: None,
-                    build_stats: bob::PkgBuildStats {
-                        timestamp: now,
-                        ..Default::default()
-                    },
+                    build_stats: bob::PkgBuildStats::default(),
                 };
                 db.store_build_by_name(&build_result)?;
                 if let Some(mut input) = build_result.history_input() {
@@ -345,14 +341,9 @@ pub fn run_build_with(
             }
         }
     }
-    let now = bob::epoch_secs()?;
-
     for result in &skipped_results {
         if let Some(mut input) = result.history_input() {
             input.build_id = build_id.clone();
-            if input.timestamp == 0 {
-                input.timestamp = now;
-            }
             if let Err(e) = db.record_history(&input) {
                 tracing::warn!(error = format!("{e:#}"), "Failed to save skipped history");
             }

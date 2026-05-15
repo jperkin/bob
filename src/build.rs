@@ -449,7 +449,7 @@ impl crate::ColumnAlign for Stage {
 /**
  * Metrics captured during a package build.
  */
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PkgBuildStats {
     /// MAKE_JOBS used for this build.
     pub make_jobs: PkgMakeJobs,
@@ -467,6 +467,21 @@ pub struct PkgBuildStats {
     pub duration: Duration,
     /// Unix epoch when the build started.
     pub timestamp: i64,
+}
+
+impl Default for PkgBuildStats {
+    fn default() -> Self {
+        Self {
+            make_jobs: PkgMakeJobs::default(),
+            stage: None,
+            stage_durations: Vec::new(),
+            stage_cpu_times: Vec::new(),
+            disk_usage: None,
+            wrkobjdir: None,
+            duration: Duration::ZERO,
+            timestamp: crate::epoch_secs().unwrap_or(0),
+        }
+    }
 }
 
 /// Result of a package build.
