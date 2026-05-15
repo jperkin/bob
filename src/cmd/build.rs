@@ -30,7 +30,7 @@ use tracing::error;
 
 use bob::Interrupted;
 use bob::build::{self, Build};
-use bob::config::Config;
+use bob::config::{Config, Pkgsrc};
 use bob::db::Database;
 use bob::sandbox::SandboxScope;
 use bob::scan::{ScanResult, ScanSummary};
@@ -51,6 +51,7 @@ use bob::scan::{ScanResult, ScanSummary};
  */
 pub fn check_up_to_date(
     config: &Config,
+    pkgsrc: &Pkgsrc,
     db: &Database,
     scan_result: &ScanSummary,
 ) -> Result<usize> {
@@ -62,7 +63,6 @@ pub fn check_up_to_date(
         }
     };
     let packages_dir = pkgsrc_env.packages.join("All");
-    let pkgsrc_dir = config.pkgsrc();
 
     let buildable: Vec<_> = scan_result.buildable().collect();
     let mut up_to_date_count = 0usize;
@@ -160,7 +160,8 @@ pub fn check_up_to_date(
                 .map(|&pkgname| {
                     let pkg = pkg_by_name[pkgname];
                     let depends: Vec<&str> = pkg.depends().iter().map(|d| d.pkgname()).collect();
-                    let result = bob::pkg_up_to_date(pkgname, &depends, &packages_dir, pkgsrc_dir);
+                    let result =
+                        bob::pkg_up_to_date(pkgname, &depends, &packages_dir, &pkgsrc.basedir);
                     (pkg, result)
                 })
                 .collect()
@@ -250,6 +251,7 @@ pub fn check_up_to_date(
  */
 pub fn run_build_with(
     config: &Config,
+    pkgsrc: &Pkgsrc,
     db: &Database,
     state: &bob::RunState,
     scan_result: ScanSummary,
@@ -294,7 +296,7 @@ pub fn run_build_with(
         .context("PkgsrcEnv not cached - try 'bob clean' first")?;
 
     let buildable = db.load_buildable_packages()?;
-    let mut build = Build::new(config, pkgsrc_env, scope, buildable);
+    let mut build = Build::new(config, pkgsrc, pkgsrc_env, scope, buildable);
     build.load_cached_from_db(db)?;
 
     tracing::debug!("Calling build.start()");

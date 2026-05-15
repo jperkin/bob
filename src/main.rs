@@ -20,7 +20,7 @@ use bob::Interrupted;
 use bob::PackageStateKind;
 use bob::RunState;
 use bob::build::{self, Build};
-use bob::config::Config;
+use bob::config::{Config, Pkgsrc};
 use bob::db::Database;
 use bob::logging;
 use bob::sandbox::{Sandbox, SandboxScope};
@@ -37,6 +37,7 @@ const EXIT_INTERRUPTED: u8 = 128 + libc::SIGINT as u8;
 /// Common context for build operations.
 struct BuildRunner {
     config: Config,
+    pkgsrc: Pkgsrc,
     db: Database,
     state: RunState,
 }
@@ -44,7 +45,7 @@ struct BuildRunner {
 impl BuildRunner {
     /// Set up the build environment: config, logging, validation, db, signals.
     fn new(config_path: Option<&Path>) -> Result<Self> {
-        let config = Config::load(config_path)?;
+        let (config, pkgsrc) = Config::load_with_pkgsrc(config_path)?;
 
         logging::init(config.dbdir(), config.log_level())?;
 
@@ -61,7 +62,12 @@ impl BuildRunner {
         let state = bob::RunState::new();
         state.register_signals()?;
 
-        Ok(Self { config, db, state })
+        Ok(Self {
+            config,
+            pkgsrc,
+            db,
+            state,
+        })
     }
 
     /**
@@ -88,7 +94,7 @@ impl BuildRunner {
 
         let cpu_sampler = bob::start_cpu_sampler();
 
-        scan.start(&self.db, scope)?;
+        scan.start(&self.db, scope, &self.pkgsrc)?;
 
         if let Some(sampler) = cpu_sampler {
             let samples = sampler.stop();
@@ -133,7 +139,7 @@ impl BuildRunner {
             .load_pkgsrc_env()
             .context("PkgsrcEnv not cached - try 'bob clean' first")?;
 
-        let mut build = Build::new(&self.config, pkgsrc_env, scope, buildable);
+        let mut build = Build::new(&self.config, &self.pkgsrc, pkgsrc_env, scope, buildable);
         build.load_cached_from_db(&self.db)?;
 
         tracing::debug!("Calling build.start()");
@@ -448,14 +454,14 @@ fn run() -> Result<()> {
         Cmd::Scan { scan_only } => {
             let runner = BuildRunner::new(args.config.as_deref())?;
 
-            let mut scan = Scan::new(&runner.config);
-            if let Some(pkgs) = runner.config.pkgpaths() {
+            let mut scan = Scan::new(&runner.config, Some(&runner.pkgsrc));
+            if let Some(pkgs) = runner.pkgsrc.pkgpaths.as_deref() {
                 for p in pkgs {
                     scan.add(p);
                 }
             }
 
-            let sandbox = Sandbox::new(&runner.config);
+            let sandbox = Sandbox::new(&runner.config, Some(&runner.pkgsrc));
             let mut scope = SandboxScope::new(sandbox, runner.state.clone());
             runner.run_scan_phase(&mut scan, &mut scope)?;
             drop(scope);
@@ -467,6 +473,7 @@ fn run() -> Result<()> {
             } else {
                 Some(cmd::build::check_up_to_date(
                     &runner.config,
+                    &runner.pkgsrc,
                     &runner.db,
                     &result,
                 )?)
@@ -479,9 +486,9 @@ fn run() -> Result<()> {
             let runner = BuildRunner::new(args.config.as_deref())?;
             tracing::info!("Build command started");
 
-            let mut scan = Scan::new(&runner.config);
+            let mut scan = Scan::new(&runner.config, Some(&runner.pkgsrc));
             if cmdline_pkgs.is_empty() {
-                if let Some(pkgs) = runner.config.pkgpaths() {
+                if let Some(pkgs) = runner.pkgsrc.pkgpaths.as_deref() {
                     for p in pkgs {
                         scan.add(p);
                     }
@@ -495,14 +502,15 @@ fn run() -> Result<()> {
                 }
             }
 
-            let sandbox = Sandbox::new(&runner.config);
+            let sandbox = Sandbox::new(&runner.config, Some(&runner.pkgsrc));
             let mut scope = SandboxScope::new(sandbox, runner.state.clone());
             runner.run_scan_phase(&mut scan, &mut scope)?;
             let scan_result = scan.resolve_with_report(&runner.db, runner.config.strict_scan())?;
             let prior = runner.db.get_successful_packages().unwrap_or_default();
-            cmd::build::check_up_to_date(&runner.config, &runner.db, &scan_result)?;
+            cmd::build::check_up_to_date(&runner.config, &runner.pkgsrc, &runner.db, &scan_result)?;
             let summary = cmd::build::run_build_with(
                 &runner.config,
+                &runner.pkgsrc,
                 &runner.db,
                 &runner.state,
                 scan_result,
@@ -528,7 +536,7 @@ fn run() -> Result<()> {
             else {
                 return Ok(());
             };
-            let sandbox = Sandbox::new(&runner.config);
+            let sandbox = Sandbox::new(&runner.config, Some(&runner.pkgsrc));
             let scope = SandboxScope::new(sandbox, runner.state.clone());
             let summary = runner.run_build(buildable, scope)?;
             runner.update_pkg_summary(&prior, &summary);
@@ -540,21 +548,11 @@ fn run() -> Result<()> {
             dry_run,
             baseline,
         } => {
-            let config = Config::load(args.config.as_deref())?;
-            logging::init(config.dbdir(), config.log_level())?;
-            let db_path = config.dbdir().join("bob.db");
-
-            if !db_path.exists() {
-                bail!(
-                    "No database found at {}.  Perform a build first.",
-                    db_path.display()
-                );
-            }
-
-            let db = Database::open(config.dbdir())?;
+            let runner = BuildRunner::new(args.config.as_deref())?;
             cmd::publish::run(
-                &config,
-                &db,
+                &runner.config,
+                &runner.pkgsrc,
+                &runner.db,
                 packages,
                 report,
                 email,
@@ -606,12 +604,12 @@ fn run() -> Result<()> {
             cmd::list::run(&db, cmd.unwrap_or(cmd::list::ListCmd::Builds))?;
         }
         Cmd::Dev => {
-            let config = Config::load(args.config.as_deref())?;
-            cmd::sandbox::run(&config, cmd::sandbox::SandboxCmd::Exec)?;
+            let (config, pkgsrc) = Config::load_with_optional_pkgsrc(args.config.as_deref())?;
+            cmd::sandbox::run(&config, pkgsrc.as_ref(), cmd::sandbox::SandboxCmd::Exec)?;
         }
         Cmd::Sandbox { cmd: sandbox_cmd } => {
-            let config = Config::load(args.config.as_deref())?;
-            cmd::sandbox::run(&config, sandbox_cmd)?;
+            let (config, pkgsrc) = Config::load_with_optional_pkgsrc(args.config.as_deref())?;
+            cmd::sandbox::run(&config, pkgsrc.as_ref(), sandbox_cmd)?;
         }
         Cmd::Util {
             cmd: UtilCmd::PrintDepGraph { output },
@@ -624,7 +622,7 @@ fn run() -> Result<()> {
                 bail!("No cached scan data found. Run 'bob scan' first.");
             }
 
-            let mut scan = Scan::new(&config);
+            let mut scan = Scan::new(&config, None);
             scan.init_from_db(&db)?;
 
             let result =

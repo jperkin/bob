@@ -73,7 +73,7 @@ mod sandbox_netbsd;
 mod sandbox_sunos;
 
 use crate::action::{Action, ActionContext, ActionType, FSType};
-use crate::config::{Config, PkgsrcEnv};
+use crate::config::{Config, Pkgsrc, PkgsrcEnv};
 use crate::try_println;
 use crate::{Interrupted, RunState};
 use anyhow::{Context, Result, bail};
@@ -230,6 +230,7 @@ pub fn wait_output_with_shutdown(child: Child, state: &RunState) -> Result<Outpu
 #[derive(Clone, Debug, Default)]
 pub struct Sandbox {
     config: Config,
+    pkgsrc: Option<Pkgsrc>,
     context: ActionContext,
     /**
      * The pkgsrc environment, populated once via [`set_pkgsrc_env`].
@@ -256,8 +257,8 @@ impl Sandbox {
      *
      * [`execute`]: Sandbox::execute
      */
-    pub fn new(config: &Config) -> Sandbox {
-        Self::with_context(config, ActionContext::Build)
+    pub fn new(config: &Config, pkgsrc: Option<&Pkgsrc>) -> Sandbox {
+        Self::with_context(config, pkgsrc, ActionContext::Build)
     }
 
     /**
@@ -265,13 +266,14 @@ impl Sandbox {
      * interactive sessions.  Actions whose `only.context` is set to
      * `"dev"` will run; actions restricted to `"build"` will be skipped.
      */
-    pub fn new_dev(config: &Config) -> Sandbox {
-        Self::with_context(config, ActionContext::Dev)
+    pub fn new_dev(config: &Config, pkgsrc: Option<&Pkgsrc>) -> Sandbox {
+        Self::with_context(config, pkgsrc, ActionContext::Dev)
     }
 
-    fn with_context(config: &Config, context: ActionContext) -> Sandbox {
+    fn with_context(config: &Config, pkgsrc: Option<&Pkgsrc>, context: ActionContext) -> Sandbox {
         Sandbox {
             config: config.clone(),
+            pkgsrc: pkgsrc.cloned(),
             context,
             pkgsrc_env: Arc::new(OnceLock::new()),
         }
@@ -311,20 +313,32 @@ impl Sandbox {
      * [`set_pkgsrc_env`]: Sandbox::set_pkgsrc_env
      */
     pub fn script_env(&self) -> Vec<(String, String)> {
-        let mut envs = vec![
-            (
-                "bob_logdir".to_string(),
-                format!("{}", self.config.logdir().display()),
-            ),
-            (
-                "bob_make".to_string(),
-                format!("{}", self.config.make().display()),
-            ),
-            (
+        let mut envs = vec![(
+            "bob_logdir".to_string(),
+            format!("{}", self.config.logdir().display()),
+        )];
+        if let Some(pkgsrc) = &self.pkgsrc {
+            envs.push(("bob_make".to_string(), format!("{}", pkgsrc.make.display())));
+            envs.push((
                 "bob_pkgsrc".to_string(),
-                format!("{}", self.config.pkgsrc().display()),
-            ),
-        ];
+                format!("{}", pkgsrc.basedir.display()),
+            ));
+            if let Some(build_user) = &pkgsrc.build_user {
+                envs.push(("bob_build_user".to_string(), build_user.clone()));
+            }
+            if let Some(home) = &pkgsrc.build_user_home {
+                envs.push((
+                    "bob_build_user_home".to_string(),
+                    home.display().to_string(),
+                ));
+            }
+            if let Some(bootstrap) = &pkgsrc.bootstrap {
+                envs.push((
+                    "bob_bootstrap".to_string(),
+                    format!("{}", bootstrap.display()),
+                ));
+            }
+        }
         if let Some(env) = self.pkgsrc_env.get() {
             envs.push((
                 "bob_packages".to_string(),
@@ -349,21 +363,6 @@ impl Sandbox {
             for (key, value) in &env.cachevars {
                 envs.push((key.clone(), value.clone()));
             }
-        }
-        if let Some(build_user) = self.config.build_user() {
-            envs.push(("bob_build_user".to_string(), build_user.to_string()));
-        }
-        if let Some(home) = self.config.build_user_home() {
-            envs.push((
-                "bob_build_user_home".to_string(),
-                home.display().to_string(),
-            ));
-        }
-        if let Some(bootstrap) = self.config.bootstrap() {
-            envs.push((
-                "bob_bootstrap".to_string(),
-                format!("{}", bootstrap.display()),
-            ));
         }
         envs
     }
@@ -861,7 +860,7 @@ impl Sandbox {
      * failure is fatal (sandbox-level) or per-package.
      */
     pub fn run_pre_build(&self, sandbox_id: Option<usize>) -> Result<()> {
-        if let Some(bootstrap) = self.config.bootstrap() {
+        if let Some(bootstrap) = self.pkgsrc.as_ref().and_then(|p| p.bootstrap.as_deref()) {
             let Some(sandbox_id) = sandbox_id else {
                 bail!("bootstrap requires sandboxes to be enabled");
             };

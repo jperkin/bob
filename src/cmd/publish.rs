@@ -52,7 +52,7 @@ use strum::IntoEnumIterator;
 use tracing::{debug, info};
 
 use bob::build::{BuildResult, BuildSummary, PkgBuildStats};
-use bob::config::{Config, Publish, PublishPackages, ScriptValue};
+use bob::config::{Config, Pkgsrc, Publish, PublishPackages, ScriptValue};
 use bob::db::Database;
 use bob::{PackageCounts, PackageState, PackageStateKind};
 
@@ -61,8 +61,10 @@ struct PublishResult {
     restricted: usize,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     config: &Config,
+    pkgsrc: &Pkgsrc,
     db: &Database,
     packages: bool,
     report: bool,
@@ -70,10 +72,12 @@ pub fn run(
     dry_run: bool,
     baseline: Option<&str>,
 ) -> Result<()> {
-    let build_id = db.build_id()?;
+    let build_id = db
+        .build_id()
+        .context("No build recorded.  Perform a build first.")?;
 
     if report || email {
-        generate_reports(config, db, &build_id, baseline)?;
+        generate_reports(config, pkgsrc, db, &build_id, baseline)?;
     }
 
     if report {
@@ -169,6 +173,7 @@ fn publish_packages(config: &Config, db: &Database, dry_run: bool) -> Result<Pub
 
 fn generate_reports(
     config: &Config,
+    pkgsrc: &Pkgsrc,
     db: &Database,
     build_id: &str,
     baseline: Option<&str>,
@@ -207,7 +212,7 @@ fn generate_reports(
 
     let commits = diff
         .as_ref()
-        .and_then(|d| compute_diff_commits(db, config, &vcs_info, d));
+        .and_then(|d| compute_diff_commits(db, pkgsrc, &vcs_info, d));
 
     std::fs::create_dir_all(logdir)
         .with_context(|| format!("Failed to create {}", logdir.display()))?;
@@ -1811,7 +1816,7 @@ fn build_compare_url(
  */
 fn compute_diff_commits(
     db: &Database,
-    config: &Config,
+    pkgsrc: &Pkgsrc,
     vcs_info: &bob::vcs::VcsInfo,
     diff: &bob::db::BuildDiff,
 ) -> Option<HashMap<String, Vec<bob::vcs::CommitInfo>>> {
@@ -1855,10 +1860,10 @@ fn compute_diff_commits(
         old_rev = %old_rev,
         new_rev = %new_rev,
         pkgpath_count = pkgpaths.len(),
-        repo = %config.pkgsrc().display(),
+        repo = %pkgsrc.basedir.display(),
         "Computing per-pkgpath commit list"
     );
-    match bob::vcs::commits_for_pkgpaths(config.pkgsrc(), &old_rev, new_rev, &pkgpaths) {
+    match bob::vcs::commits_for_pkgpaths(&pkgsrc.basedir, &old_rev, new_rev, &pkgpaths) {
         Ok(map) if !map.is_empty() => {
             let total: usize = map.values().map(|v| v.len()).sum();
             debug!(

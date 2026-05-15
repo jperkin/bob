@@ -22,7 +22,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 
-use bob::config::{Config, PkgsrcEnv};
+use bob::config::{Config, Pkgsrc, PkgsrcEnv};
 use bob::logging;
 use bob::sandbox::Sandbox;
 
@@ -38,11 +38,11 @@ pub enum SandboxCmd {
     List,
 }
 
-pub fn run(config: &Config, cmd: SandboxCmd) -> Result<()> {
+pub fn run(config: &Config, pkgsrc: Option<&Pkgsrc>, cmd: SandboxCmd) -> Result<()> {
     match cmd {
         SandboxCmd::Create => {
             logging::init_stderr_if_enabled();
-            let sandbox = Sandbox::new(config);
+            let sandbox = Sandbox::new(config, pkgsrc);
             if !sandbox.enabled() {
                 bail!("No sandboxes configured");
             }
@@ -50,24 +50,26 @@ pub fn run(config: &Config, cmd: SandboxCmd) -> Result<()> {
         }
         SandboxCmd::Destroy => {
             logging::init_stderr_if_enabled();
-            let sandbox = Sandbox::new(config);
+            let sandbox = Sandbox::new(config, pkgsrc);
             if !sandbox.enabled() {
                 bail!("No sandboxes configured");
             }
-            match bob::Database::open(config.dbdir()).and_then(|db| db.load_pkgsrc_env()) {
-                Ok(env) => sandbox.set_pkgsrc_env(env),
-                Err(_) => eprintln!(
-                    "Warning: No database available, unable to remove pkgsrc directories."
-                ),
+            if pkgsrc.is_some() {
+                match bob::Database::open(config.dbdir()).and_then(|db| db.load_pkgsrc_env()) {
+                    Ok(env) => sandbox.set_pkgsrc_env(env),
+                    Err(_) => eprintln!(
+                        "Warning: No database available, unable to remove pkgsrc directories."
+                    ),
+                }
             }
             sandbox.destroy_all()?;
         }
         SandboxCmd::Exec => {
             logging::init(config.dbdir(), config.log_level())?;
-            exec(config)?;
+            exec(config, pkgsrc)?;
         }
         SandboxCmd::List => {
-            let sandbox = Sandbox::new(config);
+            let sandbox = Sandbox::new(config, pkgsrc);
             if !sandbox.enabled() {
                 bail!("No sandboxes configured");
             }
@@ -77,8 +79,8 @@ pub fn run(config: &Config, cmd: SandboxCmd) -> Result<()> {
     Ok(())
 }
 
-fn exec(config: &Config) -> Result<()> {
-    let sandbox = Sandbox::new_dev(config);
+fn exec(config: &Config, pkgsrc: Option<&Pkgsrc>) -> Result<()> {
+    let sandbox = Sandbox::new_dev(config, pkgsrc);
     if !sandbox.enabled() {
         bail!("No sandboxes configured");
     }
@@ -99,8 +101,10 @@ fn exec(config: &Config) -> Result<()> {
                 return Err(e.context("pre-build failed"));
             }
         }
-        let pkgsrc_env = PkgsrcEnv::fetch(config, &sandbox, Some(id))?;
-        sandbox.set_pkgsrc_env(pkgsrc_env);
+        if let Some(pkgsrc) = pkgsrc {
+            let pkgsrc_env = PkgsrcEnv::fetch(pkgsrc, &sandbox, Some(id))?;
+            sandbox.set_pkgsrc_env(pkgsrc_env);
+        }
         let init_path = write_shell_init(config, &sandbox, id)?;
         println!("Entering sandbox {}...", sandbox.path(id).display());
         let mut cmd = Command::new("/usr/sbin/chroot");

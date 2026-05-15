@@ -42,7 +42,7 @@
 //! - `deinstall` - Test package removal (non-bootstrap only)
 //! - `clean` - Clean up build artifacts
 
-use crate::config::{PkgsrcEnv, WrkObjKind};
+use crate::config::{Pkgsrc, PkgsrcEnv, WrkObjKind};
 use crate::makejobs::PkgMakeJobs;
 use crate::sandbox::{CommandSetsid, SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
 use crate::scan::ResolvedPackage;
@@ -501,6 +501,7 @@ trait BuildCallback: Send {
 #[derive(Debug)]
 struct BuildSession {
     config: Config,
+    pkgsrc: Pkgsrc,
     pkgsrc_env: PkgsrcEnv,
     sandbox: Sandbox,
     state: RunState,
@@ -514,7 +515,6 @@ struct PkgBuilder<'a> {
     worker_id: usize,
     pkginfo: &'a ResolvedPackage,
     logdir: PathBuf,
-    build_user: Option<String>,
     envs: Vec<(String, String)>,
     output_tx: Sender<ChannelCommand>,
     make_jobs: PkgMakeJobs,
@@ -537,14 +537,12 @@ impl<'a> PkgBuilder<'a> {
             .config
             .logdir()
             .join(pkginfo.index.pkgname.pkgname());
-        let build_user = session.config.build_user().map(|s| s.to_string());
         Self {
             session,
             sandbox_id,
             worker_id,
             pkginfo,
             logdir,
-            build_user,
             envs,
             output_tx,
             make_jobs,
@@ -561,7 +559,7 @@ impl<'a> PkgBuilder<'a> {
         let pkgname_str = self.pkginfo.pkgname().pkgname();
         let pkgpath = &self.pkginfo.pkgpath;
 
-        let pkgdir = self.session.config.pkgsrc().join(pkgpath.as_path());
+        let pkgdir = self.session.pkgsrc.basedir.join(pkgpath.as_path());
 
         // Pre-clean
         let stage_start = Instant::now();
@@ -778,7 +776,7 @@ impl<'a> PkgBuilder<'a> {
 
     /// Determine how to run build commands.
     fn build_run_as(&self) -> RunAs {
-        if self.build_user.is_some() {
+        if self.session.pkgsrc.build_user.is_some() {
             RunAs::User
         } else {
             RunAs::Root
@@ -814,7 +812,7 @@ impl<'a> PkgBuilder<'a> {
         info!(stage = stage.into_str(), "Running make stage");
 
         let (status, cpu_time) =
-            self.run_command_logged(self.session.config.make(), &args, run_as, &logfile)?;
+            self.run_command_logged(&self.session.pkgsrc.make, &args, run_as, &logfile)?;
 
         Ok((status.success(), cpu_time))
     }
@@ -931,7 +929,7 @@ impl<'a> PkgBuilder<'a> {
         let mut cmd = self
             .session
             .sandbox
-            .command(self.sandbox_id, self.session.config.make());
+            .command(self.sandbox_id, &self.session.pkgsrc.make);
         cmd.new_session();
         self.apply_envs(&mut cmd, &[]);
 
@@ -1050,7 +1048,7 @@ impl<'a> PkgBuilder<'a> {
         }
 
         let (status, _) =
-            self.run_command_logged(self.session.config.make(), &args, RunAs::Root, logfile)?;
+            self.run_command_logged(&self.session.pkgsrc.make, &args, RunAs::Root, logfile)?;
         Ok(status.success())
     }
 
@@ -1132,7 +1130,7 @@ impl<'a> PkgBuilder<'a> {
                 parts.extend(args_str);
             }
             RunAs::User => {
-                let user = self.build_user.as_ref().unwrap();
+                let user = self.session.pkgsrc.build_user.as_ref().unwrap();
                 let inner_cmd = std::iter::once(cmd_str)
                     .chain(args_str)
                     .collect::<Vec<_>>()
@@ -1294,6 +1292,7 @@ impl BuildSummary {
 pub struct Build {
     /// Parsed [`Config`].
     config: Config,
+    pkgsrc: Pkgsrc,
     /// Pkgsrc environment variables.
     pkgsrc_env: PkgsrcEnv,
     /// Sandbox scope - owns created sandboxes, destroys on drop.
@@ -1340,13 +1339,13 @@ impl<'a> MakeQuery<'a> {
 
     /// Query multiple bmake variables in a single invocation.
     fn vars(&self, names: &[&str]) -> HashMap<String, String> {
-        let pkgdir = self.session.config.pkgsrc().join(self.pkgpath.as_path());
+        let pkgdir = self.session.pkgsrc.basedir.join(self.pkgpath.as_path());
         let varnames_arg = names.join(" ");
 
         let mut cmd = self
             .session
             .sandbox
-            .command(self.sandbox_id, self.session.config.make());
+            .command(self.sandbox_id, &self.session.pkgsrc.make);
         cmd.new_session();
         cmd.arg("-C")
             .arg(&pkgdir)
@@ -1436,7 +1435,7 @@ impl PackageBuild {
                 None
             };
 
-        let patterns = self.session.config.save_wrkdir_patterns();
+        let patterns = self.session.pkgsrc.save_wrkdir_patterns.as_slice();
 
         // Run pre-build operations (bootstrap unpack + hook actions).
         // The sandbox is not usable until this completes; failure here
@@ -1665,12 +1664,12 @@ impl PackageBuild {
 
     /// Run bmake clean for a package.
     fn run_clean(&self, pkgpath: &PkgPath, envs: &[(String, String)]) {
-        let pkgdir = self.session.config.pkgsrc().join(pkgpath.as_path());
+        let pkgdir = self.session.pkgsrc.basedir.join(pkgpath.as_path());
 
         let mut cmd = self
             .session
             .sandbox
-            .command(self.sandbox_id, self.session.config.make());
+            .command(self.sandbox_id, &self.session.pkgsrc.make);
         cmd.new_session();
         cmd.arg("-C").arg(&pkgdir).arg("clean");
         for (key, value) in envs {
@@ -1856,6 +1855,7 @@ impl Build {
      */
     pub fn new(
         config: &Config,
+        pkgsrc: &Pkgsrc,
         pkgsrc_env: PkgsrcEnv,
         scope: SandboxScope,
         scanpkgs: IndexMap<PkgName, ResolvedPackage>,
@@ -1869,6 +1869,7 @@ impl Build {
         scope.sandbox().set_pkgsrc_env(pkgsrc_env.clone());
         Build {
             config: config.clone(),
+            pkgsrc: pkgsrc.clone(),
             pkgsrc_env,
             scope,
             scanpkgs,
@@ -2228,6 +2229,7 @@ impl Build {
          */
         let session = Arc::new(BuildSession {
             config: self.config.clone(),
+            pkgsrc: self.pkgsrc,
             pkgsrc_env: self.pkgsrc_env.clone(),
             sandbox: self.scope.sandbox().clone(),
             state: state_flag.clone(),

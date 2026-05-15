@@ -24,10 +24,14 @@
 //! A configuration file has five main sections:
 //!
 //! - [`options`](#options-section) - General build options (optional)
-//! - [`pkgsrc`](#pkgsrc-section) - pkgsrc paths and package list (required)
+//! - [`pkgsrc`](#pkgsrc-section) - pkgsrc paths and package list (optional;
+//!   required for commands that operate on the pkgsrc tree)
 //! - [`sandboxes`](#sandboxes-section) - Sandbox configuration (optional)
 //! - [`dynamic`](#dynamic-section) - Dynamic resource allocation (optional)
 //! - [`publish`](#publish-section) - Remote publishing configuration (optional)
+//!
+//! Omitting `pkgsrc` lets `bob` run `bob dev` against a chroot defined
+//! purely by `sandboxes.setup`, for example to drive non-pkgsrc builds.
 //!
 //! # Options Section
 //!
@@ -44,7 +48,9 @@
 //!
 //! # Pkgsrc Section
 //!
-//! The `pkgsrc` section is required and defines paths to pkgsrc components.
+//! The `pkgsrc` section is optional, but commands that operate on the
+//! pkgsrc tree will refuse to run without it.  Defines paths to pkgsrc
+//! components.
 //!
 //! ## Required Fields
 //!
@@ -169,7 +175,19 @@ impl PkgsrcEnv {
     ///
     /// This must be called after sandbox 0 is created if sandboxes are enabled,
     /// since bmake may only exist inside the sandbox.
-    pub fn fetch(config: &Config, sandbox: &Sandbox, id: Option<usize>) -> Result<Self> {
+    pub fn fetch(pkgsrc: &Pkgsrc, sandbox: &Sandbox, id: Option<usize>) -> Result<Self> {
+        if !sandbox.enabled() {
+            if !pkgsrc.basedir.exists() {
+                bail!(
+                    "pkgsrc basedir does not exist: {}",
+                    pkgsrc.basedir.display()
+                );
+            }
+            if !pkgsrc.make.exists() {
+                bail!("make binary does not exist: {}", pkgsrc.make.display());
+            }
+        }
+
         const REQUIRED_VARS: &[&str] = &[
             "PACKAGES",
             "PKG_DBDIR",
@@ -193,8 +211,8 @@ impl PkgsrcEnv {
             "VARBASE",
         ];
 
-        let cachevar_names: Vec<&str> = if !config.cachevars().is_empty() {
-            config.cachevars().iter().map(|s| s.as_str()).collect()
+        let cachevar_names: Vec<&str> = if !pkgsrc.cachevars.is_empty() {
+            pkgsrc.cachevars.iter().map(|s| s.as_str()).collect()
         } else {
             let mut v = vec!["NATIVE_OPSYS", "NATIVE_OPSYS_VERSION", "NATIVE_OS_VERSION"];
             if cfg!(target_os = "netbsd") {
@@ -213,8 +231,8 @@ impl PkgsrcEnv {
         let varnames_arg = all_varnames.join(" ");
         let script = format!(
             "cd {}/pkgtools/pkg_install && {} show-vars VARNAMES=\"{}\"\n",
-            config.pkgsrc().display(),
-            config.make().display(),
+            pkgsrc.basedir.display(),
+            pkgsrc.make.display(),
             varnames_arg
         );
 
@@ -313,8 +331,6 @@ pub struct Config {
 pub struct ConfigFile {
     /// The `options` section.
     pub options: Option<Options>,
-    /// The `pkgsrc` section.
-    pub pkgsrc: Pkgsrc,
     /// The `sandboxes` section.
     pub sandboxes: Option<Sandboxes>,
     /// The `dynamic` section.
@@ -555,7 +571,7 @@ pub struct PublishReport {
 /// - `build_user`: Unprivileged user for builds
 /// - `pkgpaths`: List of packages to build
 /// - `save_wrkdir_patterns`: Glob patterns for files to save on build failure
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Pkgsrc {
     /// Path to pkgsrc source tree.
     pub basedir: PathBuf,
@@ -682,6 +698,21 @@ impl Config {
     /// Returns an error if the configuration file doesn't exist or contains
     /// invalid Lua syntax.
     pub fn load(config_path: Option<&Path>) -> Result<Config> {
+        let (config, _) = Self::load_with_optional_pkgsrc(config_path)?;
+        Ok(config)
+    }
+
+    /// Load configuration; require a `pkgsrc` section.
+    pub fn load_with_pkgsrc(config_path: Option<&Path>) -> Result<(Config, Pkgsrc)> {
+        let (config, pkgsrc) = Self::load_with_optional_pkgsrc(config_path)?;
+        let pkgsrc = pkgsrc.context("pkgsrc section required for this command")?;
+        Ok((config, pkgsrc))
+    }
+
+    /// Load configuration; pkgsrc section is optional.
+    pub fn load_with_optional_pkgsrc(
+        config_path: Option<&Path>,
+    ) -> Result<(Config, Option<Pkgsrc>)> {
         let filename = match config_path {
             Some(path) => {
                 if path.is_relative() {
@@ -706,7 +737,7 @@ impl Config {
         /*
          * Parse configuration file as Lua.
          */
-        let file = load_lua(&filename)
+        let (file, pkgsrc) = load_lua(&filename)
             .map_err(|e| anyhow!(e))
             .with_context(|| {
                 format!(
@@ -720,7 +751,7 @@ impl Config {
         /*
          * Validate bootstrap path exists if specified.
          */
-        if let Some(ref bootstrap) = file.pkgsrc.bootstrap {
+        if let Some(bootstrap) = pkgsrc.as_ref().and_then(|p| p.bootstrap.as_ref()) {
             if !bootstrap.exists() {
                 anyhow::bail!(
                     "pkgsrc.bootstrap file {} does not exist",
@@ -759,12 +790,15 @@ impl Config {
             "info".to_string()
         };
 
-        Ok(Config {
-            file,
-            dbdir,
-            logdir,
-            log_level,
-        })
+        Ok((
+            Config {
+                file,
+                dbdir,
+                logdir,
+                log_level,
+            },
+            pkgsrc,
+        ))
     }
 
     pub fn build_threads(&self) -> usize {
@@ -807,18 +841,6 @@ impl Config {
             Some(sandboxes) => &sandboxes.hooks,
             None => &[],
         }
-    }
-
-    pub fn make(&self) -> &PathBuf {
-        &self.file.pkgsrc.make
-    }
-
-    pub fn pkgpaths(&self) -> &Option<Vec<PkgPath>> {
-        &self.file.pkgsrc.pkgpaths
-    }
-
-    pub fn pkgsrc(&self) -> &PathBuf {
-        &self.file.pkgsrc.basedir
     }
 
     pub fn sandboxes(&self) -> &Option<Sandboxes> {
@@ -876,47 +898,9 @@ impl Config {
         &self.logdir
     }
 
-    pub fn save_wrkdir_patterns(&self) -> &[String] {
-        self.file.pkgsrc.save_wrkdir_patterns.as_slice()
-    }
-
-    pub fn build_user(&self) -> Option<&str> {
-        self.file.pkgsrc.build_user.as_deref()
-    }
-
-    pub fn build_user_home(&self) -> Option<&Path> {
-        self.file.pkgsrc.build_user_home.as_deref()
-    }
-
-    pub fn bootstrap(&self) -> Option<&PathBuf> {
-        self.file.pkgsrc.bootstrap.as_ref()
-    }
-
-    /// Return list of pkgsrc variable names to cache.
-    pub fn cachevars(&self) -> &[String] {
-        self.file.pkgsrc.cachevars.as_slice()
-    }
-
     /// Validate the configuration, checking that required paths and files exist.
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors: Vec<String> = Vec::new();
-
-        // Check pkgsrc directory exists
-        if !self.file.pkgsrc.basedir.exists() {
-            errors.push(format!(
-                "pkgsrc basedir does not exist: {}",
-                self.file.pkgsrc.basedir.display()
-            ));
-        }
-
-        // Check make binary exists (only on host if sandboxes not enabled)
-        // When sandboxes are enabled, the make binary is inside the sandbox
-        if self.file.sandboxes.is_none() && !self.file.pkgsrc.make.exists() {
-            errors.push(format!(
-                "make binary does not exist: {}",
-                self.file.pkgsrc.make.display()
-            ));
-        }
 
         // Check sandbox basedir is writable if sandboxes enabled
         if let Some(sandboxes) = &self.file.sandboxes {
@@ -1052,7 +1036,7 @@ pub fn default_data_dir() -> Result<PathBuf> {
 }
 
 /// Load and parse a Lua configuration file.
-fn load_lua(filename: &Path) -> Result<ConfigFile, String> {
+fn load_lua(filename: &Path) -> Result<(ConfigFile, Option<Pkgsrc>), String> {
     let lua = Lua::new();
 
     // Add config directory to package.path so require() finds relative modules
@@ -1097,14 +1081,16 @@ fn load_lua(filename: &Path) -> Result<ConfigFile, String> {
     let summary =
         parse_summary(&globals).map_err(|e| format!("Error parsing summary config: {}", e))?;
 
-    Ok(ConfigFile {
-        options,
+    Ok((
+        ConfigFile {
+            options,
+            sandboxes,
+            dynamic,
+            publish,
+            summary,
+        },
         pkgsrc,
-        sandboxes,
-        dynamic,
-        publish,
-        summary,
-    })
+    ))
 }
 
 /// Build the migration error message for an unsupported config key.
@@ -1591,8 +1577,14 @@ fn parse_dynamic(globals: &Table) -> LuaResult<Option<DynamicConfig>> {
     Ok(Some(DynamicConfig { jobs, wrkobjdir }))
 }
 
-fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
-    let pkgsrc: Table = globals.get("pkgsrc")?;
+fn parse_pkgsrc(globals: &Table) -> LuaResult<Option<Pkgsrc>> {
+    let value: Value = globals.get("pkgsrc")?;
+    if value.is_nil() {
+        return Ok(None);
+    }
+    let pkgsrc = value
+        .as_table()
+        .ok_or_else(|| mlua::Error::runtime("'pkgsrc' must be a table"))?;
 
     const KNOWN_KEYS: &[&str] = &[
         "basedir",
@@ -1604,9 +1596,9 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         "pkgpaths",
         "save_wrkdir_patterns",
     ];
-    warn_unknown_keys(&pkgsrc, "pkgsrc", KNOWN_KEYS);
+    warn_unknown_keys(pkgsrc, "pkgsrc", KNOWN_KEYS);
 
-    let basedir = get_required_string(&pkgsrc, "basedir")?;
+    let basedir = get_required_string(pkgsrc, "basedir")?;
     let bootstrap: Option<PathBuf> = pkgsrc
         .get::<Option<String>>("bootstrap")?
         .map(PathBuf::from);
@@ -1623,7 +1615,7 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
     } else {
         None
     };
-    let make = get_required_string(&pkgsrc, "make")?;
+    let make = get_required_string(pkgsrc, "make")?;
 
     let pkgpaths: Option<Vec<PkgPath>> = match pkgsrc.get::<Value>("pkgpaths")? {
         Value::Nil => None,
@@ -1659,10 +1651,10 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         _ => None,
     };
 
-    let save_wrkdir_patterns = get_string_list(&pkgsrc, "save_wrkdir_patterns", "pkgsrc")?;
-    let cachevars = get_string_list(&pkgsrc, "cachevars", "pkgsrc")?;
+    let save_wrkdir_patterns = get_string_list(pkgsrc, "save_wrkdir_patterns", "pkgsrc")?;
+    let cachevars = get_string_list(pkgsrc, "cachevars", "pkgsrc")?;
 
-    Ok(Pkgsrc {
+    Ok(Some(Pkgsrc {
         basedir: PathBuf::from(basedir),
         bootstrap,
         build_user,
@@ -1671,7 +1663,7 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Pkgsrc> {
         make: PathBuf::from(make),
         pkgpaths,
         save_wrkdir_patterns,
-    })
+    }))
 }
 
 fn parse_sandboxes(globals: &Table) -> LuaResult<Option<Sandboxes>> {
@@ -2032,6 +2024,15 @@ mod tests {
         Config::load(Some(&path)).map_err(|e| format!("{e:#}"))
     }
 
+    fn load_pkgsrc(lua_src: &str) -> Result<Pkgsrc, String> {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let path = dir.path().join("config.lua");
+        std::fs::write(&path, lua_src).map_err(|e| e.to_string())?;
+        let (_, pkgsrc) =
+            Config::load_with_optional_pkgsrc(Some(&path)).map_err(|e| format!("{e:#}"))?;
+        pkgsrc.ok_or_else(|| "pkgsrc section missing".to_string())
+    }
+
     const MINIMAL: &str = r#"
         pkgsrc = {
             basedir = "/usr/pkgsrc",
@@ -2100,10 +2101,9 @@ mod tests {
     #[test]
     fn cachevars_valid() {
         let lua = format!("{MINIMAL}\npkgsrc.cachevars = {{ \"NATIVE_OPSYS\", \"PKGSRC\" }}");
-        let cfg = load_config(&lua);
-        assert!(cfg.is_ok(), "expected ok, got: {:?}", cfg);
+        let pkgsrc = load_pkgsrc(&lua).expect("config should load");
         assert_eq!(
-            cfg.unwrap().cachevars(),
+            pkgsrc.cachevars,
             &["NATIVE_OPSYS".to_string(), "PKGSRC".to_string()]
         );
     }

@@ -37,7 +37,7 @@
 //! - Unresolved dependencies - Required dependency not found
 //! - Circular dependencies - Package has a dependency cycle
 
-use crate::config::PkgsrcEnv;
+use crate::config::{Pkgsrc, PkgsrcEnv};
 use crate::sandbox::{SandboxScope, wait_output_with_shutdown};
 use crate::tui::{Progress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, Interrupted, RunState, Sandbox};
@@ -359,10 +359,9 @@ pub struct Scan {
 }
 
 impl Scan {
-    pub fn new(config: &Config) -> Scan {
-        let sandbox = Sandbox::new(config);
-        debug!(pkgsrc = %config.pkgsrc().display(),
-            make = %config.make().display(),
+    pub fn new(config: &Config, pkgsrc: Option<&Pkgsrc>) -> Scan {
+        let sandbox = Sandbox::new(config, pkgsrc);
+        debug!(
             scan_threads = config.scan_threads(),
             "Created new Scan instance"
         );
@@ -464,15 +463,16 @@ impl Scan {
         &mut self,
         pool: &rayon::ThreadPool,
         shutdown: &RunState,
+        pkgsrc: &Pkgsrc,
     ) -> anyhow::Result<()> {
         println!("Discovering packages...");
-        let pkgsrc = self.config.pkgsrc().display().to_string();
+        let basedir = pkgsrc.basedir.display().to_string();
 
         // Get top-level SUBDIR (categories + USER_ADDITIONAL_PKGS)
         let child = self.sandbox.execute_command(
             self.sandbox_id,
-            self.config.make(),
-            ["-C", &pkgsrc, "show-subdir-var", "VARNAME=SUBDIR"],
+            &pkgsrc.make,
+            ["-C", &basedir, "show-subdir-var", "VARNAME=SUBDIR"],
             vec![],
         )?;
         let output =
@@ -499,14 +499,14 @@ impl Scan {
         }
 
         // Process categories in parallel
-        let make = self.config.make();
+        let make = &pkgsrc.make;
         let sandbox = &self.sandbox;
         let sandbox_id = self.sandbox_id;
         let discovered: Vec<PkgPath> = pool.install(|| {
             categories
                 .par_iter()
                 .flat_map(|category| {
-                    let workdir = format!("{}/{}", pkgsrc, category);
+                    let workdir = format!("{}/{}", basedir, category);
                     let result = sandbox
                         .execute_command(
                             sandbox_id,
@@ -560,6 +560,7 @@ impl Scan {
         &mut self,
         db: &crate::db::Database,
         scope: &mut SandboxScope,
+        pkgsrc: &Pkgsrc,
     ) -> anyhow::Result<()> {
         /*
          * Adopt the scope's sandbox so the pkgsrc cell is shared.  After
@@ -639,9 +640,9 @@ impl Scan {
         let env = match db.load_pkgsrc_env() {
             Ok(env) => env,
             Err(_) => {
-                let env = PkgsrcEnv::fetch(&self.config, &self.sandbox, self.sandbox_id)?;
+                let env = PkgsrcEnv::fetch(pkgsrc, &self.sandbox, self.sandbox_id)?;
                 db.store_pkgsrc_env(&env)?;
-                let mut vcs_info = crate::vcs::VcsInfo::from_path(self.config.pkgsrc());
+                let mut vcs_info = crate::vcs::VcsInfo::from_path(&pkgsrc.basedir);
                 if let Some(branch) = self.config.report_branch() {
                     vcs_info.remote_branch = Some(branch.to_string());
                 }
@@ -653,7 +654,7 @@ impl Scan {
 
         // For full tree scans, always discover all packages
         if self.full_tree {
-            self.discover_packages(&pool, &shutdown_flag)?;
+            self.discover_packages(&pool, &shutdown_flag, pkgsrc)?;
             self.incoming.retain(|p| !self.done.contains(p));
         }
 
@@ -731,7 +732,6 @@ impl Scan {
 
         // Borrow config and sandbox separately for use in scanner thread,
         // allowing main thread to mutate self.done, self.incoming, etc.
-        let config = &self.config;
         let sandbox = &self.sandbox;
         let sandbox_id = self.sandbox_id;
         let scan_env = self.scan_env();
@@ -811,7 +811,7 @@ impl Scan {
                             }
 
                             let result = Self::scan_pkgpath_with(
-                                config,
+                                pkgsrc,
                                 sandbox,
                                 sandbox_id,
                                 pkgpath,
@@ -1037,7 +1037,7 @@ impl Scan {
      * This allows scanning without borrowing all of `self`.
      */
     fn scan_pkgpath_with(
-        config: &Config,
+        pkgsrc: &Pkgsrc,
         sandbox: &Sandbox,
         sandbox_id: Option<usize>,
         pkgpath: &PkgPath,
@@ -1049,13 +1049,13 @@ impl Scan {
         let _guard = span.enter();
         debug!("Scanning package");
 
-        let pkgsrcdir = config.pkgsrc().display().to_string();
+        let pkgsrcdir = pkgsrc.basedir.display().to_string();
         let workdir = format!("{}/{}", pkgsrcdir, pkgpath_str);
 
         trace!(%workdir, ?scan_env, "Executing pkg-scan");
         let child = sandbox.execute_command(
             sandbox_id,
-            config.make(),
+            &pkgsrc.make,
             ["-C", &workdir, "pbulk-index"],
             scan_env.to_vec(),
         )?;

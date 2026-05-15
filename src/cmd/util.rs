@@ -154,7 +154,7 @@ pub fn import_scan(config: &Config, file: &PathBuf, no_resolve: bool) -> Result<
         return Ok(());
     }
 
-    let mut scan = Scan::new(config);
+    let mut scan = Scan::new(config, None);
     let result = scan.resolve_with_report(&db, config.strict_scan())?;
     result.print_resolved();
     result.print_counts(None);
@@ -170,7 +170,7 @@ pub fn print_presolve(config: &Config, output: Option<&PathBuf>, sort: bool) -> 
         bail!("No cached scan data found. Run 'bob scan' first.");
     }
 
-    let mut scan = Scan::new(config);
+    let mut scan = Scan::new(config, None);
     scan.init_from_db(&db)?;
 
     let mut result =
