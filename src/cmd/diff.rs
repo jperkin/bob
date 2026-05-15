@@ -44,6 +44,9 @@ pub struct DiffArgs {
     /// Show all changes, not just failures and fixes
     #[arg(short, long)]
     pub all: bool,
+    /// Hide column headers
+    #[arg(short = 'H')]
+    pub no_header: bool,
     /// Columns to display (comma-separated, see --help for full list)
     #[arg(short = 'o', value_delimiter = ',')]
     pub columns: Option<Vec<String>>,
@@ -133,9 +136,16 @@ pub fn run(db: &Database, args: DiffArgs) -> Result<()> {
         (!args.to.is_empty()).then(|| args.to.iter().flatten().copied().collect());
 
     if from.is_some() || to.is_some() {
-        print_filtered(&diff, &breaks, &col_names, from.as_ref(), to.as_ref());
+        print_filtered(
+            &diff,
+            &breaks,
+            &col_names,
+            from.as_ref(),
+            to.as_ref(),
+            args.no_header,
+        );
     } else {
-        print_diff(&diff, &breaks, args.all, &col_names);
+        print_diff(&diff, &breaks, args.all, &col_names, args.no_header);
     }
     Ok(())
 }
@@ -158,6 +168,7 @@ fn print_filtered(
     col_names: &[&str],
     from: Option<&HashSet<PackageStateKind>>,
     to: Option<&HashSet<PackageStateKind>>,
+    no_header: bool,
 ) {
     if !try_println(&format!("--- {}", diff.build1_id)) {
         return;
@@ -208,14 +219,16 @@ fn print_filtered(
         })
         .collect();
 
-    let header: String = col_names
-        .iter()
-        .zip(&widths)
-        .map(|(name, w)| format!("{:<w$}", name.to_uppercase(), w = w))
-        .collect::<Vec<_>>()
-        .join("  ");
-    if !try_println(&format!(" {}", header)) {
-        return;
+    if !no_header {
+        let header: String = col_names
+            .iter()
+            .zip(&widths)
+            .map(|(name, w)| format!("{:<w$}", name.to_uppercase(), w = w))
+            .collect::<Vec<_>>()
+            .join("  ");
+        if !try_println(&format!(" {}", header)) {
+            return;
+        }
     }
 
     entries.sort_by_key(|e| std::cmp::Reverse(get_breaks(e, breaks)));
@@ -281,6 +294,7 @@ fn print_diff(
     breaks: &HashMap<String, usize>,
     show_all: bool,
     col_names: &[&str],
+    no_header: bool,
 ) {
     if !try_println(&format!("--- {}", diff.build1_id)) {
         return;
@@ -340,14 +354,16 @@ fn print_diff(
         })
         .collect();
 
-    let header: String = col_names
-        .iter()
-        .zip(&widths)
-        .map(|(name, w)| format!("{:<w$}", name.to_uppercase(), w = w))
-        .collect::<Vec<_>>()
-        .join("  ");
-    if !try_println(&format!(" {}", header)) {
-        return;
+    if !no_header {
+        let header: String = col_names
+            .iter()
+            .zip(&widths)
+            .map(|(name, w)| format!("{:<w$}", name.to_uppercase(), w = w))
+            .collect::<Vec<_>>()
+            .join("  ");
+        if !try_println(&format!(" {}", header)) {
+            return;
+        }
     }
 
     let print_entries = |prefix: char, entries: &mut [&DiffEntry]| -> bool {

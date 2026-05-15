@@ -601,7 +601,10 @@ fn run() -> Result<()> {
         Cmd::List { cmd } => {
             let config = Config::load(args.config.as_deref())?;
             let db = Database::open(config.dbdir())?;
-            cmd::list::run(&db, cmd.unwrap_or(cmd::list::ListCmd::Builds))?;
+            cmd::list::run(
+                &db,
+                cmd.unwrap_or(cmd::list::ListCmd::Builds { no_header: false }),
+            )?;
         }
         Cmd::Dev => {
             let (config, pkgsrc) = Config::load_with_optional_pkgsrc(args.config.as_deref())?;

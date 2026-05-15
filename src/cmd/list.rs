@@ -46,7 +46,11 @@ pub enum TreeOutput {
 #[derive(Debug, Subcommand)]
 pub enum ListCmd {
     /// List builds recorded in history (default)
-    Builds,
+    Builds {
+        /// Hide column headers
+        #[arg(short = 'H')]
+        no_header: bool,
+    },
     /// Show dependency tree of packages to build
     Tree {
         /// Include up-to-date packages
@@ -81,12 +85,12 @@ pub enum ListCmd {
 }
 
 pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
-    if !matches!(cmd, ListCmd::Builds) && db.count_packages()? == 0 {
+    if !matches!(cmd, ListCmd::Builds { .. }) && db.count_packages()? == 0 {
         bail!("No packages in database. Run 'bob scan' first.");
     }
 
     match cmd {
-        ListCmd::Builds => list_builds(db)?,
+        ListCmd::Builds { no_header } => list_builds(db, no_header)?,
         ListCmd::Tree {
             all,
             format,
@@ -143,7 +147,7 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
     Ok(())
 }
 
-fn list_builds(db: &Database) -> Result<()> {
+fn list_builds(db: &Database, no_header: bool) -> Result<()> {
     let builds = db.list_history_builds()?;
     if builds.is_empty() {
         println!("No builds in history.");
@@ -169,7 +173,7 @@ fn list_builds(db: &Database) -> Result<()> {
             bob::format_duration(b.duration_ms),
         ]);
     }
-    fmt.print(OutputFormat::Table, false);
+    fmt.print(OutputFormat::Table, no_header);
     Ok(())
 }
 
