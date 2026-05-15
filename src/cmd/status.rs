@@ -527,13 +527,7 @@ fn print_build_status(
                 "multi_version" => multi_version.clone(),
                 "deps" => sp.dep_count.to_string(),
                 "priority" => sp.total_pbulk_weight.to_string(),
-                "cpu" => {
-                    if sp.cpu_time > 0 {
-                        bob::format_duration(sp.cpu_time)
-                    } else {
-                        dash()
-                    }
-                }
+                "cpu" => bob::format_duration(sp.cpu_time),
                 "wrkobjdir" => resolved_wrkobjdir.clone().unwrap_or_else(dash),
                 "make_jobs" => resolved_make_jobs
                     .map(|n| n.to_string())

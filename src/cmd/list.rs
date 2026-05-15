@@ -159,11 +159,6 @@ fn list_builds(db: &Database) -> Result<()> {
         Col::new("duration", bob::Align::Right),
     ]);
     for b in &builds {
-        let duration = if b.duration_ms == 0 {
-            "-".to_string()
-        } else {
-            bob::format_duration(b.duration_ms)
-        };
         fmt.push(vec![
             b.build_id.clone(),
             b.package_count.to_string(),
@@ -171,7 +166,7 @@ fn list_builds(db: &Database) -> Result<()> {
             b.up_to_date.to_string(),
             b.failed.to_string(),
             b.masked.to_string(),
-            duration,
+            bob::format_duration(b.duration_ms),
         ]);
     }
     fmt.print(OutputFormat::Table, false);

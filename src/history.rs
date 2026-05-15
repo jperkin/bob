@@ -203,7 +203,9 @@ fn format_timestamp(epoch: i64) -> String {
 }
 
 pub fn format_duration(ms: u64) -> String {
-    if ms < 1000 {
+    if ms == 0 {
+        "-".to_string()
+    } else if ms < 1000 {
         format!("{}ms", ms)
     } else if ms < 60_000 {
         format!("{:.1}s", ms as f64 / 1000.0)
