@@ -125,7 +125,7 @@ const SCHEMA_VERSION: i32 = 20260425;
 /**
  * Schema version for history.db - update when history schema changes.
  */
-const HISTORY_SCHEMA_VERSION: i32 = 20260513;
+const HISTORY_SCHEMA_VERSION: i32 = 20260515;
 
 /**
  * Summary of a package's most recent build from history.
@@ -756,39 +756,6 @@ impl Database {
         Ok(())
     }
 
-    /**
-     * Get build reason for a package by name.
-     */
-    pub fn get_build_reason(&self, pkgname: &str) -> Result<Option<String>> {
-        let result = self.conn.query_row(
-            "SELECT s.build_reason FROM package_state s
-             JOIN scan_index p ON p.id = s.package_id
-             WHERE p.pkgname = ?1",
-            [pkgname],
-            |row| row.get(0),
-        );
-        match result {
-            Ok(reason) => Ok(reason),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /**
-     * Get all packages with their build reasons.
-     */
-    pub fn get_all_build_reasons(&self) -> Result<HashMap<String, String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT p.pkgname, s.build_reason FROM scan_index p
-             JOIN package_state s ON s.package_id = p.id
-             WHERE s.build_reason IS NOT NULL",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
     // ========================================================================
     // DEPENDENCY QUERIES
     // ========================================================================
@@ -1016,20 +983,6 @@ impl Database {
         Ok(out)
     }
 
-    /**
-     * Get resolved dependency edges as raw integer IDs.
-     *
-     * Use with an id-to-pkgname map (from [`get_all_package_status`]) to
-     * avoid the double JOIN in [`get_all_resolved_deps`].
-     */
-    pub fn get_resolved_dep_ids(&self) -> Result<Vec<(i64, i64)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT package_id, depends_on_id FROM resolved_depends")?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
     // ========================================================================
     // BUILD QUERIES
     // ========================================================================
@@ -1155,33 +1108,6 @@ impl Database {
             }
         }
         Ok(results)
-    }
-
-    /**
-     * Count how many packages are broken by each failed package.
-     * Returns a map from pkgname to the count of packages that depend on it.
-     */
-    pub fn count_breaks_for_failed(&self) -> Result<HashMap<String, usize>> {
-        let mut counts: HashMap<String, usize> = HashMap::new();
-
-        let mut stmt = self.conn.prepare(
-            "SELECT p.pkgname, COUNT(*)
-             FROM builds b
-             JOIN scan_index p ON b.failed_dep_id = p.id
-             WHERE b.outcome = ?1
-             GROUP BY b.failed_dep_id",
-        )?;
-
-        let rows = stmt.query_map([PackageStateKind::IndirectFailed as i32], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?;
-
-        for row in rows {
-            let (pkgname, count) = row?;
-            counts.insert(pkgname, count as usize);
-        }
-
-        Ok(counts)
     }
 
     /**
@@ -1382,76 +1308,6 @@ impl Database {
         )?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
-    /**
-     * Mark a package and all its transitive reverse dependencies as failed.
-     * Returns the count of packages marked.
-     */
-    pub fn mark_failure_cascade(
-        &self,
-        package_id: i64,
-        reason: &str,
-        duration: Duration,
-    ) -> Result<usize> {
-        let pkgname = self.get_pkgname(package_id)?;
-
-        // Get all affected packages using recursive CTE
-        let mut stmt = self.conn.prepare(
-            "WITH RECURSIVE affected(id, depth) AS (
-                SELECT ?1, 0
-                UNION
-                SELECT rd.package_id, a.depth + 1
-                FROM resolved_depends rd
-                JOIN affected a ON rd.depends_on_id = a.id
-            )
-            SELECT id, depth FROM affected ORDER BY depth",
-        )?;
-
-        let affected: Vec<(i64, i32)> = stmt
-            .query_map([package_id], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i32>(1)?))
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        // Batch insert failures
-        let tx = self.transaction()?;
-
-        for (id, depth) in &affected {
-            let (outcome, detail, dur, dep_id) = if *depth == 0 {
-                (
-                    PackageStateKind::Failed as i32,
-                    reason.to_string(),
-                    duration.as_millis() as i64,
-                    None,
-                )
-            } else {
-                (
-                    PackageStateKind::IndirectFailed as i32,
-                    format!("depends on failed {}", pkgname),
-                    0,
-                    Some(package_id),
-                )
-            };
-
-            self.conn.execute(
-                "INSERT OR REPLACE INTO builds
-                 (package_id, outcome, outcome_detail, duration_ms,
-                  failed_dep_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![id, outcome, detail, dur, dep_id],
-            )?;
-        }
-
-        tx.commit()?;
-
-        debug!(
-            package_id = package_id,
-            affected_count = affected.len(),
-            "Marked failure cascade"
-        );
-        Ok(affected.len())
     }
 
     // ========================================================================
@@ -1772,15 +1628,30 @@ impl Database {
 
     /**
      * Query build history, optionally filtering by regex on pkgpath
-     * or pkgname. Results are returned most recent first.
+     * or pkgname. Results are returned most recent first.  Defaults
+     * to Success and Failed outcomes only; `all = true` returns
+     * every recorded outcome including UpToDate and masked rows.
      */
-    pub fn query_history(&self, pattern: Option<&regex::Regex>) -> Result<Vec<crate::History>> {
+    pub fn query_history(
+        &self,
+        pattern: Option<&regex::Regex>,
+        all: bool,
+    ) -> Result<Vec<crate::History>> {
         let conn = self.history_conn()?;
         let cols: String = HistoryKind::VARIANTS
             .iter()
             .map(|v| format!("bh.{}", <&str>::from(v)))
             .collect::<Vec<_>>()
             .join(", ");
+        let where_clause = if all {
+            String::new()
+        } else {
+            format!(
+                "WHERE bh.outcome IN ({success}, {failed})",
+                success = PackageStateKind::Success as i32,
+                failed = PackageStateKind::Failed as i32,
+            )
+        };
         let sql = format!(
             "SELECT bh.id, {cols}, \
                     wt.stage, wt.duration, ct.duration \
@@ -1788,10 +1659,8 @@ impl Database {
              LEFT JOIN wall_times wt ON wt.history_id = bh.id \
              LEFT JOIN cpu_times ct ON ct.history_id = bh.id \
                                    AND ct.stage = wt.stage \
-             WHERE bh.outcome IN ({success}, {failed}) \
+             {where_clause} \
              ORDER BY bh.timestamp DESC, bh.id DESC",
-            success = PackageStateKind::Success as i32,
-            failed = PackageStateKind::Failed as i32,
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| {
@@ -1938,11 +1807,17 @@ impl Database {
         let pkgbase_col: &str = HistoryKind::Pkgbase.into();
         let pkgpath_col: &str = HistoryKind::Pkgpath.into();
         let partition = latest_history_partition();
+        let up_to_date = PackageStateKind::UpToDate as i32;
 
+        /*
+         * UpToDate rows are markers; they carry no disk_usage,
+         * make_jobs, or wrkobjdir.  Exclude them so the latest row per
+         * package is the most recent real build measurement.
+         */
         let where_clause = if build_id.is_some() {
-            "WHERE h.build_id = ?1"
+            format!("WHERE h.build_id = ?1 AND h.{out} != {up_to_date}")
         } else {
-            ""
+            format!("WHERE h.{out} != {up_to_date}")
         };
 
         let sql = format!(
@@ -2009,81 +1884,6 @@ impl Database {
     }
 
     /**
-     * Query the most recent successful build duration for all packages.
-     *
-     * Returns a map of pkgbase to duration in milliseconds.
-     */
-    pub fn duration_by_pkg_all(&self) -> HashMap<String, u64> {
-        let conn = match self.history_conn() {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(
-                    error = format!("{e:#}"),
-                    "duration_by_pkg_all: failed to open history db"
-                );
-                return HashMap::new();
-            }
-        };
-
-        let dur: &str = HistoryKind::Duration.into();
-        let out: &str = HistoryKind::Outcome.into();
-        let pkgbase_col: &str = HistoryKind::Pkgbase.into();
-        let pkgpath_col: &str = HistoryKind::Pkgpath.into();
-        let success_outcome = PackageStateKind::Success as i32;
-        let build_stage = Stage::Build as i32;
-        let jobs: &str = HistoryKind::MakeJobs.into();
-
-        let sql = format!(
-            "WITH matched AS ( \
-                 SELECT h.{pkgbase_col}, h.{dur}, h.{jobs}, h.id, \
-                        ROW_NUMBER() OVER ( \
-                            PARTITION BY h.{pkgpath_col}, h.{pkgbase_col} \
-                            ORDER BY h.id DESC \
-                        ) AS rn \
-                 FROM build_history h \
-                 WHERE h.{out} = {success_outcome} \
-             ) \
-             SELECT m.{pkgbase_col}, \
-                    COALESCE(wt.duration, m.{dur}) \
-                        * COALESCE(m.{jobs}, 1) \
-             FROM matched m \
-             LEFT JOIN wall_times wt ON wt.history_id = m.id \
-                  AND wt.stage = {build_stage} \
-             WHERE m.rn = 1",
-        );
-
-        let mut stmt = match conn.prepare(&sql) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(
-                    error = format!("{e:#}"),
-                    "duration_by_pkg_all: failed to prepare query"
-                );
-                return HashMap::new();
-            }
-        };
-        let rows = match stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        }) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(
-                    error = format!("{e:#}"),
-                    "duration_by_pkg_all: query failed"
-                );
-                return HashMap::new();
-            }
-        };
-
-        let mut result = HashMap::new();
-        for row in rows.flatten() {
-            let (pkgbase, ms) = row;
-            result.insert(pkgbase, ms as u64);
-        }
-        result
-    }
-
-    /**
      * Write CPU usage samples to the `cpu_usage` table in history.db.
      */
     pub fn store_cpu_usage(&self, samples: &[crate::cpu::CpuSample]) -> Result<()> {
@@ -2108,31 +1908,26 @@ impl Database {
     /**
      * List all build IDs in history, most recent first.
      *
-     * Counts come from the latest `build_history` row per pkgpath
-     * except for up-to-date packages, which are tracked on
-     * `build_metadata.up_to_date` because they have no history row.
+     * Succeeded/failed/masked counts come from `build_history`;
+     * `UpToDate` rows in `build_history` (present for builds run
+     * after schema v20260515) are excluded from the masked bucket
+     * because the canonical up-to-date count lives on
+     * `build_metadata.up_to_date`, which also covers older builds
+     * that never wrote per-package up-to-date rows.
      */
     pub fn list_history_builds(&self) -> Result<Vec<BuildListEntry>> {
         let conn = self.history_conn()?;
         let success = PackageStateKind::Success as i32;
         let failed = PackageStateKind::Failed as i32;
+        let up_to_date = PackageStateKind::UpToDate as i32;
         let mut stmt = conn.prepare(
-            "WITH latest AS ( \
-                 SELECT build_id, outcome, \
-                        ROW_NUMBER() OVER ( \
-                            PARTITION BY build_id, pkgpath, pkgname \
-                            ORDER BY id DESC \
-                        ) AS rn \
-                 FROM build_history \
-                 WHERE build_id IS NOT NULL \
-             ), \
-             attempted AS ( \
+            "WITH attempted AS ( \
                  SELECT build_id, \
                         SUM(CASE WHEN outcome = ?1 THEN 1 ELSE 0 END) AS succeeded, \
                         SUM(CASE WHEN outcome = ?2 THEN 1 ELSE 0 END) AS failed, \
-                        SUM(CASE WHEN outcome NOT IN (?1, ?2) THEN 1 ELSE 0 END) AS masked \
-                 FROM latest \
-                 WHERE rn = 1 \
+                        SUM(CASE WHEN outcome NOT IN (?1, ?2, ?3) THEN 1 ELSE 0 END) AS masked \
+                 FROM build_history \
+                 WHERE build_id IS NOT NULL \
                  GROUP BY build_id \
              ), \
              all_builds AS ( \
@@ -2153,7 +1948,7 @@ impl Database {
              LEFT JOIN build_metadata m ON m.build_id = b.build_id \
              ORDER BY b.build_id DESC",
         )?;
-        let rows = stmt.query_map(params![success, failed], |row| {
+        let rows = stmt.query_map(params![success, failed, up_to_date], |row| {
             Ok(BuildListEntry {
                 build_id: row.get(0)?,
                 package_count: row.get::<_, i64>(1)? as usize,
@@ -2224,16 +2019,10 @@ impl Database {
             outcome: i32,
             stage: Option<i32>,
         }
-        let partition = latest_history_partition();
-        let sql = format!(
-            "SELECT pkgpath, pkgbase, pkgname, outcome, stage FROM ( \
-                 SELECT pkgpath, pkgbase, pkgname, outcome, stage, \
-                        ROW_NUMBER() OVER ({partition}) AS rn \
-                 FROM build_history WHERE build_id = ?1 \
-             ) WHERE rn = 1",
-        );
+        let sql = "SELECT pkgpath, pkgbase, pkgname, outcome, stage \
+                   FROM build_history WHERE build_id = ?1";
         let query_build = |bid: &str| -> Result<HashMap<PkgKey, PkgRecord>> {
-            let mut stmt = conn.prepare(&sql)?;
+            let mut stmt = conn.prepare(sql)?;
             let mut map = HashMap::new();
             let rows = stmt.query_map([bid], |row| {
                 Ok((
@@ -2291,7 +2080,16 @@ impl Database {
                     let b1_outcome = PackageStateKind::from_repr(b1_rec.outcome);
                     let b1_stage = b1_rec.stage.and_then(Stage::from_repr);
                     let pkgname_changed = b1_rec.pkgname != b2_rec.pkgname;
-                    if b1_outcome == b2_outcome && b1_stage == b2_stage && !pkgname_changed {
+                    let both_ok = matches!(
+                        (b1_outcome, b2_outcome),
+                        (Some(Success | UpToDate), Some(Success | UpToDate))
+                    );
+                    let no_change = if both_ok {
+                        !pkgname_changed
+                    } else {
+                        b1_outcome == b2_outcome && b1_stage == b2_stage && !pkgname_changed
+                    };
+                    if no_change {
                         continue;
                     }
                     let entry = entry_from(Some(b1_rec));
@@ -2433,9 +2231,21 @@ fn check_history_schema(dbdir: &Path) -> Result<()> {
         return Ok(());
     }
     if version == 20260406 {
-        migrate_history_20260406_to_20260513(&conn).with_context(|| {
+        migrate_history_20260406_to_20260513(&conn)
+            .with_context(|| format!("Failed to migrate history schema v{version} to v20260513"))?;
+    }
+    let version: i32 = conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+        row.get(0)
+    })?;
+    if version == 20260513 {
+        migrate_history_20260513_to_20260515(&conn).with_context(|| {
             format!("Failed to migrate history schema v{version} to v{HISTORY_SCHEMA_VERSION}")
         })?;
+    }
+    let version: i32 = conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+        row.get(0)
+    })?;
+    if version == HISTORY_SCHEMA_VERSION {
         return Ok(());
     }
     anyhow::bail!(
@@ -2457,11 +2267,65 @@ fn migrate_history_20260406_to_20260513(conn: &Connection) -> Result<()> {
         "ALTER TABLE build_metadata ADD COLUMN up_to_date  INTEGER NOT NULL DEFAULT 0;
          ALTER TABLE build_metadata ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0;",
     )?;
+    tx.execute("UPDATE schema_version SET version = ?1", params![20260513])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/**
+ * Migrate history.db from v20260513 to v20260515.
+ *
+ * Adds `UNIQUE(build_id, pkgpath, pkgbase)` to `build_history`,
+ * rebuilding the table to install the constraint.  Pre-existing
+ * duplicate rows are collapsed to the most recent row per key
+ * (`MAX(id)` per group).  Rows with a NULL `build_id` are kept
+ * verbatim: SQL `GROUP BY` treats NULLs as equal but the new UNIQUE
+ * constraint treats them as distinct, so grouping would discard
+ * rows that the constraint allows.  Orphaned `wall_times` /
+ * `cpu_times` rows for dropped history rows are removed in the
+ * same transaction.
+ */
+fn migrate_history_20260513_to_20260515(conn: &Connection) -> Result<()> {
+    conn.execute_batch("PRAGMA foreign_keys=OFF")?;
+    let tx = conn.unchecked_transaction()?;
+    let history_cols = history_schema();
+    tx.execute_batch(&format!(
+        "CREATE TABLE build_history_new (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             {history_cols},
+             UNIQUE (build_id, pkgpath, pkgbase)
+         );
+         INSERT INTO build_history_new
+             SELECT * FROM build_history
+             WHERE build_id IS NULL
+                OR id IN (
+                    SELECT MAX(id) FROM build_history
+                    WHERE build_id IS NOT NULL
+                    GROUP BY build_id, pkgpath, pkgbase
+                );
+         DELETE FROM wall_times
+             WHERE history_id NOT IN (SELECT id FROM build_history_new);
+         DELETE FROM cpu_times
+             WHERE history_id NOT IN (SELECT id FROM build_history_new);
+         DROP TABLE build_history;
+         ALTER TABLE build_history_new RENAME TO build_history;
+         CREATE INDEX idx_history_pkgpath
+             ON build_history(pkgpath);
+         CREATE INDEX idx_history_pkgpath_pkgbase
+             ON build_history(pkgpath, pkgbase);
+         CREATE INDEX idx_history_pkgpath_outcome
+             ON build_history(pkgpath, outcome);
+         CREATE INDEX idx_history_timestamp
+             ON build_history(timestamp);
+         CREATE INDEX idx_history_build_id
+             ON build_history(build_id, pkgpath, id);",
+    ))?;
     tx.execute(
         "UPDATE schema_version SET version = ?1",
         params![HISTORY_SCHEMA_VERSION],
     )?;
     tx.commit()?;
+    conn.execute_batch("PRAGMA foreign_keys=ON")?;
     Ok(())
 }
 
@@ -2518,9 +2382,20 @@ pub(crate) fn create_history_schema(conn: &Connection) -> Result<()> {
          );
          INSERT INTO stage_types (id, name) VALUES {stages};
 
+         /*
+          * build_history is keyed by (build_id, pkgpath, pkgbase) and
+          * holds the latest outcome per key, not an append-only event
+          * log: record_history_to upserts on conflict, replacing any
+          * prior row for the same key (e.g. a transient failure
+          * superseded by a successful rebuild within the same
+          * build_id).  Within-build retries collapse to the final
+          * state; cross-build history is preserved because each build
+          * has its own build_id.
+          */
          CREATE TABLE build_history (
              id INTEGER PRIMARY KEY AUTOINCREMENT,
-             {history_columns}
+             {history_columns},
+             UNIQUE (build_id, pkgpath, pkgbase)
          );
 
          CREATE INDEX idx_history_pkgpath
@@ -2574,9 +2449,15 @@ pub(crate) fn create_history_schema(conn: &Connection) -> Result<()> {
 /**
  * Insert a build record into the history database.
  *
- * Writes to `build_history`, `wall_times`, and `cpu_times`.
- * Used by [`Database::record_history`] and by tests that need
- * to populate an in-memory history database.
+ * `build_history` has `UNIQUE(build_id, pkgpath, pkgbase)`.  Real
+ * outcomes (Success, Failed, etc.) replace any prior row for the
+ * same key and refresh the `wall_times` / `cpu_times` side rows;
+ * an `UpToDate` write is a marker only and yields to any existing
+ * row, since a real outcome is always more informative than "we
+ * didn't rebuild it."
+ *
+ * Used by [`Database::record_history`] and by tests that need to
+ * populate an in-memory history database.
  */
 pub(crate) fn record_history_to(conn: &Connection, rec: &crate::History) -> Result<()> {
     let cols: Vec<&str> = HistoryKind::VARIANTS.iter().map(<&str>::from).collect();
@@ -2584,29 +2465,55 @@ pub(crate) fn record_history_to(conn: &Connection, rec: &crate::History) -> Resu
         .map(|i| format!("?{}", i))
         .collect::<Vec<_>>()
         .join(", ");
+    let dur_ms = |d: Duration| d.as_millis() as i64;
+    let values = params![
+        rec.timestamp,
+        rec.pkgpath,
+        rec.pkgname,
+        rec.pkgbase,
+        rec.outcome.db_id(),
+        rec.stage.map(|s| s as i32),
+        rec.make_jobs.map(|j| j as i64),
+        dur_ms(rec.duration),
+        rec.disk_usage.map(|s| s as i64),
+        rec.wrkobjdir.as_ref().map(|k| k.to_string()),
+        rec.build_id.as_deref(),
+    ];
+
+    if matches!(rec.outcome, crate::PackageState::UpToDate) {
+        let sql = format!(
+            "INSERT INTO build_history ({}) VALUES ({}) \
+             ON CONFLICT(build_id, pkgpath, pkgbase) DO NOTHING",
+            cols.join(", "),
+            placeholders,
+        );
+        conn.execute(&sql, values)?;
+        return Ok(());
+    }
+
+    let update_assignments: String = cols
+        .iter()
+        .map(|c| format!("{c} = excluded.{c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let sql = format!(
-        "INSERT INTO build_history ({}) VALUES ({})",
+        "INSERT INTO build_history ({}) VALUES ({}) \
+         ON CONFLICT(build_id, pkgpath, pkgbase) DO UPDATE SET {} \
+         RETURNING id",
         cols.join(", "),
         placeholders,
+        update_assignments,
     );
-    let dur_ms = |d: Duration| d.as_millis() as i64;
+    let history_id: i64 = conn.query_row(&sql, values, |row| row.get(0))?;
+
     conn.execute(
-        &sql,
-        params![
-            rec.timestamp,
-            rec.pkgpath,
-            rec.pkgname,
-            rec.pkgbase,
-            rec.outcome.db_id(),
-            rec.stage.map(|s| s as i32),
-            rec.make_jobs.map(|j| j as i64),
-            dur_ms(rec.duration),
-            rec.disk_usage.map(|s| s as i64),
-            rec.wrkobjdir.as_ref().map(|k| k.to_string()),
-            rec.build_id.as_deref(),
-        ],
+        "DELETE FROM wall_times WHERE history_id = ?1",
+        params![history_id],
     )?;
-    let history_id = conn.last_insert_rowid();
+    conn.execute(
+        "DELETE FROM cpu_times WHERE history_id = ?1",
+        params![history_id],
+    )?;
     if !rec.stage_durations.is_empty() {
         let mut stmt = conn.prepare_cached(
             "INSERT INTO wall_times \

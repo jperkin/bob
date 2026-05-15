@@ -196,12 +196,13 @@ pub fn check_up_to_date(
      * or their specific rebuild reason). Propagated packages (not checked)
      * get DependencyRefresh.
      */
+    let build_id = db.build_id()?;
+    let now = chrono::Utc::now().timestamp();
     for (pkg, result) in checked_results {
         let pkgname = pkg.pkgname().pkgname();
         match result {
             Ok(None) => {
                 if db.is_successful(pkgname)? {
-                    up_to_date_count += 1;
                     continue;
                 }
                 let build_result = bob::BuildResult {
@@ -209,9 +210,22 @@ pub fn check_up_to_date(
                     pkgpath: Some(pkg.pkgpath.clone()),
                     state: bob::PackageState::UpToDate,
                     log_dir: None,
-                    build_stats: bob::PkgBuildStats::default(),
+                    build_stats: bob::PkgBuildStats {
+                        timestamp: now,
+                        ..Default::default()
+                    },
                 };
                 db.store_build_by_name(&build_result)?;
+                if let Some(mut input) = build_result.history_input() {
+                    input.build_id = Some(build_id.clone());
+                    if let Err(e) = db.record_history(&input) {
+                        tracing::warn!(
+                            pkgname,
+                            error = format!("{e:#}"),
+                            "Failed to record up-to-date history"
+                        );
+                    }
+                }
                 up_to_date_count += 1;
             }
             Ok(Some(reason)) => {
@@ -235,7 +249,7 @@ pub fn check_up_to_date(
 
     bob::print_elapsed("Calculating package build status", start.elapsed());
 
-    db.record_up_to_date_count(&db.build_id()?, up_to_date_count)?;
+    db.record_up_to_date_count(&build_id, up_to_date_count)?;
 
     Ok(up_to_date_count)
 }

@@ -24,6 +24,9 @@ use super::{Col, Formatter, OutputFormat};
 
 #[derive(Debug, Args)]
 pub struct HistoryArgs {
+    /// Include rows for every recorded outcome (up-to-date, masked, etc.)
+    #[arg(short = 'a', long)]
+    all: bool,
     /// Hide column headers
     #[arg(short = 'H')]
     no_header: bool,
@@ -50,17 +53,20 @@ pub fn run(db: &Database, args: HistoryArgs) -> Result<()> {
         args.no_header,
         args.long,
         args.raw,
+        args.all,
         args.format,
         args.package.as_deref(),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_history(
     db: &Database,
     columns: Option<&[String]>,
     no_header: bool,
     long: bool,
     raw: bool,
+    all: bool,
     format: OutputFormat,
     package: Option<&str>,
 ) -> Result<()> {
@@ -89,7 +95,7 @@ fn print_history(
 
     let pattern = package.map(pkg_pattern).transpose()?;
 
-    let records = db.query_history(pattern.as_ref())?;
+    let records = db.query_history(pattern.as_ref(), all)?;
 
     if records.is_empty() {
         if package.is_some() {
