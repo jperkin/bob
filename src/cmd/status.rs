@@ -294,6 +294,9 @@ pub struct StatusArgs {
     /// Show all columns
     #[arg(short = 'l', long)]
     long: bool,
+    /// Output raw numeric values (ms for durations, bytes for sizes)
+    #[arg(short = 'r', long)]
+    raw: bool,
     /// Output format
     #[arg(short = 'f', long, value_enum, default_value_t = OutputFormat::Table)]
     format: OutputFormat,
@@ -328,6 +331,7 @@ pub fn run(db: &Database, config: &Config, args: StatusArgs) -> Result<()> {
         args.columns.as_deref(),
         args.no_header,
         args.long,
+        args.raw,
         args.format,
         &args.packages,
         args.all,
@@ -349,6 +353,7 @@ fn print_build_status(
     columns: Option<&[String]>,
     no_header: bool,
     long: bool,
+    raw: bool,
     format: OutputFormat,
     pkg_filters: &[String],
     show_all: bool,
@@ -527,12 +532,26 @@ fn print_build_status(
                 "multi_version" => multi_version.clone(),
                 "deps" => sp.dep_count.to_string(),
                 "priority" => sp.total_pbulk_weight.to_string(),
-                "cpu" => bob::format_duration(sp.cpu_time),
+                "cpu" => {
+                    if raw {
+                        sp.cpu_time.to_string()
+                    } else {
+                        bob::format_duration(sp.cpu_time)
+                    }
+                }
                 "wrkobjdir" => resolved_wrkobjdir.clone().unwrap_or_else(dash),
                 "make_jobs" => resolved_make_jobs
                     .map(|n| n.to_string())
                     .unwrap_or_else(dash),
-                "disk_usage" => actual_disk_usage.map(bob::format_size).unwrap_or_else(dash),
+                "disk_usage" => actual_disk_usage
+                    .map(|s| {
+                        if raw {
+                            s.to_string()
+                        } else {
+                            bob::format_size(s)
+                        }
+                    })
+                    .unwrap_or_else(dash),
                 _ => String::new(),
             })
             .collect();

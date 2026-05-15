@@ -114,11 +114,11 @@ impl HistoryKind {
     }
 
     /// Generate the `after_long_help` text for `bob history`.
-    pub fn after_help() -> String {
+    pub fn columns_help() -> String {
         let all_cols = Self::all_columns();
         let max_name = all_cols.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
 
-        let mut help = String::from("Columns:\n");
+        let mut help = String::from("Columns to display (comma-separated)\n\nColumns:\n");
         for col in Self::VARIANTS {
             let name: &str = col.into();
             let desc = col.get_message().unwrap_or("");
@@ -143,20 +143,20 @@ impl HistoryKind {
             ));
         }
         help.push_str(&format!(
-            "\nDefault columns: {}\n",
+            "\nDefault columns: {}",
             Self::default_names().join(",")
         ));
 
-        help.push_str(
-            "\n\
-             Examples:\n  \
-             bob history                                        Show all build history\n  \
-             bob history rust                                   Show history matching 'rust'\n  \
-             bob history -o pkgname,build,cpu:build,duration    Show build wall+cpu time\n  \
-             bob history -Ho pkgpath                            Show pkgpaths only, no header",
-        );
-
         help
+    }
+
+    pub fn after_help() -> String {
+        "Examples:\n  \
+         bob history                                        Show all build history\n  \
+         bob history rust                                   Show history matching 'rust'\n  \
+         bob history -o pkgname,build,cpu:build,duration    Show build wall+cpu time\n  \
+         bob history -Ho pkgpath                            Show pkgpaths only, no header"
+            .to_string()
     }
 }
 

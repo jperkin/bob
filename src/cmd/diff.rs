@@ -47,6 +47,9 @@ pub struct DiffArgs {
     /// Hide column headers
     #[arg(short = 'H')]
     pub no_header: bool,
+    /// Show all columns
+    #[arg(short = 'l', long)]
+    pub long: bool,
     /// Columns to display (comma-separated, see --help for full list)
     #[arg(short = 'o', value_delimiter = ',')]
     pub columns: Option<Vec<String>>,
@@ -93,6 +96,7 @@ pub fn run(db: &Database, args: DiffArgs) -> Result<()> {
             }
             cols.iter().map(|s| s.as_str()).collect()
         }
+        None if args.long => DIFF_COLUMNS.iter().map(|(n, _)| *n).collect(),
         None => DEFAULT_COLUMNS.to_vec(),
     };
 

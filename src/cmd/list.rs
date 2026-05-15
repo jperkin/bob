@@ -48,6 +48,12 @@ pub struct BuildsArgs {
     /// Hide column headers
     #[arg(short = 'H')]
     pub no_header: bool,
+    /// Output raw numeric values (ms for durations)
+    #[arg(short = 'r', long)]
+    pub raw: bool,
+    /// Output format
+    #[arg(short = 'f', long, value_enum, default_value_t = OutputFormat::Table)]
+    pub format: OutputFormat,
     /// Columns to display (comma-separated, see --help for full list)
     #[arg(short = 'o', long_help = builds_columns_help(), value_delimiter = ',')]
     pub columns: Option<Vec<String>>,
@@ -96,7 +102,7 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
     }
 
     match cmd {
-        ListCmd::Builds(args) => list_builds(db, args.no_header, args.columns.as_deref())?,
+        ListCmd::Builds(args) => list_builds(db, args)?,
         ListCmd::Tree {
             all,
             format,
@@ -153,46 +159,55 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
     Ok(())
 }
 
-type BuildColFmt = fn(&bob::db::BuildListEntry) -> String;
+type BuildColFmt = fn(&bob::db::BuildListEntry, bool) -> String;
 const BUILD_COLS: &[(&str, &str, bob::Align, BuildColFmt)] = &[
     (
         "build_id",
         "Build session identifier",
         bob::Align::Left,
-        |b| b.build_id.clone(),
+        |b, _| b.build_id.clone(),
     ),
     (
         "packages",
         "Total packages in the build",
         bob::Align::Right,
-        |b| b.package_count.to_string(),
+        |b, _| b.package_count.to_string(),
     ),
     (
         "succeeded",
         "Packages built successfully",
         bob::Align::Right,
-        |b| b.succeeded.to_string(),
+        |b, _| b.succeeded.to_string(),
     ),
     (
         "uptodate",
         "Packages already up-to-date",
         bob::Align::Right,
-        |b| b.up_to_date.to_string(),
+        |b, _| b.up_to_date.to_string(),
     ),
-    ("failed", "Packages that failed", bob::Align::Right, |b| {
-        b.failed.to_string()
-    }),
+    (
+        "failed",
+        "Packages that failed",
+        bob::Align::Right,
+        |b, _| b.failed.to_string(),
+    ),
     (
         "masked",
         "Packages skipped or masked",
         bob::Align::Right,
-        |b| b.masked.to_string(),
+        |b, _| b.masked.to_string(),
     ),
     (
         "duration",
         "Wall-clock build time",
         bob::Align::Right,
-        |b| bob::format_duration(b.duration_ms),
+        |b, raw| {
+            if raw {
+                b.duration_ms.to_string()
+            } else {
+                bob::format_duration(b.duration_ms)
+            }
+        },
     ),
 ];
 
@@ -211,8 +226,8 @@ fn builds_columns_help() -> String {
     help
 }
 
-fn list_builds(db: &Database, no_header: bool, columns: Option<&[String]>) -> Result<()> {
-    let cols: Vec<&(&str, &str, bob::Align, BuildColFmt)> = match columns {
+fn list_builds(db: &Database, args: BuildsArgs) -> Result<()> {
+    let cols: Vec<&(&str, &str, bob::Align, BuildColFmt)> = match args.columns.as_deref() {
         Some(names) => {
             let mut out = Vec::with_capacity(names.len());
             for name in names {
@@ -245,9 +260,9 @@ fn list_builds(db: &Database, no_header: bool, columns: Option<&[String]>) -> Re
             .collect(),
     );
     for b in &builds {
-        fmt.push(cols.iter().map(|(_, _, _, f)| f(b)).collect());
+        fmt.push(cols.iter().map(|(_, _, _, f)| f(b, args.raw)).collect());
     }
-    fmt.print(OutputFormat::Table, no_header);
+    fmt.print(args.format, args.no_header);
     Ok(())
 }
 

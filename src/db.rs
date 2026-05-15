@@ -1634,7 +1634,7 @@ impl Database {
      */
     pub fn query_history(
         &self,
-        pattern: Option<&regex::Regex>,
+        patterns: &[regex::Regex],
         all: bool,
     ) -> Result<Vec<crate::History>> {
         let conn = self.history_conn()?;
@@ -1728,10 +1728,12 @@ impl Database {
             current_id = Some(id);
             current_accepted = false;
 
-            if let Some(re) = pattern {
-                if !re.is_match(&pkgpath) && !re.is_match(&pkgname) {
-                    continue;
-                }
+            if !patterns.is_empty()
+                && !patterns
+                    .iter()
+                    .any(|re| re.is_match(&pkgpath) || re.is_match(&pkgname))
+            {
+                continue;
             }
 
             current_accepted = true;

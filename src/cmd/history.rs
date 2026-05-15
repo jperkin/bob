@@ -39,11 +39,11 @@ pub struct HistoryArgs {
     /// Output format
     #[arg(short = 'f', long, value_enum, default_value_t = OutputFormat::Table)]
     format: OutputFormat,
-    /// Columns to display (comma-separated, see --help for full list)
-    #[arg(short = 'o', value_delimiter = ',')]
+    /// Columns to display (comma-separated; use --help for full list)
+    #[arg(short = 'o', long_help = bob::HistoryKind::columns_help(), value_delimiter = ',')]
     columns: Option<Vec<String>>,
-    /// Filter by pkgpath or pkgname (regex)
-    package: Option<String>,
+    /// Filter by pkgpath or pkgname (regex; any match)
+    packages: Vec<String>,
 }
 
 pub fn run(db: &Database, args: HistoryArgs) -> Result<()> {
@@ -55,7 +55,7 @@ pub fn run(db: &Database, args: HistoryArgs) -> Result<()> {
         args.raw,
         args.all,
         args.format,
-        args.package.as_deref(),
+        &args.packages,
     )
 }
 
@@ -68,7 +68,7 @@ fn print_history(
     raw: bool,
     all: bool,
     format: OutputFormat,
-    package: Option<&str>,
+    packages: &[String],
 ) -> Result<()> {
     let all_cols = bob::HistoryKind::all_columns();
     let default_cols = bob::HistoryKind::default_names();
@@ -93,12 +93,16 @@ fn print_history(
         }
     }
 
-    let pattern = package.map(pkg_pattern).transpose()?;
+    let patterns: Vec<regex::Regex> = packages
+        .iter()
+        .map(String::as_str)
+        .map(pkg_pattern)
+        .collect::<Result<Vec<_>>>()?;
 
-    let records = db.query_history(pattern.as_ref(), all)?;
+    let records = db.query_history(&patterns, all)?;
 
     if records.is_empty() {
-        if package.is_some() {
+        if !patterns.is_empty() {
             bail!("No history matches the pattern");
         } else {
             println!("No build history recorded");
