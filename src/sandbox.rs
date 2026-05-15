@@ -1091,7 +1091,26 @@ impl Sandbox {
      * [`set_pkgsrc_env`]: Sandbox::set_pkgsrc_env
      */
     pub fn destroy_all(&self) -> Result<()> {
-        let sandboxes = self.discover_sandboxes()?;
+        let ids = self.discover_sandboxes()?;
+        self.destroy_set(ids)
+    }
+
+    /**
+     * Destroy the listed sandbox IDs.  IDs that are not currently
+     * allocated are silently skipped (rm -f semantics).  Both complete
+     * and incomplete sandboxes are valid targets.
+     */
+    pub fn destroy_ids(&self, ids: &[usize]) -> Result<()> {
+        let discovered = self.discover_sandboxes()?;
+        let mut targets: Vec<usize> = discovered
+            .into_iter()
+            .filter(|id| ids.contains(id))
+            .collect();
+        targets.sort();
+        self.destroy_set(targets)
+    }
+
+    fn destroy_set(&self, sandboxes: Vec<usize>) -> Result<()> {
         if sandboxes.is_empty() {
             return Ok(());
         }
@@ -1129,7 +1148,7 @@ impl Sandbox {
         } else {
             Err(anyhow::anyhow!(
                 "Failed to destroy {} sandbox{}.\n\
-                 Remove unexpected files, then run 'bob sandbox destroy'.",
+                 Remove unexpected files, then try again.",
                 failed,
                 if failed == 1 { "" } else { "es" }
             ))

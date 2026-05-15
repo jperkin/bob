@@ -20,7 +20,7 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use clap::Subcommand;
+use clap::{ArgGroup, Args, Subcommand};
 
 use bob::config::{Config, Pkgsrc, PkgsrcEnv};
 use bob::logging;
@@ -30,12 +30,24 @@ use bob::sandbox::Sandbox;
 pub enum SandboxCmd {
     /// Create all sandboxes
     Create,
-    /// Destroy all sandboxes
-    Destroy,
+    /// Destroy sandboxes
+    Destroy(DestroyArgs),
     /// Create a sandbox and start an interactive shell
     Exec,
     /// List currently created sandboxes
     List,
+}
+
+#[derive(Debug, Args)]
+#[command(group = ArgGroup::new("target").required(true).multiple(false))]
+pub struct DestroyArgs {
+    /// Destroy every discovered sandbox.
+    #[arg(short = 'a', long, group = "target")]
+    pub all: bool,
+    /// Sandbox IDs to destroy.  IDs that are not currently allocated
+    /// are silently skipped.
+    #[arg(value_name = "ID", group = "target", num_args = 1..)]
+    pub ids: Vec<usize>,
 }
 
 pub fn run(config: &Config, pkgsrc: Option<&Pkgsrc>, cmd: SandboxCmd) -> Result<()> {
@@ -48,7 +60,7 @@ pub fn run(config: &Config, pkgsrc: Option<&Pkgsrc>, cmd: SandboxCmd) -> Result<
             }
             sandbox.create_all(config.build_threads())?;
         }
-        SandboxCmd::Destroy => {
+        SandboxCmd::Destroy(args) => {
             logging::init_stderr_if_enabled();
             let sandbox = Sandbox::new(config, pkgsrc);
             if !sandbox.enabled() {
@@ -62,7 +74,11 @@ pub fn run(config: &Config, pkgsrc: Option<&Pkgsrc>, cmd: SandboxCmd) -> Result<
                     ),
                 }
             }
-            sandbox.destroy_all()?;
+            if args.all {
+                sandbox.destroy_all()?;
+            } else {
+                sandbox.destroy_ids(&args.ids)?;
+            }
         }
         SandboxCmd::Exec => {
             logging::init(config.dbdir(), config.log_level())?;
