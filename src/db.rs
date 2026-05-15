@@ -466,7 +466,9 @@ impl Database {
             stages = stage_values(),
         ))?;
 
-        let build_id = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        let build_id = chrono::Utc::now()
+            .format(crate::BUILD_ID_FORMAT)
+            .to_string();
         self.conn.execute(
             "INSERT INTO metadata (key, value) VALUES ('build_id', ?1)",
             params![build_id],
@@ -1963,6 +1965,31 @@ impl Database {
         })?;
         rows.collect::<Result<Vec<_>, _>>()
             .context("Failed to list history builds")
+    }
+
+    /**
+     * Delete the listed build_ids from `build_history` and
+     * `build_metadata`, then `VACUUM` to reclaim space.  Cascaded
+     * deletes via FK clean up `wall_times` and `cpu_times`.  No-op if
+     * `build_ids` is empty.
+     */
+    pub fn prune_builds(&self, build_ids: &[String]) -> Result<()> {
+        if build_ids.is_empty() {
+            return Ok(());
+        }
+        let conn = self.history_conn()?;
+        let tx = conn.unchecked_transaction()?;
+        {
+            let mut hist = tx.prepare("DELETE FROM build_history WHERE build_id = ?1")?;
+            let mut meta = tx.prepare("DELETE FROM build_metadata WHERE build_id = ?1")?;
+            for id in build_ids {
+                hist.execute([id])?;
+                meta.execute([id])?;
+            }
+        }
+        tx.commit()?;
+        conn.execute_batch("VACUUM")?;
+        Ok(())
     }
 
     /**

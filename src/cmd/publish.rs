@@ -372,7 +372,7 @@ fn send_email(config: &Config, db: &Database, build_id: &str, dry_run: bool) -> 
                  Set publish.report.branch in config."
             )
         })?;
-    let date = chrono::NaiveDateTime::parse_from_str(build_id, "%Y%m%dT%H%M%SZ")
+    let date = bob::parse_build_id(build_id)
         .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
         .context("Failed to parse build ID as timestamp")?;
     let subject = format!("{} - {} - {}", branch, platform, date);
@@ -1137,10 +1137,9 @@ fn write_html_report(
             .then_with(|| a.result.pkgname.pkgname().cmp(b.result.pkgname.pkgname()))
     });
 
-    let display_date = match chrono::NaiveDateTime::parse_from_str(meta.build_id, "%Y%m%dT%H%M%SZ")
-    {
-        Ok(dt) => dt.format("%Y-%m-%d %H:%M").to_string(),
-        Err(_) => meta.build_id.to_string(),
+    let display_date = match bob::parse_build_id(meta.build_id) {
+        Some(dt) => dt.format("%Y-%m-%d %H:%M").to_string(),
+        None => meta.build_id.to_string(),
     };
     let os = m
         .get("OS_VARIANT")

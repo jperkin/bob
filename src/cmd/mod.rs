@@ -4,6 +4,7 @@ pub mod diff;
 pub mod history;
 pub mod list;
 pub mod log;
+pub mod prune;
 pub mod publish;
 pub mod rebuild;
 pub mod sandbox;

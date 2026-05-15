@@ -328,6 +328,11 @@ enum Cmd {
         #[command(flatten)]
         builds: cmd::list::BuildsArgs,
     },
+    /// Remove old build history
+    Prune {
+        #[command(flatten)]
+        args: cmd::prune::PruneArgs,
+    },
     /// Create a sandbox and start an interactive shell
     Dev,
     /// Create and destroy build sandboxes
@@ -604,6 +609,11 @@ fn run() -> Result<()> {
             let config = Config::load(args.config.as_deref())?;
             let db = Database::open(config.dbdir())?;
             cmd::list::run(&db, cmd.unwrap_or(cmd::list::ListCmd::Builds(builds)))?;
+        }
+        Cmd::Prune { args: prune_args } => {
+            let config = Config::load(args.config.as_deref())?;
+            let db = Database::open(config.dbdir())?;
+            cmd::prune::run(&db, prune_args)?;
         }
         Cmd::Dev => {
             let (config, pkgsrc) = Config::load_with_optional_pkgsrc(args.config.as_deref())?;

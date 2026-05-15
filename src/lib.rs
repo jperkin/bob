@@ -80,6 +80,47 @@ pub fn epoch_secs() -> Result<i64, std::time::SystemTimeError> {
         .map(|d| d.as_secs() as i64)
 }
 
+/**
+ * `strftime` format for a build_id.  Build_ids are timestamp strings
+ * minted at `Database::open` and stored as the primary key in
+ * `build_metadata` and the `build_id` column of `build_history`.
+ */
+pub const BUILD_ID_FORMAT: &str = "%Y%m%dT%H%M%SZ";
+
+/**
+ * Parse a build_id string into the timestamp it encodes, or `None`
+ * if `s` is not in the expected [`BUILD_ID_FORMAT`].
+ */
+pub fn parse_build_id(s: &str) -> Option<chrono::NaiveDateTime> {
+    chrono::NaiveDateTime::parse_from_str(s, BUILD_ID_FORMAT).ok()
+}
+
+/**
+ * Parse a human-style duration like `30d`, `6w`, `12m`, `1y` into a
+ * count of seconds.  Units: `d` days, `w` weeks, `m` months (30 days),
+ * `y` years (365 days).
+ */
+pub fn parse_duration_secs(s: &str) -> Result<i64, String> {
+    let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (num_part, unit) = s.split_at(split);
+    let n: i64 = num_part
+        .parse()
+        .map_err(|_| format!("invalid duration '{}': expected NUMBER+UNIT", s))?;
+    let secs_per = match unit {
+        "d" => 86_400,
+        "w" => 86_400 * 7,
+        "m" => 86_400 * 30,
+        "y" => 86_400 * 365,
+        _ => {
+            return Err(format!(
+                "invalid duration unit '{}': use d, w, m, or y",
+                unit
+            ));
+        }
+    };
+    Ok(n * secs_per)
+}
+
 /// Error indicating the operation was interrupted (e.g., by Ctrl+C).
 #[derive(Debug)]
 pub struct Interrupted;
