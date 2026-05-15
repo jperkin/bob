@@ -603,7 +603,10 @@ fn run() -> Result<()> {
             let db = Database::open(config.dbdir())?;
             cmd::list::run(
                 &db,
-                cmd.unwrap_or(cmd::list::ListCmd::Builds { no_header: false }),
+                cmd.unwrap_or(cmd::list::ListCmd::Builds {
+                    no_header: false,
+                    columns: None,
+                }),
             )?;
         }
         Cmd::Dev => {

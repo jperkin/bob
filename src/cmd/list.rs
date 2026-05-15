@@ -50,6 +50,9 @@ pub enum ListCmd {
         /// Hide column headers
         #[arg(short = 'H')]
         no_header: bool,
+        /// Columns to display (comma-separated, see --help for full list)
+        #[arg(short = 'o', long_help = builds_columns_help(), value_delimiter = ',')]
+        columns: Option<Vec<String>>,
     },
     /// Show dependency tree of packages to build
     Tree {
@@ -90,7 +93,7 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
     }
 
     match cmd {
-        ListCmd::Builds { no_header } => list_builds(db, no_header)?,
+        ListCmd::Builds { no_header, columns } => list_builds(db, no_header, columns.as_deref())?,
         ListCmd::Tree {
             all,
             format,
@@ -147,31 +150,99 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
     Ok(())
 }
 
-fn list_builds(db: &Database, no_header: bool) -> Result<()> {
+type BuildColFmt = fn(&bob::db::BuildListEntry) -> String;
+const BUILD_COLS: &[(&str, &str, bob::Align, BuildColFmt)] = &[
+    (
+        "build_id",
+        "Build session identifier",
+        bob::Align::Left,
+        |b| b.build_id.clone(),
+    ),
+    (
+        "packages",
+        "Total packages in the build",
+        bob::Align::Right,
+        |b| b.package_count.to_string(),
+    ),
+    (
+        "succeeded",
+        "Packages built successfully",
+        bob::Align::Right,
+        |b| b.succeeded.to_string(),
+    ),
+    (
+        "uptodate",
+        "Packages already up-to-date",
+        bob::Align::Right,
+        |b| b.up_to_date.to_string(),
+    ),
+    ("failed", "Packages that failed", bob::Align::Right, |b| {
+        b.failed.to_string()
+    }),
+    (
+        "masked",
+        "Packages skipped or masked",
+        bob::Align::Right,
+        |b| b.masked.to_string(),
+    ),
+    (
+        "duration",
+        "Wall-clock build time",
+        bob::Align::Right,
+        |b| bob::format_duration(b.duration_ms),
+    ),
+];
+
+fn builds_columns_help() -> String {
+    let width = BUILD_COLS
+        .iter()
+        .map(|(n, _, _, _)| n.len())
+        .max()
+        .unwrap_or(0);
+    let mut help = String::from("Columns:\n");
+    for (name, desc, _, _) in BUILD_COLS {
+        help.push_str(&format!("  {:<width$}  {}\n", name, desc));
+    }
+    let all: Vec<&str> = BUILD_COLS.iter().map(|(n, _, _, _)| *n).collect();
+    help.push_str(&format!("\nDefault: all columns ({})", all.join(",")));
+    help
+}
+
+fn list_builds(db: &Database, no_header: bool, columns: Option<&[String]>) -> Result<()> {
+    let cols: Vec<&(&str, &str, bob::Align, BuildColFmt)> = match columns {
+        Some(names) => {
+            let mut out = Vec::with_capacity(names.len());
+            for name in names {
+                let col = BUILD_COLS
+                    .iter()
+                    .find(|(n, _, _, _)| *n == name.as_str())
+                    .ok_or_else(|| {
+                        let valid: Vec<&str> = BUILD_COLS.iter().map(|(n, _, _, _)| *n).collect();
+                        anyhow::anyhow!(
+                            "Unknown column '{}'. Valid columns: {}",
+                            name,
+                            valid.join(", ")
+                        )
+                    })?;
+                out.push(col);
+            }
+            out
+        }
+        None => BUILD_COLS.iter().collect(),
+    };
+
     let builds = db.list_history_builds()?;
     if builds.is_empty() {
         println!("No builds in history.");
         return Ok(());
     }
-    let mut fmt = Formatter::new(vec![
-        Col::new("build_id", bob::Align::Left),
-        Col::new("packages", bob::Align::Right),
-        Col::new("succeeded", bob::Align::Right),
-        Col::new("uptodate", bob::Align::Right),
-        Col::new("failed", bob::Align::Right),
-        Col::new("masked", bob::Align::Right),
-        Col::new("duration", bob::Align::Right),
-    ]);
+    let mut fmt = Formatter::new(
+        cols.iter()
+            .map(|(name, _, align, _)| Col::new(name, *align))
+            .collect(),
+    );
     for b in &builds {
-        fmt.push(vec![
-            b.build_id.clone(),
-            b.package_count.to_string(),
-            b.succeeded.to_string(),
-            b.up_to_date.to_string(),
-            b.failed.to_string(),
-            b.masked.to_string(),
-            bob::format_duration(b.duration_ms),
-        ]);
+        fmt.push(cols.iter().map(|(_, _, _, f)| f(b)).collect());
     }
     fmt.print(OutputFormat::Table, no_header);
     Ok(())
