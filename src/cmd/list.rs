@@ -43,17 +43,20 @@ pub enum TreeOutput {
     None,
 }
 
+#[derive(Debug, Default, clap::Args)]
+pub struct BuildsArgs {
+    /// Hide column headers
+    #[arg(short = 'H')]
+    pub no_header: bool,
+    /// Columns to display (comma-separated, see --help for full list)
+    #[arg(short = 'o', long_help = builds_columns_help(), value_delimiter = ',')]
+    pub columns: Option<Vec<String>>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum ListCmd {
     /// List builds recorded in history (default)
-    Builds {
-        /// Hide column headers
-        #[arg(short = 'H')]
-        no_header: bool,
-        /// Columns to display (comma-separated, see --help for full list)
-        #[arg(short = 'o', long_help = builds_columns_help(), value_delimiter = ',')]
-        columns: Option<Vec<String>>,
-    },
+    Builds(BuildsArgs),
     /// Show dependency tree of packages to build
     Tree {
         /// Include up-to-date packages
@@ -93,7 +96,7 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
     }
 
     match cmd {
-        ListCmd::Builds { no_header, columns } => list_builds(db, no_header, columns.as_deref())?,
+        ListCmd::Builds(args) => list_builds(db, args.no_header, args.columns.as_deref())?,
         ListCmd::Tree {
             all,
             format,

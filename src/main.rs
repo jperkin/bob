@@ -321,10 +321,12 @@ enum Cmd {
         args: cmd::history::HistoryArgs,
     },
     /// List builds, packages, and dependency information
-    #[command(alias = "ls")]
+    #[command(alias = "ls", args_conflicts_with_subcommands = true)]
     List {
         #[command(subcommand)]
         cmd: Option<cmd::list::ListCmd>,
+        #[command(flatten)]
+        builds: cmd::list::BuildsArgs,
     },
     /// Create a sandbox and start an interactive shell
     Dev,
@@ -598,16 +600,10 @@ fn run() -> Result<()> {
             let db = Database::open(config.dbdir())?;
             cmd::history::run(&db, history_args)?;
         }
-        Cmd::List { cmd } => {
+        Cmd::List { cmd, builds } => {
             let config = Config::load(args.config.as_deref())?;
             let db = Database::open(config.dbdir())?;
-            cmd::list::run(
-                &db,
-                cmd.unwrap_or(cmd::list::ListCmd::Builds {
-                    no_header: false,
-                    columns: None,
-                }),
-            )?;
+            cmd::list::run(&db, cmd.unwrap_or(cmd::list::ListCmd::Builds(builds)))?;
         }
         Cmd::Dev => {
             let (config, pkgsrc) = Config::load_with_optional_pkgsrc(args.config.as_deref())?;
