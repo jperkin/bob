@@ -28,14 +28,21 @@ use bob::sandbox::Sandbox;
 
 #[derive(Debug, Subcommand)]
 pub enum SandboxCmd {
-    /// Create all sandboxes
-    Create,
+    /// Create one or more sandboxes
+    Create(CreateArgs),
     /// Destroy sandboxes
     Destroy(DestroyArgs),
     /// Create a sandbox and start an interactive shell
     Exec,
     /// List currently created sandboxes
     List,
+}
+
+#[derive(Debug, Args)]
+pub struct CreateArgs {
+    /// Number of sandboxes to create.
+    #[arg(short = 'n', long, value_name = "N", default_value_t = 1)]
+    pub count: usize,
 }
 
 #[derive(Debug, Args)]
@@ -52,13 +59,21 @@ pub struct DestroyArgs {
 
 pub fn run(config: &Config, pkgsrc: Option<&Pkgsrc>, cmd: SandboxCmd) -> Result<()> {
     match cmd {
-        SandboxCmd::Create => {
+        SandboxCmd::Create(args) => {
             logging::init_stderr_if_enabled();
+            if args.count == 0 {
+                bail!("--count must be at least 1");
+            }
             let sandbox = Sandbox::new(config, pkgsrc);
             if !sandbox.enabled() {
                 bail!("No sandboxes configured");
             }
-            sandbox.create_all(config.build_threads())?;
+            let ids = sandbox.create_all(args.count)?;
+            for id in ids {
+                if !bob::try_println(&format!("{}", sandbox.path(id).display())) {
+                    break;
+                }
+            }
         }
         SandboxCmd::Destroy(args) => {
             logging::init_stderr_if_enabled();

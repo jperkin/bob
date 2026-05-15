@@ -1063,9 +1063,11 @@ impl Sandbox {
     }
 
     /**
-     * Create sandboxes, claiming available IDs.
+     * Create sandboxes, claiming available IDs.  Returns the IDs in
+     * ascending order so callers can pair them with paths via
+     * [`Sandbox::path`].
      */
-    pub fn create_all(&self, count: usize) -> Result<()> {
+    pub fn create_all(&self, count: usize) -> Result<Vec<usize>> {
         let msg = if count == 1 {
             "Creating sandbox".to_string()
         } else {
@@ -1073,9 +1075,9 @@ impl Sandbox {
         };
         crate::print_status(&msg);
         let start = Instant::now();
-        self.claim_ids(count)?;
+        let ids = self.claim_ids(count)?;
         crate::print_elapsed(&msg, start.elapsed());
-        Ok(())
+        Ok(ids)
     }
 
     /**
