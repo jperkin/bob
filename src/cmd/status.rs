@@ -536,7 +536,7 @@ fn print_build_status(
                     if raw {
                         sp.cpu_time.to_string()
                     } else {
-                        bob::format_duration(sp.cpu_time)
+                        bob::fmt::duration_ms(sp.cpu_time)
                     }
                 }
                 "wrkobjdir" => resolved_wrkobjdir.clone().unwrap_or_else(dash),
@@ -548,7 +548,7 @@ fn print_build_status(
                         if raw {
                             s.to_string()
                         } else {
-                            bob::format_size(s)
+                            bob::fmt::size_bytes(s)
                         }
                     })
                     .unwrap_or_else(dash),

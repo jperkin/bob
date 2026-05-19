@@ -186,55 +186,6 @@ pub struct History {
     pub build_id: Option<String>,
 }
 
-fn format_timestamp(epoch: i64) -> String {
-    let mut buf = [0u8; 20];
-    let time_t = epoch as libc::time_t;
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::localtime_r(&time_t, &mut tm) };
-    let len = unsafe {
-        libc::strftime(
-            buf.as_mut_ptr().cast::<libc::c_char>(),
-            buf.len(),
-            c"%Y-%m-%d %H:%M:%S".as_ptr(),
-            &tm,
-        )
-    };
-    String::from_utf8_lossy(&buf[..len]).to_string()
-}
-
-pub fn format_duration(ms: u64) -> String {
-    if ms == 0 {
-        "-".to_string()
-    } else if ms < 1000 {
-        format!("{}ms", ms)
-    } else if ms < 60_000 {
-        format!("{:.1}s", ms as f64 / 1000.0)
-    } else if ms < 3_600_000 {
-        let mins = ms / 60_000;
-        let secs = (ms % 60_000) / 1000;
-        format!("{}m{:02}s", mins, secs)
-    } else {
-        let hours = ms / 3_600_000;
-        let mins = (ms % 3_600_000) / 60_000;
-        format!("{}h{:02}m", hours, mins)
-    }
-}
-
-pub fn format_size(bytes: u64) -> String {
-    const K: u64 = 1024;
-    const M: u64 = 1024 * 1024;
-    const G: u64 = 1024 * 1024 * 1024;
-    if bytes >= G {
-        format!("{:.1}G", bytes as f64 / G as f64)
-    } else if bytes >= M {
-        format!("{:.1}M", bytes as f64 / M as f64)
-    } else if bytes >= K {
-        format!("{:.1}K", bytes as f64 / K as f64)
-    } else {
-        format!("{}B", bytes)
-    }
-}
-
 impl History {
     /**
      * Format a column value for display.
@@ -242,36 +193,36 @@ impl History {
      * Handles both [`HistoryKind`] variants (exhaustive match) and
      * [`Stage`] per-stage duration columns.
      */
-    pub fn format_col(&self, name: &str) -> String {
-        let fmt_dur = |d: Duration| format_duration(d.as_millis() as u64);
+    pub fn format_col(&self, name: &str) -> anyhow::Result<String> {
+        let fmt_dur = |d: Duration| crate::fmt::duration_ms(d.as_millis() as u64);
         let dash = || "-".to_string();
 
         if let Some(stage_name) = name.strip_prefix(CPU_PREFIX) {
             if let Some(stage) = Stage::VARIANTS.iter().find(|s| s.into_str() == stage_name) {
-                return self
+                return Ok(self
                     .stage_cpu_times
                     .iter()
                     .find(|(st, _)| st == stage)
                     .map(|(_, d)| fmt_dur(*d))
-                    .unwrap_or_else(dash);
+                    .unwrap_or_else(dash));
             }
         }
 
         if let Some(stage) = Stage::VARIANTS.iter().find(|s| s.into_str() == name) {
-            return self
+            return Ok(self
                 .stage_durations
                 .iter()
                 .find(|(st, _)| st == stage)
                 .map(|(_, d)| fmt_dur(*d))
-                .unwrap_or_else(dash);
+                .unwrap_or_else(dash));
         }
 
         let col = HistoryKind::VARIANTS
             .iter()
             .find(|c| <&str>::from(*c) == name)
             .expect("column already validated");
-        match col {
-            HistoryKind::Timestamp => format_timestamp(self.timestamp),
+        Ok(match col {
+            HistoryKind::Timestamp => crate::fmt::timestamp(self.timestamp)?,
             HistoryKind::Pkgpath => self.pkgpath.clone(),
             HistoryKind::Pkgname => self.pkgname.clone(),
             HistoryKind::Pkgbase => self.pkgbase.clone(),
@@ -287,14 +238,17 @@ impl History {
             }
             HistoryKind::MakeJobs => self.make_jobs.map(|j| j.to_string()).unwrap_or_else(dash),
             HistoryKind::Duration => fmt_dur(self.duration),
-            HistoryKind::DiskUsage => self.disk_usage.map(format_size).unwrap_or_else(dash),
+            HistoryKind::DiskUsage => self
+                .disk_usage
+                .map(crate::fmt::size_bytes)
+                .unwrap_or_else(dash),
             HistoryKind::Wrkobjdir => self
                 .wrkobjdir
                 .as_ref()
                 .map(|k| k.to_string())
                 .unwrap_or_else(dash),
             HistoryKind::BuildId => self.build_id.clone().unwrap_or_else(dash),
-        }
+        })
     }
 
     /**

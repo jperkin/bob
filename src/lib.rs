@@ -21,6 +21,7 @@ pub mod build;
 pub mod config;
 pub mod cpu;
 pub mod db;
+pub mod fmt;
 pub mod logging;
 pub mod makejobs;
 pub mod sandbox;
@@ -149,7 +150,7 @@ pub use config::{
 };
 pub use cpu::{CpuSample, CpuSamplerHandle, start_cpu_sampler};
 pub use db::Database;
-pub use history::{History, HistoryKind, format_duration, format_size};
+pub use history::{History, HistoryKind};
 pub use init::Init;
 pub use makejobs::PkgMakeJobs;
 pub use pkgstate::{

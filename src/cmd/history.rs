@@ -120,16 +120,16 @@ fn print_history(
 
     let mut fmt = Formatter::new(fmt_cols);
     for rec in &records {
-        let row = cols
+        let row: Vec<String> = cols
             .iter()
             .map(|&col| {
                 if raw {
-                    rec.format_col_raw(col)
+                    Ok(rec.format_col_raw(col))
                 } else {
                     rec.format_col(col)
                 }
             })
-            .collect();
+            .collect::<Result<_>>()?;
         fmt.push(row);
     }
     fmt.print(format, no_header);

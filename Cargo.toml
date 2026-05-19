@@ -13,7 +13,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
-chrono = { version = "0.4", default-features = false, features = ["now"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.6", features = ["derive"] }
 copy_dir = "0.1"
 crossterm = { version = "0.29", features = ["use-dev-tty"] }

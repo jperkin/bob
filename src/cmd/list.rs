@@ -205,7 +205,7 @@ const BUILD_COLS: &[(&str, &str, bob::Align, BuildColFmt)] = &[
             if raw {
                 b.duration_ms.to_string()
             } else {
-                bob::format_duration(b.duration_ms)
+                bob::fmt::duration_ms(b.duration_ms)
             }
         },
     ),
