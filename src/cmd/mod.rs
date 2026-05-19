@@ -211,27 +211,19 @@ impl Formatter {
     }
 
     fn print_csv(self, no_header: bool) {
+        let mut wtr = csv::Writer::from_writer(std::io::stdout());
         if !no_header {
             let header: Vec<&str> = self.cols.iter().map(|c| c.name.as_str()).collect();
-            if !bob::try_println(&header.join(",")) {
+            if wtr.write_record(&header).is_err() {
                 return;
             }
         }
         for row in &self.rows {
-            let values: Vec<String> = row
-                .iter()
-                .map(|v| {
-                    if v.contains(',') || v.contains('"') {
-                        format!("\"{}\"", v.replace('"', "\"\""))
-                    } else {
-                        v.clone()
-                    }
-                })
-                .collect();
-            if !bob::try_println(&values.join(",")) {
+            if wtr.write_record(row).is_err() {
                 break;
             }
         }
+        let _ = wtr.flush();
     }
 
     fn print_json(self) {
