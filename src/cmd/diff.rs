@@ -19,20 +19,29 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Result, bail};
 
 use bob::db::{BuildDiff, Database, DiffEntry};
-use bob::{PackageStateKind, parse_status_filter, try_println};
+use bob::{PackageStateKind, parse_status_filter};
 
-const DIFF_COLUMNS: &[(&str, &str)] = &[
-    ("pkgname", "Package name (current, or previous if absent)"),
-    ("pkgpath", "Package path in pkgsrc"),
-    ("breaks", "Number of packages broken by this failure"),
-    ("stage", "Build stage that failed (current)"),
-    ("stage_prev", "Build stage that failed (previous)"),
-    ("outcome", "Outcome (current)"),
-    ("outcome_prev", "Outcome (previous)"),
-    ("pkgname_prev", "Package name (previous)"),
+use super::{
+    Cell, Column, ColumnSource, OutputFormat, OutputOptions, Writer, cols_help, select_columns,
+};
+
+const SUPPORTED: &[Column] = &[
+    Column::Pkgname,
+    Column::Pkgpath,
+    Column::Breaks,
+    Column::Stage,
+    Column::StagePrev,
+    Column::Outcome,
+    Column::OutcomePrev,
+    Column::PkgnamePrev,
 ];
 
-const DEFAULT_COLUMNS: &[&str] = &["pkgname", "pkgpath", "breaks", "stage"];
+const DEFAULT: &[Column] = &[
+    Column::Pkgname,
+    Column::Pkgpath,
+    Column::Breaks,
+    Column::Stage,
+];
 
 #[derive(Debug, clap::Args)]
 #[command(after_long_help = diff_after_help())]
@@ -72,33 +81,48 @@ pub struct DiffArgs {
 }
 
 fn diff_after_help() -> String {
-    let width = DIFF_COLUMNS.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
-    let mut help = String::from("Columns:\n");
-    for (name, desc) in DIFF_COLUMNS {
-        help.push_str(&format!("  {:<width$}  {}\n", name, desc));
+    cols_help(SUPPORTED, DEFAULT)
+}
+
+impl ColumnSource for DiffEntry {
+    type Ctx = HashMap<String, usize>;
+    fn cell(&self, col: Column, breaks: &Self::Ctx) -> Cell {
+        match col {
+            Column::Pkgname => self
+                .build2_pkgname
+                .as_deref()
+                .or(self.build1_pkgname.as_deref())
+                .map_or(Cell::Null, Cell::from),
+            Column::Pkgpath => self.pkgpath.as_str().into(),
+            Column::Breaks => get_breaks(self, breaks).into(),
+            Column::Stage => match self.build2_outcome {
+                Some(bob::PackageStateKind::Success) | Some(bob::PackageStateKind::UpToDate) => {
+                    Cell::Null
+                }
+                _ => self
+                    .build2_stage
+                    .map_or(Cell::Null, |s| <&str>::from(s).into()),
+            },
+            Column::StagePrev => self
+                .build1_stage
+                .map_or(Cell::Null, |s| <&str>::from(s).into()),
+            Column::Outcome => self
+                .build2_outcome
+                .map_or(Cell::Null, |o| <&str>::from(o).into()),
+            Column::OutcomePrev => self
+                .build1_outcome
+                .map_or(Cell::Null, |o| <&str>::from(o).into()),
+            Column::PkgnamePrev => self
+                .build1_pkgname
+                .as_deref()
+                .map_or(Cell::Null, Cell::from),
+            _ => unreachable!("column {:?} not supported by bob diff", col),
+        }
     }
-    help.push_str(&format!("\nDefault columns: {}", DEFAULT_COLUMNS.join(",")));
-    help
 }
 
 pub fn run(db: &Database, args: DiffArgs) -> Result<()> {
-    let col_names: Vec<&str> = match &args.columns {
-        Some(cols) => {
-            for c in cols {
-                if !DIFF_COLUMNS.iter().any(|(n, _)| *n == c.as_str()) {
-                    let valid: Vec<&str> = DIFF_COLUMNS.iter().map(|(n, _)| *n).collect();
-                    bail!(
-                        "Unknown column '{}'. Valid columns: {}",
-                        c,
-                        valid.join(", ")
-                    );
-                }
-            }
-            cols.iter().map(|s| s.as_str()).collect()
-        }
-        None if args.long => DIFF_COLUMNS.iter().map(|(n, _)| *n).collect(),
-        None => DEFAULT_COLUMNS.to_vec(),
-    };
+    let chosen = select_columns(args.columns.as_deref(), args.long, DEFAULT, SUPPORTED)?;
 
     let (build1_id, build2_id) = match (args.build1, args.build2) {
         (Some(b1), Some(b2)) => (b1, b2),
@@ -139,19 +163,17 @@ pub fn run(db: &Database, args: DiffArgs) -> Result<()> {
     let to: Option<HashSet<PackageStateKind>> =
         (!args.to.is_empty()).then(|| args.to.iter().flatten().copied().collect());
 
+    let opts = OutputOptions {
+        format: OutputFormat::Table,
+        no_header: args.no_header,
+        raw: false,
+    };
+
     if from.is_some() || to.is_some() {
-        print_filtered(
-            &diff,
-            &breaks,
-            &col_names,
-            from.as_ref(),
-            to.as_ref(),
-            args.no_header,
-        );
+        print_filtered(&diff, &breaks, chosen, opts, from.as_ref(), to.as_ref())
     } else {
-        print_diff(&diff, &breaks, args.all, &col_names, args.no_header);
+        print_diff(&diff, &breaks, args.all, chosen, opts)
     }
-    Ok(())
 }
 
 fn matches_filter(
@@ -169,18 +191,11 @@ fn matches_filter(
 fn print_filtered(
     diff: &BuildDiff,
     breaks: &HashMap<String, usize>,
-    col_names: &[&str],
+    chosen: Vec<Column>,
+    opts: OutputOptions,
     from: Option<&HashSet<PackageStateKind>>,
     to: Option<&HashSet<PackageStateKind>>,
-    no_header: bool,
-) {
-    if !try_println(&format!("--- {}", diff.build1_id)) {
-        return;
-    }
-    if !try_println(&format!("+++ {}", diff.build2_id)) {
-        return;
-    }
-
+) -> Result<()> {
     let mut entries: Vec<&DiffEntry> = diff
         .new_failures
         .iter()
@@ -204,85 +219,17 @@ fn print_filtered(
         label(from),
         label(to),
     );
-    if !try_println(&summary) {
-        return;
-    }
-    if entries.is_empty() {
-        return;
-    }
 
-    let widths: Vec<usize> = col_names
-        .iter()
-        .map(|name| {
-            entries
-                .iter()
-                .map(|e| format_col(e, name, breaks).len())
-                .max()
-                .unwrap_or(0)
-                .max(name.len())
-        })
-        .collect();
-
-    if !no_header {
-        let header: String = col_names
-            .iter()
-            .zip(&widths)
-            .map(|(name, w)| format!("{:<w$}", name.to_uppercase(), w = w))
-            .collect::<Vec<_>>()
-            .join("  ");
-        if !try_println(&format!(" {}", header)) {
-            return;
-        }
-    }
+    let mut out = Writer::stdout(chosen, opts)?;
+    out.message(&format!("--- {}", diff.build1_id))?;
+    out.message(&format!("+++ {}", diff.build2_id))?;
+    out.message(&summary)?;
 
     entries.sort_by_key(|e| std::cmp::Reverse(get_breaks(e, breaks)));
     for e in &entries {
-        let row: String = col_names
-            .iter()
-            .zip(&widths)
-            .map(|(name, w)| format!("{:<w$}", format_col(e, name, breaks), w = w))
-            .collect::<Vec<_>>()
-            .join("  ");
-        if !try_println(&format!(" {}", row)) {
-            return;
-        }
+        out.write(Some(' '), *e, breaks)?;
     }
-}
-
-fn format_col(e: &DiffEntry, col: &str, breaks: &HashMap<String, usize>) -> String {
-    match col {
-        "pkgname" => e
-            .build2_pkgname
-            .as_deref()
-            .or(e.build1_pkgname.as_deref())
-            .unwrap_or("-")
-            .to_string(),
-        "pkgpath" => e.pkgpath.clone(),
-        "breaks" => get_breaks(e, breaks).to_string(),
-        "stage" => match e.build2_outcome {
-            Some(bob::PackageStateKind::Success) | Some(bob::PackageStateKind::UpToDate) => {
-                String::new()
-            }
-            _ => e
-                .build2_stage
-                .map(|s| s.into_str().to_string())
-                .unwrap_or_default(),
-        },
-        "stage_prev" => e
-            .build1_stage
-            .map(|s| s.into_str().to_string())
-            .unwrap_or_default(),
-        "outcome" => e
-            .build2_outcome
-            .map(|o| <&str>::from(o).to_string())
-            .unwrap_or_default(),
-        "outcome_prev" => e
-            .build1_outcome
-            .map(|o| <&str>::from(o).to_string())
-            .unwrap_or_default(),
-        "pkgname_prev" => e.build1_pkgname.as_deref().unwrap_or("").to_string(),
-        _ => String::new(),
-    }
+    out.finish()
 }
 
 fn get_breaks(e: &DiffEntry, breaks: &HashMap<String, usize>) -> usize {
@@ -297,16 +244,9 @@ fn print_diff(
     diff: &BuildDiff,
     breaks: &HashMap<String, usize>,
     show_all: bool,
-    col_names: &[&str],
-    no_header: bool,
-) {
-    if !try_println(&format!("--- {}", diff.build1_id)) {
-        return;
-    }
-    if !try_println(&format!("+++ {}", diff.build2_id)) {
-        return;
-    }
-
+    chosen: Vec<Column>,
+    opts: OutputOptions,
+) -> Result<()> {
     let nf = diff.new_failures.len();
     let fx = diff.fixes.len();
     let vc = diff.version_changes.len();
@@ -329,80 +269,38 @@ fn print_diff(
             if oc == 1 { "" } else { "s" }
         ));
     }
-    if parts.is_empty() {
-        try_println("@@ no changes @@");
-        return;
-    }
-    if !try_println(&format!("@@ {} @@", parts.join(", "))) {
-        return;
-    }
+    let summary = if parts.is_empty() {
+        "@@ no changes @@".to_string()
+    } else {
+        format!("@@ {} @@", parts.join(", "))
+    };
 
-    let widths: Vec<usize> = col_names
-        .iter()
-        .map(|name| {
-            let all_entries = diff
-                .new_failures
-                .iter()
-                .chain(diff.version_changes.iter())
-                .chain(diff.fixes.iter())
-                .chain(if show_all {
-                    diff.other_changes.iter()
-                } else {
-                    [].iter()
-                });
-            let max_val = all_entries
-                .map(|e| format_col(e, name, breaks).len())
-                .max()
-                .unwrap_or(0);
-            max_val.max(name.len())
-        })
-        .collect();
+    let mut out = Writer::stdout(chosen, opts)?;
+    out.message(&format!("--- {}", diff.build1_id))?;
+    out.message(&format!("+++ {}", diff.build2_id))?;
+    out.message(&summary)?;
 
-    if !no_header {
-        let header: String = col_names
-            .iter()
-            .zip(&widths)
-            .map(|(name, w)| format!("{:<w$}", name.to_uppercase(), w = w))
-            .collect::<Vec<_>>()
-            .join("  ");
-        if !try_println(&format!(" {}", header)) {
-            return;
-        }
-    }
-
-    let print_entries = |prefix: char, entries: &mut [&DiffEntry]| -> bool {
+    let emit = |out: &mut Writer<std::io::StdoutLock<'static>>,
+                prefix: char,
+                entries: &mut [&DiffEntry]|
+     -> Result<()> {
         entries.sort_by_key(|e| std::cmp::Reverse(get_breaks(e, breaks)));
         for e in entries.iter() {
-            let row: String = col_names
-                .iter()
-                .zip(&widths)
-                .map(|(name, w)| format!("{:<w$}", format_col(e, name, breaks), w = w))
-                .collect::<Vec<_>>()
-                .join("  ");
-            if !try_println(&format!("{}{}", prefix, row)) {
-                return false;
-            }
+            out.write(Some(prefix), *e, breaks)?;
         }
-        true
+        Ok(())
     };
 
     let mut failures: Vec<_> = diff.new_failures.iter().collect();
-    if !print_entries('+', &mut failures) {
-        return;
-    }
-
+    emit(&mut out, '+', &mut failures)?;
     let mut version_changes: Vec<_> = diff.version_changes.iter().collect();
-    if !print_entries('~', &mut version_changes) {
-        return;
-    }
-
+    emit(&mut out, '~', &mut version_changes)?;
     let mut fixes: Vec<_> = diff.fixes.iter().collect();
-    if !print_entries('-', &mut fixes) {
-        return;
-    }
-
+    emit(&mut out, '-', &mut fixes)?;
     if show_all {
         let mut other: Vec<_> = diff.other_changes.iter().collect();
-        print_entries(' ', &mut other);
+        emit(&mut out, ' ', &mut other)?;
     }
+
+    out.finish()
 }

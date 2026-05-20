@@ -31,7 +31,9 @@ use bob::{
 };
 
 use super::util::pkg_pattern;
-use super::{Col, Formatter, OutputFormat, SortKey, parse_sort_specs, sort_indexed_rows};
+use super::{
+    Cell, Col, Formatter, OutputFormat, OutputOptions, SortKey, parse_sort_specs, sort_indexed_rows,
+};
 
 #[derive(Clone, Copy, strum::EnumProperty, strum::IntoStaticStr, strum::VariantArray)]
 #[strum(serialize_all = "snake_case")]
@@ -598,14 +600,22 @@ fn print_build_status(
         .iter()
         .map(|&name| {
             let sc = StatusCol::find(name).expect("column already validated");
-            Col::new(name, sc.align()).max(sc.max_width())
+            Col::new(<&'static str>::from(sc), sc.align()).max(sc.max_width())
         })
         .collect();
-    let mut fmt = Formatter::new(fmt_cols);
+    let mut fmt = Formatter::new(
+        std::io::stdout().lock(),
+        fmt_cols,
+        OutputOptions {
+            format,
+            no_header,
+            raw,
+        },
+    )?;
     for row in rows {
-        fmt.push(row);
+        fmt.row(row.into_iter().map(Cell::Text))?;
     }
-    fmt.print(format, no_header);
+    fmt.finish()?;
 
     Ok(())
 }

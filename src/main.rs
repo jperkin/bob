@@ -437,6 +437,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) if e.downcast_ref::<Interrupted>().is_some() => ExitCode::from(EXIT_INTERRUPTED),
+        Err(e) if cmd::is_broken_pipe(&e) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("Error: {}", format_error(&e));
             ExitCode::FAILURE

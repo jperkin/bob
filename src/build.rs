@@ -417,6 +417,7 @@ pub fn pkg_up_to_date(
     serde::Serialize,
     serde::Deserialize,
     strum::EnumProperty,
+    strum::EnumString,
     strum::FromRepr,
     strum::IntoStaticStr,
     strum::VariantArray,

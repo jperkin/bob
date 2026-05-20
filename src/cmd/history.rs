@@ -20,7 +20,7 @@ use clap::Args;
 use bob::db::Database;
 
 use super::util::pkg_pattern;
-use super::{Col, Formatter, OutputFormat};
+use super::{Cell, Col, Formatter, OutputFormat, OutputOptions};
 
 #[derive(Debug, Args)]
 pub struct HistoryArgs {
@@ -114,25 +114,34 @@ fn print_history(
         .iter()
         .map(|&name| {
             let (_, align) = all_cols.iter().find(|(n, _)| n == name).expect("validated");
-            Col::new(name, *align)
+            Col::new(name.to_string(), *align)
         })
         .collect();
 
-    let mut fmt = Formatter::new(fmt_cols);
+    let mut fmt = Formatter::new(
+        std::io::stdout().lock(),
+        fmt_cols,
+        OutputOptions {
+            format,
+            no_header,
+            raw,
+        },
+    )?;
     for rec in &records {
-        let row: Vec<String> = cols
+        let row: Vec<Cell> = cols
             .iter()
             .map(|&col| {
-                if raw {
-                    Ok(rec.format_col_raw(col))
+                let s = if raw {
+                    rec.format_col_raw(col)
                 } else {
-                    rec.format_col(col)
-                }
+                    rec.format_col(col)?
+                };
+                Ok::<_, anyhow::Error>(Cell::Text(s))
             })
             .collect::<Result<_>>()?;
-        fmt.push(row);
+        fmt.row(row)?;
     }
-    fmt.print(format, no_header);
+    fmt.finish()?;
 
     Ok(())
 }

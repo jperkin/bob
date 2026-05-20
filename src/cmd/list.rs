@@ -26,7 +26,7 @@ use bob::try_println;
 use bob::{PackageState, PackageStateKind};
 
 use super::util::pkg_pattern;
-use super::{Col, Formatter, OutputFormat};
+use super::{Cell, Col, Formatter, OutputFormat, OutputOptions};
 
 fn use_color() -> bool {
     std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
@@ -254,15 +254,21 @@ fn list_builds(db: &Database, args: BuildsArgs) -> Result<()> {
         println!("No builds in history.");
         return Ok(());
     }
-    let mut fmt = Formatter::new(
+    let mut out = Formatter::new(
+        std::io::stdout().lock(),
         cols.iter()
-            .map(|(name, _, align, _)| Col::new(name, *align))
+            .map(|(name, _, align, _)| Col::new(*name, *align))
             .collect(),
-    );
+        OutputOptions {
+            format: args.format,
+            no_header: args.no_header,
+            raw: args.raw,
+        },
+    )?;
     for b in &builds {
-        fmt.push(cols.iter().map(|(_, _, _, f)| f(b, args.raw)).collect());
+        out.row(cols.iter().map(|(_, _, _, f)| Cell::Text(f(b, args.raw))))?;
     }
-    fmt.print(args.format, args.no_header);
+    out.finish()?;
     Ok(())
 }
 
