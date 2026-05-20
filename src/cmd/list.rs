@@ -26,7 +26,7 @@ use bob::try_println;
 use bob::{PackageState, PackageStateKind};
 
 use super::util::pkg_pattern;
-use super::{Cell, Col, Formatter, OutputFormat, OutputOptions};
+use super::{Cell, Column, ColumnSource, OutputFormat, OutputOptions, Writer, cols_help, select_columns};
 
 fn use_color() -> bool {
     std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
@@ -159,106 +159,46 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
     Ok(())
 }
 
-type BuildColFmt = fn(&bob::db::BuildListEntry, bool) -> String;
-const BUILD_COLS: &[(&str, &str, bob::Align, BuildColFmt)] = &[
-    (
-        "build_id",
-        "Build session identifier",
-        bob::Align::Left,
-        |b, _| b.build_id.clone(),
-    ),
-    (
-        "packages",
-        "Total packages in the build",
-        bob::Align::Right,
-        |b, _| b.package_count.to_string(),
-    ),
-    (
-        "succeeded",
-        "Packages built successfully",
-        bob::Align::Right,
-        |b, _| b.succeeded.to_string(),
-    ),
-    (
-        "uptodate",
-        "Packages already up-to-date",
-        bob::Align::Right,
-        |b, _| b.up_to_date.to_string(),
-    ),
-    (
-        "failed",
-        "Packages that failed",
-        bob::Align::Right,
-        |b, _| b.failed.to_string(),
-    ),
-    (
-        "masked",
-        "Packages skipped or masked",
-        bob::Align::Right,
-        |b, _| b.masked.to_string(),
-    ),
-    (
-        "duration",
-        "Wall-clock build time",
-        bob::Align::Right,
-        |b, raw| {
-            if raw {
-                b.duration_ms.to_string()
-            } else {
-                bob::fmt::duration_ms(b.duration_ms)
-            }
-        },
-    ),
+const COLS: &[Column] = &[
+    Column::BuildId,
+    Column::Packages,
+    Column::Succeeded,
+    Column::Uptodate,
+    Column::Failed,
+    Column::Masked,
+    Column::Duration,
 ];
 
 fn builds_columns_help() -> String {
-    let width = BUILD_COLS
-        .iter()
-        .map(|(n, _, _, _)| n.len())
-        .max()
-        .unwrap_or(0);
-    let mut help = String::from("Columns:\n");
-    for (name, desc, _, _) in BUILD_COLS {
-        help.push_str(&format!("  {:<width$}  {}\n", name, desc));
+    cols_help(COLS, COLS)
+}
+
+impl ColumnSource for bob::db::BuildListEntry {
+    type Ctx = ();
+    fn cell(&self, col: Column, _: &Self::Ctx) -> Cell {
+        match col {
+            Column::BuildId => self.build_id.as_str().into(),
+            Column::Packages => self.package_count.into(),
+            Column::Succeeded => self.succeeded.into(),
+            Column::Uptodate => self.up_to_date.into(),
+            Column::Failed => self.failed.into(),
+            Column::Masked => self.masked.into(),
+            Column::Duration => Cell::DurationMs(self.duration_ms),
+            _ => unreachable!("column {:?} not supported by bob list builds", col),
+        }
     }
-    let all: Vec<&str> = BUILD_COLS.iter().map(|(n, _, _, _)| *n).collect();
-    help.push_str(&format!("\nDefault: all columns ({})", all.join(",")));
-    help
 }
 
 fn list_builds(db: &Database, args: BuildsArgs) -> Result<()> {
-    let cols: Vec<&(&str, &str, bob::Align, BuildColFmt)> = match args.columns.as_deref() {
-        Some(names) => {
-            let mut out = Vec::with_capacity(names.len());
-            for name in names {
-                let col = BUILD_COLS
-                    .iter()
-                    .find(|(n, _, _, _)| *n == name.as_str())
-                    .ok_or_else(|| {
-                        let valid: Vec<&str> = BUILD_COLS.iter().map(|(n, _, _, _)| *n).collect();
-                        anyhow::anyhow!(
-                            "Unknown column '{}'. Valid columns: {}",
-                            name,
-                            valid.join(", ")
-                        )
-                    })?;
-                out.push(col);
-            }
-            out
-        }
-        None => BUILD_COLS.iter().collect(),
-    };
+    let chosen = select_columns(args.columns.as_deref(), false, COLS, COLS)?;
 
     let builds = db.list_history_builds()?;
     if builds.is_empty() {
         println!("No builds in history.");
         return Ok(());
     }
-    let mut out = Formatter::new(
-        std::io::stdout().lock(),
-        cols.iter()
-            .map(|(name, _, align, _)| Col::new(*name, *align))
-            .collect(),
+    let mut out = Writer::stdout(
+        chosen,
         OutputOptions {
             format: args.format,
             no_header: args.no_header,
@@ -266,7 +206,7 @@ fn list_builds(db: &Database, args: BuildsArgs) -> Result<()> {
         },
     )?;
     for b in &builds {
-        out.row(cols.iter().map(|(_, _, _, f)| Cell::Text(f(b, args.raw))))?;
+        out.write(None, b, &())?;
     }
     out.finish()?;
     Ok(())
