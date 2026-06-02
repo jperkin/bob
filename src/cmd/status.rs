@@ -17,6 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::IsTerminal;
+use std::path::Path;
 
 use anyhow::{Result, bail};
 use clap::Args;
@@ -24,9 +25,10 @@ use clap::builder::styling::Style;
 use regex::Regex;
 use strum::{EnumCount, EnumProperty, IntoEnumIterator, VariantArray};
 
+use bob::build::Stage;
 use bob::db::{Database, PackageStatusRow};
 use bob::{
-    ColumnAlign, Config, PackageState, PackageStateAlias, PackageStateKind, Scheduler, WrkObjKind,
+    ColumnAlign, Config, PackageStateAlias, PackageStateKind, Scheduler, WrkObjKind,
     parse_status_filter,
 };
 
@@ -130,6 +132,21 @@ const STATUS_DISPLAY_ORDER: [PackageStateKind; PackageStateKind::COUNT] = {
  */
 fn longest<'a, I: IntoIterator<Item = &'a str>>(names: I) -> usize {
     names.into_iter().map(str::len).fold(0, usize::max)
+}
+
+/**
+ * Reason text for a failed build, naming the stage it failed in.  A
+ * missing stage means the build never started; the error, if any, is in
+ * the package's `setup.log`.
+ */
+fn failed_reason(stage: Option<i32>, logdir: &Path, pkgname: &str) -> String {
+    match stage.and_then(Stage::from_repr) {
+        Some(stage) => format!("Build failed during {} stage", stage.into_str()),
+        None if logdir.join(pkgname).join("setup.log").exists() => {
+            "Could not start build (see setup.log)".to_string()
+        }
+        None => "Could not start build".to_string(),
+    }
 }
 
 /**
@@ -409,6 +426,15 @@ fn print_build_status(
         sched.allocate_all();
     }
 
+    let blockers = db.blockers()?;
+    let logdir = config.logdir();
+    let blocked_by = |pkgname: &str| -> String {
+        match blockers.get(pkgname) {
+            Some(blockers) => format!("Blocked by {}", blockers.join(", ")),
+            None => String::new(),
+        }
+    };
+
     let need_history = cols
         .iter()
         .any(|c| matches!(*c, "wrkobjdir" | "make_jobs" | "disk_usage"));
@@ -442,26 +468,31 @@ fn print_build_status(
     };
 
     let get_status = |pkg: &PackageStatusRow| -> (PackageStateKind, String) {
-        if let Some(state) = pkg
-            .build_outcome
-            .and_then(|id| PackageState::from_db(id, pkg.outcome_detail.clone()))
-        {
-            let reason = state.detail().map(String::from).unwrap_or_default();
-            (state.kind(), reason)
-        } else if let Some(reason) = &pkg.build_reason {
-            (PackageStateKind::Pending, reason.clone())
+        use PackageStateKind::*;
+        if let Some(kind) = pkg.build_outcome.and_then(PackageStateKind::from_repr) {
+            let reason = match kind {
+                Failed => failed_reason(pkg.build_stage, logdir, &pkg.pkgname),
+                IndirectFailed => blocked_by(&pkg.pkgname),
+                _ => String::new(),
+            };
+            (kind, reason)
         } else if let Some(reason) = &pkg.pkg_fail_reason {
-            (
-                PackageStateKind::PreFailed,
-                format!("PKG_FAIL_REASON: {}", reason),
-            )
+            (PreFailed, format!("PKG_FAIL_REASON: {reason}"))
         } else if let Some(reason) = &pkg.pkg_skip_reason {
-            (
-                PackageStateKind::PreSkipped,
-                format!("PKG_SKIP_REASON: {}", reason),
-            )
+            (PreSkipped, format!("PKG_SKIP_REASON: {reason}"))
+        } else if let Some(kind) = pkg.scan_outcome.and_then(PackageStateKind::from_repr) {
+            let reason = match kind {
+                Unresolved => match &pkg.scan_outcome_detail {
+                    Some(detail) => detail.replace('\n', "; "),
+                    None => String::new(),
+                },
+                _ => blocked_by(&pkg.pkgname),
+            };
+            (kind, reason)
+        } else if let Some(reason) = &pkg.build_reason {
+            (Pending, reason.clone())
         } else {
-            (PackageStateKind::Pending, String::new())
+            (Pending, String::new())
         }
     };
 

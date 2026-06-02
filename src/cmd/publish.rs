@@ -197,9 +197,6 @@ fn generate_reports(
     for (_, _, state) in &db.get_prefailskip_packages()? {
         states.add(state);
     }
-    for (_, _, failed_dep) in &db.get_indirect_failures()? {
-        states.add(&PackageState::IndirectFailed(failed_dep.clone()));
-    }
 
     let duration = db.get_build_duration()?;
     let report_url = report_cfg
@@ -627,6 +624,7 @@ struct FailedPackageInfo<'a> {
     result: &'a BuildResult,
     breaks_count: usize,
     failed_log: Option<String>,
+    blockers: Vec<String>,
 }
 
 fn escape_html(s: &str) -> String {
@@ -768,7 +766,7 @@ fn write_text_report(
     }
 
     let mut maintainers: HashMap<String, String> = HashMap::new();
-    for (pkgname, idx, _, _) in db.get_report_data()? {
+    for (pkgname, idx, _) in db.get_report_data()? {
         if let Some(m) = idx.maintainer {
             maintainers.insert(pkgname, m);
         }
@@ -893,7 +891,7 @@ fn write_machine_report(db: &Database, logdir: &Path) -> Result<()> {
         .map(|sp| (sp.pkg.to_string(), sp.dep_count))
         .collect();
 
-    for (pkgname, idx, outcome_id, detail) in db.get_report_data()? {
+    for (pkgname, idx, outcome_id) in db.get_report_data()? {
         write!(encoder, "{}", idx.report())?;
 
         // TODO: packages not in the scheduler (e.g. skipped at scan time)
@@ -902,7 +900,7 @@ fn write_machine_report(db: &Database, logdir: &Path) -> Result<()> {
         writeln!(encoder, "PKG_DEPTH={}", pkg_depth)?;
 
         let status = match outcome_id {
-            Some(id) => match PackageState::from_db(id, detail) {
+            Some(id) => match PackageState::from_db(id, None) {
                 Some(state) => state.pbulk_status(),
                 None => "open",
             },
@@ -1056,16 +1054,6 @@ fn write_html_report(
         });
     }
 
-    for (pkgname, pkgpath, failed_dep) in db.get_indirect_failures()? {
-        results.push(BuildResult {
-            pkgname: pkgsrc::PkgName::new(&pkgname),
-            pkgpath: pkgpath.and_then(|p| pkgsrc::PkgPath::new(&p).ok()),
-            state: PackageState::IndirectFailed(failed_dep),
-            log_dir: None,
-            build_stats: PkgBuildStats::default(),
-        });
-    }
-
     let mut scanfail: Vec<(pkgsrc::PkgPath, String)> = db
         .get_scan_failures()?
         .into_iter()
@@ -1088,6 +1076,7 @@ fn write_html_report(
     let mut file = std::fs::File::create(path)?;
     let m = &meta.pkgsrc_env.metadata;
 
+    let blockers_by_pkg = db.blockers()?;
     let mut failed_info: Vec<FailedPackageInfo> = summary
         .results
         .iter()
@@ -1120,10 +1109,15 @@ fn write_html_report(
                     let setup_log = logdir.join(result.pkgname.pkgname()).join("setup.log");
                     setup_log.exists().then(|| "setup.log".to_string())
                 });
+            let blockers = match blockers_by_pkg.get(result.pkgname.pkgname()) {
+                Some(blockers) => blockers.clone(),
+                None => Vec::new(),
+            };
             FailedPackageInfo {
                 result,
                 breaks_count,
                 failed_log,
+                blockers,
             }
         })
         .collect();
@@ -1203,7 +1197,7 @@ fn write_html_report(
     }
 
     let mut maintainers: HashMap<String, String> = HashMap::new();
-    for (pkgname, idx, _, _) in db.get_report_data()? {
+    for (pkgname, idx, _) in db.get_report_data()? {
         if let Some(m) = idx.maintainer {
             maintainers.insert(pkgname, m);
         }
@@ -1578,17 +1572,26 @@ fn write_failed_table(
         };
 
         if info.result.state.is_skip() {
-            let reason = info.result.state.to_string();
+            let links = info
+                .blockers
+                .iter()
+                .map(|blocker| {
+                    let e = escape_html(blocker);
+                    format!("<a href=\"#failed-{e}\">{e}</a>")
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let reason = format!("Blocked by {links}");
             writeln!(
                 file,
-                "<tr><td class=\"col-pkg indirect\"><span title=\"{0}\">{0}</span></td><td class=\"col-path indirect\">{1}</td><td class=\"col-breaks r indirect\" data-sort=\"{2}\">{3}</td><td class=\"col-dur r indirect\" data-sort=\"0\"></td><td class=\"col-maint indirect\">{4}</td><td class=\"col-status indirect\">{5}</td><td class=\"col-logs reason\" data-sort=\"1\">{6}</td></tr>",
+                "<tr id=\"failed-{0}\"><td class=\"col-pkg indirect\"><span title=\"{0}\">{0}</span></td><td class=\"col-path indirect\">{1}</td><td class=\"col-breaks r indirect\" data-sort=\"{2}\">{3}</td><td class=\"col-dur r indirect\" data-sort=\"0\"></td><td class=\"col-maint indirect\">{4}</td><td class=\"col-status indirect\">{5}</td><td class=\"col-logs reason\" data-sort=\"1\">{6}</td></tr>",
                 escape_html(pkg_name),
                 pkgpath,
                 info.breaks_count,
                 breaks_display,
                 escape_html(maintainer),
                 info.result.state.status(),
-                escape_html(&reason)
+                reason
             )?;
             continue;
         }
@@ -1614,7 +1617,7 @@ fn write_failed_table(
 
         writeln!(
             file,
-            "<tr><td class=\"col-pkg\">{}</td><td class=\"col-path\">{}</td><td class=\"col-breaks r\" data-sort=\"{}\">{}</td><td class=\"col-dur r\" data-sort=\"{}\">{}</td><td class=\"col-maint\">{}</td><td class=\"col-status\">{}</td><td class=\"col-logs\" data-sort=\"0\">{}</td></tr>",
+            "<tr id=\"failed-{id}\"><td class=\"col-pkg\">{}</td><td class=\"col-path\">{}</td><td class=\"col-breaks r\" data-sort=\"{}\">{}</td><td class=\"col-dur r\" data-sort=\"{}\">{}</td><td class=\"col-maint\">{}</td><td class=\"col-status\">{}</td><td class=\"col-logs\" data-sort=\"0\">{}</td></tr>",
             pkg_link,
             pkgpath,
             info.breaks_count,
@@ -1623,7 +1626,8 @@ fn write_failed_table(
             duration,
             escape_html(maintainer),
             info.result.state.status(),
-            phase_links
+            phase_links,
+            id = escaped
         )?;
     }
 

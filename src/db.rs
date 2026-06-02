@@ -53,8 +53,8 @@ use crate::try_println;
 use crate::{HistoryKind, PackageState, PackageStateKind};
 
 /// Row type for [`Database::get_report_data`]:
-/// (pkgname, scan_index, outcome_id, outcome_detail).
-pub type ReportRow = (String, ScanIndex, Option<i32>, Option<String>);
+/// (pkgname, scan_index, outcome_id).
+pub type ReportRow = (String, ScanIndex, Option<i32>);
 
 /**
  * `(pkgpath, pkgbase)` -- the identity key for matching
@@ -185,11 +185,13 @@ pub struct PackageStatusRow {
     pub build_reason: Option<String>,
     pub multi_version: Option<String>,
     pub build_outcome: Option<i32>,
-    pub outcome_detail: Option<String>,
+    pub build_stage: Option<i32>,
+    pub scan_outcome: Option<i32>,
+    pub scan_outcome_detail: Option<String>,
 }
 
 fn build_result_from_row(row: &rusqlite::Row) -> rusqlite::Result<Option<BuildResult>> {
-    let Some(state) = PackageState::from_db(row.get("outcome")?, row.get("outcome_detail")?) else {
+    let Some(state) = PackageState::from_db(row.get("outcome")?, None) else {
         return Ok(None);
     };
     Ok(Some(BuildResult {
@@ -440,17 +442,14 @@ impl Database {
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  package_id INTEGER NOT NULL REFERENCES scan_index(id) ON DELETE CASCADE,
                  outcome INTEGER NOT NULL REFERENCES outcome_types(id),
-                 outcome_detail TEXT,
                  stage INTEGER REFERENCES stage_types(id),
                  duration_ms INTEGER NOT NULL DEFAULT 0,
                  log_dir TEXT,
-                 failed_dep_id INTEGER REFERENCES scan_index(id),
                  UNIQUE(package_id)
              );
 
              CREATE INDEX idx_builds_outcome ON builds(outcome);
              CREATE INDEX idx_builds_package ON builds(package_id);
-             CREATE INDEX idx_builds_failed_dep ON builds(failed_dep_id);
 
              CREATE TABLE scan_failures (
                  pkgpath TEXT PRIMARY KEY,
@@ -635,7 +634,8 @@ impl Database {
             "SELECT p.id, p.pkgname, p.pkg_location,
                     p.pkg_skip_reason, p.pkg_fail_reason, p.multi_version,
                     s.build_reason,
-                    b.outcome AS build_outcome, b.outcome_detail
+                    b.outcome AS build_outcome, b.stage AS build_stage,
+                    p.scan_outcome, p.scan_outcome_detail
              FROM scan_index p
              JOIN package_state s ON s.package_id = p.id
              LEFT JOIN builds b ON b.package_id = p.id
@@ -994,16 +994,15 @@ impl Database {
      */
     pub fn store_build_result(&self, package_id: i64, result: &BuildResult) -> Result<()> {
         let outcome = result.state.db_id();
-        let detail = result.state.detail().map(String::from);
         let stage = result.build_stats.stage.map(|s| s as i32);
         let duration_ms = result.build_stats.duration.as_millis() as i64;
         let log_dir = result.log_dir.as_ref().map(|p| p.display().to_string());
 
         self.conn.execute(
             "INSERT OR REPLACE INTO builds
-             (package_id, outcome, outcome_detail, stage, duration_ms, log_dir)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![package_id, outcome, detail, stage, duration_ms, log_dir],
+             (package_id, outcome, stage, duration_ms, log_dir)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![package_id, outcome, stage, duration_ms, log_dir],
         )?;
 
         debug!(
@@ -1046,7 +1045,7 @@ impl Database {
     pub fn get_build_result(&self, package_id: i64) -> Result<Option<BuildResult>> {
         let mut stmt = self.conn.prepare(
             "SELECT p.pkgname, p.pkg_location AS pkgpath,
-                    b.outcome, b.outcome_detail,
+                    b.outcome,
                     b.stage, b.duration_ms, b.log_dir
              FROM builds b
              JOIN scan_index p ON b.package_id = p.id
@@ -1095,7 +1094,7 @@ impl Database {
     pub fn get_all_build_results(&self) -> Result<Vec<BuildResult>> {
         let mut stmt = self.conn.prepare(
             "SELECT p.pkgname, p.pkg_location AS pkgpath,
-                    b.outcome, b.outcome_detail,
+                    b.outcome,
                     b.stage, b.duration_ms, b.log_dir
              FROM builds b
              JOIN scan_index p ON b.package_id = p.id
@@ -1261,55 +1260,52 @@ impl Database {
     }
 
     /**
-     * Get packages without build results that depend on failed packages.
-     * Returns (pkgname, pkgpath, failed_deps) where failed_deps is
-     * comma-separated. Excludes packages that have skip_reason or fail_reason
-     * (they're pre-failed). Only lists root failures (direct failures), not
-     * indirect failures.
+     * For every blocked package, the packages blocking it (those that
+     * failed to build, or were pre-skipped, pre-failed, or unresolved at
+     * scan), ordered by how many packages each blocks.
      */
-    pub fn get_indirect_failures(&self) -> Result<Vec<(String, Option<String>, String)>> {
-        // Find packages that:
-        // 1. Have no build result
-        // 2. Have no skip_reason or fail_reason (not pre-failed)
-        // 3. Depend (transitively) on a package with a direct failure
-        // Group by package and aggregate failed deps into comma-separated string
-        // Only 'failed' and 'pre-fail' are root causes, not 'indirect-*'
+    pub fn blockers(&self) -> Result<HashMap<String, Vec<String>>> {
         let mut stmt = self.conn.prepare(
             "WITH RECURSIVE
-             -- Only direct failures are root causes
-             failed_pkgs(id) AS (
-                 SELECT package_id FROM builds
-                 WHERE outcome IN (?1, ?2)
-             ),
-             -- Packages affected by failures (transitive closure)
-             affected(id, root_id) AS (
-                 SELECT id, id FROM failed_pkgs
+             blockers(id) AS (
+                 SELECT package_id FROM builds WHERE outcome = ?1
                  UNION
-                 SELECT rd.package_id, a.root_id
+                 SELECT id FROM scan_index WHERE scan_outcome IN (?2, ?3, ?4)
+             ),
+             affected(id, blocker_id) AS (
+                 SELECT id, id FROM blockers
+                 UNION
+                 SELECT rd.package_id, a.blocker_id
                  FROM resolved_depends rd
                  JOIN affected a ON rd.depends_on_id = a.id
-                 WHERE rd.package_id NOT IN (SELECT id FROM failed_pkgs)
+                 WHERE rd.package_id NOT IN (SELECT id FROM blockers)
+             ),
+             impact(blocker_id, n) AS (
+                 SELECT blocker_id, COUNT(*) FROM affected WHERE id != blocker_id GROUP BY blocker_id
              )
-             SELECT p.pkgname, p.pkg_location, GROUP_CONCAT(DISTINCT fp.pkgname) as failed_deps
+             SELECT p.pkgname, bp.pkgname
              FROM affected a
              JOIN scan_index p ON a.id = p.id
-             JOIN scan_index fp ON a.root_id = fp.id
-             WHERE a.id != a.root_id
-               AND NOT EXISTS (SELECT 1 FROM builds b WHERE b.package_id = a.id)
-               AND p.scan_outcome IS NULL
-             GROUP BY p.id, p.pkgname, p.pkg_location
-             ORDER BY p.pkgname",
+             JOIN scan_index bp ON a.blocker_id = bp.id
+             JOIN impact i ON i.blocker_id = a.blocker_id
+             WHERE a.id != a.blocker_id
+             ORDER BY i.n DESC, bp.pkgname",
         )?;
-
         let rows = stmt.query_map(
             params![
                 PackageStateKind::Failed as i32,
+                PackageStateKind::PreSkipped as i32,
                 PackageStateKind::PreFailed as i32,
+                PackageStateKind::Unresolved as i32,
             ],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )?;
-
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for row in rows {
+            let (pkgname, blocker) = row?;
+            map.entry(pkgname).or_default().push(blocker);
+        }
+        Ok(map)
     }
 
     // ========================================================================
@@ -1526,15 +1522,14 @@ impl Database {
 
     /**
      * Get all packages with their scan data and build status for
-     * reporting.  Returns `(pkgname, pkgpath, scan_index, outcome_id,
-     * detail)` rows ordered by pkgname.
+     * reporting.  Returns `(pkgname, scan_index, outcome_id)` rows
+     * ordered by pkgname.
      */
     pub fn get_report_data(&self) -> Result<Vec<ReportRow>> {
         let resolved = self.get_all_resolved_deps()?;
         let mut stmt = self.conn.prepare(
             "SELECT p.*,
-                    COALESCE(b.outcome, p.scan_outcome) AS outcome,
-                    COALESCE(b.outcome_detail, p.scan_outcome_detail) AS outcome_detail
+                    COALESCE(b.outcome, p.scan_outcome) AS outcome
              FROM scan_index p
              LEFT JOIN builds b ON b.package_id = p.id
              ORDER BY p.pkgname",
@@ -1544,7 +1539,6 @@ impl Database {
         while let Some(row) = rows.next()? {
             let pkgname: String = row.get("pkgname")?;
             let outcome: Option<i32> = row.get("outcome")?;
-            let detail: Option<String> = row.get("outcome_detail")?;
             let mut index = Self::scan_index_from_row(row)?;
             if let Some(deps) = resolved.get(&pkgname) {
                 index.resolved_depends = Some(deps.iter().map(|d| d.parse()).collect::<Result<
@@ -1553,7 +1547,7 @@ impl Database {
                 >>(
                 )?);
             }
-            out.push((pkgname, index, outcome, detail));
+            out.push((pkgname, index, outcome));
         }
         Ok(out)
     }
