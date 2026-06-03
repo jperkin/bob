@@ -226,7 +226,7 @@ impl History {
             HistoryKind::Pkgpath => self.pkgpath.clone(),
             HistoryKind::Pkgname => self.pkgname.clone(),
             HistoryKind::Pkgbase => self.pkgbase.clone(),
-            HistoryKind::Outcome => self.outcome.status().to_string(),
+            HistoryKind::Outcome => self.outcome.as_str().to_string(),
             HistoryKind::Stage => {
                 if self.outcome == PackageState::Success {
                     dash()
@@ -291,7 +291,7 @@ impl History {
             HistoryKind::Pkgpath => self.pkgpath.clone(),
             HistoryKind::Pkgname => self.pkgname.clone(),
             HistoryKind::Pkgbase => self.pkgbase.clone(),
-            HistoryKind::Outcome => self.outcome.status().to_string(),
+            HistoryKind::Outcome => self.outcome.as_str().to_string(),
             HistoryKind::Stage => {
                 if self.outcome == PackageState::Success {
                     dash()

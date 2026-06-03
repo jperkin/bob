@@ -14,22 +14,23 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-//! Unified package state.
-//!
-//! [`PackageState`] represents every possible state of a package across
-//! the scan and build lifecycle, ordered by discovery phase.
-//!
-//! [`PackageStateKind`] is the plain discriminant enum, used for status
-//! labels, database IDs, and parsing without needing a full instance.
+/*!
+ * Types representing package state across the scan and build lifecycle.
+ *
+ * [`PackageState`] enumerates the states a package can be in.  A package may
+ * transition between states as it moves through the lifecycle.
+ *
+ * [`PackageCounts`] is a simple tally indexed by [`PackageState`], helpful
+ * for ensuring consistent and accurate counts where required.
+ */
 
-use std::str::FromStr;
-use strum::{EnumCount, IntoEnumIterator};
+use strum::VariantArray;
 
-/// Plain discriminant for [`PackageState`], ordered by lifecycle phase.
-///
-/// Derives provide kebab-case status labels ([`IntoStaticStr`]/[`EnumString`]),
-/// integer conversion ([`FromRepr`] with `#[repr(i32)]`), and iteration
-/// ([`EnumIter`]).
+/**
+ * Current state of a package across the scan and build lifecycle.
+ *
+ * Variants are ordered by the phase in which they are first assigned.
+ */
 #[derive(
     Clone,
     Copy,
@@ -37,348 +38,336 @@ use strum::{EnumCount, IntoEnumIterator};
     Hash,
     PartialEq,
     Eq,
-    strum::EnumCount,
-    strum::EnumIter,
-    strum::EnumProperty,
+    strum::VariantArray,
+    strum::IntoStaticStr,
     strum::EnumString,
     strum::FromRepr,
-    strum::AsRefStr,
-    strum::IntoStaticStr,
+    serde::Serialize,
+    serde::Deserialize,
 )]
 #[strum(serialize_all = "kebab-case")]
 #[repr(i32)]
-pub enum PackageStateKind {
-    #[strum(props(pbulk = "prefailed", desc = "PKG_SKIP_REASON set"))]
+pub enum PackageState {
+    /// Package has `PKG_SKIP_REASON` set.
     PreSkipped = 0,
-    #[strum(props(pbulk = "prefailed", desc = "PKG_FAIL_REASON set"))]
+    /// Package has `PKG_FAIL_REASON` set.
     PreFailed = 1,
-    #[strum(props(pbulk = "prefailed", desc = "Has unresolved dependencies"))]
+    /// Package has unresolved dependencies, or could not otherwise be scanned.
     Unresolved = 2,
-    #[strum(props(pbulk = "indirect-prefailed", desc = "Blocked by pre-skipped package"))]
+    /// Package is blocked by a [`PreSkipped`](Self::PreSkipped) dependency.
     IndirectPreSkipped = 3,
-    #[strum(props(pbulk = "indirect-prefailed", desc = "Blocked by pre-failed package"))]
+    /// Package is blocked by a [`PreFailed`](Self::PreFailed) dependency.
     IndirectPreFailed = 4,
-    #[strum(props(
-        pbulk = "indirect-prefailed",
-        desc = "Blocked by package with unresolved dependencies"
-    ))]
+    /// Package is blocked by an [`Unresolved`](Self::Unresolved) dependency.
     IndirectUnresolved = 5,
-    #[strum(props(pbulk = "open", desc = "Ready to build"))]
+    /// Package is buildable, awaiting build.
     Pending = 6,
-    #[strum(props(pbulk = "done", desc = "Binary already exists"))]
+    /// Binary package already exists and is current.
     UpToDate = 7,
-    #[strum(props(pbulk = "done", desc = "Built successfully"))]
+    /// Package built successfully.
     Success = 8,
-    #[strum(props(pbulk = "failed", desc = "Build attempted and failed"))]
+    /// Package build was attempted but failed.
     Failed = 9,
-    #[strum(props(
-        pbulk = "indirect-failed",
-        desc = "Blocked by package that failed to build"
-    ))]
+    /// Package is blocked by a [`Failed`](Self::Failed) dependency.
     IndirectFailed = 10,
 }
 
-impl PackageStateKind {
-    /// One-line description of the state, from the `desc` strum property.
-    pub fn desc(self) -> &'static str {
-        use strum::EnumProperty;
-        self.get_str("desc").expect("desc prop")
+impl PackageState {
+    /**
+     * The integer encoding for this state.  The mapping is stable:
+     * existing values must never change.
+     *
+     * # Examples
+     *
+     * ```
+     * use bob::pkgstate::PackageState;
+     *
+     * assert_eq!(PackageState::Success.id(), 8);
+     * ```
+     */
+    pub fn id(self) -> i32 {
+        self as i32
     }
-}
 
-/// Aliases for filtering on multiple [`PackageStateKind`] values at once.
-///
-/// Used by the `bob status -s` filter and by aggregated count output.
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    PartialEq,
-    Eq,
-    strum::EnumIter,
-    strum::EnumProperty,
-    strum::EnumString,
-    strum::AsRefStr,
-    strum::IntoStaticStr,
-)]
-#[strum(serialize_all = "kebab-case")]
-pub enum PackageStateAlias {
-    #[strum(props(desc = "Any pre-skipped or pre-failed package"))]
-    Skipped,
-    #[strum(props(desc = "Any package blocked by another"))]
-    Blocked,
-    #[strum(props(desc = "Any successful outcome (freshly built or up-to-date)"))]
-    Ok,
-}
+    /**
+     * State label.  bob aims for a more consistent and comprehensive map of
+     * display strings than pbulk.  [`as_pbulk_str`](Self::as_pbulk_str) is
+     * provided for pbulk compatible output strings, e.g. `BUILD_STATUS` in
+     * reports.
+     *
+     * Note that the labels are derived using strum directly from the member
+     * name, using the so-called "kebab-case" format.
+     *
+     * # Examples
+     *
+     * ```
+     * use bob::pkgstate::PackageState;
+     *
+     * assert_eq!(PackageState::PreSkipped.as_str(), "pre-skipped");
+     * assert_eq!(PackageState::IndirectPreSkipped.as_str(), "indirect-pre-skipped");
+     * ```
+     */
+    pub fn as_str(self) -> &'static str {
+        self.into()
+    }
 
-impl PackageStateAlias {
-    /// The set of [`PackageStateKind`] values this alias expands to.
-    pub fn expands_to(self) -> &'static [PackageStateKind] {
-        use PackageStateKind::*;
+    /**
+     * pbulk-compatible `BUILD_STATUS` output format.  Should only be used
+     * where 100% compatibility with pbulk is required, e.g. in the machine
+     * readable report that is consumed by external tools.
+     *
+     * # Examples
+     *
+     * ```
+     * use bob::pkgstate::PackageState;
+     *
+     * // pbulk does not support PKG_SKIP_REASON as a separate status
+     * assert_eq!(PackageState::PreSkipped.as_pbulk_str(), "prefailed");
+     * assert_eq!(PackageState::IndirectPreSkipped.as_pbulk_str(), "indirect-prefailed");
+     * ```
+     */
+    pub fn as_pbulk_str(self) -> &'static str {
         match self {
-            Self::Skipped => &[PreSkipped, PreFailed],
-            Self::Blocked => &[
-                IndirectPreSkipped,
-                IndirectPreFailed,
-                IndirectUnresolved,
-                IndirectFailed,
-            ],
-            Self::Ok => &[Success, UpToDate],
+            Self::PreSkipped | Self::PreFailed | Self::Unresolved => "prefailed",
+            Self::IndirectPreSkipped | Self::IndirectPreFailed | Self::IndirectUnresolved => {
+                "indirect-prefailed"
+            }
+            Self::Pending => "open",
+            Self::UpToDate | Self::Success => "done",
+            Self::Failed => "failed",
+            Self::IndirectFailed => "indirect-failed",
         }
     }
 
-    /// One-line description of the alias.
+    /**
+     * State description for CLI usage output.  Matches the corresponding
+     * variant's documentation, without the trailing period or link markup.
+     *
+     * # Examples
+     *
+     * ```
+     * use bob::pkgstate::PackageState;
+     *
+     * assert_eq!(PackageState::Success.desc(), "Package built successfully");
+     * ```
+     */
     pub fn desc(self) -> &'static str {
-        use strum::EnumProperty;
-        self.get_str("desc").expect("desc prop")
+        match self {
+            Self::PreSkipped => "Package has PKG_SKIP_REASON set",
+            Self::PreFailed => "Package has PKG_FAIL_REASON set",
+            Self::Unresolved => {
+                "Package has unresolved dependencies, or could not otherwise be scanned"
+            }
+            Self::IndirectPreSkipped => "Package is blocked by a PreSkipped dependency",
+            Self::IndirectPreFailed => "Package is blocked by a PreFailed dependency",
+            Self::IndirectUnresolved => "Package is blocked by an Unresolved dependency",
+            Self::Pending => "Package is buildable, awaiting build",
+            Self::UpToDate => "Binary package already exists and is current",
+            Self::Success => "Package built successfully",
+            Self::Failed => "Package build was attempted but failed",
+            Self::IndirectFailed => "Package is blocked by a Failed dependency",
+        }
+    }
+
+    /**
+     * A successful outcome (freshly built or existing package is up-to-date).
+     *
+     * # Examples
+     *
+     * ```
+     * use bob::pkgstate::PackageState;
+     *
+     * assert!(PackageState::Success.is_success());
+     * assert!(PackageState::UpToDate.is_success());
+     * assert!(!PackageState::Failed.is_success());
+     * ```
+     */
+    pub fn is_success(self) -> bool {
+        matches!(self, Self::Success | Self::UpToDate)
+    }
+
+    /**
+     * Package was marked pre-skipped or pre-failed at scan time.
+     *
+     * # Examples
+     *
+     * ```
+     * use bob::pkgstate::PackageState;
+     *
+     * assert!(PackageState::PreSkipped.is_skipped());
+     * assert!(PackageState::PreFailed.is_skipped());
+     * assert!(!PackageState::Failed.is_skipped());
+     * ```
+     */
+    pub fn is_skipped(self) -> bool {
+        matches!(self, Self::PreSkipped | Self::PreFailed)
+    }
+
+    /**
+     * Package build is blocked by another package (any indirect variant).
+     *
+     * # Examples
+     *
+     * ```
+     * use bob::pkgstate::PackageState;
+     *
+     * assert!(PackageState::IndirectFailed.is_blocked());
+     * assert!(!PackageState::Failed.is_blocked());
+     * ```
+     */
+    pub fn is_blocked(self) -> bool {
+        matches!(
+            self,
+            Self::IndirectPreSkipped
+                | Self::IndirectPreFailed
+                | Self::IndirectUnresolved
+                | Self::IndirectFailed
+        )
+    }
+
+    /**
+     * Package build cannot be attempted.  Equal to
+     * [`is_skipped`](Self::is_skipped) || [`is_blocked`](Self::is_blocked).
+     *
+     * # Examples
+     *
+     * ```
+     * use bob::pkgstate::PackageState;
+     *
+     * assert!(PackageState::PreSkipped.is_masked());
+     * assert!(PackageState::IndirectFailed.is_masked());
+     * assert!(!PackageState::Pending.is_masked());
+     * ```
+     */
+    pub fn is_masked(self) -> bool {
+        self.is_skipped() || self.is_blocked()
+    }
+
+    /**
+     * Map a scan-time skip state to its indirect equivalent.
+     * Non-skip variants are returned unchanged.
+     */
+    pub fn indirect(self) -> Self {
+        match self {
+            Self::PreSkipped | Self::IndirectPreSkipped => Self::IndirectPreSkipped,
+            Self::PreFailed | Self::IndirectPreFailed => Self::IndirectPreFailed,
+            Self::Unresolved | Self::IndirectUnresolved => Self::IndirectUnresolved,
+            _ => self,
+        }
+    }
+}
+
+impl TryFrom<i32> for PackageState {
+    type Error = String;
+
+    fn try_from(id: i32) -> Result<Self, Self::Error> {
+        Self::from_repr(id).ok_or_else(|| format!("unknown outcome id {id}"))
     }
 }
 
 /**
- * Parse a status filter string into one or more [`PackageStateKind`] values.
+ * Counts of packages by [`PackageState`], backed by a fixed-size
+ * array indexed by variant position.  Bob has a variety of counter displays,
+ * and this ensures they are all consistent.
  *
- * Accepts either a canonical kind name (e.g. `pre-failed`) or an alias
- * (e.g. `blocked`), returning the expanded set of kinds.
+ * # Examples
+ *
+ * ```
+ * use bob::pkgstate::{PackageCounts, PackageState};
+ *
+ * let mut counts = PackageCounts::default();
+ * counts.add(PackageState::Success);
+ * counts.add(PackageState::UpToDate);
+ * counts.add(PackageState::Failed);
+ *
+ * assert_eq!(counts[PackageState::Success], 1);
+ * assert_eq!(counts.count(PackageState::is_success), 2);
+ * ```
  */
-pub fn parse_status_filter(s: &str) -> Result<Vec<PackageStateKind>, String> {
-    if let Ok(k) = s.parse::<PackageStateKind>() {
-        return Ok(vec![k]);
-    }
-    if let Ok(a) = s.parse::<PackageStateAlias>() {
-        return Ok(a.expands_to().to_vec());
-    }
-    Err(format!("unknown status '{s}'"))
-}
-
-/// State of a package across the scan and build lifecycle.
-///
-/// Variants are ordered by the phase in which they are first assigned:
-///
-/// 1. **Scan** -- `PreSkipped`, `PreFailed`
-/// 2. **Resolution** -- `Unresolved`
-/// 3. **Propagation** -- `IndirectPreSkipped`, `IndirectPreFailed`, `IndirectUnresolved`
-/// 4. **Buildable** -- `Pending`
-/// 5. **Up-to-date check** -- `UpToDate`
-/// 6. **Build** -- `Success`, `Failed`
-/// 7. **Build propagation** -- `IndirectFailed`
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum PackageState {
-    /// Skipped due to PKG_SKIP_REASON.
-    PreSkipped(String),
-    /// Skipped due to PKG_FAIL_REASON.
-    PreFailed(String),
-    /// Has unresolved dependencies.
-    Unresolved(String),
-    /// Blocked by a pre-skipped dependency.
-    IndirectPreSkipped(String),
-    /// Blocked by a pre-failed dependency.
-    IndirectPreFailed(String),
-    /// Blocked by a dependency with unresolved deps.
-    IndirectUnresolved(String),
-    /// Buildable, awaiting build.
-    Pending,
-    /// Binary package already exists and is current.
-    UpToDate,
-    /// Built successfully.
-    Success,
-    /// Build failed.
-    Failed(String),
-    /// Blocked by a dependency that failed to build.
-    IndirectFailed(String),
-}
-
-impl PackageState {
-    /// The plain discriminant for this state.
-    pub fn kind(&self) -> PackageStateKind {
-        match self {
-            Self::PreSkipped(_) => PackageStateKind::PreSkipped,
-            Self::PreFailed(_) => PackageStateKind::PreFailed,
-            Self::Unresolved(_) => PackageStateKind::Unresolved,
-            Self::IndirectPreSkipped(_) => PackageStateKind::IndirectPreSkipped,
-            Self::IndirectPreFailed(_) => PackageStateKind::IndirectPreFailed,
-            Self::IndirectUnresolved(_) => PackageStateKind::IndirectUnresolved,
-            Self::Pending => PackageStateKind::Pending,
-            Self::UpToDate => PackageStateKind::UpToDate,
-            Self::Success => PackageStateKind::Success,
-            Self::Failed(_) => PackageStateKind::Failed,
-            Self::IndirectFailed(_) => PackageStateKind::IndirectFailed,
-        }
-    }
-
-    /// Construct from a kind and optional detail string.
-    fn from_kind(kind: PackageStateKind, detail: String) -> Self {
-        match kind {
-            PackageStateKind::PreSkipped => Self::PreSkipped(detail),
-            PackageStateKind::PreFailed => Self::PreFailed(detail),
-            PackageStateKind::Unresolved => Self::Unresolved(detail),
-            PackageStateKind::IndirectPreSkipped => Self::IndirectPreSkipped(detail),
-            PackageStateKind::IndirectPreFailed => Self::IndirectPreFailed(detail),
-            PackageStateKind::IndirectUnresolved => Self::IndirectUnresolved(detail),
-            PackageStateKind::Pending => Self::Pending,
-            PackageStateKind::UpToDate => Self::UpToDate,
-            PackageStateKind::Success => Self::Success,
-            PackageStateKind::Failed => Self::Failed(detail),
-            PackageStateKind::IndirectFailed => Self::IndirectFailed(detail),
-        }
-    }
-
-    /// Kebab-case status label.
-    pub fn status(&self) -> &'static str {
-        self.kind().into()
-    }
-
-    /**
-     * pbulk-compatible BUILD_STATUS value.
-     */
-    pub fn pbulk_status(&self) -> &'static str {
-        use strum::EnumProperty;
-        self.kind().get_str("pbulk").expect("pbulk prop")
-    }
-
-    /// Database integer ID, matching variant order.
-    pub fn db_id(&self) -> i32 {
-        self.kind() as i32
-    }
-
-    /// Reconstruct from DB integer + optional detail string.
-    pub fn from_db(id: i32, detail: Option<String>) -> Option<Self> {
-        PackageStateKind::from_repr(id).map(|k| Self::from_kind(k, detail.unwrap_or_default()))
-    }
-
-    /// Parse a status string into a default (empty-detail) instance.
-    pub fn from_status(s: &str) -> Option<Self> {
-        PackageStateKind::from_str(s)
-            .ok()
-            .map(|k| Self::from_kind(k, String::new()))
-    }
-
-    /// The detail/reason string, if any.
-    pub fn detail(&self) -> Option<&str> {
-        match self {
-            Self::Pending | Self::UpToDate | Self::Success => None,
-            Self::PreSkipped(s)
-            | Self::PreFailed(s)
-            | Self::Unresolved(s)
-            | Self::IndirectPreSkipped(s)
-            | Self::IndirectPreFailed(s)
-            | Self::IndirectUnresolved(s)
-            | Self::Failed(s)
-            | Self::IndirectFailed(s) => Some(s),
-        }
-    }
-
-    /// True for skip-phase states (not success, failed, or up-to-date).
-    pub fn is_skip(&self) -> bool {
-        !matches!(self, Self::Success | Self::Failed(_) | Self::UpToDate)
-    }
-
-    /// True for direct skip reasons (PreSkipped/PreFailed/Unresolved).
-    pub fn is_direct_skip(&self) -> bool {
-        matches!(
-            self,
-            Self::PreSkipped(_) | Self::PreFailed(_) | Self::Unresolved(_)
-        )
-    }
-
-    /// Map a skip state to its indirect equivalent, with new detail.
-    pub fn indirect(&self, detail: String) -> Self {
-        match self {
-            Self::PreSkipped(_) | Self::IndirectPreSkipped(_) => Self::IndirectPreSkipped(detail),
-            Self::PreFailed(_) | Self::IndirectPreFailed(_) => Self::IndirectPreFailed(detail),
-            Self::Unresolved(_) | Self::IndirectUnresolved(_) => Self::IndirectUnresolved(detail),
-            Self::IndirectFailed(_) => Self::IndirectFailed(detail),
-            other => other.clone(),
-        }
-    }
-
-    /// Generate SQL VALUES for the outcome_types lookup table.
-    ///
-    /// Excludes Pending since that is not stored in the database.
-    pub fn db_values() -> String {
-        PackageStateKind::iter()
-            .filter(|k| *k != PackageStateKind::Pending)
-            .map(|k| {
-                let s: &'static str = k.into();
-                format!("({}, '{}')", k as i32, s)
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-}
-
-/// Counts of packages by [`PackageStateKind`].
-///
-/// Backed by an array indexed by the kind discriminant, so adding a new
-/// variant to [`PackageStateKind`] automatically extends the counts with
-/// no additional code.
 #[derive(Clone, Debug)]
-pub struct PackageCounts([usize; PackageStateKind::COUNT]);
+pub struct PackageCounts([usize; PackageState::VARIANTS.len()]);
 
 impl Default for PackageCounts {
     fn default() -> Self {
-        Self([0; PackageStateKind::COUNT])
+        Self([0; PackageState::VARIANTS.len()])
     }
 }
 
 impl PackageCounts {
-    /// Increment the counter for this state.
-    pub fn add(&mut self, state: &PackageState) {
-        self.0[state.kind() as usize] += 1;
+    /**
+     * Increment the counter for this state.
+     *
+     * # Examples
+     *
+     * ```
+     * use bob::pkgstate::{PackageCounts, PackageState};
+     *
+     * let mut counts = PackageCounts::default();
+     * counts.add(PackageState::Success);
+     * assert_eq!(counts[PackageState::Success], 1);
+     * ```
+     */
+    pub fn add(&mut self, state: PackageState) {
+        self.0[state as usize] += 1;
     }
 
-    /// Packages with a successful outcome: freshly built (`Success`) plus
-    /// already-current binaries (`UpToDate`).
+    /**
+     * Sum the counts of all states matching the predicate.
+     *
+     * # Examples
+     *
+     * ```
+     * use bob::pkgstate::{PackageCounts, PackageState};
+     *
+     * let mut counts = PackageCounts::default();
+     * counts.add(PackageState::Success);
+     * counts.add(PackageState::UpToDate);
+     * assert_eq!(counts.count(PackageState::is_success), 2);
+     * ```
+     */
+    pub fn count(&self, pred: impl Fn(PackageState) -> bool) -> usize {
+        PackageState::VARIANTS
+            .iter()
+            .copied()
+            .filter(|k| pred(*k))
+            .map(|k| self[k])
+            .sum()
+    }
+
+    /**
+     * Count of successful packages (freshly built or already up-to-date).
+     */
     pub fn successful(&self) -> usize {
-        self[PackageStateKind::Success] + self[PackageStateKind::UpToDate]
+        self.count(PackageState::is_success)
     }
 
-    /// Packages that failed to build.
+    /**
+     * Count of packages whose build was attempted and failed directly.
+     */
     pub fn failed(&self) -> usize {
-        self[PackageStateKind::Failed]
+        self[PackageState::Failed]
     }
 
-    /// Packages whose existing binary was up to date.
-    pub fn up_to_date(&self) -> usize {
-        self[PackageStateKind::UpToDate]
-    }
-
-    /// Sum of counts for all kinds in an alias expansion.
-    pub fn count_alias(&self, alias: PackageStateAlias) -> usize {
-        alias.expands_to().iter().map(|k| self[*k]).sum()
-    }
-
-    /// Packages not attempted: skip/fail reasons and indirect
-    /// dependents of failed or masked packages.  Does not include
-    /// Unresolved (those appear in scan failures).
+    /**
+     * Count of masked packages (skipped, or blocked by another package).
+     */
     pub fn masked(&self) -> usize {
-        use PackageStateKind::*;
-        self[PreSkipped]
-            + self[PreFailed]
-            + self[IndirectPreSkipped]
-            + self[IndirectPreFailed]
-            + self[IndirectUnresolved]
-            + self[IndirectFailed]
+        self.count(PackageState::is_masked)
     }
 
-    /// Total packages: successful + failed + masked.
-    /// Excludes scan failures and unresolved (listed separately).
+    /**
+     * Total packages with a reported outcome, as shown in report summaries:
+     * [`successful`](Self::successful) + [`failed`](Self::failed) +
+     * [`masked`](Self::masked).
+     */
     pub fn total(&self) -> usize {
         self.successful() + self.failed() + self.masked()
     }
 }
 
-impl std::ops::Index<PackageStateKind> for PackageCounts {
+impl std::ops::Index<PackageState> for PackageCounts {
     type Output = usize;
-    fn index(&self, kind: PackageStateKind) -> &usize {
-        &self.0[kind as usize]
-    }
-}
-
-impl std::fmt::Display for PackageState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.detail() {
-            Some(d) if !d.is_empty() => write!(f, "{}", d),
-            _ => write!(f, "{}", self.status()),
-        }
+    fn index(&self, state: PackageState) -> &usize {
+        &self.0[state as usize]
     }
 }

@@ -17,7 +17,7 @@
 use anyhow::{Context, Result, bail};
 use bob::Init;
 use bob::Interrupted;
-use bob::PackageStateKind;
+use bob::PackageState;
 use bob::RunState;
 use bob::build::{self, Build};
 use bob::config::{Config, Pkgsrc};
@@ -174,9 +174,7 @@ impl BuildRunner {
      */
     fn update_pkg_summary(&self, prior: &[String], summary: &build::BuildSummary) {
         let changed = match self.db.get_successful_packages() {
-            Ok(current) => {
-                prior != current || summary.counts().states[PackageStateKind::Success] > 0
-            }
+            Ok(current) => prior != current || summary.counts().states[PackageState::Success] > 0,
             Err(_) => true,
         };
         if !changed {

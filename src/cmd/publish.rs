@@ -48,13 +48,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use glob::Pattern;
-use strum::IntoEnumIterator;
+use strum::VariantArray;
 use tracing::{debug, info};
 
 use bob::build::{BuildResult, BuildSummary, PkgBuildStats};
 use bob::config::{Config, Pkgsrc, Publish, PublishPackages, ScriptValue};
 use bob::db::Database;
-use bob::{PackageCounts, PackageState, PackageStateKind};
+use bob::{PackageCounts, PackageState};
 
 struct PublishResult {
     uploaded: usize,
@@ -192,10 +192,10 @@ fn generate_reports(
 
     let mut states = PackageCounts::default();
     for r in &db.get_all_build_results()? {
-        states.add(&r.state);
+        states.add(r.state);
     }
-    for (_, _, state) in &db.get_prefailskip_packages()? {
-        states.add(state);
+    for (_, _, state, _) in &db.get_prefailskip_packages()? {
+        states.add(*state);
     }
 
     let duration = db.get_build_duration()?;
@@ -665,27 +665,25 @@ fn write_text_report(
         .map(|sp| (sp.pkg.to_string(), sp.dep_count))
         .collect();
 
-    for (pkgname, pkgpath, state) in db.get_prefailskip_packages()? {
-        results.push(BuildResult {
-            pkgname: pkgsrc::PkgName::new(&pkgname),
-            pkgpath: pkgpath.and_then(|p| pkgsrc::PkgPath::new(&p).ok()),
-            state,
-            log_dir: None,
-            build_stats: PkgBuildStats::default(),
-        });
-    }
-
     let mut scanfail: Vec<(pkgsrc::PkgPath, String)> = db
         .get_scan_failures()?
         .into_iter()
         .filter_map(|(p, e)| pkgsrc::PkgPath::new(&p).ok().map(|pp| (pp, e)))
         .collect();
-    for r in &results {
-        if let PackageState::Unresolved(reason) = &r.state {
-            if let Some(pp) = &r.pkgpath {
+    for (pkgname, pkgpath, state, reason) in db.get_prefailskip_packages()? {
+        let pkgpath = pkgpath.and_then(|p| pkgsrc::PkgPath::new(&p).ok());
+        if state == PackageState::Unresolved {
+            if let (Some(pp), Some(reason)) = (&pkgpath, &reason) {
                 scanfail.push((pp.clone(), reason.clone()));
             }
         }
+        results.push(BuildResult {
+            pkgname: pkgsrc::PkgName::new(&pkgname),
+            pkgpath,
+            state,
+            log_dir: None,
+            build_stats: PkgBuildStats::default(),
+        });
     }
 
     let summary = BuildSummary {
@@ -732,12 +730,15 @@ fn write_text_report(
     }
     right.push(("Duration", duration_str));
 
+    let successful = c.states.successful();
+    let failed = c.states.failed();
+    let masked = c.states.masked();
     let left = [
         ("Total", c.states.total()),
-        ("Successful", c.states.successful()),
-        ("Failed", c.states.failed()),
-        ("UpToDate", c.states.up_to_date()),
-        ("Masked", c.states.masked()),
+        ("Successful", successful),
+        ("Failed", failed),
+        ("UpToDate", c.states[PackageState::UpToDate]),
+        ("Masked", masked),
     ];
 
     /* Width = longest "Label:" + 1 trailing space. */
@@ -785,7 +786,7 @@ fn write_text_report(
             let was_previously_ok = |e: &bob::db::DiffEntry| -> bool {
                 matches!(
                     e.build1_outcome,
-                    None | Some(PackageStateKind::Success) | Some(PackageStateKind::UpToDate)
+                    None | Some(PackageState::Success) | Some(PackageState::UpToDate)
                 )
             };
             sorted.sort_by(|a, b| {
@@ -804,7 +805,7 @@ fn write_text_report(
             for e in &sorted {
                 let pkgname = e.build2_pkgname.as_deref().unwrap_or("-");
                 let breaks = breaks_counts.get(pkgname).copied().unwrap_or(0);
-                let previously: &str = e.build1_outcome.map_or("absent", |o| o.into());
+                let previously: &str = e.build1_outcome.map_or("absent", |o| o.as_str());
                 let breaks_str = if breaks > 0 {
                     breaks.to_string()
                 } else {
@@ -837,9 +838,9 @@ fn write_text_report(
     }
 
     let mut failed: Vec<_> = summary
-        .failed()
-        .into_iter()
-        .filter(|r| matches!(r.state, PackageState::Failed(_)))
+        .results
+        .iter()
+        .filter(|r| r.state == PackageState::Failed)
         .map(|r| {
             let breaks = breaks_counts.get(r.pkgname.pkgname()).copied().unwrap_or(0);
             (r, breaks)
@@ -900,9 +901,9 @@ fn write_machine_report(db: &Database, logdir: &Path) -> Result<()> {
         writeln!(encoder, "PKG_DEPTH={}", pkg_depth)?;
 
         let status = match outcome_id {
-            Some(id) => match PackageState::from_db(id, None) {
-                Some(state) => state.pbulk_status(),
-                None => "open",
+            Some(id) => match PackageState::try_from(id) {
+                Ok(state) => state.as_pbulk_str(),
+                Err(_) => "open",
             },
             None => "open",
         };
@@ -936,10 +937,12 @@ fn write_variables_json(
         pkgsrc.insert(key.clone(), value.clone().into());
     }
 
-    let mut counts: serde_json::Map<_, _> = PackageStateKind::iter()
-        .map(|kind| (kind.as_ref().to_string(), states[kind].into()))
+    let mut counts: serde_json::Map<_, _> = PackageState::VARIANTS
+        .iter()
+        .map(|kind| (kind.as_str().to_string(), states[*kind].into()))
         .collect();
-    counts.insert("total".to_string(), states.total().into());
+    let total = states.total();
+    counts.insert("total".to_string(), total.into());
 
     let mut report = serde_json::Map::new();
     report.insert("date".to_string(), build_id.into());
@@ -1044,27 +1047,25 @@ fn write_html_report(
         .map(|sp| (sp.pkg.to_string(), sp.dep_count))
         .collect();
 
-    for (pkgname, pkgpath, state) in db.get_prefailskip_packages()? {
-        results.push(BuildResult {
-            pkgname: pkgsrc::PkgName::new(&pkgname),
-            pkgpath: pkgpath.and_then(|p| pkgsrc::PkgPath::new(&p).ok()),
-            state,
-            log_dir: None,
-            build_stats: PkgBuildStats::default(),
-        });
-    }
-
     let mut scanfail: Vec<(pkgsrc::PkgPath, String)> = db
         .get_scan_failures()?
         .into_iter()
         .filter_map(|(p, e)| pkgsrc::PkgPath::new(&p).ok().map(|pp| (pp, e)))
         .collect();
-    for r in &results {
-        if let PackageState::Unresolved(reason) = &r.state {
-            if let Some(pp) = &r.pkgpath {
+    for (pkgname, pkgpath, state, reason) in db.get_prefailskip_packages()? {
+        let pkgpath = pkgpath.and_then(|p| pkgsrc::PkgPath::new(&p).ok());
+        if state == PackageState::Unresolved {
+            if let (Some(pp), Some(reason)) = (&pkgpath, &reason) {
                 scanfail.push((pp.clone(), reason.clone()));
             }
         }
+        results.push(BuildResult {
+            pkgname: pkgsrc::PkgName::new(&pkgname),
+            pkgpath,
+            state,
+            log_dir: None,
+            build_stats: PkgBuildStats::default(),
+        });
     }
 
     let summary = BuildSummary {
@@ -1080,12 +1081,7 @@ fn write_html_report(
     let mut failed_info: Vec<FailedPackageInfo> = summary
         .results
         .iter()
-        .filter(|r| {
-            matches!(
-                r.state,
-                PackageState::Failed(_) | PackageState::IndirectFailed(_)
-            )
-        })
+        .filter(|r| matches!(r.state, PackageState::Failed | PackageState::IndirectFailed))
         .map(|result| {
             let breaks_count = breaks_counts
                 .get(result.pkgname.pkgname())
@@ -1123,8 +1119,8 @@ fn write_html_report(
         .collect();
 
     failed_info.sort_by(|a, b| {
-        let a_indirect = matches!(a.result.state, PackageState::IndirectFailed(_));
-        let b_indirect = matches!(b.result.state, PackageState::IndirectFailed(_));
+        let a_indirect = a.result.state == PackageState::IndirectFailed;
+        let b_indirect = b.result.state == PackageState::IndirectFailed;
         a_indirect
             .cmp(&b_indirect)
             .then_with(|| b.breaks_count.cmp(&a.breaks_count))
@@ -1350,11 +1346,18 @@ fn write_statistics_table(file: &mut std::fs::File, summary: &BuildSummary) -> R
 
     writeln!(file, "<table class=\"vars stats\">")?;
     writeln!(file, "<tr><th colspan=\"2\">Statistics</th></tr>")?;
+    let successful = c.states.successful();
+    let failed = c.states.failed();
+    let masked = c.states.masked();
     write_var_row(file, "Total", &c.states.total().to_string())?;
-    write_var_row(file, "Successful", &c.states.successful().to_string())?;
-    write_var_row(file, "Failed", &c.states.failed().to_string())?;
-    write_var_row(file, "UpToDate", &c.states.up_to_date().to_string())?;
-    write_var_row(file, "Masked", &c.states.masked().to_string())?;
+    write_var_row(file, "Successful", &successful.to_string())?;
+    write_var_row(file, "Failed", &failed.to_string())?;
+    write_var_row(
+        file,
+        "UpToDate",
+        &c.states[PackageState::UpToDate].to_string(),
+    )?;
+    write_var_row(file, "Masked", &masked.to_string())?;
     writeln!(file, "</table>")?;
     Ok(())
 }
@@ -1571,7 +1574,7 @@ fn write_failed_table(
             String::new()
         };
 
-        if info.result.state.is_skip() {
+        if info.result.state == PackageState::IndirectFailed {
             let links = info
                 .blockers
                 .iter()
@@ -1590,7 +1593,7 @@ fn write_failed_table(
                 info.breaks_count,
                 breaks_display,
                 escape_html(maintainer),
-                info.result.state.status(),
+                info.result.state.as_str(),
                 reason
             )?;
             continue;
@@ -1625,7 +1628,7 @@ fn write_failed_table(
             dur_secs,
             duration,
             escape_html(maintainer),
-            info.result.state.status(),
+            info.result.state.as_str(),
             phase_links,
             id = escaped
         )?;
@@ -1658,7 +1661,7 @@ fn write_diff_section(
     let was_ok = |e: &bob::db::DiffEntry| -> bool {
         matches!(
             e.build1_outcome,
-            None | Some(PackageStateKind::Success) | Some(PackageStateKind::UpToDate)
+            None | Some(PackageState::Success) | Some(PackageState::UpToDate)
         )
     };
 
@@ -1737,7 +1740,7 @@ fn write_diff_section(
             None => (0, String::new()),
         };
 
-        let previously: &str = e.build1_outcome.map_or("absent", |o| o.into());
+        let previously: &str = e.build1_outcome.map_or("absent", |o| o.as_str());
 
         let escaped = escape_html(pkgname);
         let pkg_link = match info.and_then(|i| i.failed_log.as_deref()) {

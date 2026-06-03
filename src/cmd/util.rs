@@ -22,7 +22,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use pkgsrc::ScanIndex;
 use regex::Regex;
 
-use bob::PackageStateKind;
+use bob::PackageState;
 use bob::config::Config;
 use bob::db::Database;
 use bob::scan::Scan;
@@ -91,9 +91,8 @@ pub fn presolve(file: &PathBuf, output: Option<&PathBuf>, strict: bool, verbose:
         std::fs::write(path, &out)?;
         let c = result.counts();
         let s = &c.states;
-        let skipped = s[PackageStateKind::PreSkipped]
-            + s[PackageStateKind::PreFailed]
-            + s[PackageStateKind::Unresolved];
+        let skipped =
+            s[PackageState::PreSkipped] + s[PackageState::PreFailed] + s[PackageState::Unresolved];
         eprintln!(
             "Wrote {} buildable, {} skipped to {}",
             c.buildable,
@@ -200,9 +199,8 @@ pub fn print_presolve(config: &Config, output: Option<&PathBuf>, sort: bool) -> 
         w.flush()?;
         let c = result.counts();
         let s = &c.states;
-        let skipped = s[PackageStateKind::PreSkipped]
-            + s[PackageStateKind::PreFailed]
-            + s[PackageStateKind::Unresolved];
+        let skipped =
+            s[PackageState::PreSkipped] + s[PackageState::PreFailed] + s[PackageState::Unresolved];
         eprintln!(
             "Wrote {} buildable, {} skipped to {}",
             c.buildable,

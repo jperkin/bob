@@ -50,7 +50,7 @@ use crate::build::{BuildResult, PkgBuildStats, Stage};
 use crate::config::PkgsrcEnv;
 use crate::scan::ScanResult;
 use crate::try_println;
-use crate::{HistoryKind, PackageState, PackageStateKind};
+use crate::{HistoryKind, PackageState};
 
 /// Row type for [`Database::get_report_data`]:
 /// (pkgname, scan_index, outcome_id).
@@ -83,6 +83,19 @@ fn stage_values() -> String {
     Stage::VARIANTS
         .iter()
         .map(|v| format!("({}, '{}')", *v as i32, v.into_str()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/**
+ * SQL VALUES list seeding the `outcome_types` lookup table.  `Pending`
+ * is the implicit default and is not persisted, so it is excluded.
+ */
+fn outcome_values() -> String {
+    PackageState::VARIANTS
+        .iter()
+        .filter(|k| **k != PackageState::Pending)
+        .map(|k| format!("({}, '{}')", k.id(), k.as_str()))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -132,8 +145,8 @@ const HISTORY_SCHEMA_VERSION: i32 = 20260515;
  */
 #[derive(Clone, Debug)]
 pub struct PkgBuildHistory {
-    /// Build outcome, if the stored value maps to a known variant.
-    pub outcome: Option<PackageStateKind>,
+    /// Build outcome.
+    pub outcome: PackageState,
     /// Disk usage in bytes, if recorded.
     pub disk_usage: Option<u64>,
     /// MAKE_JOBS used, if recorded.
@@ -191,7 +204,7 @@ pub struct PackageStatusRow {
 }
 
 fn build_result_from_row(row: &rusqlite::Row) -> rusqlite::Result<Option<BuildResult>> {
-    let Some(state) = PackageState::from_db(row.get("outcome")?, None) else {
+    let Ok(state) = PackageState::try_from(row.get::<_, i32>("outcome")?) else {
         return Ok(None);
     };
     Ok(Some(BuildResult {
@@ -461,7 +474,7 @@ impl Database {
                  value TEXT NOT NULL
              );",
             SCHEMA_VERSION,
-            outcome_types = PackageState::db_values(),
+            outcome_types = outcome_values(),
             stages = stage_values(),
         ))?;
 
@@ -813,13 +826,15 @@ impl Database {
              WHERE pkgname = ?3",
         )?;
         for pkg in &summary.packages {
-            if let ScanResult::Skipped { state, index, .. } = pkg {
+            if let ScanResult::Skipped {
+                state,
+                index,
+                reason,
+                ..
+            } = pkg
+            {
                 let Some(idx) = index else { continue };
-                stmt.execute(params![
-                    state.db_id(),
-                    state.to_string(),
-                    idx.pkgname.pkgname(),
-                ])?;
+                stmt.execute(params![state.id(), reason, idx.pkgname.pkgname(),])?;
             }
         }
         drop(stmt);
@@ -993,7 +1008,7 @@ impl Database {
      * Store a build result by package ID.
      */
     pub fn store_build_result(&self, package_id: i64, result: &BuildResult) -> Result<()> {
-        let outcome = result.state.db_id();
+        let outcome = result.state.id();
         let stage = result.build_stats.stage.map(|s| s as i32);
         let duration_ms = result.build_stats.duration.as_millis() as i64;
         let log_dir = result.log_dir.as_ref().map(|p| p.display().to_string());
@@ -1017,7 +1032,7 @@ impl Database {
      * Check if a package has a successful build result.
      */
     pub fn is_successful(&self, pkgname: &str) -> Result<bool> {
-        let success = PackageStateKind::Success as i32;
+        let success = PackageState::Success.id();
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM builds b
              JOIN scan_index p ON b.package_id = p.id
@@ -1178,25 +1193,25 @@ impl Database {
         let rows = stmt.query_map(
             params![
                 package_id,
-                PackageStateKind::Success as i32,
-                PackageStateKind::UpToDate as i32,
-                PackageStateKind::Failed as i32,
-                PackageStateKind::PreFailed as i32,
-                PackageStateKind::PreSkipped as i32,
-                PackageStateKind::Unresolved as i32,
+                PackageState::Success.id(),
+                PackageState::UpToDate.id(),
+                PackageState::Failed.id(),
+                PackageState::PreFailed.id(),
+                PackageState::PreSkipped.id(),
+                PackageState::Unresolved.id(),
             ],
             |row| {
                 let pkgname: String = row.get(0)?;
                 let pkgpath: String = row.get(1)?;
                 let outcome_id: i32 = row.get(2)?;
-                let kind = PackageStateKind::from_repr(outcome_id).ok_or_else(|| {
+                let kind = PackageState::try_from(outcome_id).map_err(|_| {
                     rusqlite::Error::FromSqlConversionFailure(
                         2,
                         rusqlite::types::Type::Integer,
                         format!("unknown outcome type id: {}", outcome_id).into(),
                     )
                 })?;
-                let status: &str = kind.into();
+                let status = kind.as_str();
                 Ok((pkgname, pkgpath, status.to_string()))
             },
         )?;
@@ -1237,7 +1252,10 @@ impl Database {
      * Get scan-phase outcomes (pre-skipped/pre-failed/unresolved + their
      * indirect propagations) recorded on `scan_index`.
      */
-    pub fn get_prefailskip_packages(&self) -> Result<Vec<(String, Option<String>, PackageState)>> {
+    #[allow(clippy::type_complexity)]
+    pub fn get_prefailskip_packages(
+        &self,
+    ) -> Result<Vec<(String, Option<String>, PackageState, Option<String>)>> {
         let mut stmt = self.conn.prepare(
             "SELECT pkgname, pkg_location, scan_outcome, scan_outcome_detail
              FROM scan_index
@@ -1246,15 +1264,15 @@ impl Database {
         )?;
         let rows = stmt.query_map([], |row| {
             let outcome: i32 = row.get("scan_outcome")?;
-            let detail: Option<String> = row.get("scan_outcome_detail")?;
-            let state = PackageState::from_db(outcome, detail).ok_or_else(|| {
+            let reason: Option<String> = row.get("scan_outcome_detail")?;
+            let state = PackageState::try_from(outcome).map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(
                     2,
                     rusqlite::types::Type::Integer,
-                    format!("unknown scan_outcome id: {outcome}").into(),
+                    e.into(),
                 )
             })?;
-            Ok((row.get("pkgname")?, row.get("pkg_location")?, state))
+            Ok((row.get("pkgname")?, row.get("pkg_location")?, state, reason))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
@@ -1293,10 +1311,10 @@ impl Database {
         )?;
         let rows = stmt.query_map(
             params![
-                PackageStateKind::Failed as i32,
-                PackageStateKind::PreSkipped as i32,
-                PackageStateKind::PreFailed as i32,
-                PackageStateKind::Unresolved as i32,
+                PackageState::Failed.id(),
+                PackageState::PreSkipped.id(),
+                PackageState::PreFailed.id(),
+                PackageState::Unresolved.id(),
             ],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )?;
@@ -1466,9 +1484,7 @@ impl Database {
         )?;
 
         let pkgnames = stmt
-            .query_map([PackageStateKind::Failed as i32], |row| {
-                row.get::<_, String>(0)
-            })?
+            .query_map([PackageState::Failed.id()], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(pkgnames)
@@ -1487,10 +1503,7 @@ impl Database {
 
         let pkgnames = stmt
             .query_map(
-                params![
-                    PackageStateKind::Success as i32,
-                    PackageStateKind::UpToDate as i32,
-                ],
+                params![PackageState::Success.id(), PackageState::UpToDate.id(),],
                 |row| row.get::<_, String>(0),
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1644,8 +1657,8 @@ impl Database {
         } else {
             format!(
                 "WHERE bh.outcome IN ({success}, {failed})",
-                success = PackageStateKind::Success as i32,
-                failed = PackageStateKind::Failed as i32,
+                success = PackageState::Success.id(),
+                failed = PackageState::Failed.id(),
             )
         };
         let sql = format!(
@@ -1733,8 +1746,8 @@ impl Database {
             }
 
             current_accepted = true;
-            let outcome = PackageState::from_db(outcome_id, None)
-                .ok_or_else(|| anyhow::anyhow!("Unknown outcome type id: {}", outcome_id))?;
+            let outcome = PackageState::try_from(outcome_id)
+                .map_err(|_| anyhow::anyhow!("Unknown outcome type id: {}", outcome_id))?;
             let stage = stage_id
                 .map(|id| {
                     Stage::from_repr(id).ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", id))
@@ -1805,7 +1818,7 @@ impl Database {
         let pkgbase_col: &str = HistoryKind::Pkgbase.into();
         let pkgpath_col: &str = HistoryKind::Pkgpath.into();
         let partition = latest_history_partition();
-        let up_to_date = PackageStateKind::UpToDate as i32;
+        let up_to_date = PackageState::UpToDate.id();
 
         /*
          * UpToDate rows are markers; they carry no disk_usage,
@@ -1868,10 +1881,17 @@ impl Database {
         let mut result = HashMap::new();
         for row in rows.flatten() {
             let (pkgpath, pkgbase, outcome, du, mj, wo) = row;
+            let outcome = match PackageState::try_from(outcome) {
+                Ok(k) => k,
+                Err(e) => {
+                    warn!(error = e, "build_history_by_pkg_all: skipping row");
+                    continue;
+                }
+            };
             result.insert(
                 (pkgpath, pkgbase),
                 PkgBuildHistory {
-                    outcome: PackageStateKind::from_repr(outcome),
+                    outcome,
                     disk_usage: du.map(|v| v as u64),
                     make_jobs: mj.map(|v| v as u32),
                     wrkobjdir: wo,
@@ -1915,9 +1935,9 @@ impl Database {
      */
     pub fn list_history_builds(&self) -> Result<Vec<BuildListEntry>> {
         let conn = self.history_conn()?;
-        let success = PackageStateKind::Success as i32;
-        let failed = PackageStateKind::Failed as i32;
-        let up_to_date = PackageStateKind::UpToDate as i32;
+        let success = PackageState::Success.id();
+        let failed = PackageState::Failed.id();
+        let up_to_date = PackageState::UpToDate.id();
         let mut stmt = conn.prepare(
             "WITH attempted AS ( \
                  SELECT build_id, \
@@ -2082,17 +2102,17 @@ impl Database {
             other_changes: Vec::new(),
         };
 
-        use PackageStateKind::*;
+        use PackageState::*;
 
         for ((pkgpath, pkgbase), b2_rec) in &b2 {
-            let b2_outcome = PackageStateKind::from_repr(b2_rec.outcome);
+            let b2_outcome = PackageState::try_from(b2_rec.outcome).ok();
             let b2_stage = b2_rec.stage.and_then(Stage::from_repr);
 
             let entry_from = |b1_rec: Option<&PkgRecord>| DiffEntry {
                 pkgpath: pkgpath.clone(),
                 build1_pkgname: b1_rec.map(|r| r.pkgname.clone()),
                 build2_pkgname: Some(b2_rec.pkgname.clone()),
-                build1_outcome: b1_rec.and_then(|r| PackageStateKind::from_repr(r.outcome)),
+                build1_outcome: b1_rec.and_then(|r| PackageState::try_from(r.outcome).ok()),
                 build2_outcome: b2_outcome,
                 build1_stage: b1_rec.and_then(|r| r.stage.and_then(Stage::from_repr)),
                 build2_stage: b2_stage,
@@ -2100,7 +2120,7 @@ impl Database {
 
             match b1.get(&(pkgpath.clone(), pkgbase.clone())) {
                 Some(b1_rec) => {
-                    let b1_outcome = PackageStateKind::from_repr(b1_rec.outcome);
+                    let b1_outcome = PackageState::try_from(b1_rec.outcome).ok();
                     let b1_stage = b1_rec.stage.and_then(Stage::from_repr);
                     let pkgname_changed = b1_rec.pkgname != b2_rec.pkgname;
                     let both_ok = matches!(
@@ -2149,7 +2169,7 @@ impl Database {
             if b2.contains_key(&(pkgpath.clone(), pkgbase.clone())) {
                 continue;
             }
-            let b1_outcome = PackageStateKind::from_repr(b1_rec.outcome);
+            let b1_outcome = PackageState::try_from(b1_rec.outcome).ok();
             let entry = DiffEntry {
                 pkgpath: pkgpath.clone(),
                 build1_pkgname: Some(b1_rec.pkgname.clone()),
@@ -2177,8 +2197,8 @@ pub struct DiffEntry {
     pub pkgpath: String,
     pub build1_pkgname: Option<String>,
     pub build2_pkgname: Option<String>,
-    pub build1_outcome: Option<PackageStateKind>,
-    pub build2_outcome: Option<PackageStateKind>,
+    pub build1_outcome: Option<PackageState>,
+    pub build2_outcome: Option<PackageState>,
     pub build1_stage: Option<Stage>,
     pub build2_stage: Option<Stage>,
 }
@@ -2462,7 +2482,7 @@ pub(crate) fn create_history_schema(conn: &Connection) -> Result<()> {
              duration_ms INTEGER NOT NULL DEFAULT 0
          );",
         HISTORY_SCHEMA_VERSION,
-        outcome_types = PackageState::db_values(),
+        outcome_types = outcome_values(),
         stages = stage_values(),
         history_columns = history_schema(),
     ))?;
@@ -2494,7 +2514,7 @@ pub(crate) fn record_history_to(conn: &Connection, rec: &crate::History) -> Resu
         rec.pkgpath,
         rec.pkgname,
         rec.pkgbase,
-        rec.outcome.db_id(),
+        rec.outcome.id(),
         rec.stage.map(|s| s as i32),
         rec.make_jobs.map(|j| j as i64),
         dur_ms(rec.duration),
@@ -2503,7 +2523,7 @@ pub(crate) fn record_history_to(conn: &Connection, rec: &crate::History) -> Resu
         rec.build_id.as_deref(),
     ];
 
-    if matches!(rec.outcome, crate::PackageState::UpToDate) {
+    if rec.outcome == crate::PackageState::UpToDate {
         let sql = format!(
             "INSERT INTO build_history ({}) VALUES ({}) \
              ON CONFLICT(build_id, pkgpath, pkgbase) DO NOTHING",
@@ -2640,7 +2660,7 @@ pub(crate) fn query_build_stage_timings(conn: &Connection) -> HashMap<PkgKey, Bu
     let out: &str = HistoryKind::Outcome.into();
     let pkgbase_col: &str = HistoryKind::Pkgbase.into();
     let pkgpath_col: &str = HistoryKind::Pkgpath.into();
-    let success_outcome = PackageStateKind::Success as i32;
+    let success_outcome = PackageState::Success.id();
     let build_stage = Stage::Build as i32;
     let partition = latest_history_partition();
 

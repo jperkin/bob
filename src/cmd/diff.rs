@@ -18,11 +18,12 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
 
+use bob::PackageState;
 use bob::db::{BuildDiff, Database, DiffEntry};
-use bob::{PackageStateKind, parse_status_filter};
 
 use super::{
-    Cell, Column, ColumnSource, OutputFormat, OutputOptions, Writer, cols_help, select_columns,
+    Cell, Column, ColumnSource, OutputFormat, OutputOptions, Writer, cols_help,
+    parse_status_filter, select_columns,
 };
 
 const SUPPORTED: &[Column] = &[
@@ -63,21 +64,11 @@ pub struct DiffArgs {
     #[arg(short = 'o', value_delimiter = ',')]
     pub columns: Option<Vec<String>>,
     /// Filter by baseline status (see `bob status -s` for valid values)
-    #[arg(
-        short = 'f',
-        long = "from",
-        value_parser = parse_status_filter,
-        value_delimiter = ',',
-    )]
-    pub from: Vec<Vec<PackageStateKind>>,
+    #[arg(short = 'f', long = "from", value_delimiter = ',', value_parser = parse_status_filter)]
+    pub from: Vec<Vec<PackageState>>,
     /// Filter by current status (see `bob status -s` for valid values)
-    #[arg(
-        short = 't',
-        long = "to",
-        value_parser = parse_status_filter,
-        value_delimiter = ',',
-    )]
-    pub to: Vec<Vec<PackageStateKind>>,
+    #[arg(short = 't', long = "to", value_delimiter = ',', value_parser = parse_status_filter)]
+    pub to: Vec<Vec<PackageState>>,
 }
 
 fn diff_after_help() -> String {
@@ -96,9 +87,7 @@ impl ColumnSource for DiffEntry {
             Column::Pkgpath => self.pkgpath.as_str().into(),
             Column::Breaks => get_breaks(self, breaks).into(),
             Column::Stage => match self.build2_outcome {
-                Some(bob::PackageStateKind::Success) | Some(bob::PackageStateKind::UpToDate) => {
-                    Cell::Null
-                }
+                Some(k) if k.is_success() => Cell::Null,
                 _ => self
                     .build2_stage
                     .map_or(Cell::Null, |s| <&str>::from(s).into()),
@@ -108,10 +97,10 @@ impl ColumnSource for DiffEntry {
                 .map_or(Cell::Null, |s| <&str>::from(s).into()),
             Column::Outcome => self
                 .build2_outcome
-                .map_or(Cell::Null, |o| <&str>::from(o).into()),
+                .map_or(Cell::Null, |o| o.as_str().into()),
             Column::OutcomePrev => self
                 .build1_outcome
-                .map_or(Cell::Null, |o| <&str>::from(o).into()),
+                .map_or(Cell::Null, |o| o.as_str().into()),
             Column::PkgnamePrev => self
                 .build1_pkgname
                 .as_deref()
@@ -158,9 +147,9 @@ pub fn run(db: &Database, args: DiffArgs) -> Result<()> {
         Err(_) => HashMap::new(),
     };
 
-    let from: Option<HashSet<PackageStateKind>> =
+    let from: Option<HashSet<PackageState>> =
         (!args.from.is_empty()).then(|| args.from.iter().flatten().copied().collect());
-    let to: Option<HashSet<PackageStateKind>> =
+    let to: Option<HashSet<PackageState>> =
         (!args.to.is_empty()).then(|| args.to.iter().flatten().copied().collect());
 
     let opts = OutputOptions {
@@ -178,10 +167,10 @@ pub fn run(db: &Database, args: DiffArgs) -> Result<()> {
 
 fn matches_filter(
     e: &DiffEntry,
-    from: Option<&HashSet<PackageStateKind>>,
-    to: Option<&HashSet<PackageStateKind>>,
+    from: Option<&HashSet<PackageState>>,
+    to: Option<&HashSet<PackageState>>,
 ) -> bool {
-    let ok = |set: Option<&HashSet<PackageStateKind>>, state: Option<PackageStateKind>| match set {
+    let ok = |set: Option<&HashSet<PackageState>>, state: Option<PackageState>| match set {
         Some(s) => state.is_some_and(|k| s.contains(&k)),
         None => true,
     };
@@ -193,8 +182,8 @@ fn print_filtered(
     breaks: &HashMap<String, usize>,
     chosen: Vec<Column>,
     opts: OutputOptions,
-    from: Option<&HashSet<PackageStateKind>>,
-    to: Option<&HashSet<PackageStateKind>>,
+    from: Option<&HashSet<PackageState>>,
+    to: Option<&HashSet<PackageState>>,
 ) -> Result<()> {
     let mut entries: Vec<&DiffEntry> = diff
         .new_failures
@@ -205,9 +194,9 @@ fn print_filtered(
         .filter(|e| matches_filter(e, from, to))
         .collect();
 
-    let label = |set: Option<&HashSet<PackageStateKind>>| -> String {
+    let label = |set: Option<&HashSet<PackageState>>| -> String {
         set.map(|s| {
-            let mut names: Vec<&str> = s.iter().map(<&str>::from).collect();
+            let mut names: Vec<&str> = s.iter().map(|k| k.as_str()).collect();
             names.sort_unstable();
             names.join(",")
         })

@@ -49,7 +49,7 @@ use crate::scan::ResolvedPackage;
 use crate::scheduler::Scheduler;
 use crate::tui::{Progress, REFRESH_INTERVAL};
 use crate::{Config, RunState, Sandbox};
-use crate::{PackageCounts, PackageState, PackageStateKind};
+use crate::{PackageCounts, PackageState};
 use anyhow::{Context, bail};
 use crossterm::event;
 use glob::Pattern;
@@ -1226,7 +1226,7 @@ impl BuildResult {
             pkgpath: self.pkgpath.as_ref()?.to_string(),
             pkgname: self.pkgname.pkgname().to_string(),
             pkgbase: self.pkgname.pkgbase().to_string(),
-            outcome: self.state.clone(),
+            outcome: self.state,
             stage: self.build_stats.stage,
             make_jobs: self.build_stats.make_jobs.jobs(),
             duration: self.build_stats.duration,
@@ -1267,30 +1267,9 @@ impl BuildSummary {
             ..Default::default()
         };
         for r in &self.results {
-            c.states.add(&r.state);
+            c.states.add(r.state);
         }
         c
-    }
-
-    /// Get all failed results (direct build failures only).
-    pub fn failed(&self) -> Vec<&BuildResult> {
-        self.results
-            .iter()
-            .filter(|r| matches!(r.state, PackageState::Failed(_)))
-            .collect()
-    }
-
-    /// Get all successful results.
-    pub fn succeeded(&self) -> Vec<&BuildResult> {
-        self.results
-            .iter()
-            .filter(|r| matches!(r.state, PackageState::Success))
-            .collect()
-    }
-
-    /// Get all skipped results.
-    pub fn skipped(&self) -> Vec<&BuildResult> {
-        self.results.iter().filter(|r| r.state.is_skip()).collect()
     }
 }
 
@@ -1849,10 +1828,7 @@ impl BuildJobs {
             self.results.push(BuildResult {
                 pkgname: pkg,
                 pkgpath,
-                state: PackageState::IndirectFailed(format!(
-                    "dependency {} failed",
-                    pkgname.pkgname()
-                )),
+                state: PackageState::IndirectFailed,
                 log_dir,
                 build_stats: PkgBuildStats::default(),
             });
@@ -1955,17 +1931,14 @@ impl Build {
         let mut cached_count = 0usize;
         let mut indirect_failed_count = 0usize;
         for (pkgname, result) in &self.cached {
-            match result.state {
-                PackageState::Success | PackageState::UpToDate => {
-                    scheduler.mark_success(pkgname);
-                }
-                _ => {
-                    let indirect = scheduler.mark_failure(pkgname);
-                    indirect_failed_count += indirect
-                        .iter()
-                        .filter(|p| !self.cached.contains_key(*p))
-                        .count();
-                }
+            if result.state.is_success() {
+                scheduler.mark_success(pkgname);
+            } else {
+                let indirect = scheduler.mark_failure(pkgname);
+                indirect_failed_count += indirect
+                    .iter()
+                    .filter(|p| !self.cached.contains_key(*p))
+                    .count();
             }
             cached_count += 1;
         }
@@ -2013,7 +1986,6 @@ impl Build {
          */
         let build_history = db.build_history_by_pkg_all(None);
         let wrkobjdir_map: HashMap<PkgName, WrkObjKind> = if let Some(w) = self.config.wrkobjdir() {
-            let success = Some(PackageStateKind::Success);
             debug!(
                 total_packages = self.scanpkgs.len(),
                 history_entries = build_history.len(),
@@ -2030,7 +2002,7 @@ impl Build {
                 }
                 let key = (pkgpath.to_string(), pkgname.pkgbase().to_string());
                 let du = build_history.get(&key).and_then(|h| {
-                    if h.outcome == success {
+                    if h.outcome == PackageState::Success {
                         h.disk_usage
                     } else {
                         match (h.disk_usage, w.failed_threshold) {
@@ -2200,7 +2172,7 @@ impl Build {
                                         manager_tx.send(ChannelCommand::JobFailed(BuildResult {
                                             pkgname,
                                             pkgpath: Some(pkgpath),
-                                            state: PackageState::Failed("Build failed".to_string()),
+                                            state: PackageState::Failed,
                                             log_dir: Some(log_dir),
                                             build_stats,
                                         }));
@@ -2216,7 +2188,7 @@ impl Build {
                                             BuildResult {
                                                 pkgname,
                                                 pkgpath: Some(pkgpath),
-                                                state: PackageState::Failed(e.to_string()),
+                                                state: PackageState::Failed,
                                                 log_dir: Some(log_dir),
                                                 build_stats,
                                             },
@@ -2335,7 +2307,7 @@ impl Build {
                                     make_jobs_safe = sp.make_jobs.safe(),
                                     wrkobjdir = wrkobjdir.as_deref(),
                                     history = hist.is_some() || sp.cpu_time > 0,
-                                    previous_status = hist.and_then(|h| h.outcome).map(|o| -> &str { o.into() }),
+                                    previous_status = hist.map(|h| h.outcome.as_str()),
                                     previous_disk_usage = hist.and_then(|h| h.disk_usage),
                                     "Scheduler decision"
                                 );

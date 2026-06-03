@@ -12,6 +12,9 @@ pub mod simulate;
 pub mod status;
 pub mod util;
 
+use bob::PackageState;
+use strum::VariantArray;
+
 /**
  * Sort key for one column of one row.  `Num`/`OptStr` order missing
  * values last regardless of direction, since "no data" is rarely the
@@ -788,4 +791,66 @@ fn pad(s: &str, align: bob::Align, width: usize) -> String {
         bob::Align::Right => format!("{:>width$}", s, width = width),
         bob::Align::Left => format!("{:<width$}", s, width = width),
     }
+}
+
+struct FilterAlias {
+    name: &'static str,
+    desc: &'static str,
+    matches: fn(PackageState) -> bool,
+}
+
+const FILTER_ALIASES: &[FilterAlias] = &[
+    FilterAlias {
+        name: "ok",
+        desc: "Any successful outcome (freshly built or up-to-date)",
+        matches: PackageState::is_success,
+    },
+    FilterAlias {
+        name: "skipped",
+        desc: "Any pre-skipped or pre-failed package",
+        matches: PackageState::is_skipped,
+    },
+    FilterAlias {
+        name: "blocked",
+        desc: "Any package blocked by another",
+        matches: PackageState::is_blocked,
+    },
+    FilterAlias {
+        name: "masked",
+        desc: "Any skipped or indirectly blocked package",
+        matches: PackageState::is_masked,
+    },
+];
+
+/**
+ * Iterate over `(alias_name, description)` for every status filter alias
+ * recognised by [`parse_status_filter`].
+ */
+pub fn status_filter_aliases() -> impl Iterator<Item = (&'static str, &'static str)> {
+    FILTER_ALIASES.iter().map(|a| (a.name, a.desc))
+}
+
+/**
+ * Parse a status filter string into the states it matches.
+ *
+ * A filter string is either the name of a single state, for example
+ * `failed` or `indirect-failed`, which matches just that state (see
+ * [`PackageState::as_str`](bob::PackageState::as_str) for the full set of
+ * names); or an alias for a group of states, listed by
+ * [`status_filter_aliases`].
+ */
+pub fn parse_status_filter(s: &str) -> Result<Vec<PackageState>, String> {
+    if let Ok(k) = s.parse::<PackageState>() {
+        return Ok(vec![k]);
+    }
+    for alias in FILTER_ALIASES {
+        if alias.name == s {
+            return Ok(PackageState::VARIANTS
+                .iter()
+                .copied()
+                .filter(|k| (alias.matches)(*k))
+                .collect());
+        }
+    }
+    Err(format!("unknown status '{s}'"))
 }

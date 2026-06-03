@@ -21,12 +21,14 @@ use anyhow::{Result, bail};
 use clap::Subcommand;
 use crossterm::terminal;
 
+use bob::PackageState;
 use bob::db::Database;
 use bob::try_println;
-use bob::{PackageState, PackageStateKind};
 
 use super::util::pkg_pattern;
-use super::{Cell, Column, ColumnSource, OutputFormat, OutputOptions, Writer, cols_help, select_columns};
+use super::{
+    Cell, Column, ColumnSource, OutputFormat, OutputOptions, Writer, cols_help, select_columns,
+};
 
 fn use_color() -> bool {
     std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
@@ -282,12 +284,12 @@ fn print_build_tree(
     let results = db.get_all_build_results()?;
     let excluded: HashSet<String> = results
         .iter()
-        .filter(|r| matches!(r.state, PackageState::UpToDate) || r.state.is_skip())
+        .filter(|r| r.state == PackageState::UpToDate || r.state.is_masked())
         .map(|r| r.pkgname.pkgname().to_string())
         .collect();
     let up_to_date: HashSet<String> = results
         .iter()
-        .filter(|r| matches!(r.state, PackageState::UpToDate))
+        .filter(|r| r.state == PackageState::UpToDate)
         .map(|r| r.pkgname.pkgname().to_string())
         .collect();
 
@@ -339,7 +341,7 @@ fn print_build_tree(
         }
     };
 
-    let up_to_date_label: &str = PackageStateKind::UpToDate.into();
+    let up_to_date_label: &str = PackageState::UpToDate.as_str();
 
     if packages.is_empty() {
         println!("All packages are {up_to_date_label}");

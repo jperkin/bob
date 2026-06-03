@@ -1,7 +1,7 @@
 //! Integration tests for dependency resolution using real pkgsrc scan data.
 
 use anyhow::Result;
-use bob::PackageStateKind::*;
+use bob::PackageState::*;
 use bob::Scan;
 use bob::scan::ScanSummary;
 use pkgsrc::ScanIndex;

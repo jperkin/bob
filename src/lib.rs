@@ -24,6 +24,7 @@ pub mod db;
 pub mod fmt;
 pub mod logging;
 pub mod makejobs;
+pub mod pkgstate;
 pub mod sandbox;
 pub mod scan;
 pub mod scheduler;
@@ -33,7 +34,6 @@ pub mod vcs;
 
 mod history;
 mod init;
-mod pkgstate;
 mod tui;
 
 use std::io::{self, Write};
@@ -153,9 +153,7 @@ pub use db::Database;
 pub use history::{History, HistoryKind};
 pub use init::Init;
 pub use makejobs::PkgMakeJobs;
-pub use pkgstate::{
-    PackageCounts, PackageState, PackageStateAlias, PackageStateKind, parse_status_filter,
-};
+pub use pkgstate::{PackageCounts, PackageState};
 pub use sandbox::Sandbox;
 pub use scan::{ResolvedPackage, Scan, ScanResult, ScanSummary};
 pub use scheduler::{PackageNode, ScheduledPackage, Scheduler};

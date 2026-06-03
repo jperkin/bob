@@ -41,7 +41,7 @@ use crate::config::{Pkgsrc, PkgsrcEnv};
 use crate::sandbox::{SandboxScope, wait_output_with_shutdown};
 use crate::tui::{Progress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, Interrupted, RunState, Sandbox};
-use crate::{PackageCounts, PackageState, PackageStateKind};
+use crate::{PackageCounts, PackageState};
 use anyhow::{Context, Result, bail};
 use crossterm::event;
 use indexmap::IndexMap;
@@ -115,8 +115,13 @@ pub enum ScanResult {
     Skipped {
         /// Package path.
         pkgpath: PkgPath,
-        /// Package state (skip reason).
+        /// Package state.
         state: PackageState,
+        /// Human-readable reason.  Populated for [`PackageState::Unresolved`]
+        /// (the multi-line list of unresolvable dependency patterns); `None`
+        /// otherwise.  Other skip kinds source their reason from the
+        /// `scan_index` table (`pkg_skip_reason` / `pkg_fail_reason`).
+        reason: Option<String>,
         /// Scan index if available (present for most skipped packages).
         /// `index.resolved_depends` holds the resolved deps for the package,
         /// including partial resolutions when `state` is `Unresolved`.
@@ -223,7 +228,7 @@ impl ScanSummary {
         for p in &self.packages {
             match p {
                 ScanResult::Buildable(_) => c.buildable += 1,
-                ScanResult::Skipped { state, .. } => c.states.add(state),
+                ScanResult::Skipped { state, .. } => c.states.add(*state),
                 ScanResult::ScanFail { .. } => c.scanfail += 1,
             }
         }
@@ -250,9 +255,10 @@ impl ScanSummary {
         self.packages.iter().filter_map(|p| match p {
             ScanResult::ScanFail { error, .. } => Some(error.as_str()),
             ScanResult::Skipped {
-                state: PackageState::Unresolved(detail),
+                state: PackageState::Unresolved,
+                reason: Some(reason),
                 ..
-            } => Some(detail.as_str()),
+            } => Some(reason.as_str()),
             _ => None,
         })
     }
@@ -269,17 +275,13 @@ impl ScanSummary {
     /**
      * Print package counts.
      *
-     * Every count label is drawn directly from [`crate::PackageStateKind`]
-     * or [`crate::PackageStateAlias`] so the output stays in lockstep with
-     * the strings accepted by filter parsers.
-     *
      * If `up_to_date` is provided (i.e. the up-to-date check has run),
      * the pending count is split into `pending` and `up-to-date`.
      * Otherwise every buildable package is still in `Pending` by the
      * state machine, so only `pending` is shown.
      */
     pub fn print_counts(&self, up_to_date: Option<usize>) {
-        use crate::{PackageStateAlias, PackageStateKind};
+        use crate::PackageState;
         use std::fmt::Write as _;
         let c = self.counts();
         let s = &c.states;
@@ -294,21 +296,15 @@ impl ScanSummary {
             }
             let _ = write!(line, "{n} {label}");
         };
-        append(pending_count, PackageStateKind::Pending.into());
+        append(pending_count, PackageState::Pending.as_str());
         if let Some(n) = up_to_date {
-            append(n, PackageStateKind::UpToDate.into());
+            append(n, PackageState::UpToDate.as_str());
         }
+        append(s.count(PackageState::is_skipped), "skipped");
+        append(s.count(PackageState::is_blocked), "blocked");
         append(
-            s.count_alias(PackageStateAlias::Skipped),
-            PackageStateAlias::Skipped.into(),
-        );
-        append(
-            s.count_alias(PackageStateAlias::Blocked),
-            PackageStateAlias::Blocked.into(),
-        );
-        append(
-            s[PackageStateKind::Unresolved],
-            PackageStateKind::Unresolved.into(),
+            s[PackageState::Unresolved],
+            PackageState::Unresolved.as_str(),
         );
         println!("{line}");
     }
@@ -1312,22 +1308,18 @@ impl Scan {
                 let mut blocking_reason: Option<PackageState> = None;
                 for dep in pkg_depends {
                     if let Some(dep_reason) = skip_reasons.get(dep) {
-                        let msg = format!("dependency {} {}", dep.pkgname(), dep_reason.status());
-                        let indirect = dep_reason.indirect(msg);
-                        let dominated = match &blocking_reason {
+                        let indirect = dep_reason.indirect();
+                        use PackageState::*;
+                        let dominated = match blocking_reason {
                             None => true,
-                            Some(PackageState::IndirectPreSkipped(_)) => true,
-                            Some(PackageState::IndirectUnresolved(_))
-                                if matches!(indirect, PackageState::IndirectPreFailed(_)) =>
-                            {
-                                true
-                            }
+                            Some(IndirectPreSkipped) => true,
+                            Some(IndirectUnresolved) if indirect == IndirectPreFailed => true,
                             _ => false,
                         };
                         if dominated {
                             blocking_reason = Some(indirect);
                         }
-                        if matches!(blocking_reason, Some(PackageState::IndirectPreFailed(_))) {
+                        if blocking_reason == Some(IndirectPreFailed) {
                             break;
                         }
                     }
@@ -1426,6 +1418,7 @@ impl Scan {
         );
 
         let mut skip_reasons: HashMap<PkgName, PackageState> = HashMap::new();
+        let mut unresolved_reasons: HashMap<PkgName, Vec<String>> = HashMap::new();
         let mut depends: HashMap<PkgName, Vec<PkgName>> = HashMap::new();
         let mut active: HashSet<PkgName> = HashSet::new();
         let use_active_filter = !self.full_tree && !self.initial_pkgpaths.is_empty();
@@ -1440,10 +1433,7 @@ impl Scan {
             if let Some(reason) = &pkg.pkg_skip_reason {
                 if !reason.is_empty() {
                     info!(pkgname = %pkg.pkgname.pkgname(), %reason, "PKG_SKIP_REASON");
-                    skip_reasons.insert(
-                        pkg.pkgname.clone(),
-                        PackageState::PreSkipped(reason.clone()),
-                    );
+                    skip_reasons.insert(pkg.pkgname.clone(), PackageState::PreSkipped);
                 }
             }
 
@@ -1458,8 +1448,7 @@ impl Scan {
             if let Some(reason) = &pkg.pkg_fail_reason {
                 if !reason.is_empty() && !skip_reasons.contains_key(&pkg.pkgname) {
                     info!(pkgname = %pkg.pkgname.pkgname(), %reason, "PKG_FAIL_REASON");
-                    skip_reasons
-                        .insert(pkg.pkgname.clone(), PackageState::PreFailed(reason.clone()));
+                    skip_reasons.insert(pkg.pkgname.clone(), PackageState::PreFailed);
                 }
             }
 
@@ -1532,8 +1521,10 @@ impl Scan {
                                 e
                             );
                             if !skip_reasons.contains_key(&pkg.pkgname) {
-                                skip_reasons
-                                    .insert(pkg.pkgname.clone(), PackageState::PreFailed(reason));
+                                if pkg.pkg_fail_reason.is_none() {
+                                    pkg.pkg_fail_reason = Some(reason);
+                                }
+                                skip_reasons.insert(pkg.pkgname.clone(), PackageState::PreFailed);
                             }
                             continue;
                         }
@@ -1570,8 +1561,10 @@ impl Scan {
                                 e
                             );
                             if !skip_reasons.contains_key(&pkg.pkgname) {
-                                skip_reasons
-                                    .insert(pkg.pkgname.clone(), PackageState::PreFailed(reason));
+                                if pkg.pkg_fail_reason.is_none() {
+                                    pkg.pkg_fail_reason = Some(reason);
+                                }
+                                skip_reasons.insert(pkg.pkgname.clone(), PackageState::PreFailed);
                             }
                         }
                         Ok(Some(best)) => {
@@ -1611,16 +1604,15 @@ impl Scan {
                                 dep.pattern(),
                                 pkg.pkgname.pkgname()
                             );
-                            match skip_reasons.get_mut(&pkg.pkgname) {
-                                Some(PackageState::Unresolved(detail)) => {
-                                    detail.push('\n');
-                                    detail.push_str(&msg);
-                                }
-                                None => {
-                                    skip_reasons
-                                        .insert(pkg.pkgname.clone(), PackageState::Unresolved(msg));
-                                }
-                                _ => {}
+                            if !matches!(
+                                skip_reasons.get(&pkg.pkgname),
+                                Some(PackageState::PreSkipped | PackageState::PreFailed)
+                            ) {
+                                skip_reasons.insert(pkg.pkgname.clone(), PackageState::Unresolved);
+                                unresolved_reasons
+                                    .entry(pkg.pkgname.clone())
+                                    .or_default()
+                                    .push(msg);
                             }
                         }
                     }
@@ -1665,16 +1657,20 @@ impl Scan {
              * pbulk compat: a directly-unresolvable package omits the
              * DEPENDS line entirely, so leave resolved_depends as None.
              */
-            let complete = !matches!(skip, Some(PackageState::Unresolved(_)));
+            let complete = skip != Some(PackageState::Unresolved);
             if complete && !resolved_depends.is_empty() {
                 index.resolved_depends = Some(resolved_depends);
             }
             let result = match skip {
-                Some(state) => ScanResult::Skipped {
-                    pkgpath,
-                    state,
-                    index: Some(index),
-                },
+                Some(state) => {
+                    let reason = unresolved_reasons.remove(&pkgname).map(|v| v.join("\n"));
+                    ScanResult::Skipped {
+                        pkgpath,
+                        state,
+                        reason,
+                        index: Some(index),
+                    }
+                }
                 None => {
                     count_buildable += 1;
                     ScanResult::Buildable(ResolvedPackage { index, pkgpath })
@@ -1710,9 +1706,9 @@ impl Scan {
         let c = summary.counts();
         info!(
             buildable = c.buildable,
-            preskip = c.states[PackageStateKind::PreSkipped],
-            prefail = c.states[PackageStateKind::PreFailed],
-            unresolved = c.states[PackageStateKind::Unresolved],
+            preskip = c.states[PackageState::PreSkipped],
+            prefail = c.states[PackageState::PreFailed],
+            unresolved = c.states[PackageState::Unresolved],
             "Resolution complete"
         );
 

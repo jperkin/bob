@@ -44,7 +44,7 @@ pub fn run(db: &Database, args: LogArgs) -> Result<()> {
 
     let matches: Vec<&BuildResult> = results
         .iter()
-        .filter(|r| matches!(r.state, PackageState::Failed(_)))
+        .filter(|r| r.state == PackageState::Failed)
         .filter(|r| {
             pattern.is_match(r.pkgname.pkgname())
                 || r.pkgpath

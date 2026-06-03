@@ -23,18 +23,16 @@ use anyhow::{Result, bail};
 use clap::Args;
 use clap::builder::styling::Style;
 use regex::Regex;
-use strum::{EnumCount, EnumProperty, IntoEnumIterator, VariantArray};
+use strum::{EnumProperty, VariantArray};
 
 use bob::build::Stage;
 use bob::db::{Database, PackageStatusRow};
-use bob::{
-    ColumnAlign, Config, PackageStateAlias, PackageStateKind, Scheduler, WrkObjKind,
-    parse_status_filter,
-};
+use bob::{ColumnAlign, Config, PackageState, Scheduler, WrkObjKind};
 
 use super::util::pkg_pattern;
 use super::{
-    Cell, Col, Formatter, OutputFormat, OutputOptions, SortKey, parse_sort_specs, sort_indexed_rows,
+    Cell, Col, Formatter, OutputFormat, OutputOptions, SortKey, parse_sort_specs,
+    parse_status_filter, sort_indexed_rows, status_filter_aliases,
 };
 
 #[derive(Clone, Copy, strum::EnumProperty, strum::IntoStaticStr, strum::VariantArray)]
@@ -105,11 +103,11 @@ impl StatusCol {
 
 /**
  * Order in which `Status values:` are listed in `--help`, by outcome
- * relevance.  Sized by [`PackageStateKind::COUNT`] so adding a variant
+ * relevance.  Sized by [`PackageState::VARIANTS`] so adding a variant
  * without extending this array fails to compile.
  */
-const STATUS_DISPLAY_ORDER: [PackageStateKind; PackageStateKind::COUNT] = {
-    use PackageStateKind::*;
+const STATUS_DISPLAY_ORDER: [PackageState; PackageState::VARIANTS.len()] = {
+    use PackageState::*;
     [
         Pending,
         UpToDate,
@@ -132,21 +130,6 @@ const STATUS_DISPLAY_ORDER: [PackageStateKind; PackageStateKind::COUNT] = {
  */
 fn longest<'a, I: IntoIterator<Item = &'a str>>(names: I) -> usize {
     names.into_iter().map(str::len).fold(0, usize::max)
-}
-
-/**
- * Reason text for a failed build, naming the stage it failed in.  A
- * missing stage means the build never started; the error, if any, is in
- * the package's `setup.log`.
- */
-fn failed_reason(stage: Option<i32>, logdir: &Path, pkgname: &str) -> String {
-    match stage.and_then(Stage::from_repr) {
-        Some(stage) => format!("Build failed during {} stage", stage.into_str()),
-        None if logdir.join(pkgname).join("setup.log").exists() => {
-            "Could not start build (see setup.log)".to_string()
-        }
-        None => "Could not start build".to_string(),
-    }
 }
 
 /**
@@ -204,25 +187,24 @@ fn columns_section() -> String {
 
 /**
  * Render the `Possible values:` block for `-s`, combining canonical
- * [`PackageStateKind`] values with [`PackageStateAlias`] entries marked
- * `(alias)` inline.  Single combined block matches clap's possible-values
- * format.
+ * [`PackageState`] values with `(alias)` entries inline.  Single
+ * combined block matches clap's possible-values format.
  */
 fn status_section() -> String {
     let literal = literal_style();
     let width = longest(
-        PackageStateKind::iter()
-            .map(<&str>::from)
-            .chain(PackageStateAlias::iter().map(<&str>::from)),
+        PackageState::VARIANTS
+            .iter()
+            .map(|k| k.as_str())
+            .chain(status_filter_aliases().map(|(name, _)| name)),
     );
     let mut out = String::from("Possible values:\n");
     for &k in &STATUS_DISPLAY_ORDER {
-        write_item(&mut out, <&str>::from(k), k.desc(), width, literal);
+        write_item(&mut out, k.as_str(), k.desc(), width, literal);
     }
-    for a in PackageStateAlias::iter() {
-        let alias_desc = a.desc();
-        let desc = format!("{alias_desc} (alias)");
-        write_item(&mut out, <&str>::from(a), &desc, width, literal);
+    for (name, desc) in status_filter_aliases() {
+        let line = format!("{desc} (alias)");
+        write_item(&mut out, name, &line, width, literal);
     }
     out
 }
@@ -232,11 +214,11 @@ fn status_section() -> String {
  */
 fn examples_section() -> String {
     let header = header_style();
-    let pending: &str = PackageStateKind::Pending.into();
-    let failed: &str = PackageStateKind::Failed.into();
-    let skipped: &str = PackageStateAlias::Skipped.into();
-    let pre_skipped: &str = PackageStateKind::PreSkipped.into();
-    let pre_failed: &str = PackageStateKind::PreFailed.into();
+    let pending = PackageState::Pending.as_str();
+    let failed = PackageState::Failed.as_str();
+    let skipped = "skipped";
+    let pre_skipped = PackageState::PreSkipped.as_str();
+    let pre_failed = PackageState::PreFailed.as_str();
 
     let examples = [
         (
@@ -327,10 +309,10 @@ pub struct StatusArgs {
         short = 's',
         long = "status",
         long_help = status_long_help(),
-        value_parser = parse_status_filter,
         value_delimiter = ',',
+        value_parser = parse_status_filter,
     )]
-    statuses: Vec<Vec<PackageStateKind>>,
+    statuses: Vec<Vec<PackageState>>,
     /// Sort by column(s); prefix '-' to reverse default order (numeric defaults descending, text ascending)
     #[arg(short = 'S', long, value_delimiter = ',', allow_hyphen_values = true)]
     sort: Option<Vec<String>>,
@@ -342,7 +324,7 @@ pub fn run(db: &Database, config: &Config, args: StatusArgs) -> Result<()> {
     if db.count_packages()? == 0 {
         bail!("No packages in database. Run 'bob scan' first.");
     }
-    let statuses: HashSet<PackageStateKind> = args.statuses.iter().flatten().copied().collect();
+    let statuses: HashSet<PackageState> = args.statuses.iter().flatten().copied().collect();
     print_build_status(
         db,
         config,
@@ -359,6 +341,21 @@ pub fn run(db: &Database, config: &Config, args: StatusArgs) -> Result<()> {
 }
 
 /**
+ * Reason text for a failed build, naming the stage it failed in.  A
+ * missing stage means the build never started, with the error, if any,
+ * in the package's `setup.log`.
+ */
+fn failed_reason(stage: Option<i32>, logdir: &Path, pkgname: &str) -> String {
+    match stage.and_then(Stage::from_repr) {
+        Some(stage) => format!("Build failed during {} stage", stage.into_str()),
+        None if logdir.join(pkgname).join("setup.log").exists() => {
+            "Could not start build (see setup.log)".to_string()
+        }
+        None => "Could not start build".to_string(),
+    }
+}
+
+/**
  * Print package status with selectable columns in build order.
  *
  * Uses the scheduler's iterator to get packages in priority order,
@@ -368,7 +365,7 @@ pub fn run(db: &Database, config: &Config, args: StatusArgs) -> Result<()> {
 fn print_build_status(
     db: &Database,
     config: &Config,
-    statuses: &HashSet<PackageStateKind>,
+    statuses: &HashSet<PackageState>,
     columns: Option<&[String]>,
     no_header: bool,
     long: bool,
@@ -426,15 +423,6 @@ fn print_build_status(
         sched.allocate_all();
     }
 
-    let blockers = db.blockers()?;
-    let logdir = config.logdir();
-    let blocked_by = |pkgname: &str| -> String {
-        match blockers.get(pkgname) {
-            Some(blockers) => format!("Blocked by {}", blockers.join(", ")),
-            None => String::new(),
-        }
-    };
-
     let need_history = cols
         .iter()
         .any(|c| matches!(*c, "wrkobjdir" | "make_jobs" | "disk_usage"));
@@ -467,9 +455,21 @@ fn print_build_status(
         predicted_wrkobjdir.clone()
     };
 
-    let get_status = |pkg: &PackageStatusRow| -> (PackageStateKind, String) {
-        use PackageStateKind::*;
-        if let Some(kind) = pkg.build_outcome.and_then(PackageStateKind::from_repr) {
+    let blockers = db.blockers()?;
+    let logdir = config.logdir();
+    let blocked_by = |pkgname: &str| -> String {
+        match blockers.get(pkgname) {
+            Some(blockers) => format!("Blocked by {}", blockers.join(", ")),
+            None => String::new(),
+        }
+    };
+
+    let get_status = |pkg: &PackageStatusRow| -> (PackageState, String) {
+        use PackageState::*;
+        if let Some(kind) = pkg
+            .build_outcome
+            .and_then(|o| PackageState::try_from(o).ok())
+        {
             let reason = match kind {
                 Failed => failed_reason(pkg.build_stage, logdir, &pkg.pkgname),
                 IndirectFailed => blocked_by(&pkg.pkgname),
@@ -480,7 +480,10 @@ fn print_build_status(
             (PreFailed, format!("PKG_FAIL_REASON: {reason}"))
         } else if let Some(reason) = &pkg.pkg_skip_reason {
             (PreSkipped, format!("PKG_SKIP_REASON: {reason}"))
-        } else if let Some(kind) = pkg.scan_outcome.and_then(PackageStateKind::from_repr) {
+        } else if let Some(kind) = pkg
+            .scan_outcome
+            .and_then(|o| PackageState::try_from(o).ok())
+        {
             let reason = match kind {
                 Unresolved => match &pkg.scan_outcome_detail {
                     Some(detail) => detail.replace('\n', "; "),
@@ -496,14 +499,14 @@ fn print_build_status(
         }
     };
 
-    let matches_status = |kind: PackageStateKind| -> bool {
+    let matches_status = |kind: PackageState| -> bool {
         if !statuses.is_empty() {
             return statuses.contains(&kind);
         }
         if show_all || !pkg_patterns.is_empty() {
             return true;
         }
-        !matches!(kind, PackageStateKind::Success | PackageStateKind::UpToDate)
+        !kind.is_success()
     };
 
     let mut indexed_rows: Vec<(Vec<SortKey>, Vec<String>)> = Vec::new();
@@ -560,7 +563,7 @@ fn print_build_status(
             .map(|&col| match col {
                 "pkgname" => pkg.pkgname.clone(),
                 "pkgpath" => pkg.pkg_location.clone(),
-                "status" => <&str>::from(kind).to_string(),
+                "status" => kind.as_str().to_string(),
                 "reason" => reason.clone(),
                 "multi_version" => multi_version.clone(),
                 "deps" => sp.dep_count.to_string(),
