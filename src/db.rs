@@ -657,20 +657,6 @@ impl Database {
         )
     }
 
-    /**
-     * Get all buildable packages (no skip/fail reason).
-     */
-    pub fn get_buildable_packages(&self) -> Result<Vec<PackageRow>> {
-        self.query_rows(
-            "SELECT p.* FROM scan_index p
-             JOIN package_state s ON s.package_id = p.id
-             WHERE s.selected = 1
-               AND p.pkg_skip_reason IS NULL
-               AND p.pkg_fail_reason IS NULL",
-            [],
-        )
-    }
-
     fn scan_index_from_row(row: &rusqlite::Row) -> rusqlite::Result<ScanIndex> {
         Ok(ScanIndex {
             pkgname: row.get::<_, String>("pkgname")?.into(),
@@ -927,7 +913,7 @@ impl Database {
     /**
      * Get all resolved dependencies as a map from pkgname to list of dependency pkgnames.
      */
-    pub fn get_all_resolved_deps(&self) -> Result<HashMap<String, Vec<String>>> {
+    pub fn get_all_resolved_deps(&self) -> Result<HashMap<PkgName, Vec<PkgName>>> {
         let mut stmt = self.conn.prepare(
             "SELECT p1.pkgname, p2.pkgname
              FROM resolved_depends rd
@@ -936,10 +922,13 @@ impl Database {
              ORDER BY p1.pkgname, p2.pkgname",
         )?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                PkgName::from(row.get::<_, String>(0)?),
+                PkgName::from(row.get::<_, String>(1)?),
+            ))
         })?;
 
-        let mut deps: HashMap<String, Vec<String>> = HashMap::new();
+        let mut deps: HashMap<PkgName, Vec<PkgName>> = HashMap::new();
         for row in rows {
             let (pkg, dep) = row?;
             deps.entry(pkg).or_default().push(dep);
@@ -948,14 +937,12 @@ impl Database {
     }
 
     /**
-     * Load buildable selected packages as an [`IndexMap`] keyed by pkgname.
-     *
-     * Only the [`ScanIndex`] fields the build pipeline needs
-     * (`bootstrap_pkg`, `usergroup_phase`, `multi_version`,
-     * `resolved_depends`) are populated; the rest stay at their defaults.
-     * Two queries total regardless of package count.
+     * The buildable packages, with their dependencies resolved, in build
+     * order: those that passed scanning with no skip, fail, or unresolved
+     * outcome.  See [`get_buildable_pkgpaths`](Self::get_buildable_pkgpaths)
+     * for the same set without dependency resolution.
      */
-    pub fn load_buildable_packages(
+    pub fn get_buildable_packages(
         &self,
     ) -> Result<IndexMap<PkgName, crate::scan::ResolvedPackage>> {
         let all_deps = self.get_all_resolved_deps()?;
@@ -976,14 +963,9 @@ impl Database {
             let multi_version = row
                 .get::<_, Option<String>>("multi_version")?
                 .map(|s| s.split_ascii_whitespace().map(str::to_string).collect());
-            let resolved_depends: Vec<PkgName> = all_deps
-                .get(&pkgname)
-                .map(|ds| ds.iter().map(|d| d.parse()).collect::<Result<Vec<_>, _>>())
-                .transpose()?
-                .unwrap_or_default();
-            let key: PkgName = pkgname.clone().into();
+            let resolved_depends = all_deps.get(pkgname.as_str()).cloned();
             out.insert(
-                key,
+                pkgname.clone().into(),
                 crate::scan::ResolvedPackage {
                     pkgpath: pkg_location.parse()?,
                     index: ScanIndex {
@@ -991,11 +973,34 @@ impl Database {
                         bootstrap_pkg: row.get("bootstrap_pkg")?,
                         usergroup_phase: row.get("usergroup_phase")?,
                         multi_version,
-                        resolved_depends: Some(resolved_depends),
+                        resolved_depends,
                         ..Default::default()
                     },
                 },
             );
+        }
+        Ok(out)
+    }
+
+    /**
+     * The buildable packages as a `pkgname` -> `pkgpath` map: the same set
+     * as [`get_buildable_packages`](Self::get_buildable_packages), but
+     * without resolving dependencies.
+     */
+    pub fn get_buildable_pkgpaths(&self) -> Result<HashMap<PkgName, PkgPath>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.pkgname, p.pkg_location
+             FROM scan_index p
+             JOIN package_state s ON s.package_id = p.id
+             WHERE s.selected = 1
+               AND p.scan_outcome IS NULL",
+        )?;
+        let mut out = HashMap::new();
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let pkgname: String = row.get(0)?;
+            let pkg_location: String = row.get(1)?;
+            out.insert(pkgname.into(), pkg_location.parse()?);
         }
         Ok(out)
     }
@@ -1553,12 +1558,8 @@ impl Database {
             let pkgname: String = row.get("pkgname")?;
             let outcome: Option<i32> = row.get("outcome")?;
             let mut index = Self::scan_index_from_row(row)?;
-            if let Some(deps) = resolved.get(&pkgname) {
-                index.resolved_depends = Some(deps.iter().map(|d| d.parse()).collect::<Result<
-                    Vec<PkgName>,
-                    _,
-                >>(
-                )?);
+            if let Some(deps) = resolved.get(pkgname.as_str()) {
+                index.resolved_depends = Some(deps.clone());
             }
             out.push((pkgname, index, outcome));
         }

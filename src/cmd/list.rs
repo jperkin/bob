@@ -20,6 +20,7 @@ use std::io::IsTerminal;
 use anyhow::{Result, bail};
 use clap::Subcommand;
 use crossterm::terminal;
+use pkgsrc::PkgName;
 
 use bob::PackageState;
 use bob::db::Database;
@@ -235,14 +236,14 @@ fn match_packages(db: &Database, pattern: &str) -> Result<Vec<bob::db::PackageRo
  * Collect transitive dependencies for a package.
  */
 fn collect_transitive_deps<'a>(
-    pkg: &'a str,
-    deps: &'a HashMap<String, Vec<String>>,
-    result: &mut HashSet<&'a str>,
+    pkg: &'a PkgName,
+    deps: &'a HashMap<PkgName, Vec<PkgName>>,
+    result: &mut HashSet<&'a PkgName>,
 ) {
     if let Some(pkg_deps) = deps.get(pkg) {
         for dep in pkg_deps {
-            if result.insert(dep.as_str()) {
-                collect_transitive_deps(dep.as_str(), deps, result);
+            if result.insert(dep) {
+                collect_transitive_deps(dep, deps, result);
             }
         }
     }
@@ -261,20 +262,14 @@ fn print_build_tree(
     format: TreeOutput,
     package: Option<&str>,
 ) -> Result<()> {
-    // Get all buildable packages
-    let buildable_pkgs = db.get_buildable_packages()?;
-
-    // Build map for pkgname -> pkgpath lookup
-    let pkgname_to_pkgpath: HashMap<String, String> = buildable_pkgs
-        .iter()
-        .map(|pkg| (pkg.pkgname.clone(), pkg.pkg_location.clone()))
-        .collect();
+    // pkgname -> pkgpath for every buildable package
+    let pkgname_to_pkgpath = db.get_buildable_pkgpaths()?;
 
     // Get resolved dependencies from database
     let pkgname_to_deps = db.get_all_resolved_deps()?;
 
     // Build set of packages in the resolved dependency graph
-    let mut resolved: HashSet<String> = HashSet::new();
+    let mut resolved: HashSet<PkgName> = HashSet::new();
     for (pkg, deps) in &pkgname_to_deps {
         resolved.insert(pkg.clone());
         resolved.extend(deps.iter().cloned());
@@ -282,63 +277,56 @@ fn print_build_tree(
 
     // Get build results for filtering
     let results = db.get_all_build_results()?;
-    let excluded: HashSet<String> = results
+    let excluded: HashSet<PkgName> = results
         .iter()
         .filter(|r| r.state == PackageState::UpToDate || r.state.is_masked())
-        .map(|r| r.pkgname.pkgname().to_string())
+        .map(|r| r.pkgname.clone())
         .collect();
-    let up_to_date: HashSet<String> = results
+    let up_to_date: HashSet<PkgName> = results
         .iter()
         .filter(|r| r.state == PackageState::UpToDate)
-        .map(|r| r.pkgname.pkgname().to_string())
+        .map(|r| r.pkgname.clone())
         .collect();
 
     // Determine package set
-    let packages: HashSet<String> = if let Some(pattern) = package {
+    let candidates: HashSet<PkgName> = if let Some(pattern) = package {
         let re = pkg_pattern(pattern)?;
 
-        let matches: Vec<&str> = pkgname_to_pkgpath
+        let matches: Vec<&PkgName> = pkgname_to_pkgpath
             .iter()
             .filter(|(name, path)| {
-                resolved.contains(*name) && (re.is_match(name) || re.is_match(path))
+                resolved.contains(*name)
+                    && (re.is_match(name.as_ref()) || re.is_match(path.as_str()))
             })
-            .map(|(name, _)| name.as_str())
+            .map(|(name, _)| name)
             .collect();
 
         if matches.is_empty() {
             bail!("No packages match '{}'", pattern);
         }
 
-        let mut required: HashSet<&str> = HashSet::new();
-        for pkg in &matches {
+        let mut required: HashSet<&PkgName> = HashSet::new();
+        for &pkg in &matches {
             required.insert(pkg);
             collect_transitive_deps(pkg, &pkgname_to_deps, &mut required);
         }
 
-        let required: HashSet<String> = required.iter().map(|s| s.to_string()).collect();
-        if include_all {
-            required
-        } else {
-            required
-                .into_iter()
-                .filter(|p| !excluded.contains(p))
-                .collect()
-        }
+        required.into_iter().cloned().collect()
     } else {
-        let all_buildable: HashSet<String> = buildable_pkgs
-            .iter()
-            .filter(|pkg| resolved.contains(&pkg.pkgname))
-            .map(|pkg| pkg.pkgname.clone())
-            .collect();
+        pkgname_to_pkgpath
+            .keys()
+            .filter(|name| resolved.contains(*name))
+            .cloned()
+            .collect()
+    };
 
-        if include_all {
-            all_buildable
-        } else {
-            all_buildable
-                .into_iter()
-                .filter(|p| !excluded.contains(p))
-                .collect()
-        }
+    let packages: HashSet<PkgName> = if include_all {
+        candidates
+    } else {
+        candidates
+            .into_iter()
+            .filter(|p| !excluded.contains(p))
+            .collect()
     };
 
     let up_to_date_label: &str = PackageState::UpToDate.as_str();
@@ -348,7 +336,7 @@ fn print_build_tree(
         return Ok(());
     }
 
-    let mut filtered_deps: HashMap<String, Vec<String>> = pkgname_to_deps
+    let mut filtered_deps: HashMap<PkgName, Vec<PkgName>> = pkgname_to_deps
         .iter()
         .filter(|(pkg, _)| packages.contains(*pkg))
         .map(|(pkg, deps)| {
@@ -365,7 +353,7 @@ fn print_build_tree(
         filtered_deps.entry(pkg.clone()).or_default();
     }
 
-    let mut levels: HashMap<String, usize> = HashMap::new();
+    let mut levels: HashMap<PkgName, usize> = HashMap::new();
     loop {
         let before = levels.len();
         for (pkg, deps) in &filtered_deps {
@@ -383,7 +371,7 @@ fn print_build_tree(
         }
     }
     let max_level = levels.values().max().copied().unwrap_or(0);
-    let mut by_level: Vec<Vec<String>> = vec![Vec::new(); max_level + 1];
+    let mut by_level: Vec<Vec<PkgName>> = vec![Vec::new(); max_level + 1];
     for (pkg, &level) in &levels {
         by_level[level].push(pkg.clone());
     }
@@ -391,11 +379,11 @@ fn print_build_tree(
         level_pkgs.sort();
     }
 
-    let display_name = |pkg: &str| -> String {
+    let display_name = |pkg: &PkgName| -> String {
         if use_path {
             pkgname_to_pkgpath
                 .get(pkg)
-                .cloned()
+                .map(|p| p.to_string())
                 .unwrap_or_else(|| pkg.to_string())
         } else {
             pkg.to_string()

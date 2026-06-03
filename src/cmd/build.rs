@@ -305,7 +305,7 @@ pub fn run_build_with(
         .load_pkgsrc_env()
         .context("PkgsrcEnv not cached - try 'bob clean' first")?;
 
-    let buildable = db.load_buildable_packages()?;
+    let buildable = db.get_buildable_packages()?;
     let mut build = Build::new(config, pkgsrc, pkgsrc_env, scope, buildable);
     build.load_cached_from_db(db)?;
 

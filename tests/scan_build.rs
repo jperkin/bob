@@ -716,7 +716,7 @@ fn test_full_build() -> Result<()> {
     scan.resolve_with_report(&db, false)?;
 
     // Collect buildable packages for the build
-    let scanpkgs = db.load_buildable_packages()?;
+    let scanpkgs = db.get_buildable_packages()?;
 
     // Fetch pkgsrc env (or use our known paths)
     let pkgsrc_env = h.pkgsrc_env();
@@ -909,7 +909,7 @@ fn test_build_bootstrap_skips_deinstall() -> Result<()> {
     scan.resolve_with_report(&db, false)?;
 
     // Only build test/base (bootstrap package)
-    let mut scanpkgs = db.load_buildable_packages()?;
+    let mut scanpkgs = db.get_buildable_packages()?;
     scanpkgs.retain(|_, p| p.pkgpath.as_path().to_string_lossy() == "test/base");
 
     let pkgsrc_env = h.pkgsrc_env();
@@ -1009,7 +1009,7 @@ fn run_scan_and_build(h: &TestHarness) -> Result<(Database, bob::BuildSummary)> 
     scan.start(&db, &mut scan_scope, &h.pkgsrc)?;
     scan.resolve_with_report(&db, false)?;
 
-    let scanpkgs = db.load_buildable_packages()?;
+    let scanpkgs = db.get_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config, Some(&h.pkgsrc));
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
@@ -1031,7 +1031,7 @@ fn test_cached_build_resume() -> Result<()> {
     let db = h.open_db()?;
     let state = h.run_state();
 
-    let scanpkgs = db.load_buildable_packages()?;
+    let scanpkgs = db.get_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config, Some(&h.pkgsrc));
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
@@ -1580,7 +1580,7 @@ fn test_limited_build() -> Result<()> {
     assert_eq!(c.buildable, 4);
 
     // Build them
-    let scanpkgs = db.load_buildable_packages()?;
+    let scanpkgs = db.get_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config, Some(&h.pkgsrc));
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
@@ -1656,7 +1656,7 @@ fn test_build_resume_no_new_work() -> Result<()> {
     let config = h.load_config()?;
     let db = h.open_db()?;
     let state = h.run_state();
-    let scanpkgs = db.load_buildable_packages()?;
+    let scanpkgs = db.get_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config, Some(&h.pkgsrc));
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
@@ -1712,7 +1712,7 @@ pkgsrc = {{
     scan.start(&db, &mut scan_scope, &h.pkgsrc)?;
     scan.resolve_with_report(&db, false)?;
 
-    let scanpkgs = db.load_buildable_packages()?;
+    let scanpkgs = db.get_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config, Some(&h.pkgsrc));
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
@@ -1743,7 +1743,7 @@ fn test_rebuild_after_clear() -> Result<()> {
     // Rebuild - should produce new results
     let config = h.load_config()?;
     let state = h.run_state();
-    let scanpkgs = db.load_buildable_packages()?;
+    let scanpkgs = db.get_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config, Some(&h.pkgsrc));
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
@@ -1787,7 +1787,7 @@ fn test_selective_rebuild_after_failure() -> Result<()> {
     // Rebuild with cached results (most will be cached)
     let config = h.load_config()?;
     let state = h.run_state();
-    let scanpkgs = db.load_buildable_packages()?;
+    let scanpkgs = db.get_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config, Some(&h.pkgsrc));
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
@@ -1873,7 +1873,7 @@ fn test_multi_version_multiple_records_build_all_variants() -> Result<()> {
         "expected both dual variants in resolved buildable set"
     );
 
-    let scanpkgs = db.load_buildable_packages()?;
+    let scanpkgs = db.get_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config, Some(&h.pkgsrc));
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
@@ -2012,16 +2012,16 @@ SCAN_DEPENDS=
         "unselected package should not appear in status rows"
     );
 
-    let buildable = db.get_buildable_packages()?;
+    let pkgpaths = db.get_buildable_pkgpaths()?;
     assert!(
-        !buildable.iter().any(|p| p.pkgname == "extra-1.0"),
-        "unselected package should not appear in buildable rows"
+        !pkgpaths.keys().any(|k| k.pkgname() == "extra-1.0"),
+        "unselected package should not appear in buildable pkgpaths"
     );
 
-    let loaded = db.load_buildable_packages()?;
+    let buildable = db.get_buildable_packages()?;
     assert!(
-        !loaded.keys().any(|k| k.pkgname() == "extra-1.0"),
-        "unselected package should not appear in resolved rebuild set"
+        !buildable.keys().any(|k| k.pkgname() == "extra-1.0"),
+        "unselected package should not appear in buildable set"
     );
 
     Ok(())
@@ -2036,7 +2036,7 @@ fn test_usergroup_phase_package() -> Result<()> {
     let (db, _) = run_scan_and_build(&h)?;
 
     // Verify mid's scan data includes USERGROUP_PHASE
-    let buildable = db.load_buildable_packages()?;
+    let buildable = db.get_buildable_packages()?;
     let mid = buildable
         .values()
         .find(|p| p.pkgpath.as_path().to_string_lossy() == "test/mid")
@@ -2070,7 +2070,7 @@ fn test_load_resolved_packages_matches_scan() -> Result<()> {
         .map(|p| to_depset(p.pkgname().pkgname(), p.depends()))
         .collect();
 
-    let loaded = db.load_buildable_packages()?;
+    let loaded = db.get_buildable_packages()?;
     let actual: HashMap<String, Vec<String>> = loaded
         .values()
         .map(|p| to_depset(p.pkgname().pkgname(), p.depends()))
@@ -2162,7 +2162,7 @@ fn maybe_generate(db: &Database, prior: &[String], summary: &bob::BuildSummary) 
 fn run_cached_build(h: &TestHarness, db: &Database) -> Result<bob::BuildSummary> {
     let config = h.load_config()?;
     let state = h.run_state();
-    let scanpkgs = db.load_buildable_packages()?;
+    let scanpkgs = db.get_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let sandbox = Sandbox::new(&config, Some(&h.pkgsrc));
     let scope = SandboxScope::new(sandbox, state.clone());
@@ -2455,7 +2455,7 @@ fn test_pkg_summary_skipped_when_all_fail() -> Result<()> {
     scan.start(&db, &mut scope, &h.pkgsrc)?;
     scan.resolve_with_report(&db, false)?;
 
-    let scanpkgs = db.load_buildable_packages()?;
+    let scanpkgs = db.get_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config, Some(&h.pkgsrc));
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
@@ -2495,7 +2495,7 @@ fn test_pkg_summary_regenerated_when_new_packages_added() -> Result<()> {
     scan.start(&db, &mut scope, &h.pkgsrc)?;
     scan.resolve_with_report(&db, false)?;
 
-    let scanpkgs = db.load_buildable_packages()?;
+    let scanpkgs = db.get_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let build_sandbox = Sandbox::new(&config, Some(&h.pkgsrc));
     let build_scope = SandboxScope::new(build_sandbox, state.clone());
@@ -2527,7 +2527,7 @@ fn test_pkg_summary_regenerated_when_new_packages_added() -> Result<()> {
         "only base should be successful so far"
     );
 
-    let scanpkgs2 = db.load_buildable_packages()?;
+    let scanpkgs2 = db.get_buildable_packages()?;
     let pkgsrc_env2 = h.pkgsrc_env();
     let build_sandbox2 = Sandbox::new(&config, Some(&h.pkgsrc));
     let build_scope2 = SandboxScope::new(build_sandbox2, state2.clone());
@@ -2623,7 +2623,7 @@ fn test_pkg_summary_skipped_when_interrupted() -> Result<()> {
     let state = h.run_state();
     state.shutdown();
 
-    let scanpkgs = db.load_buildable_packages()?;
+    let scanpkgs = db.get_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let sandbox = Sandbox::new(&config, Some(&h.pkgsrc));
     let scope = SandboxScope::new(sandbox, state.clone());
@@ -2676,7 +2676,7 @@ fn test_pkg_summary_recovered_after_interrupt() -> Result<()> {
     let state = h.run_state();
     state.shutdown();
 
-    let scanpkgs = db.load_buildable_packages()?;
+    let scanpkgs = db.get_buildable_packages()?;
     let pkgsrc_env = h.pkgsrc_env();
     let sandbox = Sandbox::new(&config, Some(&h.pkgsrc));
     let scope = SandboxScope::new(sandbox, state.clone());
@@ -2796,7 +2796,7 @@ show-vars:
     scan.resolve_with_report(&db, false)?;
 
     // Build only the orphan-stdout package
-    let mut scanpkgs = db.load_buildable_packages()?;
+    let mut scanpkgs = db.get_buildable_packages()?;
     scanpkgs.retain(|_, p| p.pkgpath.as_path().to_string_lossy() == "test/orphan-stdout");
 
     let pkgsrc_env = h.pkgsrc_env();

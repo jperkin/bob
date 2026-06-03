@@ -1293,7 +1293,7 @@ pub struct Build {
     /// Sandbox scope - owns created sandboxes, destroys on drop.
     scope: SandboxScope,
     /// Packages to build with minimal [`ResolvedPackage`] data populated
-    /// by [`Database::load_buildable_packages`].
+    /// by [`Database::get_buildable_packages`].
     scanpkgs: IndexMap<PkgName, ResolvedPackage>,
     /// Cached build results from previous run.
     cached: IndexMap<PkgName, BuildResult>,

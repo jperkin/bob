@@ -73,7 +73,7 @@ pub fn prepare(
     }
 
     let mut buildable = db
-        .load_buildable_packages()
+        .get_buildable_packages()
         .context("No scan data cached - run 'bob scan' first")?;
     if !args.all {
         buildable.retain(|k, _| to_rebuild.contains(k.pkgname()));
