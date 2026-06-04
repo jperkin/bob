@@ -51,7 +51,7 @@ use glob::Pattern;
 use strum::VariantArray;
 use tracing::{debug, info};
 
-use bob::build::{BuildResult, BuildSummary, PkgBuildStats};
+use bob::build::{BuildResult, BuildSummary};
 use bob::config::{Config, Pkgsrc, Publish, PublishPackages, ScriptValue};
 use bob::db::Database;
 use bob::{PackageCounts, PackageState};
@@ -194,8 +194,8 @@ fn generate_reports(
     for r in &db.get_all_build_results()? {
         states.add(r.state);
     }
-    for (_, _, state, _) in &db.get_prefailskip_packages()? {
-        states.add(*state);
+    for r in &db.get_scan_outcomes()? {
+        states.add(r.state);
     }
 
     let duration = db.get_build_duration()?;
@@ -665,26 +665,13 @@ fn write_text_report(
         .map(|sp| (sp.pkg.to_string(), sp.dep_count))
         .collect();
 
-    let mut scanfail: Vec<(pkgsrc::PkgPath, String)> = db
+    let scanfail: Vec<(pkgsrc::PkgPath, String)> = db
         .get_scan_failures()?
         .into_iter()
         .filter_map(|(p, e)| pkgsrc::PkgPath::new(&p).ok().map(|pp| (pp, e)))
+        .chain(db.get_unresolved_reasons()?)
         .collect();
-    for (pkgname, pkgpath, state, reason) in db.get_prefailskip_packages()? {
-        let pkgpath = pkgpath.and_then(|p| pkgsrc::PkgPath::new(&p).ok());
-        if state == PackageState::Unresolved {
-            if let (Some(pp), Some(reason)) = (&pkgpath, &reason) {
-                scanfail.push((pp.clone(), reason.clone()));
-            }
-        }
-        results.push(BuildResult {
-            pkgname: pkgsrc::PkgName::new(&pkgname),
-            pkgpath,
-            state,
-            log_dir: None,
-            build_stats: PkgBuildStats::default(),
-        });
-    }
+    results.extend(db.get_scan_outcomes()?);
 
     let summary = BuildSummary {
         duration,
@@ -1047,26 +1034,13 @@ fn write_html_report(
         .map(|sp| (sp.pkg.to_string(), sp.dep_count))
         .collect();
 
-    let mut scanfail: Vec<(pkgsrc::PkgPath, String)> = db
+    let scanfail: Vec<(pkgsrc::PkgPath, String)> = db
         .get_scan_failures()?
         .into_iter()
         .filter_map(|(p, e)| pkgsrc::PkgPath::new(&p).ok().map(|pp| (pp, e)))
+        .chain(db.get_unresolved_reasons()?)
         .collect();
-    for (pkgname, pkgpath, state, reason) in db.get_prefailskip_packages()? {
-        let pkgpath = pkgpath.and_then(|p| pkgsrc::PkgPath::new(&p).ok());
-        if state == PackageState::Unresolved {
-            if let (Some(pp), Some(reason)) = (&pkgpath, &reason) {
-                scanfail.push((pp.clone(), reason.clone()));
-            }
-        }
-        results.push(BuildResult {
-            pkgname: pkgsrc::PkgName::new(&pkgname),
-            pkgpath,
-            state,
-            log_dir: None,
-            build_stats: PkgBuildStats::default(),
-        });
-    }
+    results.extend(db.get_scan_outcomes()?);
 
     let summary = BuildSummary {
         duration,

@@ -1254,22 +1254,20 @@ impl Database {
     }
 
     /**
-     * Get scan-phase outcomes (pre-skipped/pre-failed/unresolved + their
-     * indirect propagations) recorded on `scan_index`.
+     * Packages blocked at scan time (pre-skipped, pre-failed, unresolved,
+     * or an indirect propagation of one), as [`BuildResult`]s carrying
+     * only the outcome.  They never reached the build, so there is no log
+     * or timing.  Counted and reported alongside the real build results.
      */
-    #[allow(clippy::type_complexity)]
-    pub fn get_prefailskip_packages(
-        &self,
-    ) -> Result<Vec<(String, Option<String>, PackageState, Option<String>)>> {
+    pub fn get_scan_outcomes(&self) -> Result<Vec<BuildResult>> {
         let mut stmt = self.conn.prepare(
-            "SELECT pkgname, pkg_location, scan_outcome, scan_outcome_detail
+            "SELECT pkgname, pkg_location, scan_outcome
              FROM scan_index
              WHERE scan_outcome IS NOT NULL
              ORDER BY pkgname",
         )?;
         let rows = stmt.query_map([], |row| {
             let outcome: i32 = row.get("scan_outcome")?;
-            let reason: Option<String> = row.get("scan_outcome_detail")?;
             let state = PackageState::try_from(outcome).map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(
                     2,
@@ -1277,9 +1275,42 @@ impl Database {
                     e.into(),
                 )
             })?;
-            Ok((row.get("pkgname")?, row.get("pkg_location")?, state, reason))
+            Ok(BuildResult {
+                pkgname: PkgName::new(&row.get::<_, String>("pkgname")?),
+                pkgpath: row
+                    .get::<_, Option<String>>("pkg_location")?
+                    .and_then(|p| PkgPath::new(&p).ok()),
+                state,
+                log_dir: None,
+                build_stats: PkgBuildStats::default(),
+            })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /**
+     * `(pkgpath, reason)` for every unresolved package, taken from its
+     * `scan_outcome_detail`.  Feeds the report's scan-failures section
+     * alongside [`get_scan_failures`](Self::get_scan_failures).
+     */
+    pub fn get_unresolved_reasons(&self) -> Result<Vec<(PkgPath, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT pkg_location, scan_outcome_detail
+             FROM scan_index
+             WHERE scan_outcome = ?1
+               AND pkg_location IS NOT NULL
+               AND scan_outcome_detail IS NOT NULL
+             ORDER BY pkgname",
+        )?;
+        let rows = stmt.query_map([PackageState::Unresolved.id()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (location, reason) = row?;
+            out.push((PkgPath::new(&location)?, reason));
+        }
+        Ok(out)
     }
 
     /**
