@@ -131,34 +131,34 @@ impl Sandbox {
      * This prevents it from receiving SIGINT when the user presses Ctrl+C,
      * ensuring cleanup can complete even during repeated interrupts.
      */
-    fn unmount_common(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    fn unmount_common(&self, dest: &Path) -> anyhow::Result<()> {
         let mut cmd = Command::new("/sbin/umount");
         cmd.arg(dest).process_group(0);
         self.run_umount(&mut cmd, dest)
     }
 
-    pub fn unmount_bindfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_bindfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_devfs(&self, _dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_devfs(&self, _dest: &Path) -> anyhow::Result<()> {
         // Should never be called since mount_devfs bails
         bail!("NetBSD does not support 'dev' mounts. Use a 'cmd' action with MAKEDEV instead.")
     }
 
-    pub fn unmount_fdfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_fdfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_nfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_nfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_procfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_procfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_tmpfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_tmpfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 

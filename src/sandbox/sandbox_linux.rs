@@ -150,7 +150,7 @@ impl Sandbox {
         ))
     }
 
-    fn unmount_common(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    fn unmount_common(&self, dest: &Path) -> anyhow::Result<()> {
         // Use process_group(0) to put umount in its own process group.
         // This prevents it from receiving SIGINT when the user presses Ctrl+C,
         // ensuring cleanup can complete even during repeated interrupts.
@@ -159,27 +159,27 @@ impl Sandbox {
         self.run_umount(&mut cmd, dest)
     }
 
-    pub fn unmount_bindfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_bindfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_devfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_devfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_fdfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_fdfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_nfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_nfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_procfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_procfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_tmpfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_tmpfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 }

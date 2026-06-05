@@ -1134,7 +1134,7 @@ impl Sandbox {
      *
      * Failures are retried with exponential backoff, defined per-platform.
      */
-    fn run_umount(&self, cmd: &mut Command, dest: &Path) -> Result<Option<ExitStatus>> {
+    fn run_umount(&self, cmd: &mut Command, dest: &Path) -> Result<()> {
         let mut out = cmd.output().context("Unable to execute unmount")?;
         for retry in 0..UNMOUNT_MAX_RETRIES {
             if out.status.success() {
@@ -1145,21 +1145,28 @@ impl Sandbox {
                         "Unmount succeeded after retries"
                     );
                 }
-                return Ok(Some(out.status));
+                return Ok(());
             }
             /* Clamp the shift so the delay cannot overflow over many retries. */
             let delay = (UNMOUNT_INITIAL_DELAY_MS << retry.min(10)).min(UNMOUNT_MAX_DELAY_MS);
             std::thread::sleep(Duration::from_millis(delay));
             out = cmd.output().context("Unable to execute unmount")?;
         }
-        if !out.status.success() {
-            warn!(
-                dest = %dest.display(),
-                reason = %String::from_utf8_lossy(&out.stderr).trim(),
-                "Failed to unmount"
-            );
+        if out.status.success() {
+            return Ok(());
         }
-        Ok(Some(out.status))
+        let reason = String::from_utf8_lossy(&out.stderr);
+        let reason = reason.trim();
+        warn!(
+            dest = %dest.display(),
+            retries = UNMOUNT_MAX_RETRIES,
+            reason,
+            "Failed to unmount"
+        );
+        if reason.is_empty() {
+            bail!("Failed to unmount {}", dest.display());
+        }
+        bail!("{reason}");
     }
 
     fn destroy_set(&self, sandboxes: Vec<usize>) -> Result<()> {
@@ -1635,18 +1642,13 @@ impl Sandbox {
                         dest = %dest.display(),
                         "Unmounting"
                     );
-                    let status = match fs_type {
+                    match fs_type {
                         FSType::Bind => self.unmount_bindfs(&dest)?,
                         FSType::Dev => self.unmount_devfs(&dest)?,
                         FSType::Fd => self.unmount_fdfs(&dest)?,
                         FSType::Nfs => self.unmount_nfs(&dest)?,
                         FSType::Proc => self.unmount_procfs(&dest)?,
                         FSType::Tmp => self.unmount_tmpfs(&dest)?,
-                    };
-                    if let Some(s) = status
-                        && !s.success()
-                    {
-                        bail!("Failed to unmount {}", dest.display());
                     }
                     self.remove_empty_dirs(sandbox_id, &dest);
                 }

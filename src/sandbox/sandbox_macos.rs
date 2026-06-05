@@ -141,37 +141,37 @@ impl Sandbox {
      * Use process_group(0) to put diskutil in its own process group,
      * preventing it from receiving SIGINT when the user presses Ctrl+C.
      */
-    fn unmount_common(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    fn unmount_common(&self, dest: &Path) -> anyhow::Result<()> {
         let mut cmd = Command::new("/usr/sbin/diskutil");
         cmd.arg("unmount").arg(dest).process_group(0);
         self.run_umount(&mut cmd, dest)
     }
 
-    pub fn unmount_bindfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_bindfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_devfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_devfs(&self, dest: &Path) -> anyhow::Result<()> {
         let mut cmd = Command::new("/sbin/umount");
         cmd.arg(dest).process_group(0);
         self.run_umount(&mut cmd, dest)
     }
 
     /* Not actually supported but try to unmount it anyway. */
-    pub fn unmount_fdfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_fdfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_nfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_nfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 
     /* Not actually supported but try to unmount it anyway. */
-    pub fn unmount_procfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_procfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_tmpfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
+    pub fn unmount_tmpfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 
