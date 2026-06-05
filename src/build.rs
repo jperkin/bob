@@ -825,7 +825,7 @@ impl<'a> PkgBuilder<'a> {
 
         let args: Vec<&str> = owned_args.iter().map(|s| s.as_str()).collect();
 
-        info!(stage = stage.into_str(), "Running make stage");
+        debug!(stage = stage.into_str(), "Running make stage");
 
         let (status, cpu_time) =
             self.run_command_logged(&self.session.pkgsrc.make, &args, run_as, &logfile)?;
@@ -2301,7 +2301,7 @@ impl Build {
                                 let hist = build_history.get(&hist_key);
                                 let wrkobjdir =
                                     session.wrkobjdir_map.get(&sp.pkg).map(|k| k.to_string());
-                                info!(
+                                debug!(
                                     pkgname = %sp.pkg.pkgname(),
                                     make_jobs = sp.make_jobs.jobs(),
                                     make_jobs_safe = sp.make_jobs.safe(),

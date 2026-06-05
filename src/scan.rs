@@ -382,7 +382,7 @@ impl Scan {
     }
 
     pub fn add(&mut self, pkgpath: &PkgPath) {
-        info!(pkgpath = %pkgpath.as_path().display(), "Adding package to scan queue");
+        debug!(pkgpath = %pkgpath.as_path().display(), "Adding package to scan queue");
         self.full_tree = false;
         self.incoming.insert(pkgpath.clone());
         self.initial_pkgpaths.insert(pkgpath.clone());
@@ -1089,7 +1089,7 @@ impl Scan {
             }
         }
 
-        info!(packages_found = index.len(), "Scan complete");
+        debug!(packages_found = index.len(), "Scan complete");
 
         /*
          * Set PKGPATH (PKG_LOCATION) as for some reason pbulk-index doesn't.
