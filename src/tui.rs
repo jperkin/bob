@@ -706,13 +706,13 @@ impl Progress {
     }
 
     pub fn flush_progress_dots(&mut self, done: usize, total: usize) -> io::Result<()> {
-        if let Self::Plain(p) = self {
-            if p.plain_dots > 0 {
-                let dots = ".".repeat(p.plain_dots);
-                let counter = format!("{}/{}", done, total);
-                println!("    {:<50}  {:>11}", dots, counter);
-                p.plain_dots = 0;
-            }
+        if let Self::Plain(p) = self
+            && p.plain_dots > 0
+        {
+            let dots = ".".repeat(p.plain_dots);
+            let counter = format!("{}/{}", done, total);
+            println!("    {:<50}  {:>11}", dots, counter);
+            p.plain_dots = 0;
         }
         Ok(())
     }

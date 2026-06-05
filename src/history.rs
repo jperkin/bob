@@ -197,15 +197,15 @@ impl History {
         let fmt_dur = |d: Duration| crate::fmt::duration_ms(d.as_millis() as u64);
         let dash = || "-".to_string();
 
-        if let Some(stage_name) = name.strip_prefix(CPU_PREFIX) {
-            if let Some(stage) = Stage::VARIANTS.iter().find(|s| s.into_str() == stage_name) {
-                return Ok(self
-                    .stage_cpu_times
-                    .iter()
-                    .find(|(st, _)| st == stage)
-                    .map(|(_, d)| fmt_dur(*d))
-                    .unwrap_or_else(dash));
-            }
+        if let Some(stage_name) = name.strip_prefix(CPU_PREFIX)
+            && let Some(stage) = Stage::VARIANTS.iter().find(|s| s.into_str() == stage_name)
+        {
+            return Ok(self
+                .stage_cpu_times
+                .iter()
+                .find(|(st, _)| st == stage)
+                .map(|(_, d)| fmt_dur(*d))
+                .unwrap_or_else(dash));
         }
 
         if let Some(stage) = Stage::VARIANTS.iter().find(|s| s.into_str() == name) {
@@ -262,15 +262,15 @@ impl History {
         let fmt_dur = |d: Duration| d.as_millis().to_string();
         let dash = || "-".to_string();
 
-        if let Some(stage_name) = name.strip_prefix(CPU_PREFIX) {
-            if let Some(stage) = Stage::VARIANTS.iter().find(|s| s.into_str() == stage_name) {
-                return self
-                    .stage_cpu_times
-                    .iter()
-                    .find(|(st, _)| st == stage)
-                    .map(|(_, d)| fmt_dur(*d))
-                    .unwrap_or_else(dash);
-            }
+        if let Some(stage_name) = name.strip_prefix(CPU_PREFIX)
+            && let Some(stage) = Stage::VARIANTS.iter().find(|s| s.into_str() == stage_name)
+        {
+            return self
+                .stage_cpu_times
+                .iter()
+                .find(|(st, _)| st == stage)
+                .map(|(_, d)| fmt_dur(*d))
+                .unwrap_or_else(dash);
         }
 
         if let Some(stage) = Stage::VARIANTS.iter().find(|s| s.into_str() == name) {

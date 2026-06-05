@@ -225,11 +225,11 @@ pub(crate) fn pkg_cpu_history(
     let mut with_history = 0usize;
     for (pkgname, pkgpath) in pkg_paths {
         let pkgbase = pkgname.pkgbase().to_string();
-        if let Some(t) = stage_timings.get(&(pkgpath.clone(), pkgbase)) {
-            if t.cpu_ms > 0 {
-                result.insert(pkgname.clone(), t.cpu_ms as usize);
-                with_history += 1;
-            }
+        if let Some(t) = stage_timings.get(&(pkgpath.clone(), pkgbase))
+            && t.cpu_ms > 0
+        {
+            result.insert(pkgname.clone(), t.cpu_ms as usize);
+            with_history += 1;
         }
     }
     debug!(

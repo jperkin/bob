@@ -2047,11 +2047,11 @@ impl Build {
         ));
 
         // Mark cached and indirect-failed packages in progress display
-        if cached_count > 0 || indirect_failed_count > 0 {
-            if let Ok(mut p) = progress.lock() {
-                p.state_mut().cached = cached_count;
-                p.state_mut().skipped = indirect_failed_count;
-            }
+        if (cached_count > 0 || indirect_failed_count > 0)
+            && let Ok(mut p) = progress.lock()
+        {
+            p.state_mut().cached = cached_count;
+            p.state_mut().skipped = indirect_failed_count;
         }
 
         // Flag to stop the refresh thread
@@ -2431,11 +2431,11 @@ impl Build {
                         }
                     }
                     ChannelCommand::OutputLines(tid, lines) => {
-                        if let Ok(mut p) = progress_clone.lock() {
-                            if let Some(buf) = p.output_buffer_mut(tid) {
-                                for line in lines {
-                                    buf.push(line);
-                                }
+                        if let Ok(mut p) = progress_clone.lock()
+                            && let Some(buf) = p.output_buffer_mut(tid)
+                        {
+                            for line in lines {
+                                buf.push(line);
                             }
                         }
                     }

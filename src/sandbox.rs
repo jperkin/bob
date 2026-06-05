@@ -631,16 +631,16 @@ impl Sandbox {
             path.canonicalize()?
         } else {
             // Path doesn't exist yet, check its parent
-            if let Some(parent) = path.parent() {
-                if parent.exists() {
-                    let canonical_parent = parent.canonicalize()?;
-                    if !canonical_parent.starts_with(&canonical_sandbox) {
-                        bail!(
-                            "Path escapes sandbox: {} is not within {}",
-                            path.display(),
-                            sandbox_root.display()
-                        );
-                    }
+            if let Some(parent) = path.parent()
+                && parent.exists()
+            {
+                let canonical_parent = parent.canonicalize()?;
+                if !canonical_parent.starts_with(&canonical_sandbox) {
+                    bail!(
+                        "Path escapes sandbox: {} is not within {}",
+                        path.display(),
+                        sandbox_root.display()
+                    );
                 }
             }
             return Ok(());
@@ -1117,10 +1117,10 @@ impl Sandbox {
             return Ok(());
         }
         for &id in &sandboxes {
-            if self.path(id).exists() {
-                if let Err(e) = self.run_post_build(Some(id)) {
-                    warn!(error = format!("{e:#}"), sandbox = id, "post-build error");
-                }
+            if self.path(id).exists()
+                && let Err(e) = self.run_post_build(Some(id))
+            {
+                warn!(error = format!("{e:#}"), sandbox = id, "post-build error");
             }
         }
         let msg = if sandboxes.len() == 1 {
@@ -1363,28 +1363,27 @@ impl Sandbox {
                             &create_cmd.run,
                             action.chroot(),
                             &merged_envs,
-                        )? {
-                            if !out.status.success() {
-                                let stderr = String::from_utf8_lossy(&out.stderr);
-                                let stderr = stderr.trim();
-                                if stderr.is_empty() {
-                                    bail!(
-                                        "create command failed (exit code {}): {}",
-                                        out.status
-                                            .code()
-                                            .map_or("signal".to_string(), |c| c.to_string()),
-                                        create_cmd.run,
-                                    );
-                                } else {
-                                    bail!(
-                                        "create command failed (exit code {}): {}\n{}",
-                                        out.status
-                                            .code()
-                                            .map_or("signal".to_string(), |c| c.to_string()),
-                                        create_cmd.run,
-                                        stderr,
-                                    );
-                                }
+                        )? && !out.status.success()
+                        {
+                            let stderr = String::from_utf8_lossy(&out.stderr);
+                            let stderr = stderr.trim();
+                            if stderr.is_empty() {
+                                bail!(
+                                    "create command failed (exit code {}): {}",
+                                    out.status
+                                        .code()
+                                        .map_or("signal".to_string(), |c| c.to_string()),
+                                    create_cmd.run,
+                                );
+                            } else {
+                                bail!(
+                                    "create command failed (exit code {}): {}\n{}",
+                                    out.status
+                                        .code()
+                                        .map_or("signal".to_string(), |c| c.to_string()),
+                                    create_cmd.run,
+                                    stderr,
+                                );
                             }
                         }
                     }
@@ -1407,12 +1406,11 @@ impl Sandbox {
                         dest = %dest_path.display(),
                         "Creating symlink"
                     );
-                    if let Some(parent) = dest_path.parent() {
-                        if !parent.exists() {
-                            fs::create_dir_all(parent).with_context(|| {
-                                format!("Failed to create {}", parent.display())
-                            })?;
-                        }
+                    if let Some(parent) = dest_path.parent()
+                        && !parent.exists()
+                    {
+                        fs::create_dir_all(parent)
+                            .with_context(|| format!("Failed to create {}", parent.display()))?;
                     }
                     std::os::unix::fs::symlink(src, &dest_path).with_context(|| {
                         format!(
@@ -1438,13 +1436,13 @@ impl Sandbox {
                     }
                 }
             };
-            if let Some(s) = status {
-                if !s.success() {
-                    bail!(
-                        "Action failed (exit code {:?})",
-                        s.code().map_or("signal".to_string(), |c| c.to_string()),
-                    );
-                }
+            if let Some(s) = status
+                && !s.success()
+            {
+                bail!(
+                    "Action failed (exit code {:?})",
+                    s.code().map_or("signal".to_string(), |c| c.to_string()),
+                );
             }
         }
         Ok(())
@@ -1485,28 +1483,27 @@ impl Sandbox {
                             &destroy_cmd.run,
                             action.chroot(),
                             &merged_envs,
-                        )? {
-                            if !out.status.success() {
-                                let stderr = String::from_utf8_lossy(&out.stderr);
-                                let stderr = stderr.trim();
-                                if stderr.is_empty() {
-                                    bail!(
-                                        "destroy command failed (exit code {}): {}",
-                                        out.status
-                                            .code()
-                                            .map_or("signal".to_string(), |c| c.to_string()),
-                                        destroy_cmd.run,
-                                    );
-                                } else {
-                                    bail!(
-                                        "destroy command failed (exit code {}): {}\n{}",
-                                        out.status
-                                            .code()
-                                            .map_or("signal".to_string(), |c| c.to_string()),
-                                        destroy_cmd.run,
-                                        stderr,
-                                    );
-                                }
+                        )? && !out.status.success()
+                        {
+                            let stderr = String::from_utf8_lossy(&out.stderr);
+                            let stderr = stderr.trim();
+                            if stderr.is_empty() {
+                                bail!(
+                                    "destroy command failed (exit code {}): {}",
+                                    out.status
+                                        .code()
+                                        .map_or("signal".to_string(), |c| c.to_string()),
+                                    destroy_cmd.run,
+                                );
+                            } else {
+                                bail!(
+                                    "destroy command failed (exit code {}): {}\n{}",
+                                    out.status
+                                        .code()
+                                        .map_or("signal".to_string(), |c| c.to_string()),
+                                    destroy_cmd.run,
+                                    stderr,
+                                );
                             }
                         }
                     }
@@ -1591,10 +1588,10 @@ impl Sandbox {
                         FSType::Proc => self.unmount_procfs(&dest)?,
                         FSType::Tmp => self.unmount_tmpfs(&dest)?,
                     };
-                    if let Some(s) = status {
-                        if !s.success() {
-                            bail!("Failed to unmount {}", dest.display());
-                        }
+                    if let Some(s) = status
+                        && !s.success()
+                    {
+                        bail!("Failed to unmount {}", dest.display());
                     }
                     self.remove_empty_dirs(sandbox_id, &dest);
                 }
@@ -1766,10 +1763,10 @@ impl Drop for SandboxScope {
             return;
         }
         for &id in &self.owned {
-            if self.sandbox.path(id).exists() {
-                if let Err(e) = self.sandbox.run_post_build(Some(id)) {
-                    warn!(error = format!("{e:#}"), sandbox = id, "post-build error");
-                }
+            if self.sandbox.path(id).exists()
+                && let Err(e) = self.sandbox.run_post_build(Some(id))
+            {
+                warn!(error = format!("{e:#}"), sandbox = id, "post-build error");
             }
         }
         let msg = if self.owned.len() == 1 {

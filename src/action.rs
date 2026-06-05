@@ -184,15 +184,15 @@ pub struct Only {
 impl Only {
     /// Returns true if the action should run in the given environment.
     pub fn matches(&self, env: ActionContext) -> bool {
-        if let Some(want) = self.environment {
-            if want != env {
-                return false;
-            }
+        if let Some(want) = self.environment
+            && want != env
+        {
+            return false;
         }
-        if let Some(path) = &self.exists {
-            if !path.exists() {
-                return false;
-            }
+        if let Some(path) = &self.exists
+            && !path.exists()
+        {
+            return false;
         }
         true
     }

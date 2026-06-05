@@ -385,10 +385,10 @@ pub fn run(
             .sum();
         total_job_seconds += dt * current_jobs;
         peak_jobs = peak_jobs.max(current_jobs);
-        if let Some(mj) = jobs {
-            if current_jobs > mj {
-                overalloc_seconds += dt;
-            }
+        if let Some(mj) = jobs
+            && current_jobs > mj
+        {
+            overalloc_seconds += dt;
         }
         time = next_time;
     }

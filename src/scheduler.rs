@@ -136,10 +136,10 @@ impl Scheduler<PkgName> {
         }
 
         for (pkg_id, dep_id) in crate::db::query_resolved_deps(db.conn())? {
-            if let (Some(pkg), Some(dep)) = (id_to_name.get(&pkg_id), id_to_name.get(&dep_id)) {
-                if let Some(node) = packages.get_mut(pkg) {
-                    node.deps.insert(dep.clone());
-                }
+            if let (Some(pkg), Some(dep)) = (id_to_name.get(&pkg_id), id_to_name.get(&dep_id))
+                && let Some(node) = packages.get_mut(pkg)
+            {
+                node.deps.insert(dep.clone());
             }
         }
 
@@ -295,11 +295,9 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
 
                 let cpu_time = self.pkg_cpu_history.get(&pkg).copied();
                 let safe = self.pkg_make_jobs.get(&pkg).is_some_and(|mj| mj.safe());
-                if safe {
-                    if let Some(ref alloc) = self.allocator {
-                        let jobs = self.tail_assign(alloc, &pkg, cpu_time);
-                        self.pkg_make_jobs.get_mut(&pkg).unwrap().allocate(jobs);
-                    }
+                if safe && let Some(ref alloc) = self.allocator {
+                    let jobs = self.tail_assign(alloc, &pkg, cpu_time);
+                    self.pkg_make_jobs.get_mut(&pkg).unwrap().allocate(jobs);
                 }
                 let make_jobs = self.pkg_make_jobs.get(&pkg).copied().unwrap_or_default();
 

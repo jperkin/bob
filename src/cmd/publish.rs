@@ -431,14 +431,14 @@ fn send_email(config: &Config, db: &Database, build_id: &str, dry_run: bool) -> 
 }
 
 fn validate_pre_publish(packages: &PublishPackages, successful: &[String]) -> Result<()> {
-    if let Some(minimum) = packages.minimum {
-        if successful.len() < minimum {
-            bail!(
-                "Only {} successful packages, minimum required is {}",
-                successful.len(),
-                minimum
-            );
-        }
+    if let Some(minimum) = packages.minimum
+        && successful.len() < minimum
+    {
+        bail!(
+            "Only {} successful packages, minimum required is {}",
+            successful.len(),
+            minimum
+        );
     }
 
     for pattern_str in &packages.required {
@@ -760,46 +760,46 @@ fn write_text_report(
         }
     }
 
-    if let Some(d) = diff {
-        if !d.new_failures.is_empty() {
-            let mut sorted: Vec<_> = d.new_failures.iter().collect();
-            let get_breaks = |e: &bob::db::DiffEntry| -> usize {
-                e.build2_pkgname
-                    .as_deref()
-                    .and_then(|n| breaks_counts.get(n))
-                    .copied()
-                    .unwrap_or(0)
+    if let Some(d) = diff
+        && !d.new_failures.is_empty()
+    {
+        let mut sorted: Vec<_> = d.new_failures.iter().collect();
+        let get_breaks = |e: &bob::db::DiffEntry| -> usize {
+            e.build2_pkgname
+                .as_deref()
+                .and_then(|n| breaks_counts.get(n))
+                .copied()
+                .unwrap_or(0)
+        };
+        let was_previously_ok = |e: &bob::db::DiffEntry| -> bool {
+            matches!(
+                e.build1_outcome,
+                None | Some(PackageState::Success) | Some(PackageState::UpToDate)
+            )
+        };
+        sorted.sort_by(|a, b| {
+            was_previously_ok(b)
+                .cmp(&was_previously_ok(a))
+                .then_with(|| get_breaks(b).cmp(&get_breaks(a)))
+        });
+        writeln!(file)?;
+        writeln!(
+            file,
+            "{:<44} {:>6}  Previously",
+            format!("New Failures Since {}", d.build1_id),
+            "Breaks"
+        )?;
+        writeln!(file, "{}", "-".repeat(76))?;
+        for e in &sorted {
+            let pkgname = e.build2_pkgname.as_deref().unwrap_or("-");
+            let breaks = breaks_counts.get(pkgname).copied().unwrap_or(0);
+            let previously: &str = e.build1_outcome.map_or("absent", |o| o.as_str());
+            let breaks_str = if breaks > 0 {
+                breaks.to_string()
+            } else {
+                String::new()
             };
-            let was_previously_ok = |e: &bob::db::DiffEntry| -> bool {
-                matches!(
-                    e.build1_outcome,
-                    None | Some(PackageState::Success) | Some(PackageState::UpToDate)
-                )
-            };
-            sorted.sort_by(|a, b| {
-                was_previously_ok(b)
-                    .cmp(&was_previously_ok(a))
-                    .then_with(|| get_breaks(b).cmp(&get_breaks(a)))
-            });
-            writeln!(file)?;
-            writeln!(
-                file,
-                "{:<44} {:>6}  Previously",
-                format!("New Failures Since {}", d.build1_id),
-                "Breaks"
-            )?;
-            writeln!(file, "{}", "-".repeat(76))?;
-            for e in &sorted {
-                let pkgname = e.build2_pkgname.as_deref().unwrap_or("-");
-                let breaks = breaks_counts.get(pkgname).copied().unwrap_or(0);
-                let previously: &str = e.build1_outcome.map_or("absent", |o| o.as_str());
-                let breaks_str = if breaks > 0 {
-                    breaks.to_string()
-                } else {
-                    String::new()
-                };
-                writeln!(file, "{:<44} {:>6}  {}", pkgname, breaks_str, previously)?;
-            }
+            writeln!(file, "{:<44} {:>6}  {}", pkgname, breaks_str, previously)?;
         }
     }
 
@@ -1435,17 +1435,17 @@ fn write_misc_table(
             write_var_row(file, "Revision", rev)?;
         }
     }
-    if let Some(d) = diff {
-        if let Some((url, old_rev, new_rev)) = build_compare_url(db, vcs, &d.build1_id) {
-            writeln!(
-                file,
-                "<tr><td class=\"vk\">Compare</td>\
+    if let Some(d) = diff
+        && let Some((url, old_rev, new_rev)) = build_compare_url(db, vcs, &d.build1_id)
+    {
+        writeln!(
+            file,
+            "<tr><td class=\"vk\">Compare</td>\
                  <td><a href=\"{}\">{}..{}</a></td></tr>",
-                escape_html(&url),
-                escape_html(&old_rev),
-                escape_html(&new_rev),
-            )?;
-        }
+            escape_html(&url),
+            escape_html(&old_rev),
+            escape_html(&new_rev),
+        )?;
     }
     let dur_secs = duration.as_secs();
     let duration_str = if dur_secs >= 3600 {

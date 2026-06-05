@@ -270,19 +270,19 @@ impl PkgsrcEnv {
 
         let mut metadata: HashMap<String, String> = HashMap::new();
         for varname in METADATA_VARS {
-            if let Some(value) = values.get(varname) {
-                if !value.is_empty() {
-                    metadata.insert((*varname).to_string(), (*value).to_string());
-                }
+            if let Some(value) = values.get(varname)
+                && !value.is_empty()
+            {
+                metadata.insert((*varname).to_string(), (*value).to_string());
             }
         }
 
         let mut cachevars: HashMap<String, String> = HashMap::new();
         for varname in &cachevar_names {
-            if let Some(value) = values.get(varname) {
-                if !value.is_empty() {
-                    cachevars.insert((*varname).to_string(), (*value).to_string());
-                }
+            if let Some(value) = values.get(varname)
+                && !value.is_empty()
+            {
+                cachevars.insert((*varname).to_string(), (*value).to_string());
             }
         }
 
@@ -751,13 +751,13 @@ impl Config {
         /*
          * Validate bootstrap path exists if specified.
          */
-        if let Some(bootstrap) = pkgsrc.as_ref().and_then(|p| p.bootstrap.as_ref()) {
-            if !bootstrap.exists() {
-                anyhow::bail!(
-                    "pkgsrc.bootstrap file {} does not exist",
-                    bootstrap.display()
-                );
-            }
+        if let Some(bootstrap) = pkgsrc.as_ref().and_then(|p| p.bootstrap.as_ref())
+            && !bootstrap.exists()
+        {
+            anyhow::bail!(
+                "pkgsrc.bootstrap file {} does not exist",
+                bootstrap.display()
+            );
         }
 
         /*
@@ -905,24 +905,24 @@ impl Config {
         // Check sandbox basedir is writable if sandboxes enabled
         if let Some(sandboxes) = &self.file.sandboxes {
             // Check parent directory exists or can be created
-            if let Some(parent) = sandboxes.basedir.parent() {
-                if !parent.exists() {
-                    errors.push(format!(
-                        "Sandbox basedir parent does not exist: {}",
-                        parent.display()
-                    ));
-                }
-            }
-        }
-
-        // Check dbdir can be created
-        if let Some(parent) = self.dbdir.parent() {
-            if !parent.exists() {
+            if let Some(parent) = sandboxes.basedir.parent()
+                && !parent.exists()
+            {
                 errors.push(format!(
-                    "dbdir parent directory does not exist: {}",
+                    "Sandbox basedir parent does not exist: {}",
                     parent.display()
                 ));
             }
+        }
+
+        /* Check dbdir can be created */
+        if let Some(parent) = self.dbdir.parent()
+            && !parent.exists()
+        {
+            errors.push(format!(
+                "dbdir parent directory does not exist: {}",
+                parent.display()
+            ));
         }
 
         // Thread counts must be at least 1
@@ -970,10 +970,10 @@ impl Config {
                 if pkgs.path.is_empty() {
                     errors.push("publish.packages.path must not be empty".to_string());
                 }
-                if let Some(tmppath) = &pkgs.tmppath {
-                    if tmppath.is_empty() {
-                        errors.push("publish.packages.tmppath must not be empty".to_string());
-                    }
+                if let Some(tmppath) = &pkgs.tmppath
+                    && tmppath.is_empty()
+                {
+                    errors.push("publish.packages.tmppath must not be empty".to_string());
                 }
             }
             if let Some(report) = &publish.report {
@@ -1785,10 +1785,10 @@ fn parse_action_only(
 
     // `set` is checked at parse time against the Lua globals; if the
     // referenced var is unset, the action is dropped entirely.
-    if let Some(varpath) = only_table.get::<Option<String>>("set")? {
-        if resolve_lua_var(globals, &varpath).is_none() {
-            return Ok(None);
-        }
+    if let Some(varpath) = only_table.get::<Option<String>>("set")?
+        && resolve_lua_var(globals, &varpath).is_none()
+    {
+        return Ok(None);
     }
 
     if let Some(path_str) = only_table.get::<Option<String>>("exists")? {

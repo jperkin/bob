@@ -439,11 +439,11 @@ impl Scan {
                         "Found unscanned dependencies from interrupted scan"
                     );
                     for pkgpath_str in unscanned {
-                        if let Ok(pkgpath) = PkgPath::new(&pkgpath_str) {
-                            if !self.done.contains(&pkgpath) {
-                                self.incoming.insert(pkgpath);
-                                pending_count += 1;
-                            }
+                        if let Ok(pkgpath) = PkgPath::new(&pkgpath_str)
+                            && !self.done.contains(&pkgpath)
+                        {
+                            self.incoming.insert(pkgpath);
+                            pending_count += 1;
                         }
                     }
                 }
@@ -688,10 +688,10 @@ impl Scan {
         ));
 
         // Mark cached packages in progress display
-        if self.initial_cached > 0 {
-            if let Ok(mut p) = progress.lock() {
-                p.state_mut().cached = self.initial_cached;
-            }
+        if self.initial_cached > 0
+            && let Ok(mut p) = progress.lock()
+        {
+            p.state_mut().cached = self.initial_cached;
         }
 
         // Flag to stop the refresh thread
@@ -736,13 +736,14 @@ impl Scan {
          * This handles resume after interrupt where initial packages are
          * already scanned but their dependencies are not.
          */
-        if !self.full_tree && self.incoming.is_empty() {
-            if let Ok(deps) = self.unscanned_deps(db) {
-                for pkgpath in deps {
-                    self.incoming.insert(pkgpath);
-                    if let Ok(mut p) = progress.lock() {
-                        p.state_mut().total += 1;
-                    }
+        if !self.full_tree
+            && self.incoming.is_empty()
+            && let Ok(deps) = self.unscanned_deps(db)
+        {
+            for pkgpath in deps {
+                self.incoming.insert(pkgpath);
+                if let Ok(mut p) = progress.lock() {
+                    p.state_mut().total += 1;
                 }
             }
         }
@@ -757,10 +758,10 @@ impl Scan {
         loop {
             // Check for interrupt (stop or shutdown).
             if shutdown_flag.interrupted() {
-                if shutdown_flag.is_stopping() {
-                    if let Ok(mut p) = progress.lock() {
-                        p.announce_interrupt();
-                    }
+                if shutdown_flag.is_stopping()
+                    && let Ok(mut p) = progress.lock()
+                {
+                    p.announce_interrupt();
                 }
                 break;
             }
@@ -852,12 +853,12 @@ impl Scan {
                     self.done.insert(pkgpath.clone());
 
                     // Save to database
-                    if !scanpkgs.is_empty() {
-                        if let Err(e) = db.store_scan_pkgpath(&pkgpath.to_string(), &scanpkgs) {
-                            error!(error = format!("{e:#}"), "Failed to store scan results");
-                            if db_error.is_none() {
-                                db_error = Some(e);
-                            }
+                    if !scanpkgs.is_empty()
+                        && let Err(e) = db.store_scan_pkgpath(&pkgpath.to_string(), &scanpkgs)
+                    {
+                        error!(error = format!("{e:#}"), "Failed to store scan results");
+                        if db_error.is_none() {
+                            db_error = Some(e);
                         }
                     }
                 }
@@ -870,10 +871,10 @@ impl Scan {
 
             // Check for interrupt after batch completes.
             if shutdown_flag.interrupted() {
-                if shutdown_flag.is_stopping() {
-                    if let Ok(mut p) = progress.lock() {
-                        p.announce_interrupt();
-                    }
+                if shutdown_flag.is_stopping()
+                    && let Ok(mut p) = progress.lock()
+                {
+                    p.announce_interrupt();
                 }
                 break;
             }
@@ -925,10 +926,10 @@ impl Scan {
         }
 
         // Commit whatever succeeded (partial on interrupt/error, full on success)
-        if let Err(e) = tx.commit() {
-            if db_error.is_none() {
-                db_error = Some(e);
-            }
+        if let Err(e) = tx.commit()
+            && db_error.is_none()
+        {
+            db_error = Some(e);
         }
 
         // Stop the refresh thread and print final summary
@@ -1143,10 +1144,10 @@ impl Scan {
 
         let mut active_pkgnames: HashSet<PkgName> = HashSet::new();
         for pkg in packages.values() {
-            if let Some(ref loc) = pkg.pkg_location {
-                if self.initial_pkgpaths.contains(loc) {
-                    active_pkgnames.insert(pkg.pkgname.clone());
-                }
+            if let Some(ref loc) = pkg.pkg_location
+                && self.initial_pkgpaths.contains(loc)
+            {
+                active_pkgnames.insert(pkg.pkgname.clone());
             }
         }
 
@@ -1429,26 +1430,26 @@ impl Scan {
                 continue;
             }
 
-            if let Some(reason) = &pkg.pkg_skip_reason {
-                if !reason.is_empty() {
-                    info!(pkgname = %pkg.pkgname.pkgname(), %reason, "PKG_SKIP_REASON");
-                    skip_reasons.insert(pkg.pkgname.clone(), PackageState::PreSkipped);
-                }
+            if let Some(reason) = &pkg.pkg_skip_reason
+                && !reason.is_empty()
+            {
+                info!(pkgname = %pkg.pkgname.pkgname(), %reason, "PKG_SKIP_REASON");
+                skip_reasons.insert(pkg.pkgname.clone(), PackageState::PreSkipped);
             }
 
-            if use_active_filter {
-                if let Some(ref loc) = pkg.pkg_location {
-                    if self.initial_pkgpaths.contains(loc) {
-                        active.insert(pkg.pkgname.clone());
-                    }
-                }
+            if use_active_filter
+                && let Some(ref loc) = pkg.pkg_location
+                && self.initial_pkgpaths.contains(loc)
+            {
+                active.insert(pkg.pkgname.clone());
             }
 
-            if let Some(reason) = &pkg.pkg_fail_reason {
-                if !reason.is_empty() && !skip_reasons.contains_key(&pkg.pkgname) {
-                    info!(pkgname = %pkg.pkgname.pkgname(), %reason, "PKG_FAIL_REASON");
-                    skip_reasons.insert(pkg.pkgname.clone(), PackageState::PreFailed);
-                }
+            if let Some(reason) = &pkg.pkg_fail_reason
+                && !reason.is_empty()
+                && !skip_reasons.contains_key(&pkg.pkgname)
+            {
+                info!(pkgname = %pkg.pkgname.pkgname(), %reason, "PKG_FAIL_REASON");
+                skip_reasons.insert(pkg.pkgname.clone(), PackageState::PreFailed);
             }
 
             depends.insert(pkg.pkgname.clone(), Vec::new());
@@ -1568,20 +1569,18 @@ impl Scan {
                         }
                         Ok(Some(best)) => {
                             let pkgname = PkgName::new(best);
-                            if verbosity >= 1 {
-                                if let Some(loc) = pkg_locations.get(&pkgname) {
-                                    if let Ok(dep_path) = PkgPath::new(dep.pkgpath()) {
-                                        if *loc != dep_path {
-                                            eprintln!(
-                                                "Best matching {} differs from location {} for dependency {} of package {}",
-                                                best,
-                                                dep_path,
-                                                dep.pattern(),
-                                                pkg.pkgname.pkgname()
-                                            );
-                                        }
-                                    }
-                                }
+                            if verbosity >= 1
+                                && let Some(loc) = pkg_locations.get(&pkgname)
+                                && let Ok(dep_path) = PkgPath::new(dep.pkgpath())
+                                && *loc != dep_path
+                            {
+                                eprintln!(
+                                    "Best matching {} differs from location {} for dependency {} of package {}",
+                                    best,
+                                    dep_path,
+                                    dep.pattern(),
+                                    pkg.pkgname.pkgname()
+                                );
                             }
                             if !is_satisfied(pkg_depends, pattern)
                                 && !pkg_depends.contains(&pkgname)

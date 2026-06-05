@@ -49,10 +49,10 @@ pub fn run(db: &Database, args: PruneArgs) -> Result<()> {
         bail!("specify a range, --keep-last, or --older-than");
     };
 
-    if let Some(cur) = current.as_deref() {
-        if to_drop.iter().any(|b| b == cur) {
-            bail!("refusing to prune current build_id: {cur}");
-        }
+    if let Some(cur) = current.as_deref()
+        && to_drop.iter().any(|b| b == cur)
+    {
+        bail!("refusing to prune current build_id: {cur}");
     }
 
     if !args.dry_run {

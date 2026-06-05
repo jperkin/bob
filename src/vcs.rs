@@ -352,18 +352,18 @@ fn changed_pkgpaths(
                     source_location,
                     ..
                 } => {
-                    if let Some(pp) = pkgpath_for(source_location.to_string().as_str()) {
-                        if pkgpaths.contains(&pp) {
-                            touched.insert(pp);
-                        }
+                    if let Some(pp) = pkgpath_for(source_location.to_string().as_str())
+                        && pkgpaths.contains(&pp)
+                    {
+                        touched.insert(pp);
                     }
                     location.to_string()
                 }
             };
-            if let Some(pp) = pkgpath_for(&path) {
-                if pkgpaths.contains(&pp) {
-                    touched.insert(pp);
-                }
+            if let Some(pp) = pkgpath_for(&path)
+                && pkgpaths.contains(&pp)
+            {
+                touched.insert(pp);
             }
             Ok::<_, std::convert::Infallible>(ControlFlow::Continue(()))
         })
@@ -397,10 +397,10 @@ fn extract_author(commit: &gix::Commit<'_>) -> String {
         return String::new();
     };
     let email = sig.email.to_string();
-    if let Some((local, _)) = email.split_once('@') {
-        if !local.is_empty() {
-            return local.to_string();
-        }
+    if let Some((local, _)) = email.split_once('@')
+        && !local.is_empty()
+    {
+        return local.to_string();
     }
     sig.name.to_string()
 }

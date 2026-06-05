@@ -1748,20 +1748,19 @@ impl Database {
             ) = row?;
 
             if Some(id) == current_id {
-                if current_accepted {
-                    if let Some(last) = results.last_mut() {
-                        if let Some(stage_id) = wt_stage {
-                            let stage = Stage::from_repr(stage_id)
-                                .ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", stage_id))?;
-                            if let Some(ms) = wt_duration {
-                                last.stage_durations
-                                    .push((stage, Duration::from_millis(ms as u64)));
-                            }
-                            if let Some(ms) = ct_duration {
-                                last.stage_cpu_times
-                                    .push((stage, Duration::from_millis(ms as u64)));
-                            }
-                        }
+                if current_accepted
+                    && let Some(last) = results.last_mut()
+                    && let Some(stage_id) = wt_stage
+                {
+                    let stage = Stage::from_repr(stage_id)
+                        .ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", stage_id))?;
+                    if let Some(ms) = wt_duration {
+                        last.stage_durations
+                            .push((stage, Duration::from_millis(ms as u64)));
+                    }
+                    if let Some(ms) = ct_duration {
+                        last.stage_cpu_times
+                            .push((stage, Duration::from_millis(ms as u64)));
                     }
                 }
                 continue;
