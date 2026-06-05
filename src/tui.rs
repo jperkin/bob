@@ -32,6 +32,7 @@ use ratatui::{
 };
 use std::collections::VecDeque;
 use std::io::{self, IsTerminal, Stdout, stdout};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -85,12 +86,18 @@ pub const REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 /// matching cargo's 12-character status column.
 const STATUS_WIDTH: usize = 12;
 
-/// Strip ANSI escape sequences and sanitize control characters.
-fn sanitize_output(s: &str) -> String {
-    let stripped = strip_ansi_escapes::strip(s);
-    let s = String::from_utf8_lossy(&stripped);
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
+/**
+ * Recent output lines retained per worker for the multipanel view.
+ */
+pub(crate) const OUTPUT_BUFFER_LINES: usize = 100;
+
+/// Clean a raw output line for display: ANSI escapes stripped, tabs
+/// expanded, other control characters dropped.
+fn clean_line(raw: &[u8]) -> String {
+    let stripped = strip_ansi_escapes::strip(raw);
+    let text = String::from_utf8_lossy(&stripped);
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
         match ch {
             '\t' => out.push_str("        "),
             '\x00'..='\x1f' | '\x7f' => {}
@@ -100,39 +107,92 @@ fn sanitize_output(s: &str) -> String {
     out
 }
 
-/// Ring buffer for build output with fixed line capacity.
+/// Ring buffer for raw build output lines with fixed line capacity.
 #[derive(Clone, Debug)]
-pub struct OutputBuffer {
-    lines: VecDeque<String>,
+struct OutputBuffer {
+    lines: VecDeque<Vec<u8>>,
     capacity: usize,
 }
 
 impl OutputBuffer {
-    pub fn new(capacity: usize) -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
             lines: VecDeque::with_capacity(capacity),
             capacity,
         }
     }
 
-    pub fn push(&mut self, line: String) {
-        // Strip ANSI escapes and sanitize control characters before storing.
-        let clean_line = sanitize_output(&line);
-        // If carriage returns are present, keep only the final segment.
-        let clean_line = clean_line.rsplit('\r').next().unwrap_or("");
-        if self.lines.len() >= self.capacity {
-            self.lines.pop_front();
-        }
-        self.lines.push_back(clean_line.to_string());
+    /// Store a raw output line, reusing the oldest allocation at capacity.
+    /// Cleaning is deferred to [`Self::last_n`] to keep the pipe-drain
+    /// path cheap.
+    fn push_raw(&mut self, raw: &[u8]) {
+        let mut slot = if self.lines.len() >= self.capacity {
+            self.lines.pop_front().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        slot.clear();
+        slot.extend_from_slice(raw);
+        self.lines.push_back(slot);
     }
 
-    pub fn last_n(&self, n: usize) -> impl Iterator<Item = &String> {
+    /// Snapshot the most recent `n` raw lines.
+    fn last_n_raw(&self, n: usize) -> Vec<Vec<u8>> {
         let skip = self.lines.len().saturating_sub(n);
-        self.lines.iter().skip(skip)
+        self.lines.iter().skip(skip).cloned().collect()
     }
 
-    pub fn clear(&mut self) {
+    fn clear(&mut self) {
         self.lines.clear();
+    }
+}
+
+/**
+ * Per-worker ring buffers of recent command output, shared between the
+ * builders that write output and the multipanel renderer that displays it.
+ */
+#[derive(Clone, Debug)]
+pub(crate) struct OutputBuffers(Arc<Vec<Mutex<OutputBuffer>>>);
+
+impl OutputBuffers {
+    fn new(num_workers: usize) -> Self {
+        Self(Arc::new(
+            (0..num_workers)
+                .map(|_| Mutex::new(OutputBuffer::new(OUTPUT_BUFFER_LINES)))
+                .collect(),
+        ))
+    }
+
+    /**
+     * Append a raw output line for `worker`.
+     */
+    pub(crate) fn push(&self, worker: usize, raw: &[u8]) {
+        if let Some(buf) = self.0.get(worker)
+            && let Ok(mut buf) = buf.lock()
+        {
+            buf.push_raw(raw);
+        }
+    }
+
+    /** Discard all retained output for `worker`. */
+    fn clear(&self, worker: usize) {
+        if let Some(buf) = self.0.get(worker)
+            && let Ok(mut buf) = buf.lock()
+        {
+            buf.clear();
+        }
+    }
+
+    /** Snapshot the most recent `n` lines for `worker`, cleaned for display. */
+    fn last_n(&self, worker: usize, n: usize) -> Vec<String> {
+        /* Hold the lock only to copy raw bytes out; clean after release. */
+        let raw = self
+            .0
+            .get(worker)
+            .and_then(|buf| buf.lock().ok())
+            .map(|buf| buf.last_n_raw(n))
+            .unwrap_or_default();
+        raw.iter().map(|line| clean_line(line)).collect()
     }
 }
 
@@ -649,10 +709,16 @@ impl Progress {
         }
     }
 
-    pub fn output_buffer_mut(&mut self, id: usize) -> Option<&mut OutputBuffer> {
+    /**
+     * Handle to the per-worker output buffers for builders to write into.
+     *
+     * Returns `None` in plain mode, where there is no multipanel view, so
+     * builders skip all per-line output work.
+     */
+    pub fn output_buffers(&self) -> Option<OutputBuffers> {
         match self {
             Self::Plain(_) => None,
-            Self::Tui(p) => p.output_buffer_mut(id),
+            Self::Tui(p) => Some(p.output_buffers()),
         }
     }
 
@@ -784,7 +850,7 @@ pub(crate) struct MultiProgress {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     state: ProgressState,
     view_mode: ViewMode,
-    output_buffers: Vec<OutputBuffer>,
+    output_buffers: OutputBuffers,
     num_workers: usize,
     /// Messages buffered while in fullscreen mode, printed when returning to inline.
     pending_messages: Vec<Line<'static>>,
@@ -803,7 +869,7 @@ impl MultiProgress {
         let backend = CrosstermBackend::new(stdout());
         let viewport = Viewport::Inline(height);
         let terminal = Terminal::with_options(backend, TerminalOptions { viewport })?;
-        let output_buffers = (0..num_workers).map(|_| OutputBuffer::new(100)).collect();
+        let output_buffers = OutputBuffers::new(num_workers);
 
         Ok(Self {
             terminal,
@@ -820,14 +886,12 @@ impl MultiProgress {
         &mut self.state
     }
 
-    fn output_buffer_mut(&mut self, id: usize) -> Option<&mut OutputBuffer> {
-        self.output_buffers.get_mut(id)
+    fn output_buffers(&self) -> OutputBuffers {
+        self.output_buffers.clone()
     }
 
     fn clear_output_buffer(&mut self, id: usize) {
-        if let Some(buf) = self.output_buffers.get_mut(id) {
-            buf.clear();
-        }
+        self.output_buffers.clear(id);
     }
 
     fn print_status(
@@ -1081,11 +1145,7 @@ impl MultiProgress {
                 let inner_height = panel_area.height.saturating_sub(2) as usize;
                 let lines_needed = (inner_height * 2).max(10);
                 match &groups[gi] {
-                    PanelGroup::Active(i) => self
-                        .output_buffers
-                        .get(*i)
-                        .map(|buf| buf.last_n(lines_needed).cloned().collect())
-                        .unwrap_or_default(),
+                    PanelGroup::Active(i) => self.output_buffers.last_n(*i, lines_needed),
                     PanelGroup::Idle(..) => Vec::new(),
                 }
             })
@@ -1150,11 +1210,7 @@ impl MultiProgress {
                         let inner_height = rect.height.saturating_sub(2) as usize;
                         let lines_needed = (inner_height * 2).max(10);
                         match group {
-                            PanelGroup::Active(i) => self
-                                .output_buffers
-                                .get(*i)
-                                .map(|buf| buf.last_n(lines_needed).cloned().collect())
-                                .unwrap_or_default(),
+                            PanelGroup::Active(i) => self.output_buffers.last_n(*i, lines_needed),
                             PanelGroup::Idle(..) => Vec::new(),
                         }
                     })

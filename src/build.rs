@@ -47,7 +47,7 @@ use crate::makejobs::PkgMakeJobs;
 use crate::sandbox::{CommandSetsid, SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
 use crate::scan::ResolvedPackage;
 use crate::scheduler::Scheduler;
-use crate::tui::{Progress, REFRESH_INTERVAL};
+use crate::tui::{OutputBuffers, Progress, REFRESH_INTERVAL};
 use crate::{Config, RunState, Sandbox};
 use crate::{PackageCounts, PackageState};
 use anyhow::{Context, bail};
@@ -68,12 +68,6 @@ use std::sync::{Arc, Mutex, mpsc, mpsc::Sender};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, info_span, trace, warn};
-
-/// How often to batch and send build output lines to the UI channel.
-/// This is the floor on log display responsiveness — output cannot appear
-/// faster than this regardless of UI refresh rate. 100ms (10fps) is
-/// imperceptible for build logs while reducing channel overhead.
-const OUTPUT_BATCH_INTERVAL: Duration = Duration::from_millis(100);
 
 /// How long a worker thread sleeps when told no work is available.
 /// This prevents busy-spinning when all pending builds are blocked on
@@ -522,6 +516,7 @@ struct BuildSession {
     sandbox: Sandbox,
     state: RunState,
     wrkobjdir_map: HashMap<PkgName, WrkObjKind>,
+    output_buffers: Option<OutputBuffers>,
 }
 
 /// Package builder that executes build stages.
@@ -532,7 +527,6 @@ struct PkgBuilder<'a> {
     pkginfo: &'a ResolvedPackage,
     logdir: PathBuf,
     envs: Vec<(String, String)>,
-    output_tx: Sender<ChannelCommand>,
     make_jobs: PkgMakeJobs,
     wrkdir: Option<PathBuf>,
 }
@@ -545,7 +539,6 @@ impl<'a> PkgBuilder<'a> {
         worker_id: usize,
         pkginfo: &'a ResolvedPackage,
         envs: Vec<(String, String)>,
-        output_tx: Sender<ChannelCommand>,
         make_jobs: PkgMakeJobs,
         wrkdir: Option<PathBuf>,
     ) -> Self {
@@ -560,7 +553,6 @@ impl<'a> PkgBuilder<'a> {
             pkginfo,
             logdir,
             envs,
-            output_tx,
             make_jobs,
             wrkdir,
         }
@@ -875,18 +867,18 @@ impl<'a> PkgBuilder<'a> {
             .context("Failed to spawn shell command")?;
 
         let stdout = child.stdout.take().unwrap();
-        let output_tx = self.output_tx.clone();
         let worker_id = self.worker_id;
+        let output_buffers = self.session.output_buffers.clone();
         let (tee_done_tx, tee_done_rx) = mpsc::sync_channel::<()>(1);
 
-        // Spawn thread to read from pipe and tee to file + output channel.
-        // Batch lines and throttle sends to reduce channel overhead.
+        /*
+         * Read the command's output, teeing raw bytes to the log file.  In
+         * TUI mode each line is also stored in the worker's shared ring
+         * buffer for the multipanel view to render.
+         */
         let tee_handle = std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             let mut buf = Vec::new();
-            let mut batch = Vec::with_capacity(50);
-            let mut last_send = Instant::now();
-            let send_interval = OUTPUT_BATCH_INTERVAL;
 
             loop {
                 buf.clear();
@@ -897,25 +889,11 @@ impl<'a> PkgBuilder<'a> {
                 };
                 // Write raw bytes to log file to preserve original output
                 let _ = log.write_all(&buf);
-                // Convert to lossy UTF-8 for live view
-                let line = String::from_utf8_lossy(&buf);
-                let line = line.trim_end_matches('\n').to_string();
-                batch.push(line);
-
-                // Send batch if interval elapsed or batch is large
-                if last_send.elapsed() >= send_interval || batch.len() >= 50 {
-                    let _ = output_tx.send(ChannelCommand::OutputLines(
-                        worker_id,
-                        std::mem::take(&mut batch),
-                    ));
-                    last_send = Instant::now();
+                if let Some(ref buffers) = output_buffers {
+                    buffers.push(worker_id, &buf);
                 }
             }
 
-            // Send remaining lines
-            if !batch.is_empty() {
-                let _ = output_tx.send(ChannelCommand::OutputLines(worker_id, batch));
-            }
             let _ = tee_done_tx.send(());
         });
 
@@ -1476,7 +1454,6 @@ impl PackageBuild {
             self.worker_id,
             &self.pkginfo,
             envs.clone(),
-            status_tx.clone(),
             self.make_jobs,
             wrkdir.clone(),
         );
@@ -1787,10 +1764,6 @@ enum ChannelCommand {
      * Client reporting a stage update for a build.
      */
     StageUpdate(usize, Option<String>),
-    /**
-     * Client reporting output lines from a build.
-     */
-    OutputLines(usize, Vec<String>),
 }
 
 struct BuildJobs {
@@ -2061,7 +2034,10 @@ impl Build {
         let progress_refresh = Arc::clone(&progress);
         let stop_flag = Arc::clone(&stop_refresh);
         let state_for_refresh = state_flag.clone();
-        let is_plain = progress.lock().map(|p| p.is_plain()).unwrap_or(false);
+        let (is_plain, output_buffers) = match progress.lock() {
+            Ok(p) => (p.is_plain(), p.output_buffers()),
+            Err(_) => (false, None),
+        };
         let refresh_thread = std::thread::spawn(move || {
             while !stop_flag.load(Ordering::Relaxed) && !state_for_refresh.is_shutdown() {
                 if is_plain {
@@ -2223,6 +2199,7 @@ impl Build {
             sandbox: self.scope.sandbox().clone(),
             state: state_flag.clone(),
             wrkobjdir_map,
+            output_buffers,
         });
         let sandbox_ids = self.scope.ids().map(|ids| ids.to_vec());
         let progress_clone = Arc::clone(&progress);
@@ -2428,15 +2405,6 @@ impl Build {
                         if let Ok(mut p) = progress_clone.lock() {
                             p.state_mut().set_worker_stage(tid, stage.as_deref());
                             let _ = p.render();
-                        }
-                    }
-                    ChannelCommand::OutputLines(tid, lines) => {
-                        if let Ok(mut p) = progress_clone.lock()
-                            && let Some(buf) = p.output_buffer_mut(tid)
-                        {
-                            for line in lines {
-                                buf.push(line);
-                            }
                         }
                     }
                     ChannelCommand::ComeBackLater
