@@ -140,6 +140,23 @@ pub(crate) const KILL_PROCESSES_MAX_RETRIES: u32 = 5;
 pub(crate) const KILL_PROCESSES_INITIAL_DELAY_MS: u64 = 64;
 
 /**
+ * Retry backoff when unable to unmount a busy mount point.
+ *
+ * Short, minimal delay up to around 5 seconds on most operating systems.  On
+ * macOS a clean unmount of /System takes over a minute so we retry a lot
+ * longer there.
+ */
+#[cfg(not(target_os = "macos"))]
+pub(crate) const UNMOUNT_MAX_RETRIES: u32 = 8;
+#[cfg(target_os = "macos")]
+pub(crate) const UNMOUNT_MAX_RETRIES: u32 = 180;
+#[cfg(not(target_os = "macos"))]
+pub(crate) const UNMOUNT_INITIAL_DELAY_MS: u64 = 64;
+#[cfg(target_os = "macos")]
+pub(crate) const UNMOUNT_INITIAL_DELAY_MS: u64 = 1024;
+pub(crate) const UNMOUNT_MAX_DELAY_MS: u64 = 1024;
+
+/**
  * Poll for child process exit while checking a run state flag.  If
  * shutdown is requested, kill the child and return an error.  During
  * stop the child is allowed to continue running.
@@ -1110,6 +1127,39 @@ impl Sandbox {
             .collect();
         targets.sort();
         self.destroy_set(targets)
+    }
+
+    /**
+     * Run an unmount command, retrying a busy mountpoint before giving up.
+     *
+     * Failures are retried with exponential backoff, defined per-platform.
+     */
+    fn run_umount(&self, cmd: &mut Command, dest: &Path) -> Result<Option<ExitStatus>> {
+        let mut out = cmd.output().context("Unable to execute unmount")?;
+        for retry in 0..UNMOUNT_MAX_RETRIES {
+            if out.status.success() {
+                if retry > 0 {
+                    debug!(
+                        dest = %dest.display(),
+                        retries = retry,
+                        "Unmount succeeded after retries"
+                    );
+                }
+                return Ok(Some(out.status));
+            }
+            /* Clamp the shift so the delay cannot overflow over many retries. */
+            let delay = (UNMOUNT_INITIAL_DELAY_MS << retry.min(10)).min(UNMOUNT_MAX_DELAY_MS);
+            std::thread::sleep(Duration::from_millis(delay));
+            out = cmd.output().context("Unable to execute unmount")?;
+        }
+        if !out.status.success() {
+            warn!(
+                dest = %dest.display(),
+                reason = %String::from_utf8_lossy(&out.stderr).trim(),
+                "Failed to unmount"
+            );
+        }
+        Ok(Some(out.status))
     }
 
     fn destroy_set(&self, sandboxes: Vec<usize>) -> Result<()> {

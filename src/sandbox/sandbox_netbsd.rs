@@ -132,14 +132,9 @@ impl Sandbox {
      * ensuring cleanup can complete even during repeated interrupts.
      */
     fn unmount_common(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
-        let cmd = "/sbin/umount";
-        Ok(Some(
-            Command::new(cmd)
-                .arg(dest)
-                .process_group(0)
-                .status()
-                .context(format!("Unable to execute {}", cmd))?,
-        ))
+        let mut cmd = Command::new("/sbin/umount");
+        cmd.arg(dest).process_group(0);
+        self.run_umount(&mut cmd, dest)
     }
 
     pub fn unmount_bindfs(&self, dest: &Path) -> anyhow::Result<Option<ExitStatus>> {
