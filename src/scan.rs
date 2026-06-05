@@ -721,8 +721,6 @@ impl Scan {
             }
         });
 
-        // Start transaction for all writes
-        let tx = db.transaction()?;
         let mut db_error: Option<anyhow::Error> = None;
 
         // Borrow config and sandbox separately for use in scanner thread,
@@ -923,13 +921,6 @@ impl Scan {
             }
 
             self.incoming = new_incoming;
-        }
-
-        // Commit whatever succeeded (partial on interrupt/error, full on success)
-        if let Err(e) = tx.commit()
-            && db_error.is_none()
-        {
-            db_error = Some(e);
         }
 
         // Stop the refresh thread and print final summary

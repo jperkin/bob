@@ -502,8 +502,12 @@ impl Database {
 
     /**
      * Store a package from scan results.
+     *
+     * Duplicate PKGNAMEs are dropped by the unique index (first occurrence
+     * wins), which is the single point that keeps scan_index canonical for
+     * every writer.
      */
-    pub fn store_package(&self, pkgpath: &str, index: &ScanIndex) -> Result<i64> {
+    pub fn store_package(&self, pkgpath: &str, index: &ScanIndex) -> Result<()> {
         let pkgname = index.pkgname.pkgname();
         let skip_reason = index.pkg_skip_reason.as_deref().filter(|s| !s.is_empty());
         let fail_reason = index.pkg_fail_reason.as_deref().filter(|s| !s.is_empty());
@@ -511,16 +515,17 @@ impl Database {
         let multi_version = index.multi_version.as_ref().map(|v| v.join(" "));
 
         let mut stmt = self.conn.prepare_cached(
-            "INSERT OR REPLACE INTO scan_index
+            "INSERT INTO scan_index
              (pkgname, pkg_location, all_depends,
               pkg_skip_reason, pkg_fail_reason, no_bin_on_ftp,
               restricted, categories, maintainer, use_destdir,
               bootstrap_pkg, usergroup_phase, scan_depends,
               make_jobs_safe, pbulk_weight, multi_version)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                     ?11, ?12, ?13, ?14, ?15, ?16)",
+                     ?11, ?12, ?13, ?14, ?15, ?16)
+             ON CONFLICT(pkgname) DO NOTHING",
         )?;
-        stmt.execute(params![
+        let inserted = stmt.execute(params![
             pkgname,
             pkgpath,
             all_depends,
@@ -540,6 +545,11 @@ impl Database {
         ])?;
         drop(stmt);
 
+        if inserted == 0 {
+            debug!(pkgname = pkgname, "Skipping duplicate pkgname");
+            return Ok(());
+        }
+
         let package_id = self.conn.last_insert_rowid();
         self.conn.execute(
             "INSERT OR IGNORE INTO package_state (package_id) VALUES (?1)",
@@ -547,16 +557,21 @@ impl Database {
         )?;
 
         debug!(pkgname = pkgname, package_id = package_id, "Stored package");
-        Ok(package_id)
+        Ok(())
     }
 
     /**
-     * Store scan results for a pkgpath.
+     * Store scan results for a pkgpath in their own transaction.
+     *
+     * Committing per pkgpath keeps completed results durable as the scan
+     * streams, instead of buffering them in one long-lived transaction.
      */
     pub fn store_scan_pkgpath(&self, pkgpath: &str, indexes: &[ScanIndex]) -> Result<()> {
+        let tx = self.transaction()?;
         for index in indexes {
             self.store_package(pkgpath, index)?;
         }
+        tx.commit()?;
         Ok(())
     }
 
