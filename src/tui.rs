@@ -848,6 +848,7 @@ impl Progress {
 /// Line-based progress display using ratatui inline viewport.
 pub(crate) struct MultiProgress {
     terminal: Terminal<CrosstermBackend<Stdout>>,
+    fullscreen: Option<Box<Terminal<CrosstermBackend<Stdout>>>>,
     state: ProgressState,
     view_mode: ViewMode,
     output_buffers: OutputBuffers,
@@ -873,6 +874,7 @@ impl MultiProgress {
 
         Ok(Self {
             terminal,
+            fullscreen: None,
             state: ProgressState::new(title, finished_title, total, num_workers),
             view_mode: ViewMode::Inline,
             output_buffers,
@@ -1048,17 +1050,10 @@ impl MultiProgress {
 
     /// Switch to fullscreen multi-panel mode.
     fn switch_to_multipanel(&mut self) -> io::Result<()> {
-        // Clear the inline viewport first
-        self.terminal.clear()?;
-
-        // Enter alternate screen for fullscreen (raw mode already enabled)
         stdout().execute(EnterAlternateScreen)?;
-
-        // Recreate terminal with fullscreen viewport
         let backend = CrosstermBackend::new(stdout());
-        self.terminal = Terminal::new(backend)?;
+        self.fullscreen = Some(Box::new(Terminal::new(backend)?));
         self.view_mode = ViewMode::MultiPanel;
-
         Ok(())
     }
 
@@ -1066,14 +1061,7 @@ impl MultiProgress {
     fn switch_to_inline(&mut self) -> io::Result<()> {
         // Leave alternate screen (stay in raw mode for keyboard input)
         stdout().execute(LeaveAlternateScreen)?;
-
-        // Recreate terminal with inline viewport
-        let height = (self.num_workers + 1) as u16;
-        let backend = CrosstermBackend::new(stdout());
-        let options = TerminalOptions {
-            viewport: Viewport::Inline(height),
-        };
-        self.terminal = Terminal::with_options(backend, options)?;
+        self.fullscreen = None;
         self.view_mode = ViewMode::Inline;
 
         // Print any messages that were buffered while in fullscreen mode
@@ -1106,7 +1094,9 @@ impl MultiProgress {
                     .is_some_and(|w| w.package.is_some())
             })
             .collect();
-        let size = self.terminal.size()?;
+        let Some(size) = self.fullscreen.as_ref().map(|t| t.size()).transpose()? else {
+            return Ok(());
+        };
         let area = Rect::new(0, 0, size.width, size.height);
 
         let msg = status_msg(self.interrupt_announced, &self.state.title);
@@ -1151,7 +1141,10 @@ impl MultiProgress {
             })
             .collect();
 
-        self.terminal.draw(|frame| {
+        let Some(terminal) = self.fullscreen.as_mut() else {
+            return Ok(());
+        };
+        terminal.draw(|frame| {
             for (i, panel_rect) in panels.iter().enumerate() {
                 frame.render_widget(Clear, *panel_rect);
 
@@ -1218,7 +1211,10 @@ impl MultiProgress {
             })
             .collect();
 
-        self.terminal.draw(|frame| {
+        let Some(terminal) = self.fullscreen.as_mut() else {
+            return Ok(());
+        };
+        terminal.draw(|frame| {
             for (col_idx, rects) in column_rects.iter().enumerate() {
                 for (row_idx, panel_rect) in rects.iter().enumerate() {
                     frame.render_widget(Clear, *panel_rect);
