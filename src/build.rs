@@ -719,7 +719,7 @@ impl<'a> PkgBuilder<'a> {
         let pkgfile = self.get_make_var(&pkgdir, "STAGE_PKGFILE")?;
 
         // Test package install (unless bootstrap package)
-        let is_bootstrap = self.pkginfo.bootstrap_pkg() == Some("yes");
+        let is_bootstrap = self.pkginfo.bootstrap_pkg();
         if !is_bootstrap {
             if !self.pkg_add(&pkgfile)? {
                 return Ok(PkgBuildResult::Failed(std::mem::take(stats)));

@@ -40,7 +40,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use indexmap::IndexMap;
-use pkgsrc::{AllDepends, PkgName, PkgPath, ScanDepends, ScanIndex};
+use pkgsrc::{AllDepends, BootstrapPkg, MakeJobsSafe, PkgName, PkgPath, ScanDepends, ScanIndex};
 use rusqlite::{Connection, params};
 use tracing::{debug, warn};
 
@@ -133,7 +133,7 @@ fn history_schema() -> String {
 /**
  * Schema version for bob.db - update when schema changes.
  */
-const SCHEMA_VERSION: i32 = 20260425;
+const SCHEMA_VERSION: i32 = 20260604;
 
 /**
  * Schema version for history.db - update when history schema changes.
@@ -170,14 +170,6 @@ pub struct PackageRow {
     pub pkgname: String,
     /// Package path in the pkgsrc tree (e.g., `"www/curl"`).
     pub pkg_location: String,
-    /// `PKG_SKIP_REASON` from scan, if set.
-    pub pkg_skip_reason: Option<String>,
-    /// `PKG_FAIL_REASON` from scan, if set.
-    pub pkg_fail_reason: Option<String>,
-    /// `BOOTSTRAP_PKG` value if set (typically `"yes"`).
-    pub bootstrap_pkg: Option<String>,
-    /// `PBULK_WEIGHT` value as a string, parsed on demand.
-    pub pbulk_weight: Option<String>,
     /// `MULTI_VERSION` value, if this package has multiple versions.
     pub multi_version: Option<String>,
 }
@@ -393,19 +385,19 @@ impl Database {
      */
     fn create_schema(&self) -> Result<()> {
         self.conn.execute_batch(&format!(
-            "CREATE TABLE schema_version (version INTEGER NOT NULL);
+            "CREATE TABLE schema_version (version INTEGER NOT NULL) STRICT;
              INSERT INTO schema_version (version) VALUES ({});
 
              CREATE TABLE outcome_types (
                  id INTEGER PRIMARY KEY,
                  name TEXT UNIQUE NOT NULL
-             );
+             ) STRICT;
              INSERT INTO outcome_types (id, name) VALUES {outcome_types};
 
              CREATE TABLE stage_types (
                  id INTEGER PRIMARY KEY,
                  name TEXT UNIQUE NOT NULL
-             );
+             ) STRICT;
              INSERT INTO stage_types (id, name) VALUES {stages};
 
              CREATE TABLE scan_index (
@@ -420,33 +412,29 @@ impl Database {
                  categories TEXT,
                  maintainer TEXT,
                  use_destdir TEXT,
-                 bootstrap_pkg TEXT,
+                 bootstrap_pkg INTEGER,
                  usergroup_phase TEXT,
                  scan_depends TEXT,
-                 make_jobs_safe TEXT,
-                 pbulk_weight TEXT,
-                 multi_version TEXT,
-                 scan_outcome INTEGER REFERENCES outcome_types(id),
-                 scan_outcome_detail TEXT
-             );
+                 make_jobs_safe INTEGER,
+                 pbulk_weight INTEGER,
+                 multi_version TEXT
+             ) STRICT;
 
              CREATE INDEX idx_scan_index_pkg_location ON scan_index(pkg_location);
-             CREATE INDEX idx_scan_index_status
-                 ON scan_index(pkg_skip_reason, pkg_fail_reason);
 
              CREATE TABLE package_state (
                  package_id INTEGER PRIMARY KEY
                      REFERENCES scan_index(id) ON DELETE CASCADE,
                  selected INTEGER NOT NULL DEFAULT 0,
                  build_reason TEXT
-             );
+             ) STRICT;
 
              CREATE TABLE resolved_depends (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  package_id INTEGER NOT NULL REFERENCES scan_index(id) ON DELETE CASCADE,
                  depends_on_id INTEGER NOT NULL REFERENCES scan_index(id) ON DELETE CASCADE,
                  UNIQUE(package_id, depends_on_id)
-             );
+             ) STRICT;
 
              CREATE INDEX idx_resolved_depends_package ON resolved_depends(package_id);
              CREATE INDEX idx_resolved_depends_depends_on ON resolved_depends(depends_on_id);
@@ -459,20 +447,38 @@ impl Database {
                  duration_ms INTEGER NOT NULL DEFAULT 0,
                  log_dir TEXT,
                  UNIQUE(package_id)
-             );
+             ) STRICT;
 
              CREATE INDEX idx_builds_outcome ON builds(outcome);
              CREATE INDEX idx_builds_package ON builds(package_id);
 
+             CREATE TABLE scan_outcomes (
+                 package_id INTEGER PRIMARY KEY
+                     REFERENCES scan_index(id) ON DELETE CASCADE,
+                 outcome INTEGER NOT NULL REFERENCES outcome_types(id),
+                 detail TEXT
+             ) STRICT;
+
+             CREATE INDEX idx_scan_outcomes_outcome ON scan_outcomes(outcome);
+
+             CREATE VIEW buildable AS
+                 SELECT p.*
+                 FROM scan_index p
+                 JOIN package_state s
+                     ON s.package_id = p.id AND s.selected = 1
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM scan_outcomes o WHERE o.package_id = p.id
+                 );
+
              CREATE TABLE scan_failures (
                  pkgpath TEXT PRIMARY KEY,
                  error TEXT NOT NULL
-             );
+             ) STRICT;
 
              CREATE TABLE metadata (
                  key TEXT PRIMARY KEY,
                  value TEXT NOT NULL
-             );",
+             ) STRICT;",
             SCHEMA_VERSION,
             outcome_types = outcome_values(),
             stages = stage_values(),
@@ -525,10 +531,10 @@ impl Database {
             index.categories,
             index.maintainer,
             index.use_destdir,
-            index.bootstrap_pkg,
+            index.bootstrap_pkg.as_ref().map(BootstrapPkg::is_bootstrap),
             index.usergroup_phase,
             index.scan_depends.as_ref().map(|d| d.as_str()),
-            index.make_jobs_safe,
+            index.make_jobs_safe.as_ref().map(MakeJobsSafe::is_safe),
             index.pbulk_weight,
             multi_version,
         ])?;
@@ -648,10 +654,11 @@ impl Database {
                     p.pkg_skip_reason, p.pkg_fail_reason, p.multi_version,
                     s.build_reason,
                     b.outcome AS build_outcome, b.stage AS build_stage,
-                    p.scan_outcome, p.scan_outcome_detail
+                    o.outcome AS scan_outcome, o.detail AS scan_outcome_detail
              FROM scan_index p
              JOIN package_state s ON s.package_id = p.id
              LEFT JOIN builds b ON b.package_id = p.id
+             LEFT JOIN scan_outcomes o ON o.package_id = p.id
              WHERE s.selected = 1",
             [],
         )
@@ -673,12 +680,16 @@ impl Database {
             categories: row.get("categories")?,
             maintainer: row.get("maintainer")?,
             use_destdir: row.get("use_destdir")?,
-            bootstrap_pkg: row.get("bootstrap_pkg")?,
+            bootstrap_pkg: row
+                .get::<_, Option<bool>>("bootstrap_pkg")?
+                .map(BootstrapPkg::from),
             usergroup_phase: row.get("usergroup_phase")?,
             scan_depends: row
                 .get::<_, Option<String>>("scan_depends")?
                 .map(|s| ScanDepends::from(s.as_str())),
-            make_jobs_safe: row.get("make_jobs_safe")?,
+            make_jobs_safe: row
+                .get::<_, Option<bool>>("make_jobs_safe")?
+                .map(MakeJobsSafe::from),
             pbulk_weight: row.get("pbulk_weight")?,
             multi_version: row
                 .get::<_, Option<String>>("multi_version")?
@@ -799,17 +810,13 @@ impl Database {
     }
 
     /**
-     * Store skipped packages from scan resolution.
-     *
-     * This persists all skip reasons to the builds table so that queries
-     * like `get_blockers` can find them consistently.
+     * Record the resolution outcome for every skipped package.
      */
     pub fn store_scan_skipped(&self, summary: &crate::scan::ScanSummary) -> Result<()> {
         let tx = self.transaction()?;
         let mut stmt = self.conn.prepare(
-            "UPDATE scan_index
-             SET scan_outcome = ?1, scan_outcome_detail = ?2
-             WHERE pkgname = ?3",
+            "INSERT OR REPLACE INTO scan_outcomes (package_id, outcome, detail)
+             SELECT id, ?1, ?2 FROM scan_index WHERE pkgname = ?3",
         )?;
         for pkg in &summary.packages {
             if let ScanResult::Skipped {
@@ -820,7 +827,7 @@ impl Database {
             } = pkg
             {
                 let Some(idx) = index else { continue };
-                stmt.execute(params![state.id(), reason, idx.pkgname.pkgname(),])?;
+                stmt.execute(params![state.id(), reason, idx.pkgname.pkgname()])?;
             }
         }
         drop(stmt);
@@ -947,13 +954,9 @@ impl Database {
     ) -> Result<IndexMap<PkgName, crate::scan::ResolvedPackage>> {
         let all_deps = self.get_all_resolved_deps()?;
         let mut stmt = self.conn.prepare(
-            "SELECT p.pkgname, p.pkg_location, p.bootstrap_pkg,
-                    p.usergroup_phase, p.multi_version
-             FROM scan_index p
-             JOIN package_state s ON s.package_id = p.id
-             WHERE s.selected = 1
-               AND p.scan_outcome IS NULL
-             ORDER BY p.id",
+            "SELECT pkgname, pkg_location, bootstrap_pkg, usergroup_phase, multi_version
+             FROM buildable
+             ORDER BY id",
         )?;
         let mut out = IndexMap::new();
         let mut rows = stmt.query([])?;
@@ -970,7 +973,9 @@ impl Database {
                     pkgpath: pkg_location.parse()?,
                     index: ScanIndex {
                         pkgname: pkgname.into(),
-                        bootstrap_pkg: row.get("bootstrap_pkg")?,
+                        bootstrap_pkg: row
+                            .get::<_, Option<bool>>("bootstrap_pkg")?
+                            .map(BootstrapPkg::from),
                         usergroup_phase: row.get("usergroup_phase")?,
                         multi_version,
                         resolved_depends,
@@ -988,13 +993,9 @@ impl Database {
      * without resolving dependencies.
      */
     pub fn get_buildable_pkgpaths(&self) -> Result<HashMap<PkgName, PkgPath>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT p.pkgname, p.pkg_location
-             FROM scan_index p
-             JOIN package_state s ON s.package_id = p.id
-             WHERE s.selected = 1
-               AND p.scan_outcome IS NULL",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT pkgname, pkg_location FROM buildable")?;
         let mut out = HashMap::new();
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
@@ -1261,13 +1262,13 @@ impl Database {
      */
     pub fn get_scan_outcomes(&self) -> Result<Vec<BuildResult>> {
         let mut stmt = self.conn.prepare(
-            "SELECT pkgname, pkg_location, scan_outcome
-             FROM scan_index
-             WHERE scan_outcome IS NOT NULL
-             ORDER BY pkgname",
+            "SELECT p.pkgname, p.pkg_location, o.outcome
+             FROM scan_outcomes o
+             JOIN scan_index p ON o.package_id = p.id
+             ORDER BY p.pkgname",
         )?;
         let rows = stmt.query_map([], |row| {
-            let outcome: i32 = row.get("scan_outcome")?;
+            let outcome: i32 = row.get("outcome")?;
             let state = PackageState::try_from(outcome).map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(
                     2,
@@ -1289,18 +1290,17 @@ impl Database {
     }
 
     /**
-     * `(pkgpath, reason)` for every unresolved package, taken from its
-     * `scan_outcome_detail`.  Feeds the report's scan-failures section
-     * alongside [`get_scan_failures`](Self::get_scan_failures).
+     * `(pkgpath, reason)` for every unresolved package that recorded a
+     * reason.  Feeds the report's scan-failures section alongside
+     * [`get_scan_failures`](Self::get_scan_failures).
      */
     pub fn get_unresolved_reasons(&self) -> Result<Vec<(PkgPath, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT pkg_location, scan_outcome_detail
-             FROM scan_index
-             WHERE scan_outcome = ?1
-               AND pkg_location IS NOT NULL
-               AND scan_outcome_detail IS NOT NULL
-             ORDER BY pkgname",
+            "SELECT p.pkg_location, o.detail
+             FROM scan_outcomes o
+             JOIN scan_index p ON o.package_id = p.id
+             WHERE o.outcome = ?1 AND o.detail IS NOT NULL
+             ORDER BY p.pkgname",
         )?;
         let rows = stmt.query_map([PackageState::Unresolved.id()], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -1324,7 +1324,7 @@ impl Database {
              blockers(id) AS (
                  SELECT package_id FROM builds WHERE outcome = ?1
                  UNION
-                 SELECT id FROM scan_index WHERE scan_outcome IN (?2, ?3, ?4)
+                 SELECT package_id FROM scan_outcomes WHERE outcome IN (?2, ?3, ?4)
              ),
              affected(id, blocker_id) AS (
                  SELECT id, id FROM blockers
@@ -1578,9 +1578,10 @@ impl Database {
         let resolved = self.get_all_resolved_deps()?;
         let mut stmt = self.conn.prepare(
             "SELECT p.*,
-                    COALESCE(b.outcome, p.scan_outcome) AS outcome
+                    COALESCE(b.outcome, o.outcome) AS outcome
              FROM scan_index p
              LEFT JOIN builds b ON b.package_id = p.id
+             LEFT JOIN scan_outcomes o ON o.package_id = p.id
              ORDER BY p.pkgname",
         )?;
         let mut rows = stmt.query([])?;
@@ -2646,14 +2647,8 @@ pub(crate) fn query_selected_packages(conn: &Connection) -> Result<Vec<SelectedP
             id: row.get(0)?,
             pkgname: PkgName::from(row.get::<_, String>(1)?),
             pkg_location: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-            pbulk_weight: row
-                .get::<_, Option<String>>(3)?
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(100),
-            make_jobs_safe: !matches!(
-                row.get::<_, Option<String>>(4)?.as_deref(),
-                Some(s) if s.eq_ignore_ascii_case("no")
-            ),
+            pbulk_weight: row.get::<_, Option<u32>>(3)?.map_or(100, |w| w as usize),
+            make_jobs_safe: row.get::<_, Option<bool>>(4)?.is_none_or(|s| s),
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()

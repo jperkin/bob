@@ -75,9 +75,12 @@ impl ResolvedPackage {
         self.index.depends()
     }
 
-    /// Returns bootstrap_pkg if set.
-    pub fn bootstrap_pkg(&self) -> Option<&str> {
-        self.index.bootstrap_pkg.as_deref()
+    /// Whether this package is part of the pkgsrc bootstrap.
+    pub fn bootstrap_pkg(&self) -> bool {
+        self.index
+            .bootstrap_pkg
+            .as_ref()
+            .is_some_and(|b| b.is_bootstrap())
     }
 
     /// Returns usergroup_phase if set.
@@ -90,13 +93,9 @@ impl ResolvedPackage {
         self.index.multi_version.as_deref()
     }
 
-    /// Returns PBULK_WEIGHT, defaulting to 100 if missing or invalid.
+    /// Returns PBULK_WEIGHT, defaulting to 100 if missing.
     pub fn pbulk_weight(&self) -> usize {
-        self.index
-            .pbulk_weight
-            .as_ref()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(100)
+        self.index.pbulk_weight.map_or(100, |w| w as usize)
     }
 }
 
@@ -1100,7 +1099,7 @@ impl Scan {
                 pkgname = %pkg.pkgname.pkgname(),
                 skip_reason = ?pkg.pkg_skip_reason,
                 fail_reason = ?pkg.pkg_fail_reason,
-                depends_count = pkg.all_depends.as_ref().map_or(0, |v| v.len()),
+                depends_count = pkg.all_depends.as_ref().map_or(0, |v| v.iter().count()),
                 "Found package in scan"
             );
         }
