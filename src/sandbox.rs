@@ -1191,6 +1191,11 @@ impl Sandbox {
                     println!();
                 }
                 eprintln!("sandbox {}: {:#}", i, e);
+                warn!(
+                    error = format!("{e:#}"),
+                    sandbox = i,
+                    "Failed to destroy sandbox"
+                );
                 failed += 1;
             }
         }
@@ -1838,6 +1843,11 @@ impl Drop for SandboxScope {
                     println!();
                 }
                 eprintln!("sandbox {}: {:#}", id, e);
+                warn!(
+                    error = format!("{e:#}"),
+                    sandbox = id,
+                    "Failed to destroy sandbox"
+                );
                 failed += 1;
             }
         }
