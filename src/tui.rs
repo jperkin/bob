@@ -17,7 +17,7 @@
 //! Line-based progress display using ratatui's inline viewport.
 
 use crossterm::ExecutableCommand;
-use crossterm::cursor::Show;
+use crossterm::cursor::{MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -1288,13 +1288,32 @@ impl MultiProgress {
         Ok(())
     }
 
+    /*
+     * Tear down the inline viewport, leaving the cursor at column 0 of the
+     * viewport's top row so the caller's summary overwrites it cleanly.
+     *
+     * ratatui's Terminal::clear() repositions with a buffered erase that
+     * NetBSD's wscons terminal does not honour, leaving the viewport rows
+     * as blank lines and the cursor at the bottom.  Reposition and erase
+     * with explicit, individually flushed commands instead.
+     */
+    fn clear_viewport(&mut self) -> io::Result<()> {
+        let top = self.terminal.get_frame().area().y;
+        let mut out = stdout();
+        out.execute(MoveTo(0, top))?;
+        out.execute(crossterm::terminal::Clear(
+            crossterm::terminal::ClearType::FromCursorDown,
+        ))?;
+        out.execute(Show)?;
+        Ok(())
+    }
+
     fn finish_silent(&mut self) -> io::Result<Duration> {
         if self.view_mode == ViewMode::MultiPanel {
             self.switch_to_inline()?;
         }
+        self.clear_viewport()?;
         let _ = disable_raw_mode();
-        self.terminal.clear()?;
-        stdout().execute(Show)?;
         Ok(self.state.elapsed())
     }
 
@@ -1306,9 +1325,8 @@ impl MultiProgress {
         if self.view_mode == ViewMode::MultiPanel {
             let _ = self.switch_to_inline();
         }
+        let _ = self.clear_viewport();
         let _ = disable_raw_mode();
-        self.terminal.clear()?;
-        stdout().execute(Show)?;
         Ok(true)
     }
 }
