@@ -14,28 +14,30 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-//! Package dependency scanning and resolution.
-//!
-//! This module provides the [`Scan`] struct for discovering package dependencies
-//! and building a directed acyclic graph (DAG) for build ordering.
-//!
-//! # Scan Process
-//!
-//! 1. Create a scan sandbox
-//! 2. Run `make pbulk-index` on each package to discover dependencies
-//! 3. Recursively discover all transitive dependencies
-//! 4. Resolve dependency patterns to specific package versions
-//! 5. Verify no circular dependencies exist
-//! 6. Return buildable and skipped package lists
-//!
-//! # Skip Reasons
-//!
-//! Packages may be skipped for several reasons:
-//!
-//! - `PKG_SKIP_REASON` - Package explicitly marked to skip on this platform
-//! - `PKG_FAIL_REASON` - Package expected to fail on this platform
-//! - Unresolved dependencies - Required dependency not found
-//! - Circular dependencies - Package has a dependency cycle
+/*!
+ * Package dependency scanning and resolution.
+ *
+ * This module provides the [`Scan`] struct for discovering package dependencies
+ * and building a directed acyclic graph (DAG) for build ordering.
+ *
+ * # Scan Process
+ *
+ * 1. Create a scan sandbox
+ * 2. Run `make pbulk-index` on each package to discover dependencies
+ * 3. Recursively discover all transitive dependencies
+ * 4. Resolve dependency patterns to specific package versions
+ * 5. Verify no circular dependencies exist
+ * 6. Return buildable and skipped package lists
+ *
+ * # Skip Reasons
+ *
+ * Packages may be skipped for several reasons:
+ *
+ * - `PKG_SKIP_REASON` - Package explicitly marked to skip on this platform
+ * - `PKG_FAIL_REASON` - Package expected to fail on this platform
+ * - Unresolved dependencies - Required dependency not found
+ * - Circular dependencies - Package has a dependency cycle
+ */
 
 use crate::config::{Pkgsrc, PkgsrcEnv};
 use crate::sandbox::{SandboxScope, wait_output_with_shutdown};

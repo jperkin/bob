@@ -14,55 +14,57 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-//! Sandbox creation and management.
-//!
-//! This module provides the [`Sandbox`] struct for creating isolated build
-//! environments using chroot. The implementation varies by platform but
-//! presents a uniform interface.
-//!
-//! # Platform Support
-//!
-//! | Platform | Implementation |
-//! |----------|---------------|
-//! | Linux | Mount namespaces + chroot |
-//! | macOS | bindfs/devfs + chroot |
-//! | NetBSD | Native mounts + chroot |
-//! | illumos/Solaris | Platform mounts + chroot |
-//!
-//! # Sandbox Lifecycle
-//!
-//! 1. **Create**: Set up the sandbox directory and perform configured actions
-//! 2. **Execute**: Run build scripts inside the sandbox via chroot
-//! 3. **Destroy**: Reverse actions and clean up the sandbox directory
-//!
-//! # Configuration
-//!
-//! Sandboxes are configured in the `sandboxes` section of the Lua config file.
-//! See the [`action`](crate::action) module for available actions.
-//!
-//! ```lua
-//! sandboxes = {
-//!     basedir = "/data/chroot",
-//!     setup = {
-//!         { action = "mount", fs = "proc", dir = "/proc" },
-//!         { action = "mount", fs = "dev", dir = "/dev" },
-//!         { action = "mount", fs = "bind", dir = "/usr/bin", opts = "ro" },
-//!         { action = "copy", dir = "/etc" },
-//!     },
-//! }
-//! ```
-//!
-//! # Multiple Sandboxes
-//!
-//! Multiple sandboxes can be created for parallel builds. Each sandbox is
-//! identified by an integer ID (0, 1, 2, ...) and created as a subdirectory
-//! of `basedir`.
-//!
-//! With `build_threads = 4`, sandboxes are created at:
-//! - `/data/chroot/0`
-//! - `/data/chroot/1`
-//! - `/data/chroot/2`
-//! - `/data/chroot/3`
+/*!
+ * Sandbox creation and management.
+ *
+ * This module provides the [`Sandbox`] struct for creating isolated build
+ * environments using chroot. The implementation varies by platform but
+ * presents a uniform interface.
+ *
+ * # Platform Support
+ *
+ * | Platform | Implementation |
+ * |----------|---------------|
+ * | Linux | Mount namespaces + chroot |
+ * | macOS | bindfs/devfs + chroot |
+ * | NetBSD | Native mounts + chroot |
+ * | illumos/Solaris | Platform mounts + chroot |
+ *
+ * # Sandbox Lifecycle
+ *
+ * 1. **Create**: Set up the sandbox directory and perform configured actions
+ * 2. **Execute**: Run build scripts inside the sandbox via chroot
+ * 3. **Destroy**: Reverse actions and clean up the sandbox directory
+ *
+ * # Configuration
+ *
+ * Sandboxes are configured in the `sandboxes` section of the Lua config file.
+ * See the [`action`](crate::action) module for available actions.
+ *
+ * ```lua
+ * sandboxes = {
+ *     basedir = "/data/chroot",
+ *     setup = {
+ *         { action = "mount", fs = "proc", dir = "/proc" },
+ *         { action = "mount", fs = "dev", dir = "/dev" },
+ *         { action = "mount", fs = "bind", dir = "/usr/bin", opts = "ro" },
+ *         { action = "copy", dir = "/etc" },
+ *     },
+ * }
+ * ```
+ *
+ * # Multiple Sandboxes
+ *
+ * Multiple sandboxes can be created for parallel builds. Each sandbox is
+ * identified by an integer ID (0, 1, 2, ...) and created as a subdirectory
+ * of `basedir`.
+ *
+ * With `build_threads = 4`, sandboxes are created at:
+ * - `/data/chroot/0`
+ * - `/data/chroot/1`
+ * - `/data/chroot/2`
+ * - `/data/chroot/3`
+ */
 #[cfg(target_os = "linux")]
 mod sandbox_linux;
 #[cfg(target_os = "macos")]

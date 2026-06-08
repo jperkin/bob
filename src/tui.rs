@@ -14,7 +14,9 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-//! Line-based progress display using ratatui's inline viewport.
+/*!
+ * Line-based progress display using ratatui's inline viewport.
+ */
 
 use crossterm::ExecutableCommand;
 use crossterm::cursor::{MoveTo, Show};

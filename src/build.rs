@@ -14,33 +14,35 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-//! Parallel package builds.
-//!
-//! This module provides the [`Build`] struct for building packages in parallel
-//! across multiple sandboxes. Packages are scheduled using a dependency graph
-//! to ensure correct build order.
-//!
-//! # Build Process
-//!
-//! 1. Create build sandboxes (one per `build_threads`)
-//! 2. Run pre-build operations in each sandbox
-//! 3. Build packages in parallel, respecting dependencies
-//! 4. Run post-build operations after each package
-//! 5. Destroy sandboxes and generate report
-//!
-//! # Build Phases
-//!
-//! Each package goes through these phases in turn:
-//!
-//! - `pre-clean` - Clean any previous build artifacts
-//! - `depends` - Install required dependencies
-//! - `checksum` - Verify distfile checksums
-//! - `configure` - Configure the build
-//! - `build` - Compile the package
-//! - `install` - Install to staging area
-//! - `package` - Create binary package
-//! - `deinstall` - Test package removal (non-bootstrap only)
-//! - `clean` - Clean up build artifacts
+/*!
+ * Parallel package builds.
+ *
+ * This module provides the [`Build`] struct for building packages in parallel
+ * across multiple sandboxes. Packages are scheduled using a dependency graph
+ * to ensure correct build order.
+ *
+ * # Build Process
+ *
+ * 1. Create build sandboxes (one per `build_threads`)
+ * 2. Run pre-build operations in each sandbox
+ * 3. Build packages in parallel, respecting dependencies
+ * 4. Run post-build operations after each package
+ * 5. Destroy sandboxes and generate report
+ *
+ * # Build Phases
+ *
+ * Each package goes through these phases in turn:
+ *
+ * - `pre-clean` - Clean any previous build artifacts
+ * - `depends` - Install required dependencies
+ * - `checksum` - Verify distfile checksums
+ * - `configure` - Configure the build
+ * - `build` - Compile the package
+ * - `install` - Install to staging area
+ * - `package` - Create binary package
+ * - `deinstall` - Test package removal (non-bootstrap only)
+ * - `clean` - Clean up build artifacts
+ */
 
 use crate::config::{Pkgsrc, PkgsrcEnv, WrkObjKind};
 use crate::makejobs::PkgMakeJobs;

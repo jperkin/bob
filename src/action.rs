@@ -14,131 +14,133 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-//! Sandbox action configuration.
-//!
-//! This module defines the types used to configure sandbox setup and per-build
-//! actions.  Actions are specified in the `sandboxes.setup` table (sandbox-level)
-//! and the `sandboxes.hooks` table (per-package) of the Lua configuration file.
-//!
-//! # Action Types
-//!
-//! Five action types are supported:
-//!
-//! - **mount**: Mount a filesystem inside the sandbox
-//! - **copy**: Copy files or directories into the sandbox
-//! - **symlink**: Create a symbolic link inside the sandbox
-//! - **cmd**: Execute shell commands during create/destroy
-//! - **macos-mdns-listener**: Configure macOS DNS resolution (no-op elsewhere)
-//!
-//! # Execution Order
-//!
-//! Actions are processed in order during sandbox creation, and in reverse order
-//! during sandbox destruction.
-//!
-//! # Configuration Examples
-//!
-//! ```lua
-//! sandboxes = {
-//!     basedir = "/data/chroot",
-//!     setup = {
-//!         -- Mount procfs
-//!         { action = "mount", fs = "proc", dir = "/proc" },
-//!
-//!         -- Mount devfs
-//!         { action = "mount", fs = "dev", dir = "/dev" },
-//!
-//!         -- Mount tmpfs with size limit
-//!         { action = "mount", fs = "tmp", dir = "/tmp", opts = "size=1G" },
-//!
-//!         -- Read-only bind mount from host
-//!         { action = "mount", fs = "bind", dir = "/usr/bin", opts = "ro" },
-//!
-//!         -- Copy /etc into sandbox
-//!         { action = "copy", dir = "/etc" },
-//!
-//!         -- Create symbolic link
-//!         { action = "symlink", src = "usr/bin", dest = "/bin" },
-//!
-//!         -- Run command inside sandbox via chroot
-//!         { action = "cmd", chroot = true, create = "mkdir -m 1777 /var/tmp" },
-//!
-//!         -- Run command on host (working directory is sandbox root on host)
-//!         { action = "cmd", create = "touch .stamp" },
-//!
-//!         -- Run different commands on create and destroy
-//!         { action = "cmd", chroot = true,
-//!           create = "mkdir -p /home/builder",
-//!           destroy = "rm -rf /home/builder" },
-//!
-//!         -- Only mount if source exists on host
-//!         { action = "mount", fs = "bind", dir = "/opt/local",
-//!           only = { exists = "/opt/local" } },
-//!
-//!         -- Only run if pkgsrc.build_user is set
-//!         { action = "cmd", chroot = true,
-//!           only = { set = "pkgsrc.build_user" },
-//!           create = [[
-//!                 mkdir -p ${bob_build_user_home}
-//!                 chown ${bob_build_user} ${bob_build_user_home}
-//!           ]],
-//!           destroy = "rm -rf ${bob_build_user_home}" },
-//!
-//!         -- Only run for `bob dev` interactive sessions
-//!         { action = "copy", src = os.getenv("HOME") .. "/.vimrc",
-//!           dest = "/root/.vimrc",
-//!           only = { environment = "dev" } },
-//!
-//!         -- Enable DNS resolution inside sandbox (macOS only)
-//!         { action = "macos-mdns-listener" },
-//!     },
-//! }
-//! ```
-//!
-//! # Environment Variables
-//!
-//! Shell commands executed by `cmd` actions receive these `bob_*` environment
-//! variables.  Sandbox actions always receive the base set; build actions
-//! also receive the pkgsrc-derived variables once the bootstrap kit has been
-//! unpacked.
-//!
-//! | Variable | Description |
-//! |----------|-------------|
-//! | `bob_logdir` | Path to the build logs directory. |
-//! | `bob_make` | Path to the bmake binary. |
-//! | `bob_pkgsrc` | Path to the pkgsrc source tree. |
-//! | `bob_build_user` | Unprivileged build user (if configured). |
-//! | `bob_build_user_home` | Home directory of the build user (if configured). |
-//! | `bob_bootstrap` | Path to the bootstrap tarball (if configured). |
-//! | `bob_sandbox_path` | Absolute host path to the sandbox root (non-chroot commands only). |
-//! | `bob_sandbox_id` | Numeric sandbox id (`bob dev` only). |
-//! | `bob_packages` | Path to the packages directory (after bootstrap). |
-//! | `bob_pkgtools` | Path to the pkg tools directory (after bootstrap). |
-//! | `bob_prefix` | Installation prefix (after bootstrap). |
-//! | `bob_pkg_dbdir` | PKG_DBDIR from pkgsrc (after bootstrap). |
-//! | `bob_pkg_refcount_dbdir` | PKG_REFCOUNT_DBDIR from pkgsrc (after bootstrap). |
-//!
-//! Any variables listed in `pkgsrc.cachevars` are also available.
-//!
-//! # Common Fields
-//!
-//! | Field | Type | Description |
-//! |-------|------|-------------|
-//! | `dir` | string | Shorthand when `src` and `dest` are the same path |
-//! | `src` | string | Source path on the host system |
-//! | `dest` | string | Destination path inside the sandbox |
-//! | `only` | table | Conditional predicates restricting when this action runs.  See [Conditional Actions](#conditional-actions). |
-//!
-//! # Conditional Actions
-//!
-//! Any action may include an `only = { ... }` table whose entries restrict
-//! when the action runs.  All present predicates must match for the action
-//! to be applied; an action without `only` runs unconditionally.
-//!
-//! | Predicate | Type | Description |
-//! |-----------|------|-------------|
-//! | `environment` | string | `"build"` to run only for automated build operations, or `"dev"` to run only for `bob dev` interactive sessions.  Mirrors the `sandboxes.environment.{build,dev}` distinction. |
-//! | `set` | string | Dotted Lua config path (e.g. `"pkgsrc.build_user"`).  Action is dropped at config load time if the variable is not set. |
-//! | `exists` | string | Host filesystem path.  Action is skipped at run time if the path does not exist. |
+/*!
+ * Sandbox action configuration.
+ *
+ * This module defines the types used to configure sandbox setup and per-build
+ * actions.  Actions are specified in the `sandboxes.setup` table (sandbox-level)
+ * and the `sandboxes.hooks` table (per-package) of the Lua configuration file.
+ *
+ * # Action Types
+ *
+ * Five action types are supported:
+ *
+ * - **mount**: Mount a filesystem inside the sandbox
+ * - **copy**: Copy files or directories into the sandbox
+ * - **symlink**: Create a symbolic link inside the sandbox
+ * - **cmd**: Execute shell commands during create/destroy
+ * - **macos-mdns-listener**: Configure macOS DNS resolution (no-op elsewhere)
+ *
+ * # Execution Order
+ *
+ * Actions are processed in order during sandbox creation, and in reverse order
+ * during sandbox destruction.
+ *
+ * # Configuration Examples
+ *
+ * ```lua
+ * sandboxes = {
+ *     basedir = "/data/chroot",
+ *     setup = {
+ *         -- Mount procfs
+ *         { action = "mount", fs = "proc", dir = "/proc" },
+ *
+ *         -- Mount devfs
+ *         { action = "mount", fs = "dev", dir = "/dev" },
+ *
+ *         -- Mount tmpfs with size limit
+ *         { action = "mount", fs = "tmp", dir = "/tmp", opts = "size=1G" },
+ *
+ *         -- Read-only bind mount from host
+ *         { action = "mount", fs = "bind", dir = "/usr/bin", opts = "ro" },
+ *
+ *         -- Copy /etc into sandbox
+ *         { action = "copy", dir = "/etc" },
+ *
+ *         -- Create symbolic link
+ *         { action = "symlink", src = "usr/bin", dest = "/bin" },
+ *
+ *         -- Run command inside sandbox via chroot
+ *         { action = "cmd", chroot = true, create = "mkdir -m 1777 /var/tmp" },
+ *
+ *         -- Run command on host (working directory is sandbox root on host)
+ *         { action = "cmd", create = "touch .stamp" },
+ *
+ *         -- Run different commands on create and destroy
+ *         { action = "cmd", chroot = true,
+ *           create = "mkdir -p /home/builder",
+ *           destroy = "rm -rf /home/builder" },
+ *
+ *         -- Only mount if source exists on host
+ *         { action = "mount", fs = "bind", dir = "/opt/local",
+ *           only = { exists = "/opt/local" } },
+ *
+ *         -- Only run if pkgsrc.build_user is set
+ *         { action = "cmd", chroot = true,
+ *           only = { set = "pkgsrc.build_user" },
+ *           create = [[
+ *                 mkdir -p ${bob_build_user_home}
+ *                 chown ${bob_build_user} ${bob_build_user_home}
+ *           ]],
+ *           destroy = "rm -rf ${bob_build_user_home}" },
+ *
+ *         -- Only run for `bob dev` interactive sessions
+ *         { action = "copy", src = os.getenv("HOME") .. "/.vimrc",
+ *           dest = "/root/.vimrc",
+ *           only = { environment = "dev" } },
+ *
+ *         -- Enable DNS resolution inside sandbox (macOS only)
+ *         { action = "macos-mdns-listener" },
+ *     },
+ * }
+ * ```
+ *
+ * # Environment Variables
+ *
+ * Shell commands executed by `cmd` actions receive these `bob_*` environment
+ * variables.  Sandbox actions always receive the base set; build actions
+ * also receive the pkgsrc-derived variables once the bootstrap kit has been
+ * unpacked.
+ *
+ * | Variable | Description |
+ * |----------|-------------|
+ * | `bob_logdir` | Path to the build logs directory. |
+ * | `bob_make` | Path to the bmake binary. |
+ * | `bob_pkgsrc` | Path to the pkgsrc source tree. |
+ * | `bob_build_user` | Unprivileged build user (if configured). |
+ * | `bob_build_user_home` | Home directory of the build user (if configured). |
+ * | `bob_bootstrap` | Path to the bootstrap tarball (if configured). |
+ * | `bob_sandbox_path` | Absolute host path to the sandbox root (non-chroot commands only). |
+ * | `bob_sandbox_id` | Numeric sandbox id (`bob dev` only). |
+ * | `bob_packages` | Path to the packages directory (after bootstrap). |
+ * | `bob_pkgtools` | Path to the pkg tools directory (after bootstrap). |
+ * | `bob_prefix` | Installation prefix (after bootstrap). |
+ * | `bob_pkg_dbdir` | PKG_DBDIR from pkgsrc (after bootstrap). |
+ * | `bob_pkg_refcount_dbdir` | PKG_REFCOUNT_DBDIR from pkgsrc (after bootstrap). |
+ *
+ * Any variables listed in `pkgsrc.cachevars` are also available.
+ *
+ * # Common Fields
+ *
+ * | Field | Type | Description |
+ * |-------|------|-------------|
+ * | `dir` | string | Shorthand when `src` and `dest` are the same path |
+ * | `src` | string | Source path on the host system |
+ * | `dest` | string | Destination path inside the sandbox |
+ * | `only` | table | Conditional predicates restricting when this action runs.  See [Conditional Actions](#conditional-actions). |
+ *
+ * # Conditional Actions
+ *
+ * Any action may include an `only = { ... }` table whose entries restrict
+ * when the action runs.  All present predicates must match for the action
+ * to be applied; an action without `only` runs unconditionally.
+ *
+ * | Predicate | Type | Description |
+ * |-----------|------|-------------|
+ * | `environment` | string | `"build"` to run only for automated build operations, or `"dev"` to run only for `bob dev` interactive sessions.  Mirrors the `sandboxes.environment.{build,dev}` distinction. |
+ * | `set` | string | Dotted Lua config path (e.g. `"pkgsrc.build_user"`).  Action is dropped at config load time if the variable is not set. |
+ * | `exists` | string | Host filesystem path.  Action is skipped at run time if the path does not exist. |
+ */
 
 use crate::config::ScriptValue;
 use anyhow::{Context, Error, bail};

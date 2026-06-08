@@ -14,129 +14,131 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-//! Configuration file parsing (Lua format).
-//!
-//! Bob uses Lua configuration files for maximum flexibility. The configuration
-//! defines paths to pkgsrc, packages to build, sandbox setup, and per-build actions.
-//!
-//! # Configuration File Structure
-//!
-//! A configuration file has five main sections:
-//!
-//! - [`options`](#options-section) - General build options (optional)
-//! - [`pkgsrc`](#pkgsrc-section) - pkgsrc paths and package list (optional;
-//!   required for commands that operate on the pkgsrc tree)
-//! - [`sandboxes`](#sandboxes-section) - Sandbox configuration (optional)
-//! - [`dynamic`](#dynamic-section) - Dynamic resource allocation (optional)
-//! - [`publish`](#publish-section) - Remote publishing configuration (optional)
-//!
-//! Omitting `pkgsrc` lets `bob` run `bob dev` against a chroot defined
-//! purely by `sandboxes.setup`, for example to drive non-pkgsrc builds.
-//!
-//! # Options Section
-//!
-//! The `options` section is optional. All fields have defaults.
-//!
-//! | Field | Type | Default | Description |
-//! |-------|------|---------|-------------|
-//! | `build_threads` | integer | 1 | Number of parallel build sandboxes. Each sandbox builds one package at a time. |
-//! | `dbdir` | string | "./db" | Directory for bob state files (database, tracing log). Relative to config file directory. |
-//! | `logdir` | string | `dbdir/logs` | Directory for per-package build logs. Failed builds leave logs here; successful builds clean up. |
-//! | `scan_threads` | integer | 1 | Number of parallel scan processes for dependency discovery. |
-//! | `strict_scan` | boolean | false | If true, abort on scan errors. If false, continue and report failures separately. |
-//! | `log_level` | string | "info" | Log level: "trace", "debug", "info", "warn", or "error". Can be overridden by `RUST_LOG` env var. |
-//!
-//! # Pkgsrc Section
-//!
-//! The `pkgsrc` section is optional, but commands that operate on the
-//! pkgsrc tree will refuse to run without it.  Defines paths to pkgsrc
-//! components.
-//!
-//! ## Required Fields
-//!
-//! | Field | Type | Description |
-//! |-------|------|-------------|
-//! | `basedir` | string | Absolute path to the pkgsrc source tree (e.g., `/data/pkgsrc`). |
-//! | `make` | string | Absolute path to the bmake binary (e.g., `/usr/pkg/bin/bmake`). |
-//!
-//! ## Optional Fields
-//!
-//! | Field | Type | Default | Description |
-//! |-------|------|---------|-------------|
-//! | `bootstrap` | string | none | Path to a bootstrap tarball. Required on non-NetBSD systems. Unpacked into each sandbox before builds. |
-//! | `build_user` | string | none | Unprivileged user to run builds as. If set, builds run as this user instead of root. |
-//! | `cachevars` | table | (OS-specific) | List of pkgsrc variable names to fetch once and cache. These are set in the environment for scans and builds. If set, replaces the built-in defaults. |
-//! | `pkgpaths` | table | `{}` | List of package paths to build (e.g., `{"mail/mutt", "www/curl"}`). Dependencies are discovered automatically. |
-//! | `save_wrkdir_patterns` | table | `{}` | Glob patterns for files to preserve from WRKDIR on build failure (e.g., `{"**/config.log"}`). |
-//!
-//! Per-package make variables should be set in pkgsrc's `mk.conf`, not in
-//! bob.  Bob does not provide a per-package environment override mechanism.
-//!
-//! # Sandboxes Section
-//!
-//! The `sandboxes` section is optional. When present, builds run in isolated
-//! chroot environments.
-//!
-//! | Field | Type | Required | Description |
-//! |-------|------|----------|-------------|
-//! | `basedir` | string | yes | Base directory for sandbox roots. Sandboxes are created as numbered subdirectories (`basedir/0`, `basedir/1`, etc.). |
-//! | `setup` | table | no | Actions to perform during sandbox creation and destruction. See the [`action`](crate::action) module for details. |
-//! | `hooks` | table | no | Per-package hook actions. Any "create" action runs after bob's internal pre-build (unpacks bootstrap kit if needed); any "destroy" action runs before bob's internal post-build (wipes PREFIX and PKG_DBDIR). |
-//! | `environment` | table | no | Environment variables for sandbox processes. If omitted, the parent environment is inherited unchanged. See [Environment](#environment). |
-//!
-//! ## Environment
-//!
-//! Controls how environment variables are set for processes running inside
-//! sandboxes.  When this section is omitted, sandbox processes inherit bob's
-//! parent environment unchanged.
-//!
-//! `environment` contains two independent sub-tables, `build` and `dev`,
-//! one for each context bob runs processes in.  They have an identical
-//! shape (`clear`, `inherit`, `vars`) but are configured separately so
-//! that interactive development conveniences cannot leak into automated
-//! builds.  Either sub-table can be omitted; an omitted context inherits
-//! bob's parent environment unchanged.
-//!
-//! - `build` governs per-package build commands and bob's own pkgsrc-querying
-//!   invocations (`PkgsrcEnv` fetch, `make show-var`, `make show-vars`) when
-//!   the sandbox is in build context.  Values are passed directly to each
-//!   process as literal strings; no shell ever evaluates them.  This context
-//!   typically wants a strict, minimal environment for build reproducibility.
-//!
-//! - `dev` is used by interactive `bob dev` sessions.  Bob writes its `vars`
-//!   verbatim into a small init script (`<sandbox>/.bob/shell-init`) that the
-//!   chrooted shell runs at startup, one `export NAME=value` line per entry,
-//!   so values can reference `bob_*` variables or other shell variables --
-//!   for example `PATH = "${bob_prefix}/bin:..."`.  Each value is emitted
-//!   verbatim, so what you write must be a valid shell assignment right-hand
-//!   side; values containing whitespace or shell metacharacters need to be
-//!   quoted by the user.  `vars` are not set on commands directly -- only on
-//!   the interactive shell -- but the context's `clear`/`inherit` policy
-//!   still applies to the pkgsrc-querying invocations listed above when the
-//!   sandbox is in dev context.  This context typically wants a more generous
-//!   `inherit` list (e.g. `EDITOR`, `PAGER`, locale variables) than `build`,
-//!   since interactive sessions benefit from the developer's normal
-//!   environment.  See the [`action`](crate::action) module for the full
-//!   list of `bob_*` variables.
-//!
-//! Sandbox setup actions and per-package pre/post-build hook actions do not
-//! apply either context's policy.  They inherit bob's parent environment
-//! unchanged, plus the `bob_*` script env and any per-action `env = { ... }`
-//! additions.
-//!
-//! Each `build`/`dev` sub-table has the following fields:
-//!
-//! | Field | Type | Default | Description |
-//! |-------|------|---------|-------------|
-//! | `clear` | boolean | `true` | Start each sandbox process with an empty environment.  Set to `false` to inherit bob's full parent environment instead. |
-//! | `inherit` | table | `{}` | When `clear` is `true`, names of variables to copy from bob's parent environment. |
-//! | `vars` | table | `{}` | Variables to set in this context.  In `build` these are literal strings; in `dev` they are written verbatim into the init script. |
-//!
-//! The `dev` sub-table additionally accepts:
-//!
-//! | Field | Type | Default | Description |
-//! |-------|------|---------|-------------|
-//! | `shell` | string | `/bin/sh` | Path to the interactive shell binary used for the dev session.  The path is resolved inside the sandbox chroot, so the binary must exist there (typically arranged by a `setup` action that mounts or copies it). |
+/*!
+ * Configuration file parsing (Lua format).
+ *
+ * Bob uses Lua configuration files for maximum flexibility. The configuration
+ * defines paths to pkgsrc, packages to build, sandbox setup, and per-build actions.
+ *
+ * # Configuration File Structure
+ *
+ * A configuration file has five main sections:
+ *
+ * - [`options`](#options-section) - General build options (optional)
+ * - [`pkgsrc`](#pkgsrc-section) - pkgsrc paths and package list (optional;
+ *   required for commands that operate on the pkgsrc tree)
+ * - [`sandboxes`](#sandboxes-section) - Sandbox configuration (optional)
+ * - [`dynamic`](#dynamic-section) - Dynamic resource allocation (optional)
+ * - [`publish`](#publish-section) - Remote publishing configuration (optional)
+ *
+ * Omitting `pkgsrc` lets `bob` run `bob dev` against a chroot defined
+ * purely by `sandboxes.setup`, for example to drive non-pkgsrc builds.
+ *
+ * # Options Section
+ *
+ * The `options` section is optional. All fields have defaults.
+ *
+ * | Field | Type | Default | Description |
+ * |-------|------|---------|-------------|
+ * | `build_threads` | integer | 1 | Number of parallel build sandboxes. Each sandbox builds one package at a time. |
+ * | `dbdir` | string | "./db" | Directory for bob state files (database, tracing log). Relative to config file directory. |
+ * | `logdir` | string | `dbdir/logs` | Directory for per-package build logs. Failed builds leave logs here; successful builds clean up. |
+ * | `scan_threads` | integer | 1 | Number of parallel scan processes for dependency discovery. |
+ * | `strict_scan` | boolean | false | If true, abort on scan errors. If false, continue and report failures separately. |
+ * | `log_level` | string | "info" | Log level: "trace", "debug", "info", "warn", or "error". Can be overridden by `RUST_LOG` env var. |
+ *
+ * # Pkgsrc Section
+ *
+ * The `pkgsrc` section is optional, but commands that operate on the
+ * pkgsrc tree will refuse to run without it.  Defines paths to pkgsrc
+ * components.
+ *
+ * ## Required Fields
+ *
+ * | Field | Type | Description |
+ * |-------|------|-------------|
+ * | `basedir` | string | Absolute path to the pkgsrc source tree. |
+ * | `make` | string | Absolute path to the bmake binary. |
+ *
+ * ## Optional Fields
+ *
+ * | Field | Type | Default | Description |
+ * |-------|------|---------|-------------|
+ * | `bootstrap` | string | none | Path to a bootstrap tarball. Required on non-NetBSD systems. Unpacked into each sandbox before builds. |
+ * | `build_user` | string | none | Unprivileged user to run builds as. If set, builds run as this user instead of root. |
+ * | `cachevars` | table | (OS-specific) | List of pkgsrc variable names to fetch once and cache. These are set in the environment for scans and builds. If set, replaces the built-in defaults. |
+ * | `pkgpaths` | table | `{}` | List of package paths to build.  Dependencies are discovered automatically. |
+ * | `save_wrkdir_patterns` | table | `{}` | Glob patterns for files to preserve from WRKDIR on build failure. |
+ *
+ * Per-package make variables should be set in pkgsrc's `mk.conf`, not in
+ * bob, to ensure consistency with non-bob builds.
+ *
+ * # Sandboxes Section
+ *
+ * The `sandboxes` section is optional. When present, builds run in isolated
+ * chroot environments.
+ *
+ * | Field | Type | Required | Description |
+ * |-------|------|----------|-------------|
+ * | `basedir` | string | yes | Base directory for sandbox roots. Sandboxes are created as numbered subdirectories. |
+ * | `setup` | table | no | Actions to perform during sandbox creation and destruction. See the [`action`](crate::action) module for details. |
+ * | `hooks` | table | no | Per-package hook actions. Any "create" action runs after bob's internal pre-build (unpacks bootstrap kit if needed); any "destroy" action runs before bob's internal post-build (wipes PREFIX and PKG_DBDIR). |
+ * | `environment` | table | no | Environment variables for sandbox processes. If omitted, the parent environment is inherited unchanged. See [Environment](#environment). |
+ *
+ * ## Environment
+ *
+ * Controls how environment variables are set for processes running inside
+ * sandboxes.  When this section is omitted, sandbox processes inherit bob's
+ * parent environment unchanged.
+ *
+ * `environment` contains two independent sub-tables, `build` and `dev`,
+ * one for each context bob runs processes in.  They have an identical
+ * shape (`clear`, `inherit`, `vars`) but are configured separately so
+ * that interactive development conveniences cannot leak into automated
+ * builds.  Either sub-table can be omitted; an omitted context inherits
+ * bob's parent environment unchanged.
+ *
+ * - `build` governs per-package build commands and bob's own pkgsrc-querying
+ *   invocations (`PkgsrcEnv` fetch, `make show-var`, `make show-vars`) when
+ *   the sandbox is in build context.  Values are passed directly to each
+ *   process as literal strings; no shell ever evaluates them.  This context
+ *   typically wants a strict, minimal environment for build reproducibility.
+ *
+ * - `dev` is used by interactive `bob dev` sessions.  Bob writes its `vars`
+ *   verbatim into a small init script (`<sandbox>/.bob/shell-init`) that the
+ *   chrooted shell runs at startup, one `export NAME=value` line per entry,
+ *   so values can reference `bob_*` variables or other shell variables --
+ *   for example `PATH = "${bob_prefix}/bin:..."`.  Each value is emitted
+ *   verbatim, so what you write must be a valid shell assignment right-hand
+ *   side; values containing whitespace or shell metacharacters need to be
+ *   quoted by the user.  `vars` are not set on commands directly -- only on
+ *   the interactive shell -- but the context's `clear`/`inherit` policy
+ *   still applies to the pkgsrc-querying invocations listed above when the
+ *   sandbox is in dev context.  This context typically wants a more generous
+ *   `inherit` list (e.g. `EDITOR`, `PAGER`, locale variables) than `build`,
+ *   since interactive sessions benefit from the developer's normal
+ *   environment.  See the [`action`](crate::action) module for the full
+ *   list of `bob_*` variables.
+ *
+ * Sandbox setup actions and per-package pre/post-build hook actions do not
+ * apply either context's policy.  They inherit bob's parent environment
+ * unchanged, plus the `bob_*` script env and any per-action `env = { ... }`
+ * additions.
+ *
+ * Each `build`/`dev` sub-table has the following fields:
+ *
+ * | Field | Type | Default | Description |
+ * |-------|------|---------|-------------|
+ * | `clear` | boolean | `true` | Start each sandbox process with an empty environment.  Set to `false` to inherit bob's full parent environment instead. |
+ * | `inherit` | table | `{}` | When `clear` is `true`, names of variables to copy from bob's parent environment. |
+ * | `vars` | table | `{}` | Variables to set in this context.  In `build` these are literal strings; in `dev` they are written verbatim into the init script. |
+ *
+ * The `dev` sub-table additionally accepts:
+ *
+ * | Field | Type | Default | Description |
+ * |-------|------|---------|-------------|
+ * | `shell` | string | `/bin/sh` | Path to the interactive shell binary used for the dev session.  The path is resolved inside the sandbox chroot, so the binary must exist there (typically arranged by a `setup` action that mounts or copies it). |
+ */
 
 use crate::action::Action;
 use crate::sandbox::Sandbox;
