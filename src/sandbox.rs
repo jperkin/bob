@@ -249,18 +249,6 @@ pub struct Sandbox {
     config: Config,
     pkgsrc: Option<Pkgsrc>,
     context: ActionContext,
-    /**
-     * The pkgsrc environment, populated once via [`set_pkgsrc_env`].
-     *
-     * Cloning a [`Sandbox`] shares this cell -- there is exactly one
-     * instance per sandbox-tree, regardless of how many clones are made.
-     * Once set, the value is fixed; consumers read it through
-     * [`script_env`] and [`pkgsrc_env`].
-     *
-     * [`set_pkgsrc_env`]: Sandbox::set_pkgsrc_env
-     * [`script_env`]: Sandbox::script_env
-     * [`pkgsrc_env`]: Sandbox::pkgsrc_env
-     */
     pkgsrc_env: Arc<OnceLock<PkgsrcEnv>>,
 }
 

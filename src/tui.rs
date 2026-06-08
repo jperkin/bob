@@ -276,9 +276,7 @@ pub struct ProgressState {
     pub skipped: usize,
     pub workers: Vec<WorkerState>,
     pub started: Instant,
-    /// Current timer width tier (6, 10, or 13)
     pub timer_width: usize,
-    /// Whether output is suppressed (e.g., during shutdown)
     pub suppressed: bool,
 }
 

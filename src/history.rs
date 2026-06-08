@@ -176,13 +176,9 @@ pub struct History {
     pub make_jobs: Option<usize>,
     pub duration: Duration,
     pub disk_usage: Option<u64>,
-    /// WRKOBJDIR type used for this build.
     pub wrkobjdir: Option<crate::config::WrkObjKind>,
-    /// Per-stage wall-clock durations.
     pub stage_durations: Vec<(Stage, Duration)>,
-    /// Per-stage CPU time (user+sys from wait4).
     pub stage_cpu_times: Vec<(Stage, Duration)>,
-    /// Build session identifier (from bob.db metadata).
     pub build_id: Option<String>,
 }
 

@@ -2278,7 +2278,6 @@ pub struct BuildListEntry {
     pub up_to_date: usize,
     pub failed: usize,
     pub masked: usize,
-    /// Wall-clock duration of the build in milliseconds; 0 means unknown.
     pub duration_ms: u64,
 }
 
