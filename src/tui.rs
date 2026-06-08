@@ -107,11 +107,16 @@ fn clean_line(raw: &[u8]) -> String {
     out
 }
 
-/// Ring buffer for raw build output lines with fixed line capacity.
+/**
+ * Ring buffer for raw build output lines with fixed line capacity.
+ * `generation` advances on every content change so renderers can cache
+ * derived layout and recompute only when the buffer changes.
+ */
 #[derive(Clone, Debug)]
 struct OutputBuffer {
     lines: VecDeque<Vec<u8>>,
     capacity: usize,
+    generation: u64,
 }
 
 impl OutputBuffer {
@@ -119,12 +124,15 @@ impl OutputBuffer {
         Self {
             lines: VecDeque::with_capacity(capacity),
             capacity,
+            generation: 0,
         }
     }
 
-    /// Store a raw output line, reusing the oldest allocation at capacity.
-    /// Cleaning is deferred to [`Self::last_n`] to keep the pipe-drain
-    /// path cheap.
+    /**
+     * Store a raw output line, reusing the oldest allocation at
+     * capacity.  Cleaning is deferred to the renderer so the drain
+     * path stays a cheap copy and only displayed lines are cleaned.
+     */
     fn push_raw(&mut self, raw: &[u8]) {
         let mut slot = if self.lines.len() >= self.capacity {
             self.lines.pop_front().unwrap_or_default()
@@ -134,6 +142,7 @@ impl OutputBuffer {
         slot.clear();
         slot.extend_from_slice(raw);
         self.lines.push_back(slot);
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Snapshot the most recent `n` raw lines.
@@ -144,6 +153,7 @@ impl OutputBuffer {
 
     fn clear(&mut self) {
         self.lines.clear();
+        self.generation = self.generation.wrapping_add(1);
     }
 }
 
@@ -193,6 +203,17 @@ impl OutputBuffers {
             .map(|buf| buf.last_n_raw(n))
             .unwrap_or_default();
         raw.iter().map(|line| clean_line(line)).collect()
+    }
+
+    /**
+     * Current change counter for `worker`'s buffer.
+     */
+    fn generation(&self, worker: usize) -> u64 {
+        self.0
+            .get(worker)
+            .and_then(|buf| buf.lock().ok())
+            .map(|buf| buf.generation)
+            .unwrap_or(0)
     }
 }
 
@@ -845,6 +866,17 @@ impl Progress {
     }
 }
 
+/**
+ * Cached wrapped output rows for one worker's panel, valid while the
+ * source buffer generation and panel dimensions are unchanged.
+ */
+struct PanelCache {
+    generation: u64,
+    width: usize,
+    height: usize,
+    rows: Vec<String>,
+}
+
 /// Line-based progress display using ratatui inline viewport.
 pub(crate) struct MultiProgress {
     terminal: Terminal<CrosstermBackend<Stdout>>,
@@ -853,7 +885,7 @@ pub(crate) struct MultiProgress {
     view_mode: ViewMode,
     output_buffers: OutputBuffers,
     num_workers: usize,
-    /// Messages buffered while in fullscreen mode, printed when returning to inline.
+    panel_cache: Vec<Option<PanelCache>>,
     pending_messages: Vec<Line<'static>>,
     interrupt_announced: bool,
 }
@@ -879,6 +911,7 @@ impl MultiProgress {
             view_mode: ViewMode::Inline,
             output_buffers,
             num_workers,
+            panel_cache: (0..num_workers).map(|_| None).collect(),
             pending_messages: Vec::new(),
             interrupt_announced: false,
         })
@@ -1075,6 +1108,33 @@ impl MultiProgress {
         Ok(())
     }
 
+    /**
+     * Recompute the cached wrapped rows for `worker` only when its
+     * output buffer or panel dimensions have changed since last render.
+     */
+    fn refresh_panel(&mut self, worker: usize, width: usize, height: usize) {
+        let generation = self.output_buffers.generation(worker);
+        let fresh = self.panel_cache.get(worker).is_some_and(|slot| {
+            slot.as_ref().is_some_and(|c| {
+                c.generation == generation && c.width == width && c.height == height
+            })
+        });
+        if fresh {
+            return;
+        }
+        let lines_needed = (height * 2).max(10);
+        let tail = self.output_buffers.last_n(worker, lines_needed);
+        let rows = build_visible_rows(&tail, width, height);
+        if let Some(slot) = self.panel_cache.get_mut(worker) {
+            *slot = Some(PanelCache {
+                generation,
+                width,
+                height,
+                rows,
+            });
+        }
+    }
+
     /// Render multi-panel fullscreen view.
     fn render_multipanel(&mut self) -> io::Result<()> {
         if self.state.suppressed {
@@ -1127,20 +1187,16 @@ impl MultiProgress {
             .map(|group| self.format_group_title(group))
             .collect();
 
-        // Collect output lines for each panel
-        let panel_lines: Vec<Vec<String>> = panels
-            .iter()
-            .enumerate()
-            .map(|(gi, panel_area)| {
-                let inner_height = panel_area.height.saturating_sub(2) as usize;
-                let lines_needed = (inner_height * 2).max(10);
-                match &groups[gi] {
-                    PanelGroup::Active(i) => self.output_buffers.last_n(*i, lines_needed),
-                    PanelGroup::Idle(..) => Vec::new(),
-                }
-            })
-            .collect();
+        /* Refresh the cached wrapped rows for each active panel */
+        for (group, panel_rect) in groups.iter().zip(panels.iter()) {
+            if let PanelGroup::Active(i) = group {
+                let inner_width = panel_rect.width.saturating_sub(2) as usize;
+                let inner_height = panel_rect.height.saturating_sub(2) as usize;
+                self.refresh_panel(*i, inner_width, inner_height);
+            }
+        }
 
+        let panel_cache = &self.panel_cache;
         let Some(terminal) = self.fullscreen.as_mut() else {
             return Ok(());
         };
@@ -1152,10 +1208,7 @@ impl MultiProgress {
                     .title(titles[i].clone())
                     .borders(Borders::ALL);
 
-                let inner_width = panel_rect.width.saturating_sub(2) as usize;
-                let inner_height = panel_rect.height.saturating_sub(2) as usize;
-
-                let visible = build_visible_lines(&panel_lines[i], inner_width, inner_height);
+                let visible = panel_visible(panel_cache, &groups[i]);
 
                 let paragraph = Paragraph::new(visible).block(block);
                 frame.render_widget(paragraph, *panel_rect);
@@ -1191,26 +1244,18 @@ impl MultiProgress {
             .map(|groups| groups.iter().map(|g| self.format_group_title(g)).collect())
             .collect();
 
-        // Collect output lines for each panel in each column
-        let column_lines: Vec<Vec<Vec<String>>> = column_groups
-            .iter()
-            .zip(column_rects.iter())
-            .map(|(groups, rects)| {
-                groups
-                    .iter()
-                    .zip(rects.iter())
-                    .map(|(group, rect)| {
-                        let inner_height = rect.height.saturating_sub(2) as usize;
-                        let lines_needed = (inner_height * 2).max(10);
-                        match group {
-                            PanelGroup::Active(i) => self.output_buffers.last_n(*i, lines_needed),
-                            PanelGroup::Idle(..) => Vec::new(),
-                        }
-                    })
-                    .collect()
-            })
-            .collect();
+        /* Refresh the cached wrapped rows for each active panel */
+        for (groups, rects) in column_groups.iter().zip(column_rects.iter()) {
+            for (group, rect) in groups.iter().zip(rects.iter()) {
+                if let PanelGroup::Active(i) = group {
+                    let inner_width = rect.width.saturating_sub(2) as usize;
+                    let inner_height = rect.height.saturating_sub(2) as usize;
+                    self.refresh_panel(*i, inner_width, inner_height);
+                }
+            }
+        }
 
+        let panel_cache = &self.panel_cache;
         let Some(terminal) = self.fullscreen.as_mut() else {
             return Ok(());
         };
@@ -1222,11 +1267,7 @@ impl MultiProgress {
                     let title = column_titles[col_idx][row_idx].clone();
                     let block = Block::default().title(title).borders(Borders::ALL);
 
-                    let inner_width = panel_rect.width.saturating_sub(2) as usize;
-                    let inner_height = panel_rect.height.saturating_sub(2) as usize;
-
-                    let lines = &column_lines[col_idx][row_idx];
-                    let visible = build_visible_lines(lines, inner_width, inner_height);
+                    let visible = panel_visible(panel_cache, &column_groups[col_idx][row_idx]);
 
                     let paragraph = Paragraph::new(visible).block(block);
                     frame.render_widget(paragraph, *panel_rect);
@@ -1331,7 +1372,7 @@ impl MultiProgress {
     }
 }
 
-fn build_visible_lines(lines: &[String], width: usize, height: usize) -> Vec<Line<'static>> {
+fn build_visible_rows(lines: &[String], width: usize, height: usize) -> Vec<String> {
     if width == 0 || height == 0 {
         return Vec::new();
     }
@@ -1361,21 +1402,32 @@ fn build_visible_lines(lines: &[String], width: usize, height: usize) -> Vec<Lin
         if wrapped.len() > remaining {
             if is_last {
                 let start = wrapped.len() - remaining;
-                wrapped = wrapped[start..].to_vec();
+                wrapped.drain(0..start);
             } else {
                 continue;
             }
         }
 
-        for row in wrapped.iter().rev() {
-            rows_rev.push(row.clone());
-        }
+        rows_rev.extend(wrapped.into_iter().rev());
 
         remaining = height.saturating_sub(rows_rev.len());
         is_last = false;
     }
 
-    rows_rev.into_iter().rev().map(Line::raw).collect()
+    rows_rev.into_iter().rev().collect()
+}
+
+/**
+ * Build borrowed display lines for a panel from its cached rows.
+ */
+fn panel_visible<'a>(cache: &'a [Option<PanelCache>], group: &PanelGroup) -> Vec<Line<'a>> {
+    let PanelGroup::Active(i) = group else {
+        return Vec::new();
+    };
+    match cache.get(*i).and_then(|c| c.as_ref()) {
+        Some(c) => c.rows.iter().map(|s| Line::raw(s.as_str())).collect(),
+        None => Vec::new(),
+    }
 }
 
 fn wrap_line(s: &str, width: usize) -> Vec<String> {
