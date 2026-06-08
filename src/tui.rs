@@ -193,27 +193,26 @@ impl OutputBuffers {
         }
     }
 
-    /** Snapshot the most recent `n` lines for `worker`, cleaned for display. */
-    fn last_n(&self, worker: usize, n: usize) -> Vec<String> {
-        /* Hold the lock only to copy raw bytes out; clean after release. */
-        let raw = self
-            .0
-            .get(worker)
-            .and_then(|buf| buf.lock().ok())
-            .map(|buf| buf.last_n_raw(n))
-            .unwrap_or_default();
-        raw.iter().map(|line| clean_line(line)).collect()
-    }
-
     /**
-     * Current change counter for `worker`'s buffer.
+     * Snapshot the most recent `n` lines for `worker`, cleaned for
+     * display, together with the buffer generation.  The lock is taken
+     * once to read the generation and copy the raw bytes; cleaning
+     * happens after release.  Returns `None` when `since` equals the
+     * current generation, detecting an unchanged buffer without copying
+     * so a cached render can be reused.
      */
-    fn generation(&self, worker: usize) -> u64 {
-        self.0
-            .get(worker)
-            .and_then(|buf| buf.lock().ok())
-            .map(|buf| buf.generation)
-            .unwrap_or(0)
+    fn snapshot(&self, worker: usize, n: usize, since: Option<u64>) -> Option<(u64, Vec<String>)> {
+        let (generation, raw) = {
+            let buf = self.0.get(worker)?.lock().ok()?;
+            if since == Some(buf.generation) {
+                return None;
+            }
+            (buf.generation, buf.last_n_raw(n))
+        };
+        Some((
+            generation,
+            raw.iter().map(|line| clean_line(line)).collect(),
+        ))
     }
 }
 
@@ -1113,17 +1112,15 @@ impl MultiProgress {
      * output buffer or panel dimensions have changed since last render.
      */
     fn refresh_panel(&mut self, worker: usize, width: usize, height: usize) {
-        let generation = self.output_buffers.generation(worker);
-        let fresh = self.panel_cache.get(worker).is_some_and(|slot| {
-            slot.as_ref().is_some_and(|c| {
-                c.generation == generation && c.width == width && c.height == height
-            })
-        });
-        if fresh {
-            return;
-        }
+        let since = match self.panel_cache.get(worker).and_then(|slot| slot.as_ref()) {
+            Some(c) if c.width == width && c.height == height => Some(c.generation),
+            _ => None,
+        };
         let lines_needed = (height * 2).max(10);
-        let tail = self.output_buffers.last_n(worker, lines_needed);
+        let Some((generation, tail)) = self.output_buffers.snapshot(worker, lines_needed, since)
+        else {
+            return;
+        };
         let rows = build_visible_rows(&tail, width, height);
         if let Some(slot) = self.panel_cache.get_mut(worker) {
             *slot = Some(PanelCache {
