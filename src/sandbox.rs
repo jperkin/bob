@@ -258,11 +258,11 @@ impl Sandbox {
     /**
      * Create a new [`Sandbox`] instance for build operations.  This is
      * used even if sandboxes have not been enabled, as it provides a
-     * consistent interface to run commands through using [`execute`].
-     * If sandboxes are enabled then commands are executed via
-     * `chroot(8)`, otherwise they are executed directly.
+     * consistent interface to run commands through using
+     * [`execute_command`].  If sandboxes are enabled then commands are
+     * executed via `chroot(8)`, otherwise they are executed directly.
      *
-     * [`execute`]: Sandbox::execute
+     * [`execute_command`]: Sandbox::execute_command
      */
     pub fn new(config: &Config, pkgsrc: Option<&Pkgsrc>) -> Sandbox {
         Self::with_context(config, pkgsrc, ActionContext::Build)

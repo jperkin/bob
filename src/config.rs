@@ -554,7 +554,7 @@ pub struct PublishReport {
     pub rsync_args: String,
     /// Override auto-detected branch name for reports and email.
     pub branch: Option<String>,
-    /// Email sender in "Name <addr>" format.
+    /// Email sender in `Name <addr>` format.
     pub from: Option<String>,
     /// Email recipients.
     pub to: Vec<String>,

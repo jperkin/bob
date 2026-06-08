@@ -24,9 +24,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
  * Thread-safe run state, shared across threads via internal `Arc`.
  *
  * Signal handlers store values via the inner `AtomicUsize`.
- * Use [`load`], [`interrupted`], and [`is_shutdown`] to query state.
+ * Use [`interrupted`] and [`is_shutdown`] to query state.
  *
- * [`load`]: RunState::load
  * [`interrupted`]: RunState::interrupted
  * [`is_shutdown`]: RunState::is_shutdown
  */
