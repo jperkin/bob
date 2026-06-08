@@ -1350,10 +1350,9 @@ impl<'a> MakeQuery<'a> {
         };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let lines: Vec<&str> = stdout.lines().collect();
 
         let mut result = HashMap::new();
-        for (name, value) in names.iter().zip(&lines) {
+        for (name, value) in names.iter().zip(stdout.lines()) {
             let value = value.trim();
             if !value.is_empty() {
                 result.insert(name.to_string(), value.to_string());
