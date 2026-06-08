@@ -1064,28 +1064,20 @@ impl Scan {
         trace!(stdout_len = stdout.len(), %stdout, "pkg-scan script output");
 
         let reader = BufReader::new(&output.stdout[..]);
-        let all_results: Vec<ScanIndex> =
-            ScanIndex::from_reader(reader).collect::<Result<_, _>>()?;
 
         /*
-         * Filter to keep only the first occurrence of each PKGNAME.
-         * For multi-version packages, pbulk-index returns the *_DEFAULT
-         * version first, which is the one we want.
+         * Keep only the first occurrence of each PKGNAME.  For
+         * multi-version packages, pbulk-index returns the *_DEFAULT
+         * version first, which is the one we want.  Set PKGPATH
+         * (PKG_LOCATION) as for some reason pbulk-index doesn't.
          */
         let mut seen_pkgnames = HashSet::new();
         let mut index: Vec<ScanIndex> = Vec::new();
-        for pkg in all_results {
-            if seen_pkgnames.insert(pkg.pkgname.clone()) {
-                index.push(pkg);
+        for pkg in ScanIndex::from_reader(reader) {
+            let mut pkg = pkg?;
+            if !seen_pkgnames.insert(pkg.pkgname.clone()) {
+                continue;
             }
-        }
-
-        debug!(packages_found = index.len(), "Scan complete");
-
-        /*
-         * Set PKGPATH (PKG_LOCATION) as for some reason pbulk-index doesn't.
-         */
-        for pkg in &mut index {
             pkg.pkg_location = Some(pkgpath.clone());
             debug!(
                 pkgname = %pkg.pkgname.pkgname(),
@@ -1094,7 +1086,10 @@ impl Scan {
                 depends_count = pkg.all_depends.as_ref().map_or(0, |v| v.iter().count()),
                 "Found package in scan"
             );
+            index.push(pkg);
         }
+
+        debug!(packages_found = index.len(), "Scan complete");
 
         Ok(index)
     }
