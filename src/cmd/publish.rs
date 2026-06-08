@@ -659,10 +659,10 @@ fn write_text_report(
     let mut results = db.get_all_build_results()?;
     let duration = db.get_build_duration()?;
 
-    let sched = bob::Scheduler::new(db)?;
+    let (sched, table) = bob::Scheduler::from_db(db)?;
     let breaks_counts: HashMap<String, usize> = sched
         .iter()
-        .map(|sp| (sp.pkg.to_string(), sp.dep_count))
+        .map(|sp| (table.info(sp.pkg).pkgname.to_string(), sp.dep_count))
         .collect();
 
     let scanfail: Vec<(pkgsrc::PkgPath, String)> = db
@@ -873,10 +873,10 @@ fn write_machine_report(db: &Database, logdir: &Path) -> Result<()> {
         .with_context(|| format!("Failed to create {}", path.display()))?;
     let mut encoder = zstd::Encoder::new(file, 19)?;
 
-    let sched = bob::Scheduler::new(db)?;
+    let (sched, table) = bob::Scheduler::from_db(db)?;
     let dep_counts: HashMap<String, usize> = sched
         .iter()
-        .map(|sp| (sp.pkg.to_string(), sp.dep_count))
+        .map(|sp| (table.info(sp.pkg).pkgname.to_string(), sp.dep_count))
         .collect();
 
     for (pkgname, idx, outcome_id) in db.get_report_data()? {
@@ -1028,10 +1028,10 @@ fn write_html_report(
     let mut results = db.get_all_build_results()?;
     let duration = db.get_build_duration()?;
 
-    let sched = bob::Scheduler::new(db)?;
+    let (sched, table) = bob::Scheduler::from_db(db)?;
     let breaks_counts: HashMap<String, usize> = sched
         .iter()
-        .map(|sp| (sp.pkg.to_string(), sp.dep_count))
+        .map(|sp| (table.info(sp.pkg).pkgname.to_string(), sp.dep_count))
         .collect();
 
     let scanfail: Vec<(pkgsrc::PkgPath, String)> = db

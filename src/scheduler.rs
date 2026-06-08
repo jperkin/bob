@@ -43,11 +43,72 @@ use std::hash::Hash;
 use std::task::Poll;
 
 use anyhow::Result;
-use pkgsrc::PkgName;
+use pkgsrc::{PkgName, PkgPath};
 use tracing::warn;
 
 use crate::db::Database;
 use crate::makejobs;
+
+/**
+ * Integer identity for a package, used as the scheduler's graph key.
+ *
+ * Created by [`Scheduler::from_db`]; resolve it to a name or path
+ * through [`PackageTable`].
+ */
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PackageId(u32);
+
+impl fmt::Display for PackageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/**
+ * Name and path a [`PackageId`] resolves to.
+ */
+pub struct PackageInfo {
+    /// Package name with version.
+    pub pkgname: PkgName,
+    /// Location in the pkgsrc tree.
+    pub pkgpath: PkgPath,
+}
+
+/**
+ * Maps each [`PackageId`] to its name and path.
+ *
+ * Built by [`Scheduler::from_db`] and held alongside the [`Scheduler`].
+ */
+pub struct PackageTable {
+    rows: Vec<PackageInfo>,
+    by_name: HashMap<PkgName, PackageId>,
+}
+
+impl PackageTable {
+    /**
+     * Identity for a package id.
+     */
+    pub fn info(&self, id: PackageId) -> &PackageInfo {
+        &self.rows[id.0 as usize]
+    }
+
+    /**
+     * The id for a package name, if present.
+     */
+    pub fn id(&self, pkgname: &PkgName) -> Option<PackageId> {
+        self.by_name.get(pkgname).copied()
+    }
+
+    /**
+     * Iterate all `(id, info)` pairs in id order.
+     */
+    pub fn iter(&self) -> impl Iterator<Item = (PackageId, &PackageInfo)> {
+        self.rows
+            .iter()
+            .enumerate()
+            .map(|(i, info)| (PackageId(i as u32), info))
+    }
+}
 
 /**
  * Input data for [`Scheduler::from_graph`].
@@ -103,43 +164,56 @@ pub struct Scheduler<K: Ord> {
     allocator: Option<makejobs::Allocator>,
 }
 
-impl Scheduler<PkgName> {
+impl Scheduler<PackageId> {
     /**
-     * Create a scheduler from the database.
+     * Create a scheduler and its [`PackageTable`] from the database.
      *
      * Queries the packages table, resolved dependencies, and historical
      * CPU times.  All selected packages are included; use
      * [`mark_success`](Self::mark_success) or
      * [`mark_failure`](Self::mark_failure) to pre-mark cached results.
      */
-    pub fn new(db: &Database) -> Result<Self> {
-        let mut packages: HashMap<PkgName, PackageNode<PkgName>> = HashMap::new();
-        let mut id_to_name: HashMap<i64, PkgName> = HashMap::new();
-        let mut pkg_paths: HashMap<PkgName, String> = HashMap::new();
-        let mut pkg_make_jobs: HashMap<PkgName, makejobs::PkgMakeJobs> = HashMap::new();
+    pub fn from_db(db: &Database) -> Result<(Self, PackageTable)> {
+        let mut selected = crate::db::query_selected_packages(db.conn())?;
 
-        for row in crate::db::query_selected_packages(db.conn())? {
-            id_to_name.insert(row.id, row.pkgname.clone());
-            pkg_paths.insert(row.pkgname.clone(), row.pkg_location);
-            pkg_make_jobs.insert(
-                row.pkgname.clone(),
-                makejobs::PkgMakeJobs::new(row.make_jobs_safe),
-            );
+        /*
+         * Ids are the final tiebreaker in scheduling order, so assign
+         * them in name order to keep tied packages alphabetical.
+         */
+        selected.sort_by(|a, b| a.pkgname.cmp(&b.pkgname));
+
+        let mut rows: Vec<PackageInfo> = Vec::with_capacity(selected.len());
+        let mut by_name: HashMap<PkgName, PackageId> = HashMap::with_capacity(selected.len());
+        let mut by_db_id: HashMap<i64, PackageId> = HashMap::with_capacity(selected.len());
+        let mut packages: HashMap<PackageId, PackageNode<PackageId>> =
+            HashMap::with_capacity(selected.len());
+        let mut pkg_make_jobs: HashMap<PackageId, makejobs::PkgMakeJobs> =
+            HashMap::with_capacity(selected.len());
+
+        for row in selected {
+            let id = PackageId(rows.len() as u32);
+            by_db_id.insert(row.id, id);
+            by_name.insert(row.pkgname.clone(), id);
+            pkg_make_jobs.insert(id, makejobs::PkgMakeJobs::new(row.make_jobs_safe));
             packages.insert(
-                row.pkgname,
+                id,
                 PackageNode {
                     deps: HashSet::new(),
                     pbulk_weight: row.pbulk_weight,
                     cpu_time: 0,
                 },
             );
+            rows.push(PackageInfo {
+                pkgname: row.pkgname,
+                pkgpath: row.pkg_location.parse()?,
+            });
         }
 
         for (pkg_id, dep_id) in crate::db::query_resolved_deps(db.conn())? {
-            if let (Some(pkg), Some(dep)) = (id_to_name.get(&pkg_id), id_to_name.get(&dep_id))
-                && let Some(node) = packages.get_mut(pkg)
+            if let (Some(&pkg), Some(&dep)) = (by_db_id.get(&pkg_id), by_db_id.get(&dep_id))
+                && let Some(node) = packages.get_mut(&pkg)
             {
-                node.deps.insert(dep.clone());
+                node.deps.insert(dep);
             }
         }
 
@@ -148,36 +222,41 @@ impl Scheduler<PkgName> {
             Err(e) => {
                 warn!(
                     error = format!("{e:#}"),
-                    "Scheduler::new: failed to open history db"
+                    "Scheduler::from_db: failed to open history db"
                 );
                 HashMap::new()
             }
         };
-        for (pkgname, node) in &mut packages {
-            if let Some(pkgpath) = pkg_paths.get(pkgname) {
-                let pkgbase = pkgname.pkgbase().to_string();
-                if let Some(t) = stage_timings.get(&(pkgpath.clone(), pkgbase)) {
-                    node.cpu_time = t.cpu_ms;
-                }
+        for (i, info) in rows.iter().enumerate() {
+            let pkgbase = info.pkgname.pkgbase().to_string();
+            if let Some(t) = stage_timings.get(&(info.pkgpath.to_string(), pkgbase))
+                && let Some(node) = packages.get_mut(&PackageId(i as u32))
+            {
+                node.cpu_time = t.cpu_ms;
             }
         }
 
         let mut sched = Self::from_graph(packages);
         sched.pkg_make_jobs = pkg_make_jobs;
 
-        let safe_paths: HashMap<PkgName, String> = pkg_paths
-            .into_iter()
-            .filter(|(k, _)| {
+        let safe_paths: HashMap<PkgName, String> = rows
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| {
                 sched
                     .pkg_make_jobs
-                    .get(k)
+                    .get(&PackageId(*i as u32))
                     .map(|mj| mj.safe())
                     .unwrap_or(false)
             })
+            .map(|(_, info)| (info.pkgname.clone(), info.pkgpath.to_string()))
             .collect();
-        sched.pkg_cpu_history = makejobs::pkg_cpu_history(&stage_timings, &safe_paths);
+        sched.pkg_cpu_history = makejobs::pkg_cpu_history(&stage_timings, &safe_paths)
+            .into_iter()
+            .filter_map(|(pkgname, cpu)| by_name.get(&pkgname).map(|&id| (id, cpu)))
+            .collect();
 
-        Ok(sched)
+        Ok((sched, PackageTable { rows, by_name }))
     }
 }
 
@@ -190,7 +269,7 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
      * [`PackageNode`].
      *
      * No MAKE_JOBS values are computed; `poll()` returns
-     * `make_jobs: None`.  Use [`Scheduler::new`] with a database
+     * `make_jobs: None`.  Use [`Scheduler::from_db`] with a database
      * for MAKE_JOBS-aware scheduling.
      */
     pub fn from_graph(packages: HashMap<K, PackageNode<K>>) -> Self {

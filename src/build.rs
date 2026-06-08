@@ -48,7 +48,7 @@ use crate::config::{Pkgsrc, PkgsrcEnv, WrkObjKind};
 use crate::makejobs::PkgMakeJobs;
 use crate::sandbox::{CommandSetsid, SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
 use crate::scan::ResolvedPackage;
-use crate::scheduler::Scheduler;
+use crate::scheduler::{PackageId, PackageTable, Scheduler};
 use crate::tui::{OutputBuffers, Progress, REFRESH_INTERVAL};
 use crate::{Config, RunState, Sandbox};
 use crate::{PackageCounts, PackageState};
@@ -1769,7 +1769,8 @@ enum ChannelCommand {
 
 struct BuildJobs {
     scanpkgs: IndexMap<PkgName, ResolvedPackage>,
-    scheduler: Scheduler<PkgName>,
+    scheduler: Scheduler<PackageId>,
+    table: PackageTable,
     results: Vec<BuildResult>,
     logdir: PathBuf,
 }
@@ -1779,7 +1780,9 @@ impl BuildJobs {
      * Mark a package as successful and remove it from pending dependencies.
      */
     fn mark_success(&mut self, result: BuildResult) {
-        self.scheduler.mark_success(&result.pkgname);
+        if let Some(id) = self.table.id(&result.pkgname) {
+            self.scheduler.mark_success(&id);
+        }
         self.results.push(result);
     }
 
@@ -1790,17 +1793,21 @@ impl BuildJobs {
         trace!(pkgname = %result.pkgname.pkgname(), "mark_failure called");
         let start = std::time::Instant::now();
 
-        let indirect = self.scheduler.mark_failure(&result.pkgname);
+        let indirect = match self.table.id(&result.pkgname) {
+            Some(id) => self.scheduler.mark_failure(&id),
+            None => Vec::new(),
+        };
         trace!(pkgname = %result.pkgname.pkgname(), broken_count = indirect.len() + 1, elapsed_ms = start.elapsed().as_millis(), "mark_failure found broken packages");
 
         let pkgname = result.pkgname.clone();
         self.results.push(result);
 
-        for pkg in indirect {
-            let pkgpath = self.scanpkgs.get(&pkg).map(|r| r.pkgpath.clone());
-            let log_dir = Some(self.logdir.join(pkg.pkgname()));
+        for id in indirect {
+            let pkgname = self.table.info(id).pkgname.clone();
+            let pkgpath = self.scanpkgs.get(&pkgname).map(|r| r.pkgpath.clone());
+            let log_dir = Some(self.logdir.join(pkgname.pkgname()));
             self.results.push(BuildResult {
-                pkgname: pkg,
+                pkgname,
                 pkgpath,
                 state: PackageState::IndirectFailed,
                 log_dir,
@@ -1884,7 +1891,7 @@ impl Build {
 
         let results: Vec<BuildResult> = Vec::new();
 
-        let mut scheduler = Scheduler::new(db)?;
+        let (mut scheduler, table) = Scheduler::from_db(db)?;
 
         /*
          * Mark packages that aren't buildable (pre-skipped, pre-failed,
@@ -1892,10 +1899,9 @@ impl Build {
          * dispatched.  The scheduler includes all selected packages from
          * the DB; only the subset in scanpkgs needs building.
          */
-        let all_pkgs: Vec<PkgName> = scheduler.iter().map(|sp| sp.pkg).collect();
-        for pkg in &all_pkgs {
-            if !self.scanpkgs.contains_key(pkg) {
-                scheduler.mark_success(pkg);
+        for (id, info) in table.iter() {
+            if !self.scanpkgs.contains_key(&info.pkgname) {
+                scheduler.mark_success(&id);
             }
         }
 
@@ -1905,13 +1911,16 @@ impl Build {
         let mut cached_count = 0usize;
         let mut indirect_failed_count = 0usize;
         for (pkgname, result) in &self.cached {
+            let Some(id) = table.id(pkgname) else {
+                continue;
+            };
             if result.state.is_success() {
-                scheduler.mark_success(pkgname);
+                scheduler.mark_success(&id);
             } else {
-                let indirect = scheduler.mark_failure(pkgname);
+                let indirect = scheduler.mark_failure(&id);
                 indirect_failed_count += indirect
                     .iter()
-                    .filter(|p| !self.cached.contains_key(*p))
+                    .filter(|p| !self.cached.contains_key(&table.info(**p).pkgname))
                     .count();
             }
             cached_count += 1;
@@ -2003,6 +2012,7 @@ impl Build {
         let jobs = BuildJobs {
             scanpkgs: self.scanpkgs,
             scheduler,
+            table,
             results,
             logdir,
         };
@@ -2215,7 +2225,7 @@ impl Build {
             let mut announced_interrupt = false;
 
             // Track which thread is building which package
-            let mut thread_packages: HashMap<usize, PkgName> = HashMap::new();
+            let mut thread_packages: HashMap<usize, PackageId> = HashMap::new();
 
             loop {
                 if state_for_manager.is_shutdown() {
@@ -2267,20 +2277,21 @@ impl Build {
                         let client = clients.get(&c).expect("client not in map");
                         match jobs.scheduler.poll() {
                             Poll::Ready(Some(sp)) => {
+                                let pkgname = jobs.table.info(sp.pkg).pkgname.clone();
                                 let pkginfo = jobs
                                     .scanpkgs
-                                    .get(&sp.pkg)
+                                    .get(&pkgname)
                                     .expect("pkg not in scanpkgs")
                                     .clone();
 
-                                thread_packages.insert(c, sp.pkg.clone());
+                                thread_packages.insert(c, sp.pkg);
                                 let hist_key =
-                                    (pkginfo.pkgpath.to_string(), sp.pkg.pkgbase().to_string());
+                                    (pkginfo.pkgpath.to_string(), pkgname.pkgbase().to_string());
                                 let hist = build_history.get(&hist_key);
                                 let wrkobjdir =
-                                    session.wrkobjdir_map.get(&sp.pkg).map(|k| k.to_string());
+                                    session.wrkobjdir_map.get(&pkgname).map(|k| k.to_string());
                                 debug!(
-                                    pkgname = %sp.pkg.pkgname(),
+                                    pkgname = %pkgname.pkgname(),
                                     make_jobs = sp.make_jobs.jobs(),
                                     make_jobs_safe = sp.make_jobs.safe(),
                                     wrkobjdir = wrkobjdir.as_deref(),
@@ -2291,12 +2302,12 @@ impl Build {
                                 );
                                 if let Ok(mut p) = progress_clone.lock() {
                                     p.clear_output_buffer(c);
-                                    p.state_mut().set_worker_active(c, sp.pkg.pkgname());
+                                    p.state_mut().set_worker_active(c, pkgname.pkgname());
                                     p.state_mut().increment_dispatched();
                                     if p.is_plain() {
                                         let _ = p.print_status(
                                             "Building",
-                                            sp.pkg.pkgname(),
+                                            pkgname.pkgname(),
                                             None,
                                             None,
                                         );
@@ -2338,12 +2349,15 @@ impl Build {
                     ChannelCommand::JobSuccess(result) => {
                         let pkgname = result.pkgname.clone();
                         let duration = result.build_stats.duration;
+                        let id = jobs.table.id(&pkgname);
                         jobs.mark_success(result);
 
-                        let sid = thread_packages
-                            .iter()
-                            .find(|(_, p)| *p == &pkgname)
-                            .map(|(t, _)| *t);
+                        let sid = id.and_then(|id| {
+                            thread_packages
+                                .iter()
+                                .find(|(_, p)| **p == id)
+                                .map(|(t, _)| *t)
+                        });
 
                         if let Some(r) = jobs.results.last() {
                             let _ = completed_tx.send(r.clone());
@@ -2368,19 +2382,22 @@ impl Build {
                         let pkgname = result.pkgname.clone();
                         let duration = result.build_stats.duration;
                         let results_before = jobs.results.len();
+                        let id = jobs.table.id(&pkgname);
                         jobs.mark_failure(result);
 
-                        let sid = thread_packages
-                            .iter()
-                            .find(|(_, p)| *p == &pkgname)
-                            .map(|(t, _)| *t);
+                        let sid = id.and_then(|id| {
+                            thread_packages
+                                .iter()
+                                .find(|(_, p)| **p == id)
+                                .map(|(t, _)| *t)
+                        });
 
                         for r in jobs.results.iter().skip(results_before) {
                             let _ = completed_tx.send(r.clone());
                         }
 
                         let indirect_count = jobs.results.len() - results_before - 1;
-                        let dep_count = jobs.scheduler.dep_count(&pkgname);
+                        let dep_count = id.map(|id| jobs.scheduler.dep_count(&id)).unwrap_or(0);
 
                         if let Ok(mut p) = progress_clone.lock() {
                             let _ = p.print_status(

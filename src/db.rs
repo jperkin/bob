@@ -2629,7 +2629,7 @@ pub(crate) fn record_history_to(conn: &Connection, rec: &crate::History) -> Resu
 /*
  * Scheduler query support.
  *
- * Used by `Scheduler::new` to construct the dependency graph from the
+ * Used by `Scheduler::from_db` to construct the dependency graph from the
  * build database, and by `jobs::make_jobs_from_db` and the scheduler
  * itself to query historical build-stage timing data from history.db.
  */

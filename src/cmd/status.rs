@@ -417,7 +417,7 @@ fn print_build_status(
         .map(|r| (r.pkgname.as_str(), r))
         .collect();
 
-    let mut sched = Scheduler::new(db)?;
+    let (mut sched, table) = Scheduler::from_db(db)?;
     if let Some(jobs) = config.jobs() {
         sched.set_allocator(bob::makejobs::Allocator::new(config.build_threads(), jobs));
         sched.allocate_all();
@@ -511,7 +511,7 @@ fn print_build_status(
 
     let mut indexed_rows: Vec<(Vec<SortKey>, Vec<String>)> = Vec::new();
     for sp in sched.iter() {
-        let Some(pkg) = status_map.get(sp.pkg.pkgname()) else {
+        let Some(pkg) = status_map.get(table.info(sp.pkg).pkgname.pkgname()) else {
             continue;
         };
 
@@ -538,7 +538,10 @@ fn print_build_status(
 
         let dash = || "-".to_string();
 
-        let hist_key = (pkg.pkg_location.clone(), sp.pkg.pkgbase().to_string());
+        let hist_key = (
+            pkg.pkg_location.clone(),
+            table.info(sp.pkg).pkgname.pkgbase().to_string(),
+        );
         let hist = history.get(&hist_key);
         let actual_wrkobjdir = hist.and_then(|h| h.wrkobjdir.clone());
         let actual_make_jobs = hist.and_then(|h| h.make_jobs);

@@ -139,10 +139,10 @@ pub fn run(db: &Database, args: DiffArgs) -> Result<()> {
 
     let diff = db.compute_build_diff(&build1_id, &build2_id)?;
 
-    let breaks: HashMap<String, usize> = match bob::Scheduler::new(db) {
-        Ok(sched) => sched
+    let breaks: HashMap<String, usize> = match bob::Scheduler::from_db(db) {
+        Ok((sched, table)) => sched
             .iter()
-            .map(|sp| (sp.pkg.to_string(), sp.dep_count))
+            .map(|sp| (table.info(sp.pkg).pkgname.to_string(), sp.dep_count))
             .collect(),
         Err(_) => HashMap::new(),
     };
