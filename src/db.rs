@@ -138,7 +138,7 @@ const SCHEMA_VERSION: i32 = 20260604;
 /**
  * Schema version for history.db - update when history schema changes.
  */
-const HISTORY_SCHEMA_VERSION: i32 = 20260515;
+const HISTORY_SCHEMA_VERSION: i32 = 20260609;
 
 /**
  * Summary of a package's most recent build from history.
@@ -2281,6 +2281,21 @@ pub struct BuildListEntry {
 }
 
 /**
+ * History schema migrations in `(from, to, apply)` order.
+ *
+ * [`check_history_schema`] applies each step whose `from` matches the
+ * current version.  Bumping the schema is one new row plus its
+ * function; no other code changes.
+ */
+type HistoryMigration = (i32, i32, fn(&Connection) -> Result<()>);
+
+const HISTORY_MIGRATIONS: &[HistoryMigration] = &[
+    (20260406, 20260513, migrate_history_20260406_to_20260513),
+    (20260513, 20260515, migrate_history_20260513_to_20260515),
+    (20260515, 20260609, migrate_history_20260515_to_20260609),
+];
+
+/**
  * Check the history.db schema version if the file exists.
  *
  * This runs eagerly at Database::open() time so that a version mismatch
@@ -2312,27 +2327,19 @@ fn check_history_schema(dbdir: &Path) -> Result<()> {
         }
         return Ok(());
     }
-    let version: i32 = conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
-        row.get(0)
-    })?;
-    if version == HISTORY_SCHEMA_VERSION {
-        return Ok(());
-    }
-    if version == 20260406 {
-        migrate_history_20260406_to_20260513(&conn)
-            .with_context(|| format!("Failed to migrate history schema v{version} to v20260513"))?;
-    }
-    let version: i32 = conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
-        row.get(0)
-    })?;
-    if version == 20260513 {
-        migrate_history_20260513_to_20260515(&conn).with_context(|| {
-            format!("Failed to migrate history schema v{version} to v{HISTORY_SCHEMA_VERSION}")
+    let mut version: i32 =
+        conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+            row.get(0)
         })?;
+    for &(from, to, apply) in HISTORY_MIGRATIONS {
+        if version == from {
+            apply(&conn)
+                .with_context(|| format!("Failed to migrate history schema v{from} to v{to}"))?;
+            version = conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+                row.get(0)
+            })?;
+        }
     }
-    let version: i32 = conn.query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
-        row.get(0)
-    })?;
     if version == HISTORY_SCHEMA_VERSION {
         return Ok(());
     }
@@ -2408,12 +2415,27 @@ fn migrate_history_20260513_to_20260515(conn: &Connection) -> Result<()> {
          CREATE INDEX idx_history_build_id
              ON build_history(build_id, pkgpath, id);",
     ))?;
-    tx.execute(
-        "UPDATE schema_version SET version = ?1",
-        params![HISTORY_SCHEMA_VERSION],
-    )?;
+    tx.execute("UPDATE schema_version SET version = ?1", params![20260515])?;
     tx.commit()?;
     conn.execute_batch("PRAGMA foreign_keys=ON")?;
+    Ok(())
+}
+
+/**
+ * Migrate history.db from v20260515 to v20260609.
+ *
+ * Adds `idx_history_outcome_pkg`, a covering index for the
+ * latest-successful-build window query so it no longer seeks the table
+ * once per row.
+ */
+fn migrate_history_20260515_to_20260609(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_history_outcome_pkg
+             ON build_history(outcome, pkgpath, pkgbase);",
+    )?;
+    tx.execute("UPDATE schema_version SET version = ?1", params![20260609])?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -2496,6 +2518,8 @@ pub(crate) fn create_history_schema(conn: &Connection) -> Result<()> {
              ON build_history(timestamp);
          CREATE INDEX idx_history_build_id
              ON build_history(build_id, pkgpath, id);
+         CREATE INDEX idx_history_outcome_pkg
+             ON build_history(outcome, pkgpath, pkgbase);
 
          CREATE TABLE wall_times (
              history_id INTEGER NOT NULL
