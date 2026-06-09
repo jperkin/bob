@@ -41,7 +41,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use indexmap::IndexMap;
 use pkgsrc::{AllDepends, BootstrapPkg, MakeJobsSafe, PkgName, PkgPath, ScanDepends, ScanIndex};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use tracing::{debug, warn};
 
 use strum::VariantArray;
@@ -1102,12 +1102,13 @@ impl Database {
         let duration_ms = result.build_stats.duration.as_millis() as i64;
         let log_dir = result.log_dir.as_ref().map(|p| p.display().to_string());
 
-        self.conn.execute(
-            "INSERT OR REPLACE INTO builds
-             (package_id, outcome, stage, duration_ms, log_dir)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![package_id, outcome, stage, duration_ms, log_dir],
-        )?;
+        self.conn
+            .prepare_cached(
+                "INSERT OR REPLACE INTO builds
+                 (package_id, outcome, stage, duration_ms, log_dir)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?
+            .execute(params![package_id, outcome, stage, duration_ms, log_dir])?;
 
         debug!(
             package_id = package_id,
@@ -1123,24 +1124,34 @@ impl Database {
     pub fn is_successful(&self, pkgname: &str) -> Result<bool> {
         let success = PackageState::Success.id();
         Ok(self.conn.query_row(
-            "SELECT COUNT(*) FROM builds b
-             JOIN scan_index p ON b.package_id = p.id
-             WHERE p.pkgname = ?1 AND b.outcome = ?2",
+            "SELECT EXISTS(
+                 SELECT 1 FROM builds b
+                 JOIN scan_index p ON b.package_id = p.id
+                 WHERE p.pkgname = ?1 AND b.outcome = ?2)",
             params![pkgname, success],
             |row| row.get::<_, i64>(0),
-        )? > 0)
+        )? != 0)
     }
 
     /**
      * Store a build result by pkgname.
      */
     pub fn store_build_by_name(&self, result: &BuildResult) -> Result<()> {
-        if let Some(pkg) = self.get_package_by_name(result.pkgname.pkgname())? {
-            self.store_build_result(pkg.id, result)
-        } else {
-            warn!(pkgname = %result.pkgname.pkgname(), "Package not found in database for build result");
-            Ok(())
-        }
+        let id: i64 = self
+            .conn
+            .query_row(
+                "SELECT id FROM scan_index WHERE pkgname = ?1",
+                [result.pkgname.pkgname()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .with_context(|| {
+                format!(
+                    "build result for package not in scan_index: {}",
+                    result.pkgname.pkgname()
+                )
+            })?;
+        self.store_build_result(id, result)
     }
 
     /**
@@ -1749,6 +1760,22 @@ impl Database {
     pub fn record_history(&self, rec: &crate::History) -> Result<()> {
         let conn = self.history_conn()?;
         record_history_to(conn, rec)
+    }
+
+    /**
+     * Record many build-history rows in a single history.db transaction.
+     */
+    pub fn record_history_batch(&self, recs: &[crate::History]) -> Result<()> {
+        if recs.is_empty() {
+            return Ok(());
+        }
+        let conn = self.history_conn()?;
+        let tx = conn.unchecked_transaction()?;
+        for rec in recs {
+            record_history_to(&tx, rec)?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /**
@@ -2687,7 +2714,7 @@ pub(crate) fn record_history_to(conn: &Connection, rec: &crate::History) -> Resu
             cols.join(", "),
             placeholders,
         );
-        conn.execute(&sql, values)?;
+        conn.prepare_cached(&sql)?.execute(values)?;
         return Ok(());
     }
 

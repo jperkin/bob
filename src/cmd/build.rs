@@ -119,12 +119,16 @@ pub fn check_up_to_date(
      * Mark packages with missing binaries. Not propagated - dependents
      * will get their own reason (DependencyMissing) when checked.
      */
-    for &pkgname in &buildable_names {
-        let pkgfile = packages_dir.join(format!("{}.tgz", pkgname));
-        if !pkgfile.exists() {
-            needs_rebuild.insert(pkgname);
-            db.store_build_reason(pkgname, &bob::BuildReason::PackageNotFound.to_string())?;
+    {
+        let tx = db.transaction()?;
+        for &pkgname in &buildable_names {
+            let pkgfile = packages_dir.join(format!("{}.tgz", pkgname));
+            if !pkgfile.exists() {
+                needs_rebuild.insert(pkgname);
+                db.store_build_reason(pkgname, &bob::BuildReason::PackageNotFound.to_string())?;
+            }
         }
+        tx.commit()?;
     }
 
     /*
@@ -197,51 +201,53 @@ pub fn check_up_to_date(
      * get DependencyRefresh.
      */
     let build_id = db.build_id()?;
-    for (pkg, result) in checked_results {
-        let pkgname = pkg.pkgname().pkgname();
-        match result {
-            Ok(None) => {
-                if db.is_successful(pkgname)? {
-                    continue;
-                }
-                let build_result = bob::BuildResult {
-                    pkgname: pkg.pkgname().clone(),
-                    pkgpath: Some(pkg.pkgpath.clone()),
-                    state: bob::PackageState::UpToDate,
-                    log_dir: None,
-                    build_stats: bob::PkgBuildStats::default(),
-                };
-                db.store_build_by_name(&build_result)?;
-                if let Some(mut input) = build_result.history_input() {
-                    input.build_id = Some(build_id.clone());
-                    if let Err(e) = db.record_history(&input) {
-                        tracing::warn!(
-                            pkgname,
-                            error = format!("{e:#}"),
-                            "Failed to record up-to-date history"
-                        );
+    let mut history_inputs = Vec::new();
+    {
+        let tx = db.transaction()?;
+        for (pkg, result) in checked_results {
+            let pkgname = pkg.pkgname().pkgname();
+            match result {
+                Ok(None) => {
+                    if db.is_successful(pkgname)? {
+                        continue;
                     }
+                    let build_result = bob::BuildResult {
+                        pkgname: pkg.pkgname().clone(),
+                        pkgpath: Some(pkg.pkgpath.clone()),
+                        state: bob::PackageState::UpToDate,
+                        log_dir: None,
+                        build_stats: bob::PkgBuildStats::default(),
+                    };
+                    db.store_build_by_name(&build_result)?;
+                    if let Some(mut input) = build_result.history_input() {
+                        input.build_id = Some(build_id.clone());
+                        history_inputs.push(input);
+                    }
+                    up_to_date_count += 1;
                 }
-                up_to_date_count += 1;
-            }
-            Ok(Some(reason)) => {
-                db.store_build_reason(pkgname, &reason.to_string())?;
-            }
-            Err(e) => {
-                tracing::debug!(
-                    pkgname,
-                    error = format!("{e:#}"),
-                    "Error checking up-to-date status"
-                );
-                db.store_build_reason(pkgname, &format!("check failed: {}", e))?;
+                Ok(Some(reason)) => {
+                    db.store_build_reason(pkgname, &reason.to_string())?;
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        pkgname,
+                        error = format!("{e:#}"),
+                        "Error checking up-to-date status"
+                    );
+                    db.store_build_reason(pkgname, &format!("check failed: {}", e))?;
+                }
             }
         }
+
+        for (pkgname, dep) in propagated_from {
+            let reason = bob::BuildReason::DependencyRefresh(dep.to_string());
+            db.store_build_reason(pkgname, &reason.to_string())?;
+        }
+        tx.commit()?;
     }
 
-    for (pkgname, dep) in propagated_from {
-        let reason = bob::BuildReason::DependencyRefresh(dep.to_string());
-        db.store_build_reason(pkgname, &reason.to_string())?;
-    }
+    db.record_history_batch(&history_inputs)
+        .context("Failed to record up-to-date history")?;
 
     bob::print_elapsed("Calculating package build status", start.elapsed());
 
