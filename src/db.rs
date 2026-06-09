@@ -2725,20 +2725,24 @@ pub(crate) fn query_build_stage_timings(conn: &Connection) -> HashMap<PkgKey, Bu
     let pkgpath_col: &str = HistoryKind::Pkgpath.into();
     let success_outcome = PackageState::Success.id();
     let build_stage = Stage::Build as i32;
-    let partition = latest_history_partition();
 
+    /*
+     * The latest successful build per package is the row with the
+     * greatest id in its (pkgpath, pkgbase) group.  A grouped MAX(id)
+     * streams over idx_history_outcome_pkg; a ROW_NUMBER() window would
+     * number every row into a temporary b-tree for the same result.
+     */
     let sql = format!(
-        "WITH matched AS ( \
-             SELECT h.{pkgpath_col}, h.{pkgbase_col}, h.id, \
-                    ROW_NUMBER() OVER ({partition}) AS rn \
-             FROM build_history h \
-             WHERE h.{out} = {success_outcome} \
+        "WITH latest AS ( \
+             SELECT {pkgpath_col}, {pkgbase_col}, MAX(id) AS id \
+             FROM build_history \
+             WHERE {out} = {success_outcome} \
+             GROUP BY {pkgpath_col}, {pkgbase_col} \
          ) \
-         SELECT m.{pkgpath_col}, m.{pkgbase_col}, ct.duration \
-         FROM matched m \
-         JOIN cpu_times ct ON ct.history_id = m.id \
-              AND ct.stage = {build_stage} \
-         WHERE m.rn = 1",
+         SELECT l.{pkgpath_col}, l.{pkgbase_col}, ct.duration \
+         FROM latest l \
+         JOIN cpu_times ct ON ct.history_id = l.id \
+              AND ct.stage = {build_stage}",
     );
 
     let mut stmt = match conn.prepare(&sql) {
