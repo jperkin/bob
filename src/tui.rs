@@ -93,6 +93,20 @@ const STATUS_WIDTH: usize = 12;
  */
 pub(crate) const OUTPUT_BUFFER_LINES: usize = 100;
 
+/**
+ * Smallest panel that can show output: a top border, one output line,
+ * and a bottom border.  The multipanel layout adds columns rather than
+ * let an active worker's panel shrink below this.
+ */
+const MIN_PANEL_HEIGHT: usize = 3;
+
+/**
+ * Narrowest panel column the multipanel layout will shrink to in order
+ * to fit every worker.  Below this a column is too narrow to read, so
+ * remaining workers go unshown instead.
+ */
+const MIN_COL_WIDTH: usize = 40;
+
 /// Clean a raw output line for display: ANSI escapes stripped, tabs
 /// expanded, other control characters dropped.
 fn clean_line(raw: &[u8]) -> String {
@@ -510,6 +524,23 @@ impl PanelGroup {
             }
         }
     }
+}
+
+/**
+ * Truncate `s` to `max_width` columns, appending an ellipsis when it does
+ * not fit.
+ */
+fn fit_title(s: String, max_width: usize) -> String {
+    const ELLIPSIS: &str = "...";
+    if s.chars().count() <= max_width {
+        return s;
+    }
+    if max_width <= ELLIPSIS.len() {
+        return s.chars().take(max_width).collect();
+    }
+    let mut t: String = s.chars().take(max_width - ELLIPSIS.len()).collect();
+    t.push_str(ELLIPSIS);
+    t
 }
 
 /**
@@ -1159,10 +1190,28 @@ impl MultiProgress {
         let msg = status_msg(self.interrupt_announced, &self.state.title);
         let status_line = format_status_line(&self.state, msg, size.width as usize);
 
-        if area.width < 160 {
+        /*
+         * Choose the column count from the available height, not just the
+         * width.  A single column splits the height equally among workers,
+         * so with many workers each panel can fall below MIN_PANEL_HEIGHT
+         * and show no output.  Add columns until every worker's panel can
+         * reach MIN_PANEL_HEIGHT, but never make a column narrower than
+         * MIN_COL_WIDTH.  Wide terminals keep the squarer grid.
+         */
+        let panel_height = area.height.saturating_sub(1) as usize;
+        let width = area.width as usize;
+        let rows_per_col = (panel_height / MIN_PANEL_HEIGHT).max(1);
+        let cols_for_visibility = num_workers.div_ceil(rows_per_col);
+        let cols_comfortable = ((num_workers as f64).sqrt().ceil() as usize)
+            .min(width / 80)
+            .max(1);
+        let cols_cap = (width / MIN_COL_WIDTH).max(1);
+        let cols = cols_comfortable.max(cols_for_visibility).min(cols_cap);
+
+        if cols <= 1 {
             self.render_multipanel_linear(&is_active, area, status_line)
         } else {
-            self.render_multipanel_grid(&is_active, area, status_line)
+            self.render_multipanel_grid(&is_active, area, status_line, cols)
         }
     }
 
@@ -1178,10 +1227,13 @@ impl MultiProgress {
         let groups = group_workers_linear(is_active);
         let panels = calculate_linear_layout(panel_area, &groups);
 
-        // Pre-compute titles
+        /* Pre-compute titles, fitted to each panel's width. */
         let titles: Vec<Line<'static>> = groups
             .iter()
-            .map(|group| self.format_group_title(group))
+            .zip(panels.iter())
+            .map(|(group, rect)| {
+                self.format_group_title(group, rect.width.saturating_sub(2) as usize)
+            })
             .collect();
 
         /* Refresh the cached wrapped rows for each active panel */
@@ -1221,24 +1273,27 @@ impl MultiProgress {
         is_active: &[bool],
         area: Rect,
         status_line: Line<'static>,
+        cols: usize,
     ) -> io::Result<()> {
         let panel_area = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
         let status_area = Rect::new(area.x, area.y + panel_area.height, area.width, 1);
 
-        let num_workers = is_active.len();
-
-        // Calculate grid dimensions based on worker count and width
-        let max_cols_by_count = (num_workers as f64).sqrt().ceil() as usize;
-        let max_cols_by_width = (panel_area.width as usize) / 80;
-        let cols = max_cols_by_count.min(max_cols_by_width).max(1);
-
         let (column_groups, _rows) = group_workers_grid(is_active, cols);
         let column_rects = calculate_grid_layout(panel_area, &column_groups);
 
-        // Pre-compute titles for each group in each column
+        /* Pre-compute titles, fitted to each panel's width. */
         let column_titles: Vec<Vec<Line<'static>>> = column_groups
             .iter()
-            .map(|groups| groups.iter().map(|g| self.format_group_title(g)).collect())
+            .zip(column_rects.iter())
+            .map(|(groups, rects)| {
+                groups
+                    .iter()
+                    .zip(rects.iter())
+                    .map(|(g, rect)| {
+                        self.format_group_title(g, rect.width.saturating_sub(2) as usize)
+                    })
+                    .collect()
+            })
             .collect();
 
         /* Refresh the cached wrapped rows for each active panel */
@@ -1276,36 +1331,68 @@ impl MultiProgress {
         Ok(())
     }
 
-    fn format_group_title(&self, group: &PanelGroup) -> Line<'static> {
-        match group {
-            PanelGroup::Active(i) => {
-                if let Some(w) = self.state.workers.get(*i) {
-                    if let Some(pkg) = &w.package {
-                        let bold = Style::new().add_modifier(Modifier::BOLD);
-                        let stage = w.stage.as_deref().unwrap_or("");
-                        let elapsed = w.elapsed().map(format_duration_short).unwrap_or_default();
-                        if stage.is_empty() {
-                            Line::from(vec![
-                                Span::raw(format!("[{}] ", i)),
-                                Span::styled(pkg.clone(), bold),
-                                Span::raw(format!(" {} ", elapsed)),
-                            ])
-                        } else {
-                            Line::from(vec![
-                                Span::raw(format!("[{}] ", i)),
-                                Span::styled(pkg.clone(), bold),
-                                Span::raw(format!(" ({}) {} ", stage, elapsed)),
-                            ])
-                        }
-                    } else {
-                        Line::raw(format!("[{}] idle ", i))
-                    }
-                } else {
-                    Line::raw(format!("[{}] ", i))
-                }
+    /**
+     * Build a panel title that fits within `max_width`.
+     *
+     * The full title is `[id] pkgname (stage) elapsed`.  When it does not
+     * fit, parts are dropped in order of least importance: first the
+     * `(stage)`, then the elapsed time, and only then is the pkgname
+     * truncated with an ellipsis.  The `[id]` prefix is always kept.
+     */
+    fn format_group_title(&self, group: &PanelGroup, max_width: usize) -> Line<'static> {
+        let PanelGroup::Active(i) = group else {
+            return Line::raw(fit_title(group.format_title(), max_width));
+        };
+        let worker = self.state.workers.get(*i);
+        let Some(pkg) = worker.and_then(|w| w.package.clone()) else {
+            let label = if worker.is_some() {
+                format!("[{}] idle ", i)
+            } else {
+                format!("[{}] ", i)
+            };
+            return Line::raw(fit_title(label, max_width));
+        };
+        let stage = worker.and_then(|w| w.stage.clone()).unwrap_or_default();
+        let elapsed = worker
+            .and_then(|w| w.elapsed())
+            .map(format_duration_short)
+            .unwrap_or_default();
+
+        let prefix = format!("[{}] ", i);
+        let bold = Style::new().add_modifier(Modifier::BOLD);
+        let fixed_w = prefix.chars().count() + pkg.chars().count();
+
+        /*
+         * Trailing segments widest first; dropping the stage comes before
+         * dropping the elapsed time.
+         */
+        let full =
+            (!stage.is_empty() && !elapsed.is_empty()).then(|| format!(" ({stage}) {elapsed} "));
+        let no_stage = (!elapsed.is_empty()).then(|| format!(" {elapsed} "));
+        let stage_only = (!stage.is_empty() && elapsed.is_empty()).then(|| format!(" ({stage}) "));
+        for suffix in [full, no_stage, stage_only].into_iter().flatten() {
+            if fixed_w + suffix.chars().count() <= max_width {
+                return Line::from(vec![
+                    Span::raw(prefix),
+                    Span::styled(pkg, bold),
+                    Span::raw(suffix),
+                ]);
             }
-            PanelGroup::Idle(_) => Line::raw(group.format_title()),
         }
+        /* Just the pkgname, with a trailing space if there is room. */
+        if fixed_w < max_width {
+            return Line::from(vec![
+                Span::raw(prefix),
+                Span::styled(pkg, bold),
+                Span::raw(" ".to_string()),
+            ]);
+        }
+        /* Truncate the pkgname via fit_title, keeping the prefix. */
+        let avail = max_width.saturating_sub(prefix.chars().count());
+        Line::from(vec![
+            Span::raw(prefix),
+            Span::styled(fit_title(pkg, avail), bold),
+        ])
     }
 
     fn finish(&mut self) -> io::Result<()> {
