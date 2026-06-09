@@ -82,6 +82,7 @@ pub struct PackageInfo {
 pub struct PackageTable {
     rows: Vec<PackageInfo>,
     by_name: HashMap<PkgName, PackageId>,
+    deps: Vec<Vec<PackageId>>,
 }
 
 impl PackageTable {
@@ -97,6 +98,16 @@ impl PackageTable {
      */
     pub fn id(&self, pkgname: &PkgName) -> Option<PackageId> {
         self.by_name.get(pkgname).copied()
+    }
+
+    /**
+     * Forward dependencies of a package, in id order.
+     *
+     * These are the packages it must be built after, the same set used
+     * to install dependencies before a build.
+     */
+    pub fn deps(&self, id: PackageId) -> &[PackageId] {
+        &self.deps[id.0 as usize]
     }
 
     /**
@@ -209,12 +220,18 @@ impl Scheduler<PackageId> {
             });
         }
 
+        let mut table_deps: Vec<Vec<PackageId>> = vec![Vec::new(); rows.len()];
         for (pkg_id, dep_id) in crate::db::query_resolved_deps(db.conn())? {
             if let (Some(&pkg), Some(&dep)) = (by_db_id.get(&pkg_id), by_db_id.get(&dep_id))
                 && let Some(node) = packages.get_mut(&pkg)
             {
                 node.deps.insert(dep);
+                table_deps[pkg.0 as usize].push(dep);
             }
+        }
+        for deps in &mut table_deps {
+            deps.sort();
+            deps.dedup();
         }
 
         let stage_timings = match db.history_conn() {
@@ -256,7 +273,14 @@ impl Scheduler<PackageId> {
             .filter_map(|(pkgname, cpu)| by_name.get(&pkgname).map(|&id| (id, cpu)))
             .collect();
 
-        Ok((sched, PackageTable { rows, by_name }))
+        Ok((
+            sched,
+            PackageTable {
+                rows,
+                by_name,
+                deps: table_deps,
+            },
+        ))
     }
 }
 

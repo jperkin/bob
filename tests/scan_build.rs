@@ -2070,10 +2070,29 @@ fn test_load_resolved_packages_matches_scan() -> Result<()> {
         .map(|p| to_depset(p.pkgname().pkgname(), p.depends()))
         .collect();
 
+    /*
+     * The buildable set is reconstructed from the database by
+     * get_buildable_packages(); its dependencies are reconstructed into the
+     * scheduler's package table, which the build loop reads to install
+     * dependencies.  The set (map keys) and the dependencies (map values)
+     * must both match the scan, with no re-resolution of patterns.
+     */
     let loaded = db.get_buildable_packages()?;
+    let (_sched, table) = bob::Scheduler::from_db(&db)?;
     let actual: HashMap<String, Vec<String>> = loaded
-        .values()
-        .map(|p| to_depset(p.pkgname().pkgname(), p.depends()))
+        .keys()
+        .map(|name| {
+            let id = table
+                .id(name)
+                .expect("buildable package missing from table");
+            let mut deps: Vec<String> = table
+                .deps(id)
+                .iter()
+                .map(|d| table.info(*d).pkgname.pkgname().to_string())
+                .collect();
+            deps.sort();
+            (name.pkgname().to_string(), deps)
+        })
         .collect();
 
     assert_eq!(expected, actual);

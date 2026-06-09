@@ -959,15 +959,16 @@ impl Database {
     }
 
     /**
-     * The buildable packages, with their dependencies resolved, in build
-     * order: those that passed scanning with no skip, fail, or unresolved
-     * outcome.  See [`get_buildable_pkgpaths`](Self::get_buildable_pkgpaths)
-     * for the same set without dependency resolution.
+     * The buildable packages in build order: those that passed scanning
+     * with no skip, fail, or unresolved outcome.  Dependencies are not
+     * attached; the resolved dependency graph is owned by the scheduler's
+     * package table.  See
+     * [`get_buildable_pkgpaths`](Self::get_buildable_pkgpaths) for the same
+     * set as a plain `pkgname` -> `pkgpath` map.
      */
     pub fn get_buildable_packages(
         &self,
     ) -> Result<IndexMap<PkgName, crate::scan::ResolvedPackage>> {
-        let all_deps = self.get_all_resolved_deps()?;
         let mut stmt = self.conn.prepare(
             "SELECT pkgname, pkg_location, bootstrap_pkg, usergroup_phase, multi_version
              FROM buildable
@@ -981,7 +982,6 @@ impl Database {
             let multi_version = row
                 .get::<_, Option<String>>("multi_version")?
                 .map(|s| s.split_ascii_whitespace().map(str::to_string).collect());
-            let resolved_depends = all_deps.get(pkgname.as_str()).cloned();
             out.insert(
                 pkgname.clone().into(),
                 crate::scan::ResolvedPackage {
@@ -993,7 +993,6 @@ impl Database {
                             .map(BootstrapPkg::from),
                         usergroup_phase: row.get("usergroup_phase")?,
                         multi_version,
-                        resolved_depends,
                         ..Default::default()
                     },
                 },

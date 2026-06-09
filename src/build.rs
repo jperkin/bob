@@ -527,6 +527,7 @@ struct PkgBuilder<'a> {
     sandbox_id: Option<usize>,
     worker_id: usize,
     pkginfo: &'a ResolvedPackage,
+    deps: &'a [PkgName],
     logdir: PathBuf,
     envs: Vec<(String, String)>,
     make_jobs: PkgMakeJobs,
@@ -540,6 +541,7 @@ impl<'a> PkgBuilder<'a> {
         sandbox_id: Option<usize>,
         worker_id: usize,
         pkginfo: &'a ResolvedPackage,
+        deps: &'a [PkgName],
         envs: Vec<(String, String)>,
         make_jobs: PkgMakeJobs,
         wrkdir: Option<PathBuf>,
@@ -553,6 +555,7 @@ impl<'a> PkgBuilder<'a> {
             sandbox_id,
             worker_id,
             pkginfo,
+            deps,
             logdir,
             envs,
             make_jobs,
@@ -583,7 +586,7 @@ impl<'a> PkgBuilder<'a> {
         stats.stage_cpu_times.push((Stage::PreClean, cpu_time));
 
         // Install dependencies
-        if !self.pkginfo.depends().is_empty() {
+        if !self.deps.is_empty() {
             let stage_start = Instant::now();
             stats.stage = Some(Stage::Depends);
             callback.stage(Stage::Depends.into_str());
@@ -948,12 +951,7 @@ impl<'a> PkgBuilder<'a> {
 
     /// Install package dependencies.
     fn install_dependencies(&self) -> anyhow::Result<bool> {
-        let deps: Vec<String> = self
-            .pkginfo
-            .depends()
-            .iter()
-            .map(|d| d.to_string())
-            .collect();
+        let deps: Vec<String> = self.deps.iter().map(|d| d.to_string()).collect();
 
         let pkg_path = self.session.pkgsrc_env.packages.join("All");
         let logfile = self.logdir.join("depends.log");
@@ -1286,6 +1284,7 @@ struct PackageBuild {
     sandbox_id: Option<usize>,
     worker_id: usize,
     pkginfo: ResolvedPackage,
+    deps: Vec<PkgName>,
     make_jobs: PkgMakeJobs,
 }
 
@@ -1454,6 +1453,7 @@ impl PackageBuild {
             self.sandbox_id,
             self.worker_id,
             &self.pkginfo,
+            &self.deps,
             envs.clone(),
             self.make_jobs,
             wrkdir.clone(),
@@ -2283,6 +2283,12 @@ impl Build {
                                     .get(&pkgname)
                                     .expect("pkg not in scanpkgs")
                                     .clone();
+                                let deps: Vec<PkgName> = jobs
+                                    .table
+                                    .deps(sp.pkg)
+                                    .iter()
+                                    .map(|d| jobs.table.info(*d).pkgname.clone())
+                                    .collect();
 
                                 thread_packages.insert(c, sp.pkg);
                                 let hist_key =
@@ -2321,6 +2327,7 @@ impl Build {
                                         sandbox_id: sandbox_ids.as_ref().map(|ids| ids[c]),
                                         worker_id: c,
                                         pkginfo,
+                                        deps,
                                         make_jobs: sp.make_jobs,
                                     })));
                             }

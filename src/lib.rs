@@ -156,7 +156,9 @@ pub use makejobs::PkgMakeJobs;
 pub use pkgstate::{PackageCounts, PackageState};
 pub use sandbox::Sandbox;
 pub use scan::{ResolvedPackage, Scan, ScanResult, ScanSummary};
-pub use scheduler::{PackageNode, ScheduledPackage, Scheduler};
+pub use scheduler::{
+    PackageId, PackageInfo, PackageNode, PackageTable, ScheduledPackage, Scheduler,
+};
 pub use state::RunState;
 pub use summary::generate_pkg_summary;
 pub use tui::{print_elapsed, print_failed, print_status};
