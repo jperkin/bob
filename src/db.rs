@@ -1010,6 +1010,24 @@ impl Database {
     }
 
     /**
+     * Each selected package's transitive dependent count, keyed by
+     * pkgname.  The count is the number of packages broken if it fails.
+     */
+    pub fn dep_counts(&self) -> Result<HashMap<String, usize>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.pkgname, s.dep_count
+             FROM scan_index p
+             JOIN package_state s ON s.package_id = p.id
+             WHERE s.selected = 1",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+        })?;
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
+    }
+
+    /**
      * The buildable packages in build order: those that passed scanning
      * with no skip, fail, or unresolved outcome.  Dependencies are not
      * attached; the resolved dependency graph is owned by the scheduler's
