@@ -1738,6 +1738,7 @@ impl Scan {
         }
         db.store_resolved_selection(&result)?;
         db.store_resolved_deps(&result)?;
+        db.store_pbulk_weights()?;
         db.store_scan_skipped(&result)?;
         db.store_scan_failures(&result)?;
         crate::print_elapsed("Resolving dependencies", start.elapsed());

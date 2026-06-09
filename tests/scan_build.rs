@@ -2100,6 +2100,85 @@ fn test_load_resolved_packages_matches_scan() -> Result<()> {
     Ok(())
 }
 
+/**
+ * The PBULK_WEIGHT and dependent count persisted in package_state equal
+ * the values Scheduler::from_db computes for the same packages.
+ */
+#[test]
+fn test_persisted_pbulk_weights_match_scheduler() -> Result<()> {
+    let h = TestHarness::new()?;
+    h.run_scan()?;
+    let db = h.open_db()?;
+
+    let (sched, table) = bob::Scheduler::from_db(&db)?;
+    let expected: HashMap<String, (usize, usize)> = sched
+        .iter()
+        .map(|sp| {
+            (
+                table.info(sp.pkg).pkgname.pkgname().to_string(),
+                (sp.total_pbulk_weight, sp.dep_count),
+            )
+        })
+        .collect();
+
+    let actual: HashMap<String, (usize, usize)> = db
+        .get_all_package_status()?
+        .into_iter()
+        .map(|r| {
+            (
+                r.pkgname,
+                (r.total_pbulk_weight as usize, r.dep_count as usize),
+            )
+        })
+        .collect();
+
+    assert_eq!(expected, actual);
+
+    Ok(())
+}
+
+/**
+ * The order `bob status` prints packages in matches Scheduler::from_db's
+ * iteration order: weight descending, then dependent count, CPU, name.
+ */
+#[test]
+fn test_status_order_matches_scheduler() -> Result<()> {
+    let h = TestHarness::new()?;
+    h.run_scan()?;
+
+    let bob = env!("CARGO_BIN_EXE_bob");
+    let status = Command::new(bob)
+        .arg("-c")
+        .arg(h.config_path())
+        .arg("status")
+        .output()?;
+    assert!(
+        status.status.success(),
+        "bob status failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    let printed: Vec<String> = stdout
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_string)
+        .collect();
+
+    let db = h.open_db()?;
+    let (sched, table) = bob::Scheduler::from_db(&db)?;
+    let scheduled: Vec<String> = sched
+        .iter()
+        .map(|sp| table.info(sp.pkg).pkgname.pkgname().to_string())
+        .collect();
+
+    assert_eq!(scheduled, printed);
+
+    Ok(())
+}
+
 /// Verify that after building, build durations are recorded and non-zero
 /// for packages that actually built (not indirect-failed).
 #[test]

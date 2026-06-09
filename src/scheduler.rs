@@ -622,7 +622,7 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
  * unique transitive dependents, summing their PBULK_WEIGHTs.
  * Diamond dependencies are counted once (deduplicated).
  */
-fn compute_total_pbulk_weights<K>(
+pub(crate) fn compute_total_pbulk_weights<K>(
     incoming: &HashMap<K, HashSet<K>>,
     reverse_deps: &HashMap<K, HashSet<K>>,
     pbulk_weights: &HashMap<K, usize>,

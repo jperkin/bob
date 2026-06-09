@@ -22,12 +22,13 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use clap::Args;
 use clap::builder::styling::Style;
+use pkgsrc::PkgName;
 use regex::Regex;
 use strum::{EnumProperty, VariantArray};
 
 use bob::build::Stage;
 use bob::db::{Database, PackageStatusRow};
-use bob::{ColumnAlign, Config, PackageState, Scheduler, WrkObjKind};
+use bob::{ColumnAlign, Config, PackageState, WrkObjKind};
 
 use super::util::pkg_pattern;
 use super::{
@@ -356,10 +357,22 @@ fn failed_reason(stage: Option<i32>, logdir: &Path, pkgname: &str) -> String {
 }
 
 /**
- * Print package status with selectable columns in build order.
+ * Build-stage CPU time in milliseconds for a package, or `None` when no
+ * positive time is recorded.
+ */
+fn pkg_cpu_ms(cpu_times: &HashMap<(String, String), u64>, pkg: &PackageStatusRow) -> Option<u64> {
+    let pkgbase = PkgName::new(&pkg.pkgname).pkgbase().to_string();
+    cpu_times
+        .get(&(pkg.pkg_location.clone(), pkgbase))
+        .copied()
+        .filter(|&ms| ms > 0)
+}
+
+/**
+ * Print package status with selectable columns.
  *
- * Uses the scheduler's iterator to get packages in priority order,
- * then joins with status data from the database for display.
+ * Orders packages by weight, dependent count, CPU time, and name, joining
+ * status, history, and predicted-allocation data for display.
  */
 #[allow(clippy::too_many_arguments)]
 fn print_build_status(
@@ -412,16 +425,37 @@ fn print_build_status(
         .collect::<Result<Vec<_>>>()?;
 
     let status_rows = db.get_all_package_status()?;
-    let status_map: HashMap<&str, &PackageStatusRow> = status_rows
-        .iter()
-        .map(|r| (r.pkgname.as_str(), r))
-        .collect();
 
-    let (mut sched, table) = Scheduler::from_db(db)?;
-    if let Some(jobs) = config.jobs() {
-        sched.set_allocator(bob::makejobs::Allocator::new(config.build_threads(), jobs));
-        sched.allocate_all();
-    }
+    /*
+     * Build-stage CPU times for the cpu column and the order tiebreak
+     * after weight and dependent count.
+     */
+    let cpu_times = db.build_stage_cpu_times();
+
+    /*
+     * Allocator for predicting MAKE_JOBS of packages with no current-build
+     * entry, calibrated on the safe packages' build-stage CPU times.
+     * Built only when the make_jobs column is shown or sorted on and a
+     * jobs budget is configured.
+     */
+    let need_make_jobs = cols.contains(&"make_jobs")
+        || sort_specs
+            .iter()
+            .any(|(c, _)| matches!(c, StatusCol::MakeJobs));
+    let make_jobs_alloc = match (need_make_jobs, config.jobs()) {
+        (true, Some(jobs)) => {
+            let mut alloc = bob::makejobs::Allocator::new(config.build_threads(), jobs);
+            let mut cpu: Vec<usize> = status_rows
+                .iter()
+                .filter(|p| p.make_jobs_safe.unwrap_or(true))
+                .filter_map(|p| pkg_cpu_ms(&cpu_times, p).map(|c| c as usize))
+                .collect();
+            cpu.sort();
+            alloc.calibrate(&cpu);
+            Some(alloc)
+        }
+        _ => None,
+    };
 
     let need_history = cols
         .iter()
@@ -510,11 +544,7 @@ fn print_build_status(
     };
 
     let mut indexed_rows: Vec<(Vec<SortKey>, Vec<String>)> = Vec::new();
-    for sp in sched.iter() {
-        let Some(pkg) = status_map.get(table.info(sp.pkg).pkgname.pkgname()) else {
-            continue;
-        };
-
+    for pkg in &status_rows {
         if !pkg_patterns.is_empty()
             && !pkg_patterns
                 .iter()
@@ -537,10 +567,11 @@ fn print_build_status(
             .unwrap_or_default();
 
         let dash = || "-".to_string();
+        let cpu = pkg_cpu_ms(&cpu_times, pkg);
 
         let hist_key = (
             pkg.pkg_location.clone(),
-            table.info(sp.pkg).pkgname.pkgbase().to_string(),
+            PkgName::new(&pkg.pkgname).pkgbase().to_string(),
         );
         let hist = history.get(&hist_key);
         let actual_wrkobjdir = hist.and_then(|h| h.wrkobjdir.clone());
@@ -558,8 +589,13 @@ fn print_build_status(
         } else {
             None
         };
-        let resolved_make_jobs: Option<u32> =
-            actual_make_jobs.or_else(|| sp.make_jobs.allocated().map(|n| n as u32));
+        let resolved_make_jobs: Option<u32> = actual_make_jobs.or_else(|| {
+            let alloc = make_jobs_alloc.as_ref()?;
+            if !pkg.make_jobs_safe.unwrap_or(true) {
+                return None;
+            }
+            Some(alloc.assign(cpu.map(|c| c as usize)) as u32)
+        });
 
         let row: Vec<String> = cols
             .iter()
@@ -569,15 +605,17 @@ fn print_build_status(
                 "status" => kind.as_str().to_string(),
                 "reason" => reason.clone(),
                 "multi_version" => multi_version.clone(),
-                "deps" => sp.dep_count.to_string(),
-                "priority" => sp.total_pbulk_weight.to_string(),
-                "cpu" => {
-                    if raw {
-                        sp.cpu_time.to_string()
-                    } else {
-                        bob::fmt::duration_ms(sp.cpu_time)
-                    }
-                }
+                "deps" => pkg.dep_count.to_string(),
+                "priority" => pkg.total_pbulk_weight.to_string(),
+                "cpu" => cpu
+                    .map(|c| {
+                        if raw {
+                            c.to_string()
+                        } else {
+                            bob::fmt::duration_ms(c)
+                        }
+                    })
+                    .unwrap_or_else(dash),
                 "wrkobjdir" => resolved_wrkobjdir.clone().unwrap_or_else(dash),
                 "make_jobs" => resolved_make_jobs
                     .map(|n| n.to_string())
@@ -595,7 +633,7 @@ fn print_build_status(
             })
             .collect();
 
-        let sort_keys: Vec<SortKey> = sort_specs
+        let mut sort_keys: Vec<SortKey> = sort_specs
             .iter()
             .map(|(c, _)| match c {
                 StatusCol::Pkgname => SortKey::Str(pkg.pkgname.clone()),
@@ -603,18 +641,23 @@ fn print_build_status(
                 StatusCol::Status => SortKey::Idx(kind as usize),
                 StatusCol::Reason => SortKey::Str(reason.clone()),
                 StatusCol::MultiVersion => SortKey::Str(multi_version.clone()),
-                StatusCol::Deps => SortKey::Num(Some(sp.dep_count as u64)),
-                StatusCol::Priority => SortKey::Num(Some(sp.total_pbulk_weight as u64)),
-                StatusCol::Cpu => SortKey::Num(if sp.cpu_time > 0 {
-                    Some(sp.cpu_time)
-                } else {
-                    None
-                }),
+                StatusCol::Deps => SortKey::Num(Some(pkg.dep_count as u64)),
+                StatusCol::Priority => SortKey::Num(Some(pkg.total_pbulk_weight as u64)),
+                StatusCol::Cpu => SortKey::Num(cpu),
                 StatusCol::MakeJobs => SortKey::Num(resolved_make_jobs.map(u64::from)),
                 StatusCol::Wrkobjdir => SortKey::OptStr(resolved_wrkobjdir.clone()),
                 StatusCol::DiskUsage => SortKey::Num(actual_disk_usage),
             })
             .collect();
+
+        /*
+         * Default order, also the tiebreak under any user sort: weight
+         * DESC, dependent count DESC, CPU DESC, name ASC.
+         */
+        sort_keys.push(SortKey::Num(Some(pkg.total_pbulk_weight as u64)));
+        sort_keys.push(SortKey::Num(Some(pkg.dep_count as u64)));
+        sort_keys.push(SortKey::Num(cpu));
+        sort_keys.push(SortKey::Str(pkg.pkgname.clone()));
 
         indexed_rows.push((sort_keys, row));
     }
@@ -626,10 +669,13 @@ fn print_build_status(
         return Ok(());
     }
 
-    if !sort_specs.is_empty() {
-        let descs: Vec<bool> = sort_specs.iter().map(|(_, d)| *d).collect();
-        sort_indexed_rows(&mut indexed_rows, &descs);
-    }
+    /*
+     * Keep each appended key's natural direction: Num sorts descending
+     * (weight, dependent count, CPU) and Str ascending (name).
+     */
+    let mut descs: Vec<bool> = sort_specs.iter().map(|(_, d)| *d).collect();
+    descs.extend_from_slice(&[false, false, false, false]);
+    sort_indexed_rows(&mut indexed_rows, &descs);
 
     let rows: Vec<Vec<String>> = indexed_rows.into_iter().map(|(_, r)| r).collect();
 

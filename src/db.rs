@@ -133,7 +133,7 @@ fn history_schema() -> String {
 /**
  * Schema version for bob.db - update when schema changes.
  */
-const SCHEMA_VERSION: i32 = 20260604;
+const SCHEMA_VERSION: i32 = 20260609;
 
 /**
  * Schema version for history.db - update when history schema changes.
@@ -193,6 +193,9 @@ pub struct PackageStatusRow {
     pub build_stage: Option<i32>,
     pub scan_outcome: Option<i32>,
     pub scan_outcome_detail: Option<String>,
+    pub total_pbulk_weight: i64,
+    pub dep_count: i64,
+    pub make_jobs_safe: Option<bool>,
 }
 
 fn build_result_from_row(row: &rusqlite::Row) -> rusqlite::Result<Option<BuildResult>> {
@@ -426,7 +429,9 @@ impl Database {
                  package_id INTEGER PRIMARY KEY
                      REFERENCES scan_index(id) ON DELETE CASCADE,
                  selected INTEGER NOT NULL DEFAULT 0,
-                 build_reason TEXT
+                 build_reason TEXT,
+                 total_pbulk_weight INTEGER NOT NULL DEFAULT 0,
+                 dep_count INTEGER NOT NULL DEFAULT 0
              ) STRICT;
 
              CREATE TABLE resolved_depends (
@@ -665,9 +670,9 @@ impl Database {
      */
     pub fn get_all_package_status(&self) -> Result<Vec<PackageStatusRow>> {
         self.query_rows(
-            "SELECT p.id, p.pkgname, p.pkg_location,
+            "SELECT p.id, p.pkgname, p.pkg_location, p.make_jobs_safe,
                     p.pkg_skip_reason, p.pkg_fail_reason, p.multi_version,
-                    s.build_reason,
+                    s.build_reason, s.total_pbulk_weight, s.dep_count,
                     b.outcome AS build_outcome, b.stage AS build_stage,
                     o.outcome AS scan_outcome, o.detail AS scan_outcome_detail
              FROM scan_index p
@@ -901,6 +906,52 @@ impl Database {
                 continue;
             };
             stmt.execute([pkgname.pkgname()])?;
+        }
+        drop(stmt);
+        tx.commit()
+    }
+
+    /**
+     * Compute and store each selected package's total PBULK_WEIGHT.
+     *
+     * Walks the resolved dependency graph once to derive the total
+     * PBULK_WEIGHT and transitive dependent count per package and stores
+     * them in `package_state` for read commands to order by.  Run after
+     * [`store_resolved_selection`](Self::store_resolved_selection) and
+     * [`store_resolved_deps`](Self::store_resolved_deps).
+     */
+    pub fn store_pbulk_weights(&self) -> Result<()> {
+        let selected = query_selected_packages(&self.conn)?;
+        let mut incoming: HashMap<i64, HashSet<i64>> =
+            selected.iter().map(|p| (p.id, HashSet::new())).collect();
+        let mut reverse_deps: HashMap<i64, HashSet<i64>> =
+            selected.iter().map(|p| (p.id, HashSet::new())).collect();
+        let pbulk_weights: HashMap<i64, usize> =
+            selected.iter().map(|p| (p.id, p.pbulk_weight)).collect();
+
+        for (pkg, dep) in query_resolved_deps(&self.conn)? {
+            if let (Some(fwd), true) = (incoming.get_mut(&pkg), reverse_deps.contains_key(&dep)) {
+                fwd.insert(dep);
+            }
+            if let Some(rev) = reverse_deps.get_mut(&dep)
+                && incoming.contains_key(&pkg)
+            {
+                rev.insert(pkg);
+            }
+        }
+
+        let (total_pbulk_weights, dep_counts) =
+            crate::scheduler::compute_total_pbulk_weights(&incoming, &reverse_deps, &pbulk_weights);
+
+        let tx = self.transaction()?;
+        let mut stmt = self.conn.prepare(
+            "UPDATE package_state SET total_pbulk_weight = ?2, dep_count = ?3 \
+             WHERE package_id = ?1",
+        )?;
+        for id in incoming.keys() {
+            let weight = total_pbulk_weights.get(id).copied().unwrap_or(0);
+            let deps = dep_counts.get(id).copied().unwrap_or(0);
+            stmt.execute(params![id, weight as i64, deps as i64])?;
         }
         drop(stmt);
         tx.commit()
@@ -1831,6 +1882,26 @@ impl Database {
         }
 
         Ok(results)
+    }
+
+    /**
+     * Latest successful build-stage CPU time per package in milliseconds,
+     * keyed by [`PkgKey`].  Empty when history is unavailable.
+     */
+    pub fn build_stage_cpu_times(&self) -> HashMap<PkgKey, u64> {
+        match self.history_conn() {
+            Ok(conn) => query_build_stage_timings(conn)
+                .into_iter()
+                .map(|(key, timing)| (key, timing.cpu_ms))
+                .collect(),
+            Err(e) => {
+                warn!(
+                    error = format!("{e:#}"),
+                    "build_stage_cpu_times: failed to open history db"
+                );
+                HashMap::new()
+            }
+        }
     }
 
     /**
