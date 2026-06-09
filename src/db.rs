@@ -2514,8 +2514,7 @@ fn migrate_history_20260513_to_20260515(conn: &Connection) -> Result<()> {
  * Migrate history.db from v20260515 to v20260609.
  *
  * Adds `idx_history_outcome_pkg`, a covering index for the
- * latest-successful-build window query so it no longer seeks the table
- * once per row.
+ * latest-successful-build window query in `query_build_stage_timings`.
  */
 fn migrate_history_20260515_to_20260609(conn: &Connection) -> Result<()> {
     let tx = conn.unchecked_transaction()?;

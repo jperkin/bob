@@ -56,9 +56,10 @@ use anyhow::{Context, bail};
 use crossterm::event;
 use glob::Pattern;
 use indexmap::IndexMap;
-use pkgsrc::archive::BinaryPackage;
+use pkgsrc::archive::MetadataReader;
 use pkgsrc::digest::Digest;
-use pkgsrc::metadata::FileRead;
+use pkgsrc::metadata::Entry;
+use pkgsrc::plist::{PlistEntry, parse};
 use pkgsrc::{PkgName, PkgPath};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -68,7 +69,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc, mpsc::Sender};
 use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tracing::{debug, error, info, info_span, trace, warn};
 
 /// How long a worker thread sleeps when told no work is available.
@@ -253,18 +254,39 @@ pub fn pkg_up_to_date(
         }
     };
 
-    let pkg = BinaryPackage::open(&pkgfile)
+    /*
+     * Stream the leading metadata members, taking the build version and
+     * the recorded build dependencies.
+     */
+    let mut build_version = String::new();
+    let mut build_depends: Vec<String> = Vec::new();
+    let mut reader = MetadataReader::open(&pkgfile)
         .with_context(|| format!("Failed to open package {}", pkgfile.display()))?;
+    for member in reader.members()? {
+        let member = member?;
+        match member.entry {
+            Entry::BuildVersion => build_version = member.content,
+            Entry::Contents => {
+                for entry in parse(member.content.as_bytes()) {
+                    if let PlistEntry::BldDep(dep) = entry? {
+                        build_depends.push(dep.into_owned());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let dep_change = dependency_change(&build_depends, depends, packages_dir, pkgfile_mtime);
 
-    let build_version = pkg
-        .build_version()
-        .context("Failed to read BUILD_VERSION")?
-        .unwrap_or_default();
     debug!(
         lines = build_version.lines().count(),
         "Checking BUILD_VERSION"
     );
 
+    /*
+     * A changed or removed build file takes precedence over a dependency
+     * change, so check the recorded source files before returning it.
+     */
     for line in build_version.lines() {
         let Some((file, file_id)) = line.split_once(':') else {
             continue;
@@ -312,9 +334,26 @@ pub fn pkg_up_to_date(
         }
     }
 
-    let recorded_deps: HashSet<&str> = pkg
-        .plist()
-        .build_depends()
+    if dep_change.is_none() {
+        debug!(pkgname, "Package is up-to-date");
+    }
+    Ok(dep_change)
+}
+
+/**
+ * Whether a package's recorded build dependencies have changed against
+ * the expected `depends`, or any dependency package is newer than this
+ * one.  Returns the matching [`BuildReason`], or `None` when unchanged.
+ */
+fn dependency_change(
+    recorded_deps: &[String],
+    depends: &[&str],
+    packages_dir: &Path,
+    pkgfile_mtime: SystemTime,
+) -> Option<BuildReason> {
+    let recorded: HashSet<&str> = recorded_deps
+        .iter()
+        .map(String::as_str)
         .filter(|l| !l.is_empty())
         .collect();
     let expected_deps: HashSet<&str> = depends.iter().copied().collect();
@@ -325,7 +364,7 @@ pub fn pkg_up_to_date(
      * ALL_DEPENDS but weren't recorded in the binary package (e.g.
      * indirect buildlink3 dependencies) are not grounds for a rebuild.
      */
-    let removed_set: HashSet<&str> = recorded_deps.difference(&expected_deps).copied().collect();
+    let removed_set: HashSet<&str> = recorded.difference(&expected_deps).copied().collect();
 
     if !removed_set.is_empty() {
         let expected_by_base: HashMap<String, (&str, String)> = expected_deps
@@ -376,26 +415,25 @@ pub fn pkg_up_to_date(
                 removed,
             }
         };
-        return Ok(Some(reason));
+        return Some(reason);
     }
 
-    for dep in &recorded_deps {
+    for &dep in &recorded {
         let dep_pkg = packages_dir.join(format!("{}.tgz", dep));
         let dep_mtime = match dep_pkg.metadata().and_then(|m| m.modified()) {
             Ok(t) => t,
             Err(_) => {
                 debug!(dep, "Dependency package missing");
-                return Ok(Some(BuildReason::DependencyMissing((*dep).to_string())));
+                return Some(BuildReason::DependencyMissing(dep.to_string()));
             }
         };
         if dep_mtime > pkgfile_mtime {
             debug!(dep, "Dependency is newer");
-            return Ok(Some(BuildReason::DependencyRefresh((*dep).to_string())));
+            return Some(BuildReason::DependencyRefresh(dep.to_string()));
         }
     }
 
-    debug!(pkgname, "Package is up-to-date");
-    Ok(None)
+    None
 }
 
 /**
