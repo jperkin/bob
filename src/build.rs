@@ -49,11 +49,10 @@ use crate::makejobs::PkgMakeJobs;
 use crate::sandbox::{CommandSetsid, SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
 use crate::scan::ResolvedPackage;
 use crate::scheduler::{PackageId, PackageTable, Scheduler};
-use crate::tui::{OutputBuffers, Progress, REFRESH_INTERVAL};
+use crate::tui::{OutputBuffers, Progress};
 use crate::{Config, RunState, Sandbox};
 use crate::{PackageCounts, PackageState};
 use anyhow::{Context, bail};
-use crossterm::event;
 use glob::Pattern;
 use indexmap::IndexMap;
 use pkgsrc::archive::MetadataReader;
@@ -2099,27 +2098,9 @@ impl Build {
         let progress_refresh = Arc::clone(&progress);
         let stop_flag = Arc::clone(&stop_refresh);
         let state_for_refresh = state_flag.clone();
-        let (is_plain, output_buffers) = match progress.lock() {
-            Ok(p) => (p.is_plain(), p.output_buffers()),
-            Err(_) => (false, None),
-        };
+        let output_buffers = progress.lock().ok().and_then(|p| p.output_buffers());
         let refresh_thread = crate::spawn_named("build-refresh", move || {
-            while !stop_flag.load(Ordering::Relaxed) && !state_for_refresh.is_shutdown() {
-                if is_plain {
-                    std::thread::sleep(REFRESH_INTERVAL);
-                    if let Ok(mut p) = progress_refresh.lock() {
-                        let _ = p.render();
-                    }
-                } else {
-                    let has_event = event::poll(REFRESH_INTERVAL).unwrap_or(false);
-                    if let Ok(mut p) = progress_refresh.lock() {
-                        if has_event {
-                            let _ = p.handle_event();
-                        }
-                        let _ = p.render();
-                    }
-                }
-            }
+            crate::tui::refresh_loop(progress_refresh, &stop_flag, &state_for_refresh)
         });
 
         /*

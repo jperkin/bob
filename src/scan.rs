@@ -41,11 +41,10 @@
 
 use crate::config::{Pkgsrc, PkgsrcEnv};
 use crate::sandbox::{SandboxScope, wait_output_with_shutdown, wait_parse_with_shutdown};
-use crate::tui::{Progress, REFRESH_INTERVAL, format_duration};
+use crate::tui::{Progress, format_duration};
 use crate::{Config, Interrupted, RunState, Sandbox};
 use crate::{PackageCounts, PackageState};
 use anyhow::{Context, Result, bail};
-use crossterm::event;
 use indexmap::IndexMap;
 use petgraph::algo::tarjan_scc;
 use petgraph::graph::DiGraph;
@@ -691,24 +690,8 @@ impl Scan {
         let progress_refresh = Arc::clone(&progress);
         let stop_flag = Arc::clone(&stop_refresh);
         let shutdown_for_refresh = shutdown_flag.clone();
-        let is_plain = progress.lock().map(|p| p.is_plain()).unwrap_or(false);
         let refresh_thread = crate::spawn_named("scan-refresh", move || {
-            while !stop_flag.load(Ordering::Relaxed) && !shutdown_for_refresh.is_shutdown() {
-                if is_plain {
-                    std::thread::sleep(REFRESH_INTERVAL);
-                    if let Ok(mut p) = progress_refresh.lock() {
-                        let _ = p.render();
-                    }
-                } else {
-                    let has_event = event::poll(REFRESH_INTERVAL).unwrap_or(false);
-                    if let Ok(mut p) = progress_refresh.lock() {
-                        if has_event {
-                            let _ = p.handle_event();
-                        }
-                        let _ = p.render();
-                    }
-                }
-            }
+            crate::tui::refresh_loop(progress_refresh, &stop_flag, &shutdown_for_refresh)
         });
 
         let mut db_error: Option<anyhow::Error> = None;

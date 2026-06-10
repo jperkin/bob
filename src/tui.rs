@@ -84,6 +84,71 @@ pub fn print_failed(msg: &str, elapsed: Duration) {
 /// Used for both event polling timeout and render throttling.
 pub const REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 
+/**
+ * The progress display terminal events are delivered to, set for the
+ * lifetime of each TUI [`refresh_loop`].  Events arriving with no
+ * active display are discarded.
+ */
+static ACTIVE_PROGRESS: Mutex<Option<Arc<Mutex<Progress>>>> = Mutex::new(None);
+
+/**
+ * Spawns the terminal input thread on first use.
+ */
+static INPUT_THREAD: std::sync::Once = std::sync::Once::new();
+
+/**
+ * Block reading terminal events for the lifetime of the process,
+ * handling each against the active progress display and rendering the
+ * result.  Exits if the terminal cannot be read.
+ */
+fn input_loop() {
+    loop {
+        let Ok(event) = event::read() else {
+            return;
+        };
+        let active = ACTIVE_PROGRESS.lock().ok().and_then(|a| a.clone());
+        if let Some(progress) = active
+            && let Ok(mut p) = progress.lock()
+        {
+            let _ = p.handle_event(event);
+            let _ = p.render();
+        }
+    }
+}
+
+/**
+ * Run the display refresh loop until `stop` is set or `state` shuts
+ * down, rendering once per [`REFRESH_INTERVAL`].  In TUI mode the
+ * display is registered with the input thread, which handles terminal
+ * events as they arrive.
+ */
+pub fn refresh_loop(
+    progress: Arc<Mutex<Progress>>,
+    stop: &std::sync::atomic::AtomicBool,
+    state: &crate::RunState,
+) {
+    use std::sync::atomic::Ordering;
+
+    let is_plain = progress.lock().map(|p| p.is_plain()).unwrap_or(false);
+    if !is_plain {
+        if let Ok(mut active) = ACTIVE_PROGRESS.lock() {
+            *active = Some(Arc::clone(&progress));
+        }
+        INPUT_THREAD.call_once(|| {
+            crate::spawn_named("input", input_loop);
+        });
+    }
+    while !stop.load(Ordering::Relaxed) && !state.is_shutdown() {
+        std::thread::sleep(REFRESH_INTERVAL);
+        if let Ok(mut p) = progress.lock() {
+            let _ = p.render();
+        }
+    }
+    if !is_plain && let Ok(mut active) = ACTIVE_PROGRESS.lock() {
+        *active = None;
+    }
+}
+
 /// Fixed-width column for status verbs and progress titles,
 /// matching cargo's 12-character status column.
 const STATUS_WIDTH: usize = 12;
@@ -853,10 +918,10 @@ impl Progress {
         }
     }
 
-    pub fn handle_event(&mut self) -> io::Result<bool> {
+    pub fn handle_event(&mut self, event: Event) -> io::Result<bool> {
         match self {
             Self::Plain(_) => Ok(false),
-            Self::Tui(p) => p.handle_event(),
+            Self::Tui(p) => p.handle_event(event),
         }
     }
 
@@ -1070,12 +1135,12 @@ impl MultiProgress {
         Ok(())
     }
 
-    fn handle_event(&mut self) -> io::Result<bool> {
+    fn handle_event(&mut self, event: Event) -> io::Result<bool> {
         if self.state.suppressed {
             return Ok(false);
         }
 
-        if let Event::Key(key) = event::read()? {
+        if let Event::Key(key) = event {
             // Toggle view mode on 'v' key
             if key.code == KeyCode::Char('v') && key.modifiers.is_empty() {
                 self.toggle_view_mode()?;
