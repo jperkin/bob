@@ -246,11 +246,6 @@ impl ScanSummary {
         self.packages.iter().filter(|p| !p.is_buildable())
     }
 
-    /// Count of buildable packages.
-    pub fn count_buildable(&self) -> usize {
-        self.packages.iter().filter(|p| p.is_buildable()).count()
-    }
-
     /// Scan failures and unresolved dependency errors.
     pub fn errors(&self) -> impl Iterator<Item = &str> {
         self.packages.iter().filter_map(|p| match p {
@@ -1118,7 +1113,7 @@ impl Scan {
          */
         let mut available_pkgnames: HashSet<PkgName> = HashSet::new();
         let mut packages: IndexMap<PkgName, ScanIndex> = IndexMap::new();
-        db.with_scan_data(|pull| {
+        db.with_scan_data(crate::db::ScanIndexFields::Resolve, |pull| {
             while let Some(pkg) = pull()? {
                 if !packages.contains_key(&pkg.pkgname) {
                     available_pkgnames.insert(pkg.pkgname.clone());
@@ -1715,8 +1710,9 @@ impl Scan {
     ) -> Result<ScanSummary> {
         crate::print_status("Resolving dependencies");
         let start = std::time::Instant::now();
-        let mut result =
-            db.with_scan_data(|pull| self.resolve(std::iter::from_fn(|| pull().transpose())))?;
+        let mut result = db.with_scan_data(crate::db::ScanIndexFields::Resolve, |pull| {
+            self.resolve(std::iter::from_fn(|| pull().transpose()))
+        })?;
         /*
          * Release ALL_DEPENDS now that resolution is done; the DB
          * writers below only need the resolved names, and keeping

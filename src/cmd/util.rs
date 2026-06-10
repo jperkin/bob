@@ -24,7 +24,7 @@ use regex::Regex;
 
 use bob::PackageState;
 use bob::config::Config;
-use bob::db::Database;
+use bob::db::{Database, ScanIndexFields};
 use bob::scan::Scan;
 use bob::try_println;
 
@@ -172,8 +172,9 @@ pub fn print_presolve(config: &Config, output: Option<&PathBuf>, sort: bool) -> 
     let mut scan = Scan::new(config, None);
     scan.init_from_db(&db)?;
 
-    let mut result =
-        db.with_scan_data(|pull| scan.resolve(std::iter::from_fn(|| pull().transpose())))?;
+    let mut result = db.with_scan_data(ScanIndexFields::Full, |pull| {
+        scan.resolve(std::iter::from_fn(|| pull().transpose()))
+    })?;
 
     let errors: Vec<_> = result.errors().collect();
     if !errors.is_empty() {

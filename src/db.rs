@@ -220,6 +220,22 @@ fn build_result_from_row(row: &rusqlite::Row) -> rusqlite::Result<Option<BuildRe
 }
 
 /**
+ * Column sets for building a [`ScanIndex`] from a `scan_index` row.
+ * Each variant names the columns it populates; the rest are left at
+ * their defaults and stay in the database.
+ */
+#[derive(Clone, Copy)]
+pub enum ScanIndexFields {
+    /// Every column.
+    Full,
+    /**
+     * The columns dependency resolution reads: pkgname, pkg_location,
+     * all_depends, pkg_skip_reason, and pkg_fail_reason.
+     */
+    Resolve,
+}
+
+/**
  * SQLite database for scan, build, and history data.
  *
  * The history connection is opened lazily on first use, so commands
@@ -684,8 +700,15 @@ impl Database {
         )
     }
 
-    fn scan_index_from_row(row: &rusqlite::Row) -> rusqlite::Result<ScanIndex> {
-        Ok(ScanIndex {
+    /**
+     * Build a [`ScanIndex`] from a `scan_index` row, populating the
+     * columns selected by `fields`.
+     */
+    fn scan_index_from_row(
+        row: &rusqlite::Row,
+        fields: ScanIndexFields,
+    ) -> rusqlite::Result<ScanIndex> {
+        let mut index = ScanIndex {
             pkgname: row.get::<_, String>("pkgname")?.into(),
             pkg_location: row
                 .get::<_, Option<String>>("pkg_location")?
@@ -695,27 +718,32 @@ impl Database {
                 .map(|s| AllDepends::from(s.as_str())),
             pkg_skip_reason: row.get("pkg_skip_reason")?,
             pkg_fail_reason: row.get("pkg_fail_reason")?,
-            no_bin_on_ftp: row.get("no_bin_on_ftp")?,
-            restricted: row.get("restricted")?,
-            categories: row.get("categories")?,
-            maintainer: row.get("maintainer")?,
-            use_destdir: row.get("use_destdir")?,
-            bootstrap_pkg: row
-                .get::<_, Option<bool>>("bootstrap_pkg")?
-                .map(BootstrapPkg::from),
-            usergroup_phase: row.get("usergroup_phase")?,
-            scan_depends: row
-                .get::<_, Option<String>>("scan_depends")?
-                .map(|s| ScanDepends::from(s.as_str())),
-            make_jobs_safe: row
-                .get::<_, Option<bool>>("make_jobs_safe")?
-                .map(MakeJobsSafe::from),
-            pbulk_weight: row.get("pbulk_weight")?,
-            multi_version: row
-                .get::<_, Option<String>>("multi_version")?
-                .map(|s| s.split_ascii_whitespace().map(str::to_string).collect()),
-            resolved_depends: None,
-        })
+            ..Default::default()
+        };
+        match fields {
+            ScanIndexFields::Resolve => return Ok(index),
+            ScanIndexFields::Full => {}
+        }
+        index.no_bin_on_ftp = row.get("no_bin_on_ftp")?;
+        index.restricted = row.get("restricted")?;
+        index.categories = row.get("categories")?;
+        index.maintainer = row.get("maintainer")?;
+        index.use_destdir = row.get("use_destdir")?;
+        index.bootstrap_pkg = row
+            .get::<_, Option<bool>>("bootstrap_pkg")?
+            .map(BootstrapPkg::from);
+        index.usergroup_phase = row.get("usergroup_phase")?;
+        index.scan_depends = row
+            .get::<_, Option<String>>("scan_depends")?
+            .map(|s| ScanDepends::from(s.as_str()));
+        index.make_jobs_safe = row
+            .get::<_, Option<bool>>("make_jobs_safe")?
+            .map(MakeJobsSafe::from);
+        index.pbulk_weight = row.get("pbulk_weight")?;
+        index.multi_version = row
+            .get::<_, Option<String>>("multi_version")?
+            .map(|s| s.split_ascii_whitespace().map(str::to_string).collect());
+        Ok(index)
     }
 
     /**
@@ -729,14 +757,15 @@ impl Database {
         let row = rows
             .next()?
             .ok_or_else(|| anyhow::anyhow!("Package {package_id} not found"))?;
-        Self::scan_index_from_row(row).map_err(Into::into)
+        Self::scan_index_from_row(row, ScanIndexFields::Full).map_err(Into::into)
     }
 
     /**
      * Stream ScanIndex rows to a caller-supplied scope without buffering
-     * the full result set.
+     * the full result set.  `fields` selects the columns populated on
+     * each row.
      */
-    pub fn with_scan_data<F, R>(&self, f: F) -> Result<R>
+    pub fn with_scan_data<F, R>(&self, fields: ScanIndexFields, f: F) -> Result<R>
     where
         F: FnOnce(&mut dyn FnMut() -> Result<Option<ScanIndex>>) -> Result<R>,
     {
@@ -747,7 +776,7 @@ impl Database {
                 return Ok(None);
             };
             let id: i64 = row.get("id")?;
-            let index = Self::scan_index_from_row(row)
+            let index = Self::scan_index_from_row(row, fields)
                 .with_context(|| format!("Failed to read package {id}"))?;
             Ok(Some(index))
         };
@@ -770,11 +799,10 @@ impl Database {
     /**
      * Store why a package needs to be built.
      */
-    pub fn store_build_reason(&self, pkgname: &str, reason: &str) -> Result<()> {
+    pub fn store_build_reason(&self, package_id: i64, reason: &str) -> Result<()> {
         self.conn.execute(
-            "UPDATE package_state SET build_reason = ?1
-             WHERE package_id = (SELECT id FROM scan_index WHERE pkgname = ?2)",
-            params![reason, pkgname],
+            "UPDATE package_state SET build_reason = ?1 WHERE package_id = ?2",
+            params![reason, package_id],
         )?;
         Ok(())
     }
@@ -1089,6 +1117,34 @@ impl Database {
         Ok(out)
     }
 
+    /**
+     * Buildable packages as `(id, pkgname, pkg_location)` rows.
+     */
+    pub fn get_buildable_rows(&self) -> Result<Vec<(i64, String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, pkgname, pkg_location FROM buildable ORDER BY id")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /**
+     * Resolved dependency edges between buildable packages as
+     * `(package_id, depends_on_id)` pairs.
+     */
+    pub fn get_buildable_depends(&self) -> Result<Vec<(i64, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT rd.package_id, rd.depends_on_id
+             FROM resolved_depends rd
+             JOIN buildable p ON p.id = rd.package_id
+             JOIN buildable d ON d.id = rd.depends_on_id",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     // ========================================================================
     // BUILD QUERIES
     // ========================================================================
@@ -1121,14 +1177,11 @@ impl Database {
     /**
      * Check if a package has a successful build result.
      */
-    pub fn is_successful(&self, pkgname: &str) -> Result<bool> {
-        let success = PackageState::Success.id();
+    pub fn is_successful(&self, package_id: i64) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS(
-                 SELECT 1 FROM builds b
-                 JOIN scan_index p ON b.package_id = p.id
-                 WHERE p.pkgname = ?1 AND b.outcome = ?2)",
-            params![pkgname, success],
+                 SELECT 1 FROM builds WHERE package_id = ?1 AND outcome = ?2)",
+            params![package_id, PackageState::Success.id()],
             |row| row.get::<_, i64>(0),
         )? != 0)
     }
@@ -1683,7 +1736,7 @@ impl Database {
         while let Some(row) = rows.next()? {
             let pkgname: String = row.get("pkgname")?;
             let outcome: Option<i32> = row.get("outcome")?;
-            let mut index = Self::scan_index_from_row(row)?;
+            let mut index = Self::scan_index_from_row(row, ScanIndexFields::Full)?;
             if let Some(deps) = resolved.get(pkgname.as_str()) {
                 index.resolved_depends = Some(deps.clone());
             }

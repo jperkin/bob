@@ -21,7 +21,7 @@ use bob::PackageState;
 use bob::RunState;
 use bob::build::{self, Build};
 use bob::config::{Config, Pkgsrc};
-use bob::db::Database;
+use bob::db::{Database, ScanIndexFields};
 use bob::logging;
 use bob::sandbox::{Sandbox, SandboxScope};
 use bob::scan::Scan;
@@ -481,7 +481,6 @@ fn run() -> Result<()> {
                     &runner.config,
                     &runner.pkgsrc,
                     &runner.db,
-                    &result,
                 )?)
             };
             result.print_counts(up_to_date);
@@ -511,15 +510,14 @@ fn run() -> Result<()> {
             let sandbox = Sandbox::new(&runner.config, Some(&runner.pkgsrc));
             let mut scope = SandboxScope::new(sandbox, runner.state.clone());
             runner.run_scan_phase(&mut scan, &mut scope)?;
-            let scan_result = scan.resolve_with_report(&runner.db, runner.config.strict_scan())?;
+            scan.resolve_with_report(&runner.db, runner.config.strict_scan())?;
             let prior = runner.db.get_successful_packages().unwrap_or_default();
-            cmd::build::check_up_to_date(&runner.config, &runner.pkgsrc, &runner.db, &scan_result)?;
+            cmd::build::check_up_to_date(&runner.config, &runner.pkgsrc, &runner.db)?;
             let summary = cmd::build::run_build_with(
                 &runner.config,
                 &runner.pkgsrc,
                 &runner.db,
                 &runner.state,
-                scan_result,
                 scope,
             )?;
             runner.update_pkg_summary(&prior, &summary);
@@ -636,8 +634,9 @@ fn run() -> Result<()> {
             let mut scan = Scan::new(&config, None);
             scan.init_from_db(&db)?;
 
-            let result =
-                db.with_scan_data(|pull| scan.resolve(std::iter::from_fn(|| pull().transpose())))?;
+            let result = db.with_scan_data(ScanIndexFields::Resolve, |pull| {
+                scan.resolve(std::iter::from_fn(|| pull().transpose()))
+            })?;
 
             // Build DAG output
             let mut edges: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
