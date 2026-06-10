@@ -935,7 +935,7 @@ impl<'a> PkgBuilder<'a> {
          * TUI mode each line is also stored in the worker's shared ring
          * buffer for the multipanel view to render.
          */
-        let tee_handle = std::thread::spawn(move || {
+        let tee_handle = crate::spawn_named("tee", move || {
             let mut reader = BufReader::new(stdout);
             let mut buf = Vec::new();
 
@@ -2103,7 +2103,7 @@ impl Build {
             Ok(p) => (p.is_plain(), p.output_buffers()),
             Err(_) => (false, None),
         };
-        let refresh_thread = std::thread::spawn(move || {
+        let refresh_thread = crate::spawn_named("build-refresh", move || {
             while !stop_flag.load(Ordering::Relaxed) && !state_for_refresh.is_shutdown() {
                 if is_plain {
                     std::thread::sleep(REFRESH_INTERVAL);
@@ -2140,7 +2140,7 @@ impl Build {
             clients.insert(i, client_tx);
             let manager_tx = manager_tx.clone();
             let state_for_worker = state_flag.clone();
-            let thread = std::thread::spawn(move || {
+            let thread = crate::spawn_named(format!("worker-{i}"), move || {
                 loop {
                     if state_for_worker.is_shutdown() {
                         break;
@@ -2272,7 +2272,7 @@ impl Build {
         let (results_tx, results_rx) = mpsc::channel::<Vec<BuildResult>>();
         // Channel for saving results to database as builds complete
         let (completed_tx, completed_rx) = mpsc::channel::<BuildResult>();
-        let manager = std::thread::spawn(move || {
+        let manager = crate::spawn_named("manager", move || {
             let sandbox_ids = sandbox_ids;
             let mut clients = clients.clone();
             let mut jobs = jobs;

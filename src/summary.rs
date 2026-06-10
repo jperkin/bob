@@ -87,6 +87,7 @@ pub fn generate_pkg_summary(db: &Database, threads: usize, summary: &Summary) ->
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
+        .thread_name(|i| format!("summary-{i}"))
         .build()
         .context("Failed to build thread pool for pkg_summary generation")?;
 
@@ -156,7 +157,11 @@ fn write_pkg_summary(pkgsrc_env: &PkgsrcEnv, entries: &[String], formats: &[Stri
                 "zst" => write_pkg_summary_zst,
                 other => return Err(anyhow!("unsupported summary.compression value: {}", other)),
             };
-            handles.push((fmt.as_str(), s.spawn(move || writer(dir, entries))));
+            let handle = std::thread::Builder::new()
+                .name(format!("summary-{fmt}"))
+                .spawn_scoped(s, move || writer(dir, entries))
+                .expect("failed to spawn thread");
+            handles.push((fmt.as_str(), handle));
         }
         for (fmt, h) in handles {
             h.join()

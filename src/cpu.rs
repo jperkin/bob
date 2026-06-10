@@ -201,7 +201,7 @@ pub fn start_cpu_sampler() -> Option<CpuSamplerHandle> {
     let samples: Arc<Mutex<Vec<CpuSample>>> = Arc::new(Mutex::new(Vec::new()));
     let samples_ref = Arc::clone(&samples);
 
-    let thread = std::thread::spawn(move || {
+    let thread = crate::spawn_named("cpu-sampler", move || {
         debug!("CPU sampler started");
         let mut load = CpuLoad::new();
         while !stop_flag.load(Ordering::Relaxed) {

@@ -66,6 +66,7 @@ pub fn check_up_to_date(config: &Config, pkgsrc: &Pkgsrc, db: &Database) -> Resu
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(config.scan_threads())
+        .thread_name(|i| format!("up-to-date-{i}"))
         .build()
         .context("Failed to build thread pool for up-to-date check")?;
 

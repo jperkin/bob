@@ -241,7 +241,7 @@ pub fn wait_output_with_shutdown(child: Child, state: &RunState) -> Result<Outpu
     let pid = child.id();
     let (tx, rx) = std::sync::mpsc::channel();
 
-    std::thread::spawn(move || {
+    crate::spawn_named("wait-output", move || {
         let _ = tx.send(child.wait_with_output().map_err(Into::into));
     });
 
@@ -268,11 +268,11 @@ where
     let pid = child.id();
     let (tx, rx) = std::sync::mpsc::channel();
 
-    std::thread::spawn(move || {
+    crate::spawn_named("wait-parse", move || {
         let run = || {
             let stdout = child.stdout.take().context("child stdout not piped")?;
             let stderr = child.stderr.take().context("child stderr not piped")?;
-            let drain = std::thread::spawn(move || {
+            let drain = crate::spawn_named("stderr-drain", move || {
                 let mut out = String::new();
                 let mut stderr = stderr;
                 let _ = stderr.read_to_string(&mut out);

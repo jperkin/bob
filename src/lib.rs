@@ -73,6 +73,23 @@ pub fn try_println(s: &str) -> bool {
 }
 
 /**
+ * Spawn a thread with the given name.  Thread names appear in
+ * debuggers and per-thread process listings such as prstat, allowing
+ * activity to be attributed.  Panics if the thread cannot be spawned,
+ * matching `std::thread::spawn`.
+ */
+pub fn spawn_named<T, F>(name: impl Into<String>, f: F) -> std::thread::JoinHandle<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(f)
+        .expect("failed to spawn thread")
+}
+
+/**
  * Return the current time as seconds since the Unix epoch.
  */
 pub fn epoch_secs() -> Result<i64, std::time::SystemTimeError> {

@@ -81,7 +81,7 @@ impl RunState {
         let mut signals =
             Signals::new([SIGINT, SIGTERM]).context("Failed to register signal handlers")?;
         let state = self.clone();
-        std::thread::spawn(move || {
+        crate::spawn_named("signals", move || {
             for sig in signals.forever() {
                 match sig {
                     SIGINT => state.advance(),

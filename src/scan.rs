@@ -567,6 +567,7 @@ impl Scan {
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(self.config.scan_threads())
+            .thread_name(|i| format!("scan-{i}"))
             .build()
             .context("Failed to build scan thread pool")?;
 
@@ -696,7 +697,7 @@ impl Scan {
         let stop_flag = Arc::clone(&stop_refresh);
         let shutdown_for_refresh = shutdown_flag.clone();
         let is_plain = progress.lock().map(|p| p.is_plain()).unwrap_or(false);
-        let refresh_thread = std::thread::spawn(move || {
+        let refresh_thread = crate::spawn_named("scan-refresh", move || {
             while !stop_flag.load(Ordering::Relaxed) && !shutdown_for_refresh.is_shutdown() {
                 if is_plain {
                     std::thread::sleep(REFRESH_INTERVAL);
@@ -781,48 +782,51 @@ impl Scan {
                 let pool_ref = &pool;
                 let scan_env_ref = &scan_env;
 
-                s.spawn(move || {
-                    pool_ref.install(|| {
-                        pkgpaths.par_iter().for_each(|pkgpath| {
-                            // Check for interrupt before starting
-                            if shutdown_clone.interrupted() {
-                                return;
-                            }
-
-                            let pathname = pkgpath.as_path().to_string_lossy().to_string();
-                            let thread_id = rayon::current_thread_index().unwrap_or(0);
-
-                            // Update progress - show current package
-                            if let Ok(mut p) = progress_clone.lock() {
-                                p.state_mut().set_worker_active(thread_id, &pathname);
-                                p.state_mut().increment_dispatched();
-                            }
-
-                            let result = Self::scan_pkgpath_with(
-                                pkgsrc,
-                                sandbox,
-                                sandbox_id,
-                                pkgpath,
-                                scan_env_ref,
-                                &shutdown_clone,
-                            );
-
-                            // Update progress counter
-                            if let Ok(mut p) = progress_clone.lock() {
-                                p.state_mut().set_worker_idle(thread_id);
-                                if result.is_ok() {
-                                    p.state_mut().increment_completed();
-                                } else {
-                                    p.state_mut().increment_failed();
+                std::thread::Builder::new()
+                    .name("scan-dispatch".to_string())
+                    .spawn_scoped(s, move || {
+                        pool_ref.install(|| {
+                            pkgpaths.par_iter().for_each(|pkgpath| {
+                                // Check for interrupt before starting
+                                if shutdown_clone.interrupted() {
+                                    return;
                                 }
-                            }
 
-                            // Send result (blocks if buffer full = backpressure)
-                            let _ = tx.send((pkgpath.clone(), result));
+                                let pathname = pkgpath.as_path().to_string_lossy().to_string();
+                                let thread_id = rayon::current_thread_index().unwrap_or(0);
+
+                                // Update progress - show current package
+                                if let Ok(mut p) = progress_clone.lock() {
+                                    p.state_mut().set_worker_active(thread_id, &pathname);
+                                    p.state_mut().increment_dispatched();
+                                }
+
+                                let result = Self::scan_pkgpath_with(
+                                    pkgsrc,
+                                    sandbox,
+                                    sandbox_id,
+                                    pkgpath,
+                                    scan_env_ref,
+                                    &shutdown_clone,
+                                );
+
+                                // Update progress counter
+                                if let Ok(mut p) = progress_clone.lock() {
+                                    p.state_mut().set_worker_idle(thread_id);
+                                    if result.is_ok() {
+                                        p.state_mut().increment_completed();
+                                    } else {
+                                        p.state_mut().increment_failed();
+                                    }
+                                }
+
+                                // Send result (blocks if buffer full = backpressure)
+                                let _ = tx.send((pkgpath.clone(), result));
+                            });
                         });
-                    });
-                    drop(tx);
-                });
+                        drop(tx);
+                    })
+                    .expect("failed to spawn thread");
 
                 /*
                  * Process results and write to DB.
