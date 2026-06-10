@@ -81,11 +81,11 @@ use crate::{Interrupted, RunState};
 use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
 use std::fs;
-use std::io::Write;
+use std::io::{BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::process::{Child, ChildStdout, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -201,23 +201,16 @@ pub fn wait_with_shutdown(child: &mut Child, state: &RunState) -> Result<(ExitSt
 }
 
 /**
- * Wait for child process exit while checking a shutdown flag, returning
- * the full output (stdout/stderr).  If shutdown is requested, kill the
- * child and return an error.
- *
- * Uses a single helper thread that calls wait_with_output() (which handles
- * pipe draining correctly via internal threads).  The main thread polls a
- * channel for results while checking the shutdown flag.  This avoids the
- * polling latency of try_wait() while still allowing shutdown interruption.
+ * Poll a helper thread's result channel while checking a shutdown flag.
+ * If shutdown is requested, kill the child's process group and return an
+ * error.  This avoids the polling latency of try_wait() while still
+ * allowing shutdown interruption.
  */
-pub fn wait_output_with_shutdown(child: Child, state: &RunState) -> Result<Output> {
-    let pid = child.id();
-    let (tx, rx) = std::sync::mpsc::channel();
-
-    std::thread::spawn(move || {
-        let _ = tx.send(child.wait_with_output());
-    });
-
+fn wait_channel_with_shutdown<T>(
+    pid: u32,
+    rx: std::sync::mpsc::Receiver<Result<T>>,
+    state: &RunState,
+) -> Result<T> {
     loop {
         if state.is_shutdown() {
             unsafe {
@@ -227,13 +220,76 @@ pub fn wait_output_with_shutdown(child: Child, state: &RunState) -> Result<Outpu
             bail!("Interrupted by shutdown");
         }
         match rx.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
-            Ok(result) => return result.map_err(Into::into),
+            Ok(result) => return result,
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => {
                 bail!("wait thread disconnected unexpectedly");
             }
         }
     }
+}
+
+/**
+ * Wait for child process exit while checking a shutdown flag, returning
+ * the full output (stdout/stderr).  If shutdown is requested, kill the
+ * child and return an error.
+ *
+ * Uses a single helper thread that calls wait_with_output() (which handles
+ * pipe draining correctly via internal threads).
+ */
+pub fn wait_output_with_shutdown(child: Child, state: &RunState) -> Result<Output> {
+    let pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output().map_err(Into::into));
+    });
+
+    wait_channel_with_shutdown(pid, rx, state)
+}
+
+/**
+ * Wait for child process exit while checking a shutdown flag, streaming
+ * the child's stdout through `parse` as it is produced and collecting
+ * stderr.  If shutdown is requested, kill the child and return an error.
+ *
+ * The parse result is returned alongside the exit status and stderr,
+ * leaving the caller to decide which takes precedence on failure.
+ */
+pub fn wait_parse_with_shutdown<T, F>(
+    mut child: Child,
+    state: &RunState,
+    parse: F,
+) -> Result<(ExitStatus, T, String)>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut BufReader<ChildStdout>) -> T + Send + 'static,
+{
+    let pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    std::thread::spawn(move || {
+        let run = || {
+            let stdout = child.stdout.take().context("child stdout not piped")?;
+            let stderr = child.stderr.take().context("child stderr not piped")?;
+            let drain = std::thread::spawn(move || {
+                let mut out = String::new();
+                let mut stderr = stderr;
+                let _ = stderr.read_to_string(&mut out);
+                out
+            });
+            let mut reader = BufReader::new(stdout);
+            let parsed = parse(&mut reader);
+            /* Consume any unread stdout so the child can exit. */
+            let _ = std::io::copy(&mut reader, &mut std::io::sink());
+            let status = child.wait()?;
+            let stderr = drain.join().unwrap_or_default();
+            Ok((status, parsed, stderr))
+        };
+        let _ = tx.send(run());
+    });
+
+    wait_channel_with_shutdown(pid, rx, state)
 }
 
 /**

@@ -40,7 +40,7 @@
  */
 
 use crate::config::{Pkgsrc, PkgsrcEnv};
-use crate::sandbox::{SandboxScope, wait_output_with_shutdown};
+use crate::sandbox::{SandboxScope, wait_output_with_shutdown, wait_parse_with_shutdown};
 use crate::tui::{Progress, REFRESH_INTERVAL, format_duration};
 use crate::{Config, Interrupted, RunState, Sandbox};
 use crate::{PackageCounts, PackageState};
@@ -51,7 +51,6 @@ use petgraph::graphmap::DiGraphMap;
 use pkgsrc::{Pattern, PatternCache, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::io::BufReader;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -1043,11 +1042,40 @@ impl Scan {
             ["-C", &workdir, "pbulk-index"],
             scan_env.to_vec(),
         )?;
-        let output = wait_output_with_shutdown(child, shutdown)?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            error!(exit_code = ?output.status.code(), %stderr, "pkg-scan script failed");
+        /*
+         * Parse output as the child produces it, keeping only the first
+         * occurrence of each PKGNAME.  For multi-version packages,
+         * pbulk-index returns the *_DEFAULT version first, which is the
+         * one we want.  Set PKGPATH (PKG_LOCATION) as for some reason
+         * pbulk-index doesn't.
+         */
+        let parse_pkgpath = pkgpath.clone();
+        let parse_span = tracing::Span::current();
+        let (status, index, stderr) = wait_parse_with_shutdown(child, shutdown, move |stdout| {
+            let _guard = parse_span.enter();
+            let mut seen_pkgnames = HashSet::new();
+            let mut index: Vec<ScanIndex> = Vec::new();
+            for pkg in ScanIndex::from_reader(stdout) {
+                let mut pkg = pkg?;
+                if !seen_pkgnames.insert(pkg.pkgname.clone()) {
+                    continue;
+                }
+                pkg.pkg_location = Some(parse_pkgpath.clone());
+                debug!(
+                    pkgname = %pkg.pkgname.pkgname(),
+                    skip_reason = ?pkg.pkg_skip_reason,
+                    fail_reason = ?pkg.pkg_fail_reason,
+                    depends_count = pkg.all_depends.as_ref().map_or(0, |v| v.iter().count()),
+                    "Found package in scan"
+                );
+                index.push(pkg);
+            }
+            anyhow::Ok(index)
+        })?;
+
+        if !status.success() {
+            error!(exit_code = ?status.code(), %stderr, "pkg-scan script failed");
             let stderr = stderr.trim();
             let msg = if stderr.is_empty() {
                 format!("Scan failed for {}", pkgpath_str)
@@ -1057,35 +1085,7 @@ impl Scan {
             bail!(msg);
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        trace!(stdout_len = stdout.len(), %stdout, "pkg-scan script output");
-
-        let reader = BufReader::new(&output.stdout[..]);
-
-        /*
-         * Keep only the first occurrence of each PKGNAME.  For
-         * multi-version packages, pbulk-index returns the *_DEFAULT
-         * version first, which is the one we want.  Set PKGPATH
-         * (PKG_LOCATION) as for some reason pbulk-index doesn't.
-         */
-        let mut seen_pkgnames = HashSet::new();
-        let mut index: Vec<ScanIndex> = Vec::new();
-        for pkg in ScanIndex::from_reader(reader) {
-            let mut pkg = pkg?;
-            if !seen_pkgnames.insert(pkg.pkgname.clone()) {
-                continue;
-            }
-            pkg.pkg_location = Some(pkgpath.clone());
-            debug!(
-                pkgname = %pkg.pkgname.pkgname(),
-                skip_reason = ?pkg.pkg_skip_reason,
-                fail_reason = ?pkg.pkg_fail_reason,
-                depends_count = pkg.all_depends.as_ref().map_or(0, |v| v.iter().count()),
-                "Found package in scan"
-            );
-            index.push(pkg);
-        }
-
+        let index = index?;
         debug!(packages_found = index.len(), "Scan complete");
 
         Ok(index)
