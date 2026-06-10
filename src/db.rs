@@ -2802,6 +2802,8 @@ pub(crate) struct SelectedPackage {
     pub pkg_location: String,
     pub pbulk_weight: usize,
     pub make_jobs_safe: bool,
+    pub total_pbulk_weight: usize,
+    pub dep_count: usize,
 }
 
 /**
@@ -2810,7 +2812,8 @@ pub(crate) struct SelectedPackage {
  */
 pub(crate) fn query_selected_packages(conn: &Connection) -> Result<Vec<SelectedPackage>> {
     let mut stmt = conn.prepare(
-        "SELECT p.id, p.pkgname, p.pkg_location, p.pbulk_weight, p.make_jobs_safe \
+        "SELECT p.id, p.pkgname, p.pkg_location, p.pbulk_weight, p.make_jobs_safe, \
+                s.total_pbulk_weight, s.dep_count \
          FROM scan_index p \
          JOIN package_state s ON s.package_id = p.id \
          WHERE s.selected = 1 \
@@ -2823,6 +2826,8 @@ pub(crate) fn query_selected_packages(conn: &Connection) -> Result<Vec<SelectedP
             pkg_location: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
             pbulk_weight: row.get::<_, Option<u32>>(3)?.map_or(100, |w| w as usize),
             make_jobs_safe: row.get::<_, Option<bool>>(4)?.is_none_or(|s| s),
+            total_pbulk_weight: row.get::<_, i64>(5)? as usize,
+            dep_count: row.get::<_, i64>(6)? as usize,
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()

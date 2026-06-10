@@ -193,6 +193,24 @@ impl Scheduler<PackageId> {
          */
         selected.sort_by(|a, b| a.pkgname.cmp(&b.pkgname));
 
+        /*
+         * Ranking totals stored by resolution.  Stored totals are
+         * always at least the package's own weight, so all-zero
+         * columns mean resolution has not written them and they are
+         * computed from the graph instead.
+         */
+        let totals = if selected.iter().any(|p| p.total_pbulk_weight > 0) {
+            let mut tw = HashMap::with_capacity(selected.len());
+            let mut dc = HashMap::with_capacity(selected.len());
+            for (i, row) in selected.iter().enumerate() {
+                tw.insert(PackageId(i as u32), row.total_pbulk_weight);
+                dc.insert(PackageId(i as u32), row.dep_count);
+            }
+            Some((tw, dc))
+        } else {
+            None
+        };
+
         let mut rows: Vec<PackageInfo> = Vec::with_capacity(selected.len());
         let mut by_name: HashMap<PkgName, PackageId> = HashMap::with_capacity(selected.len());
         let mut by_db_id: HashMap<i64, PackageId> = HashMap::with_capacity(selected.len());
@@ -253,7 +271,7 @@ impl Scheduler<PackageId> {
             }
         }
 
-        let mut sched = Self::from_graph(packages);
+        let mut sched = Self::from_parts(packages, totals);
         sched.pkg_make_jobs = pkg_make_jobs;
 
         let safe_paths: HashMap<PkgName, String> = rows
@@ -297,6 +315,18 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
      * for MAKE_JOBS-aware scheduling.
      */
     pub fn from_graph(packages: HashMap<K, PackageNode<K>>) -> Self {
+        Self::from_parts(packages, None)
+    }
+
+    /**
+     * Create a scheduler from a package graph and per-package total
+     * PBULK_WEIGHTs and transitive dependent counts, computing them
+     * from the graph when not supplied.
+     */
+    fn from_parts(
+        packages: HashMap<K, PackageNode<K>>,
+        totals: Option<(HashMap<K, usize>, HashMap<K, usize>)>,
+    ) -> Self {
         let pkg_cpu_history = HashMap::new();
         let pkg_make_jobs: HashMap<K, makejobs::PkgMakeJobs> = packages
             .keys()
@@ -320,8 +350,10 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
             }
         }
 
-        let (total_pbulk_weights, dep_counts) =
-            compute_total_pbulk_weights(&incoming, &reverse_deps, &pbulk_weights);
+        let (total_pbulk_weights, dep_counts) = match totals {
+            Some(totals) => totals,
+            None => compute_total_pbulk_weights(&incoming, &reverse_deps, &pbulk_weights),
+        };
 
         /*
          * Assign a priority rank to each package.  Rank 0 is highest
