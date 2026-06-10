@@ -331,8 +331,6 @@ pub struct Scan {
     initial_cached: usize,
     /// Number of pkgpaths discovered as cached during dependency discovery.
     discovered_cached: usize,
-    /// Packages loaded from scan, indexed by pkgname.
-    packages: IndexMap<PkgName, ScanIndex>,
     /// Full tree scan - discover all packages, skip recursive dependency discovery.
     /// Defaults to true; set to false when packages are explicitly added.
     full_tree: bool,
@@ -363,7 +361,6 @@ impl Scan {
             done: HashSet::new(),
             initial_cached: 0,
             discovered_cached: 0,
-            packages: IndexMap::new(),
             full_tree: true,
             full_scan_complete: false,
             scan_failures: Vec::new(),
@@ -1111,19 +1108,18 @@ impl Scan {
          * to the missing set. If a match exists, add it to the active set.
          * Continue until no new packages are activated.
          */
-        let mut available_pkgnames: HashSet<PkgName> = HashSet::new();
         let mut packages: IndexMap<PkgName, ScanIndex> = IndexMap::new();
         db.with_scan_data(crate::db::ScanIndexFields::Resolve, |pull| {
             while let Some(pkg) = pull()? {
                 if !packages.contains_key(&pkg.pkgname) {
-                    available_pkgnames.insert(pkg.pkgname.clone());
                     packages.insert(pkg.pkgname.clone(), pkg);
                 }
             }
             Ok(())
         })?;
 
-        let pkgbase_map = Self::build_pkgbase_map(&available_pkgnames);
+        let names: Vec<PkgName> = packages.keys().cloned().collect();
+        let pkgbase_map = Self::build_pkgbase_map(&names);
 
         let mut active_pkgnames: HashSet<PkgName> = HashSet::new();
         for pkg in packages.values() {
@@ -1161,11 +1157,7 @@ impl Scan {
                             continue;
                         }
                     };
-                    let candidates = Self::find_candidates(
-                        depend.pattern(),
-                        &pkgbase_map,
-                        available_pkgnames.iter(),
-                    );
+                    let candidates = Self::find_candidates(depend.pattern(), &pkgbase_map, &names);
 
                     if candidates.is_empty() {
                         let dep_path = depend.pkgpath();
@@ -1173,9 +1165,9 @@ impl Scan {
                             missing_pkgpaths.insert(dep_path.clone());
                         }
                     } else {
-                        for candidate in &candidates {
-                            if !active_pkgnames.contains(*candidate) {
-                                active_pkgnames.insert((*candidate).clone());
+                        for &candidate in &candidates {
+                            if !active_pkgnames.contains(&names[candidate]) {
+                                active_pkgnames.insert(names[candidate].clone());
                                 changed = true;
                             }
                         }
@@ -1196,38 +1188,41 @@ impl Scan {
     /**
      * Build a map from pkgbase to matching PkgNames for efficient lookups.
      */
-    fn build_pkgbase_map<'a>(
-        pkgnames: impl IntoIterator<Item = &'a PkgName>,
-    ) -> HashMap<&'a str, Vec<&'a PkgName>> {
-        let mut map: HashMap<&str, Vec<&PkgName>> = HashMap::new();
-        for pkgname in pkgnames {
-            map.entry(pkgname.pkgbase()).or_default().push(pkgname);
+    fn build_pkgbase_map(names: &[PkgName]) -> HashMap<&str, Vec<usize>> {
+        let mut map: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (id, pkgname) in names.iter().enumerate() {
+            map.entry(pkgname.pkgbase()).or_default().push(id);
         }
         map
     }
 
     /**
-     * Find all packages matching a dependency pattern.
+     * Find all packages matching a dependency pattern, as indices into
+     * `names`.
      *
      * Uses pkgbase for efficient O(1) lookup when available, falling back to
      * iteration over all packages for patterns without a pkgbase (e.g., `p5-*`).
      */
-    fn find_candidates<'a>(
+    fn find_candidates(
         pattern: &Pattern,
-        pkgbase_map: &HashMap<&str, Vec<&'a PkgName>>,
-        all_pkgnames: impl Iterator<Item = &'a PkgName>,
-    ) -> Vec<&'a PkgName> {
+        pkgbase_map: &HashMap<&str, Vec<usize>>,
+        names: &[PkgName],
+    ) -> Vec<usize> {
         if let Some(bases) = pattern.pkgbases() {
             let mut out = Vec::new();
             for base in bases {
                 if let Some(v) = pkgbase_map.get(base) {
-                    out.extend(v.iter().filter(|c| pattern.matches(c.pkgname())).copied());
+                    out.extend(
+                        v.iter()
+                            .filter(|&&id| pattern.matches(names[id].pkgname()))
+                            .copied(),
+                    );
                 }
             }
             out
         } else {
-            all_pkgnames
-                .filter(|c| pattern.matches(c.pkgname()))
+            (0..names.len())
+                .filter(|&id| pattern.matches(names[id].pkgname()))
                 .collect()
         }
     }
@@ -1240,30 +1235,39 @@ impl Scan {
      * and version comparison are handled by `best_match_pbulk`.
      *
      * Returns:
-     * - `Ok(Some(pkgname))` - best matching package found
+     * - `Ok(Some(id))` - index into `names` of the best matching package
      * - `Ok(None)` - no candidates match the pattern
      * - `Err(e)` - version comparison error (malformed version)
      */
-    fn find_best_match<'a>(
+    fn find_best_match(
         pattern: &Pattern,
-        pkgbase_map: &HashMap<&str, Vec<&'a PkgName>>,
-        pkgnames: &'a [PkgName],
-    ) -> Result<Option<&'a str>, pkgsrc::PatternError> {
-        let mut best = None;
+        pkgbase_map: &HashMap<&str, Vec<usize>>,
+        names: &[PkgName],
+    ) -> Result<Option<usize>, pkgsrc::PatternError> {
+        let mut best: Option<&str> = None;
+        let mut best_id: Option<usize> = None;
         if let Some(bases) = pattern.pkgbases() {
             for base in bases {
                 if let Some(candidates) = pkgbase_map.get(base) {
-                    for candidate in candidates {
-                        best = pattern.best_match_pbulk(best, candidate.pkgname())?;
+                    for &id in candidates {
+                        let prev = best;
+                        best = pattern.best_match_pbulk(best, names[id].pkgname())?;
+                        if best != prev {
+                            best_id = Some(id);
+                        }
                     }
                 }
             }
         } else {
-            for candidate in pkgnames {
+            for (id, candidate) in names.iter().enumerate() {
+                let prev = best;
                 best = pattern.best_match_pbulk(best, candidate.pkgname())?;
+                if best != prev {
+                    best_id = Some(id);
+                }
             }
         }
-        Ok(best)
+        Ok(best_id)
     }
 
     /**
@@ -1278,19 +1282,16 @@ impl Scan {
      * Priority: prefailed > unresolved > preskipped (we want to report the
      * most severe blocker). Iterates until no new entries are added.
      */
-    fn propagate_failures(
-        depends: &HashMap<PkgName, Vec<PkgName>>,
-        skip_reasons: &mut HashMap<PkgName, PackageState>,
-    ) {
+    fn propagate_failures(depends: &[Vec<usize>], skip_reasons: &mut [Option<PackageState>]) {
         loop {
-            let mut new_skip_reasons: Vec<(PkgName, PackageState)> = Vec::new();
-            for (pkgname, pkg_depends) in depends {
-                if skip_reasons.contains_key(pkgname) {
+            let mut new_skip_reasons: Vec<(usize, PackageState)> = Vec::new();
+            for (id, pkg_depends) in depends.iter().enumerate() {
+                if skip_reasons[id].is_some() {
                     continue;
                 }
                 let mut blocking_reason: Option<PackageState> = None;
-                for dep in pkg_depends {
-                    if let Some(dep_reason) = skip_reasons.get(dep) {
+                for &dep in pkg_depends {
+                    if let Some(dep_reason) = skip_reasons[dep] {
                         let indirect = dep_reason.indirect();
                         use PackageState::*;
                         let dominated = match blocking_reason {
@@ -1308,14 +1309,14 @@ impl Scan {
                     }
                 }
                 if let Some(reason) = blocking_reason {
-                    new_skip_reasons.push((pkgname.clone(), reason));
+                    new_skip_reasons.push((id, reason));
                 }
             }
             if new_skip_reasons.is_empty() {
                 break;
             }
-            for (pkgname, reason) in new_skip_reasons {
-                skip_reasons.insert(pkgname, reason);
+            for (id, reason) in new_skip_reasons {
+                skip_reasons[id] = Some(reason);
             }
         }
     }
@@ -1400,86 +1401,91 @@ impl Scan {
             "Starting dependency resolution"
         );
 
-        let mut skip_reasons: HashMap<PkgName, PackageState> = HashMap::new();
-        let mut unresolved_reasons: HashMap<PkgName, Vec<String>> = HashMap::new();
-        let mut depends: HashMap<PkgName, Vec<PkgName>> = HashMap::new();
-        let mut active: HashSet<PkgName> = HashSet::new();
+        /*
+         * Packages are stored in arrival order and every resolver
+         * structure is keyed by position.  `names` mirrors each
+         * package's pkgname for matching while `indexes` is mutated.
+         */
+        let mut names: Vec<PkgName> = Vec::new();
+        let mut indexes: Vec<ScanIndex> = Vec::new();
+        let mut name_index: HashMap<PkgName, usize> = HashMap::new();
+        let mut skip_reasons: Vec<Option<PackageState>> = Vec::new();
+        let mut unresolved_reasons: HashMap<usize, Vec<String>> = HashMap::new();
+        let mut depends: Vec<Vec<usize>> = Vec::new();
+        let mut active: Vec<bool> = Vec::new();
         let use_active_filter = !self.full_tree && !self.initial_pkgpaths.is_empty();
 
         for pkg in scan_data {
             let pkg = pkg?;
-            if self.packages.contains_key(&pkg.pkgname) {
+            if name_index.contains_key(&pkg.pkgname) {
                 debug!(pkgname = %pkg.pkgname.pkgname(), "Skipping duplicate PKGNAME");
                 continue;
             }
 
+            let mut skip = None;
             if let Some(reason) = &pkg.pkg_skip_reason
                 && !reason.is_empty()
             {
                 info!(pkgname = %pkg.pkgname.pkgname(), %reason, "PKG_SKIP_REASON");
-                skip_reasons.insert(pkg.pkgname.clone(), PackageState::PreSkipped);
-            }
-
-            if use_active_filter
-                && let Some(ref loc) = pkg.pkg_location
-                && self.initial_pkgpaths.contains(loc)
-            {
-                active.insert(pkg.pkgname.clone());
+                skip = Some(PackageState::PreSkipped);
             }
 
             if let Some(reason) = &pkg.pkg_fail_reason
                 && !reason.is_empty()
-                && !skip_reasons.contains_key(&pkg.pkgname)
+                && skip.is_none()
             {
                 info!(pkgname = %pkg.pkgname.pkgname(), %reason, "PKG_FAIL_REASON");
-                skip_reasons.insert(pkg.pkgname.clone(), PackageState::PreFailed);
+                skip = Some(PackageState::PreFailed);
             }
 
-            depends.insert(pkg.pkgname.clone(), Vec::new());
-            self.packages.insert(pkg.pkgname.clone(), pkg);
+            active.push(
+                use_active_filter
+                    && pkg
+                        .pkg_location
+                        .as_ref()
+                        .is_some_and(|loc| self.initial_pkgpaths.contains(loc)),
+            );
+            skip_reasons.push(skip);
+            name_index.insert(pkg.pkgname.clone(), names.len());
+            names.push(pkg.pkgname.clone());
+            depends.push(Vec::new());
+            indexes.push(pkg);
         }
 
-        info!(packages = self.packages.len(), "Loaded packages");
+        info!(packages = indexes.len(), "Loaded packages");
 
-        let pkgnames: Vec<PkgName> = self.packages.keys().cloned().collect();
-        let pkgbase_map = Self::build_pkgbase_map(&pkgnames);
+        let pkgbase_map = Self::build_pkgbase_map(&names);
         let verbosity = self.verbosity;
-        let pkg_locations: HashMap<PkgName, PkgPath> = if verbosity >= 1 {
-            self.packages
-                .iter()
-                .filter_map(|(name, idx)| {
-                    idx.pkg_location
-                        .as_ref()
-                        .map(|loc| (name.clone(), loc.clone()))
-                })
-                .collect()
+        let pkg_locations: Vec<Option<PkgPath>> = if verbosity >= 1 {
+            indexes.iter().map(|idx| idx.pkg_location.clone()).collect()
         } else {
-            HashMap::new()
+            Vec::new()
         };
-        let mut match_cache: HashMap<String, PkgName> = HashMap::new();
-        let mut patterns = PatternCache::with_capacity(pkgnames.len());
-        let is_satisfied = |deps: &[PkgName], pattern: &Pattern| {
+        let mut match_cache: HashMap<String, usize> = HashMap::new();
+        let mut patterns = PatternCache::with_capacity(names.len());
+        let names_ref = &names;
+        let is_satisfied = |deps: &[usize], pattern: &Pattern| {
             deps.iter()
-                .any(|existing| pattern.matches(existing.pkgname()))
+                .any(|&existing| pattern.matches(names_ref[existing].pkgname()))
         };
 
-        let mut resolved: HashSet<PkgName> = HashSet::new();
+        let mut resolved = vec![false; indexes.len()];
         loop {
             let mut new_active = false;
-            for pkg in self.packages.values_mut() {
-                if use_active_filter && !active.contains(&pkg.pkgname) {
+            for (id, pkg) in indexes.iter_mut().enumerate() {
+                if use_active_filter && !active[id] {
                     continue;
                 }
-                if resolved.contains(&pkg.pkgname) {
+                if resolved[id] {
                     continue;
                 }
-                resolved.insert(pkg.pkgname.clone());
+                resolved[id] = true;
 
                 let all_deps = match pkg.all_depends.take() {
                     Some(deps) => deps,
                     None => continue,
                 };
-                let pkg_depends = depends.get_mut(&pkg.pkgname).unwrap();
+                let pkg_depends = &mut depends[id];
 
                 for dep in all_deps.iter() {
                     let dep = match dep {
@@ -1503,39 +1509,38 @@ impl Scan {
                                 dep.pattern(),
                                 e
                             );
-                            if !skip_reasons.contains_key(&pkg.pkgname) {
+                            if skip_reasons[id].is_none() {
                                 if pkg.pkg_fail_reason.is_none() {
                                     pkg.pkg_fail_reason = Some(reason);
                                 }
-                                skip_reasons.insert(pkg.pkgname.clone(), PackageState::PreFailed);
+                                skip_reasons[id] = Some(PackageState::PreFailed);
                             }
                             continue;
                         }
                     };
 
-                    if let Some(pkgname) = match_cache.get(dep.pattern()) {
-                        if !is_satisfied(pkg_depends, pattern) && !pkg_depends.contains(pkgname) {
-                            pkg_depends.push(pkgname.clone());
+                    if let Some(&dep_id) = match_cache.get(dep.pattern()) {
+                        if !is_satisfied(pkg_depends, pattern) && !pkg_depends.contains(&dep_id) {
+                            pkg_depends.push(dep_id);
                         }
                         continue;
                     }
 
                     if verbosity >= 2 {
-                        let candidates =
-                            Self::find_candidates(pattern, &pkgbase_map, pkgnames.iter());
+                        let candidates = Self::find_candidates(pattern, &pkgbase_map, names_ref);
                         if candidates.len() > 1 {
-                            for c in &candidates {
+                            for &c in &candidates {
                                 eprintln!(
                                     "Multiple matches for dependency {} of package {}: {}",
                                     dep.pattern(),
                                     pkg.pkgname.pkgname(),
-                                    c.pkgname()
+                                    names_ref[c].pkgname()
                                 );
                             }
                         }
                     }
 
-                    match Self::find_best_match(pattern, &pkgbase_map, &pkgnames) {
+                    match Self::find_best_match(pattern, &pkgbase_map, names_ref) {
                         Err(e) => {
                             let reason = format!(
                                 "{}: version comparison error for {}: {}",
@@ -1543,36 +1548,33 @@ impl Scan {
                                 dep.pattern(),
                                 e
                             );
-                            if !skip_reasons.contains_key(&pkg.pkgname) {
+                            if skip_reasons[id].is_none() {
                                 if pkg.pkg_fail_reason.is_none() {
                                     pkg.pkg_fail_reason = Some(reason);
                                 }
-                                skip_reasons.insert(pkg.pkgname.clone(), PackageState::PreFailed);
+                                skip_reasons[id] = Some(PackageState::PreFailed);
                             }
                         }
                         Ok(Some(best)) => {
-                            let pkgname = PkgName::new(best);
                             if verbosity >= 1
-                                && let Some(loc) = pkg_locations.get(&pkgname)
+                                && let Some(loc) = pkg_locations.get(best).and_then(|l| l.as_ref())
                                 && let Ok(dep_path) = PkgPath::new(dep.pkgpath())
                                 && *loc != dep_path
                             {
                                 eprintln!(
                                     "Best matching {} differs from location {} for dependency {} of package {}",
-                                    best,
+                                    names_ref[best].pkgname(),
                                     dep_path,
                                     dep.pattern(),
                                     pkg.pkgname.pkgname()
                                 );
                             }
-                            if !is_satisfied(pkg_depends, pattern)
-                                && !pkg_depends.contains(&pkgname)
-                            {
-                                pkg_depends.push(pkgname.clone());
+                            if !is_satisfied(pkg_depends, pattern) && !pkg_depends.contains(&best) {
+                                pkg_depends.push(best);
                             }
-                            match_cache.insert(dep.pattern().to_string(), pkgname.clone());
-                            if use_active_filter && !active.contains(&pkgname) {
-                                active.insert(pkgname.clone());
+                            match_cache.insert(dep.pattern().to_string(), best);
+                            if use_active_filter && !active[best] {
+                                active[best] = true;
                                 new_active = true;
                             }
                         }
@@ -1586,14 +1588,11 @@ impl Scan {
                                 pkg.pkgname.pkgname()
                             );
                             if !matches!(
-                                skip_reasons.get(&pkg.pkgname),
+                                skip_reasons[id],
                                 Some(PackageState::PreSkipped | PackageState::PreFailed)
                             ) {
-                                skip_reasons.insert(pkg.pkgname.clone(), PackageState::Unresolved);
-                                unresolved_reasons
-                                    .entry(pkg.pkgname.clone())
-                                    .or_default()
-                                    .push(msg);
+                                skip_reasons[id] = Some(PackageState::Unresolved);
+                                unresolved_reasons.entry(id).or_default().push(msg);
                             }
                         }
                     }
@@ -1613,7 +1612,7 @@ impl Scan {
         drop(patterns);
         drop(pkg_locations);
         drop(pkgbase_map);
-        drop(pkgnames);
+        drop(name_index);
         drop(resolved);
 
         Self::propagate_failures(&depends, &mut skip_reasons);
@@ -1622,18 +1621,21 @@ impl Scan {
         let mut count_buildable = 0;
         let mut count_filtered = 0;
 
-        for (pkgname, mut index) in std::mem::take(&mut self.packages) {
-            if use_active_filter && !active.contains(&pkgname) {
+        for (id, mut index) in indexes.into_iter().enumerate() {
+            if use_active_filter && !active[id] {
                 count_filtered += 1;
                 continue;
             }
 
             let Some(pkgpath) = index.pkg_location.clone() else {
-                error!(%pkgname, "Package missing PKG_LOCATION, skipping");
+                error!(pkgname = %names[id], "Package missing PKG_LOCATION, skipping");
                 continue;
             };
-            let resolved_depends = depends.remove(&pkgname).unwrap_or_default();
-            let skip = skip_reasons.remove(&pkgname);
+            let resolved_depends: Vec<PkgName> = std::mem::take(&mut depends[id])
+                .into_iter()
+                .map(|dep| names[dep].clone())
+                .collect();
+            let skip = skip_reasons[id].take();
             /*
              * pbulk compat: a directly-unresolvable package omits the
              * DEPENDS line entirely, so leave resolved_depends as None.
@@ -1644,7 +1646,7 @@ impl Scan {
             }
             let result = match skip {
                 Some(state) => {
-                    let reason = unresolved_reasons.remove(&pkgname).map(|v| v.join("\n"));
+                    let reason = unresolved_reasons.remove(&id).map(|v| v.join("\n"));
                     ScanResult::Skipped {
                         pkgpath,
                         state,
