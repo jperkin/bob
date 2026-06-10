@@ -241,11 +241,6 @@ impl ScanSummary {
         self.packages.iter().filter_map(|p| p.as_buildable())
     }
 
-    /// Iterator over non-buildable packages.
-    pub fn failed(&self) -> impl Iterator<Item = &ScanResult> {
-        self.packages.iter().filter(|p| !p.is_buildable())
-    }
-
     /// Scan failures and unresolved dependency errors.
     pub fn errors(&self) -> impl Iterator<Item = &str> {
         self.packages.iter().filter_map(|p| match p {
