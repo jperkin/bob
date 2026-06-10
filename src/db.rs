@@ -1071,7 +1071,7 @@ impl Database {
             "SELECT p.id, p.pkgname, p.pkg_location
              FROM buildable p
              JOIN package_state s ON s.package_id = p.id
-             ORDER BY s.dep_count DESC, p.id",
+             ORDER BY s.dep_count DESC, p.pkgname",
         )?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -1090,7 +1090,7 @@ impl Database {
              JOIN buildable p ON p.id = rd.package_id
              JOIN buildable d ON d.id = rd.depends_on_id
              JOIN package_state s ON s.package_id = rd.depends_on_id
-             ORDER BY rd.package_id, s.dep_count DESC, rd.depends_on_id",
+             ORDER BY rd.package_id, s.dep_count DESC, d.pkgname",
         )?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -2805,14 +2805,16 @@ pub(crate) struct SelectedPackage {
 }
 
 /**
- * Query all selected packages from the build database.
+ * Query all selected packages from the build database, most
+ * depended-upon first.
  */
 pub(crate) fn query_selected_packages(conn: &Connection) -> Result<Vec<SelectedPackage>> {
     let mut stmt = conn.prepare(
         "SELECT p.id, p.pkgname, p.pkg_location, p.pbulk_weight, p.make_jobs_safe \
          FROM scan_index p \
          JOIN package_state s ON s.package_id = p.id \
-         WHERE s.selected = 1",
+         WHERE s.selected = 1 \
+         ORDER BY s.dep_count DESC, p.pkgname",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(SelectedPackage {
