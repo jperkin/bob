@@ -60,24 +60,9 @@ pub type ReportRow = (String, ScanIndex, Option<i32>);
  * `(pkgpath, pkgbase)` -- the identity key for matching
  * `build_history` rows across builds.  Code that joins, diffs, or
  * correlates history between builds must key on this pair, never on
- * `pkgname`.  Within a single build, use [`latest_history_partition`]
- * for the canonical `ROW_NUMBER()` window.
+ * `pkgname`.  The latest row per key is the one with the highest `id`.
  */
 pub type PkgKey = (String, String);
-
-/**
- * SQL fragment for the `ROW_NUMBER()` partition that selects the
- * latest `build_history` row per [`PkgKey`].
- *
- * Use as `ROW_NUMBER() OVER ({clause}) AS rn` inside a CTE, then
- * filter `WHERE rn = 1`; always select `pkgpath` and `pkgbase` from
- * the same partition so the result map can be keyed by [`PkgKey`].
- */
-pub fn latest_history_partition() -> String {
-    let pkgpath: &str = HistoryKind::Pkgpath.into();
-    let pkgbase: &str = HistoryKind::Pkgbase.into();
-    format!("PARTITION BY {pkgpath}, {pkgbase} ORDER BY id DESC")
-}
 
 fn stage_values() -> String {
     Stage::VARIANTS
@@ -138,7 +123,7 @@ const SCHEMA_VERSION: i32 = 20260609;
 /**
  * Schema version for history.db - update when history schema changes.
  */
-const HISTORY_SCHEMA_VERSION: i32 = 20260609;
+const HISTORY_SCHEMA_VERSION: i32 = 20260610;
 
 /**
  * Summary of a package's most recent build from history.
@@ -2032,7 +2017,6 @@ impl Database {
         let wo: &str = HistoryKind::Wrkobjdir.into();
         let pkgbase_col: &str = HistoryKind::Pkgbase.into();
         let pkgpath_col: &str = HistoryKind::Pkgpath.into();
-        let partition = latest_history_partition();
         let up_to_date = PackageState::UpToDate.id();
 
         /*
@@ -2047,15 +2031,12 @@ impl Database {
         };
 
         let sql = format!(
-            "WITH latest AS ( \
-                 SELECT h.{pkgpath_col}, h.{pkgbase_col}, \
-                        h.{du}, h.{out}, h.{mj}, h.{wo}, \
-                        ROW_NUMBER() OVER ({partition}) AS rn \
-                 FROM build_history h \
-                 {where_clause} \
-             ) \
-             SELECT {pkgpath_col}, {pkgbase_col}, {out}, {du}, {mj}, {wo} \
-             FROM latest WHERE rn = 1",
+            "SELECT b.{pkgpath_col}, b.{pkgbase_col}, b.{out}, b.{du}, b.{mj}, b.{wo} \
+             FROM build_history b \
+             JOIN (SELECT MAX(h.id) AS id FROM build_history h \
+                   {where_clause} \
+                   GROUP BY h.{pkgpath_col}, h.{pkgbase_col}) latest \
+               ON b.id = latest.id",
         );
 
         let mut stmt = match conn.prepare(&sql) {
@@ -2462,6 +2443,7 @@ const HISTORY_MIGRATIONS: &[HistoryMigration] = &[
     (20260406, 20260513, migrate_history_20260406_to_20260513),
     (20260513, 20260515, migrate_history_20260513_to_20260515),
     (20260515, 20260609, migrate_history_20260515_to_20260609),
+    (20260609, 20260610, migrate_history_20260609_to_20260610),
 ];
 
 /**
@@ -2608,6 +2590,23 @@ fn migrate_history_20260515_to_20260609(conn: &Connection) -> Result<()> {
 }
 
 /**
+ * Migrate history.db from v20260609 to v20260610.
+ *
+ * Adds `idx_history_pkg_latest`, a covering index for the
+ * latest-row-per-package query in `build_history_by_pkg_all`.
+ */
+fn migrate_history_20260609_to_20260610(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_history_pkg_latest
+             ON build_history(pkgpath, pkgbase, id, outcome);",
+    )?;
+    tx.execute("UPDATE schema_version SET version = ?1", params![20260610])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/**
  * Open and initialize the history database connection.
  */
 fn open_history_conn(dbdir: &Path) -> Result<Connection> {
@@ -2688,6 +2687,8 @@ pub(crate) fn create_history_schema(conn: &Connection) -> Result<()> {
              ON build_history(build_id, pkgpath, id);
          CREATE INDEX idx_history_outcome_pkg
              ON build_history(outcome, pkgpath, pkgbase);
+         CREATE INDEX idx_history_pkg_latest
+             ON build_history(pkgpath, pkgbase, id, outcome);
 
          CREATE TABLE wall_times (
              history_id INTEGER NOT NULL
