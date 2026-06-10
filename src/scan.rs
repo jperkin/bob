@@ -47,7 +47,8 @@ use crate::{PackageCounts, PackageState};
 use anyhow::{Context, Result, bail};
 use crossterm::event;
 use indexmap::IndexMap;
-use petgraph::graphmap::DiGraphMap;
+use petgraph::algo::tarjan_scc;
+use petgraph::graph::DiGraph;
 use pkgsrc::{Pattern, PatternCache, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -1324,27 +1325,34 @@ impl Scan {
     /**
      * Check for circular dependencies in buildable packages.
      *
-     * Returns an error if a cycle is detected, with details about the cycle.
+     * Edges are `(dep, dependent)` pairs of indices into `names`.  Any
+     * strongly connected group of packages, or a package depending on
+     * itself, is an error listing every package in each group.
      */
-    fn check_circular_deps(packages: &[ScanResult]) -> Result<()> {
-        let mut graph = DiGraphMap::new();
-        for pkg in packages {
-            if let ScanResult::Buildable(resolved) = pkg {
-                for dep in resolved.depends() {
-                    graph.add_edge(dep.pkgname(), resolved.pkgname().pkgname(), ());
-                }
+    fn check_circular_deps(names: &[PkgName], edges: &[(u32, u32)]) -> Result<()> {
+        let graph = DiGraph::<(), ()>::from_edges(edges.iter().copied());
+        let mut groups: Vec<Vec<&PkgName>> = Vec::new();
+        for scc in tarjan_scc(&graph) {
+            if scc.len() > 1 || graph.find_edge(scc[0], scc[0]).is_some() {
+                let mut group: Vec<&PkgName> = scc.iter().map(|n| &names[n.index()]).collect();
+                group.sort_by(|a, b| a.pkgname().cmp(b.pkgname()));
+                groups.push(group);
             }
         }
-        if let Some(cycle) = find_cycle(&graph) {
-            let mut err = "Circular dependencies detected:\n".to_string();
-            for n in cycle.iter().rev() {
-                err.push_str(&format!("\t{}\n", n));
-            }
-            err.push_str(&format!("\t{}", cycle.last().unwrap()));
-            error!(?cycle, "Circular dependency detected");
-            bail!(err);
+        if groups.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        error!(?groups, "Circular dependencies detected");
+        let blocks: Vec<String> = groups
+            .iter()
+            .map(|g| {
+                g.iter()
+                    .map(|n| format!("\t{}", n))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect();
+        bail!("Circular dependencies detected:\n{}", blocks.join("\n\n"));
     }
 
     /**
@@ -1378,11 +1386,12 @@ impl Scan {
      * **Phase 4 - Propagate failures**: Walk the dependency graph to mark
      * packages with failed/skipped dependencies as IndirectFail/IndirectSkip.
      *
-     * **Phase 5 - Build results**: Transform the packages map into a
-     * `Vec<ScanResult>`, filtering inactive packages for limited scans.
+     * **Phase 5 - Check cycles**: Error if any buildable packages form a
+     * circular dependency group.
      *
-     * **Phase 6 - Finalize**: Check for circular dependencies, store resolved
-     * dependency edges in the database for reverse lookups, return summary.
+     * **Phase 6 - Build results**: Transform the packages into a
+     * `Vec<ScanResult>`, filtering inactive packages for limited scans,
+     * and return the summary.
      *
      * # Limited vs Full Tree Scans
      *
@@ -1617,8 +1626,23 @@ impl Scan {
 
         Self::propagate_failures(&depends, &mut skip_reasons);
 
+        debug!("Checking for circular dependencies");
+        let mut edges: Vec<(u32, u32)> = Vec::new();
+        for (id, deps) in depends.iter().enumerate() {
+            if (use_active_filter && !active[id])
+                || skip_reasons[id].is_some()
+                || indexes[id].pkg_location.is_none()
+            {
+                continue;
+            }
+            for &dep in deps {
+                edges.push((dep as u32, id as u32));
+            }
+        }
+        Self::check_circular_deps(&names, &edges)?;
+        drop(edges);
+
         let mut packages: Vec<ScanResult> = Vec::new();
-        let mut count_buildable = 0;
         let mut count_filtered = 0;
 
         for (id, mut index) in indexes.into_iter().enumerate() {
@@ -1654,10 +1678,7 @@ impl Scan {
                         index: Some(index),
                     }
                 }
-                None => {
-                    count_buildable += 1;
-                    ScanResult::Buildable(ResolvedPackage { index, pkgpath })
-                }
+                None => ScanResult::Buildable(ResolvedPackage { index, pkgpath }),
             };
             packages.push(result);
         }
@@ -1675,9 +1696,6 @@ impl Scan {
                 error: error.clone(),
             });
         }
-
-        debug!(count_buildable, "Checking for circular dependencies");
-        Self::check_circular_deps(&packages)?;
 
         let pkgpaths = packages
             .iter()
@@ -1756,47 +1774,4 @@ impl Scan {
 
         Ok(result)
     }
-}
-
-fn find_cycle<'a>(graph: &'a DiGraphMap<&'a str, ()>) -> Option<Vec<&'a str>> {
-    let mut visited = HashSet::new();
-    let mut in_stack = HashSet::new();
-    let mut stack = Vec::new();
-
-    for node in graph.nodes() {
-        if visited.contains(&node) {
-            continue;
-        }
-        if let Some(cycle) = dfs(graph, node, &mut visited, &mut stack, &mut in_stack) {
-            return Some(cycle);
-        }
-    }
-    None
-}
-
-fn dfs<'a>(
-    graph: &'a DiGraphMap<&'a str, ()>,
-    node: &'a str,
-    visited: &mut HashSet<&'a str>,
-    stack: &mut Vec<&'a str>,
-    in_stack: &mut HashSet<&'a str>,
-) -> Option<Vec<&'a str>> {
-    visited.insert(node);
-    stack.push(node);
-    in_stack.insert(node);
-    for neighbor in graph.neighbors(node) {
-        if in_stack.contains(neighbor) {
-            if let Some(pos) = stack.iter().position(|&n| n == neighbor) {
-                return Some(stack[pos..].to_vec());
-            }
-        } else if !visited.contains(neighbor) {
-            let cycle = dfs(graph, neighbor, visited, stack, in_stack);
-            if cycle.is_some() {
-                return cycle;
-            }
-        }
-    }
-    stack.pop();
-    in_stack.remove(node);
-    None
 }
