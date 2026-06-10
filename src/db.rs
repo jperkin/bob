@@ -803,9 +803,16 @@ impl Database {
     // ========================================================================
 
     /**
-     * Store resolved dependencies from a ScanSummary.
+     * Store resolution results in a single transaction: the selected
+     * package set, resolved dependency edges, skip outcomes, and scan
+     * failures.
+     *
+     * Scan results may cache additional package rows that are not part
+     * of the current resolved package set, so the selection is reset
+     * first.  Status/scheduling queries only operate on selected
+     * packages.
      */
-    pub fn store_resolved_deps(&self, summary: &crate::scan::ScanSummary) -> Result<()> {
+    pub fn store_resolution(&self, summary: &crate::scan::ScanSummary) -> Result<()> {
         let id_map: HashMap<String, i64> = self
             .conn
             .prepare("SELECT pkgname, id FROM scan_index")?
@@ -813,77 +820,54 @@ impl Database {
             .collect::<rusqlite::Result<_>>()?;
 
         let tx = self.transaction()?;
-        let mut stmt = self.conn.prepare(
+        self.conn
+            .execute("UPDATE package_state SET selected = 0", [])?;
+        self.conn.execute("DELETE FROM scan_failures", [])?;
+
+        let mut select_stmt = self
+            .conn
+            .prepare("UPDATE package_state SET selected = 1 WHERE package_id = ?1")?;
+        let mut dep_stmt = self.conn.prepare(
             "INSERT OR IGNORE INTO resolved_depends (package_id, depends_on_id) VALUES (?1, ?2)",
         )?;
+        let mut skip_stmt = self.conn.prepare(
+            "INSERT OR REPLACE INTO scan_outcomes (package_id, outcome, detail)
+             VALUES (?1, ?2, ?3)",
+        )?;
+        let mut fail_stmt = self
+            .conn
+            .prepare("INSERT INTO scan_failures (pkgpath, error) VALUES (?1, ?2)")?;
+
         let mut count: usize = 0;
         for pkg in &summary.packages {
+            if let ScanResult::ScanFail { pkgpath, error } = pkg {
+                fail_stmt.execute(params![pkgpath.as_path().display().to_string(), error])?;
+                continue;
+            }
             let Some(pkgname) = pkg.pkgname() else {
                 continue;
             };
             let Some(&pkg_id) = id_map.get(pkgname.pkgname()) else {
                 continue;
             };
+            select_stmt.execute([pkg_id])?;
             for dep in pkg.depends() {
                 if let Some(&dep_id) = id_map.get(dep.pkgname()) {
-                    stmt.execute(params![pkg_id, dep_id])?;
+                    dep_stmt.execute(params![pkg_id, dep_id])?;
                     count += 1;
                 }
             }
+            if let ScanResult::Skipped { state, reason, .. } = pkg {
+                skip_stmt.execute(params![pkg_id, state.id(), reason])?;
+            }
         }
-        drop(stmt);
+        drop(select_stmt);
+        drop(dep_stmt);
+        drop(skip_stmt);
+        drop(fail_stmt);
         tx.commit()?;
         if count > 0 {
             debug!(count, "Stored resolved dependencies");
-        }
-        Ok(())
-    }
-
-    /**
-     * Record the resolution outcome for every skipped package.
-     */
-    pub fn store_scan_skipped(&self, summary: &crate::scan::ScanSummary) -> Result<()> {
-        let tx = self.transaction()?;
-        let mut stmt = self.conn.prepare(
-            "INSERT OR REPLACE INTO scan_outcomes (package_id, outcome, detail)
-             SELECT id, ?1, ?2 FROM scan_index WHERE pkgname = ?3",
-        )?;
-        for pkg in &summary.packages {
-            if let ScanResult::Skipped {
-                state,
-                index,
-                reason,
-                ..
-            } = pkg
-            {
-                let Some(idx) = index else { continue };
-                stmt.execute(params![state.id(), reason, idx.pkgname.pkgname()])?;
-            }
-        }
-        drop(stmt);
-        tx.commit()
-    }
-
-    /**
-     * Mark which scanned packages participated in the latest resolution.
-     *
-     * Scan results may cache additional package rows that are not part of the
-     * current resolved package set. Status/scheduling queries should ignore
-     * those rows and only operate on the packages emitted by the most recent
-     * resolve step.
-     */
-    /**
-     * Store scan failures in the database.
-     */
-    pub fn store_scan_failures(&self, summary: &crate::scan::ScanSummary) -> Result<()> {
-        self.conn.execute("DELETE FROM scan_failures", [])?;
-        let mut stmt = self
-            .conn
-            .prepare("INSERT INTO scan_failures (pkgpath, error) VALUES (?1, ?2)")?;
-        for pkg in &summary.packages {
-            if let ScanResult::ScanFail { pkgpath, error } = pkg {
-                stmt.execute(params![pkgpath.as_path().display().to_string(), error])?;
-            }
         }
         Ok(())
     }
@@ -903,32 +887,13 @@ impl Database {
         Ok(rows)
     }
 
-    pub fn store_resolved_selection(&self, summary: &crate::scan::ScanSummary) -> Result<()> {
-        let tx = self.transaction()?;
-        self.conn
-            .execute("UPDATE package_state SET selected = 0", [])?;
-        let mut stmt = self.conn.prepare(
-            "UPDATE package_state SET selected = 1
-             WHERE package_id = (SELECT id FROM scan_index WHERE pkgname = ?1)",
-        )?;
-        for pkg in &summary.packages {
-            let Some(pkgname) = pkg.pkgname() else {
-                continue;
-            };
-            stmt.execute([pkgname.pkgname()])?;
-        }
-        drop(stmt);
-        tx.commit()
-    }
-
     /**
      * Compute and store each selected package's total PBULK_WEIGHT.
      *
      * Walks the resolved dependency graph once to derive the total
      * PBULK_WEIGHT and transitive dependent count per package and stores
      * them in `package_state` for read commands to order by.  Run after
-     * [`store_resolved_selection`](Self::store_resolved_selection) and
-     * [`store_resolved_deps`](Self::store_resolved_deps).
+     * [`store_resolution`](Self::store_resolution).
      */
     pub fn store_pbulk_weights(&self) -> Result<()> {
         let selected = query_selected_packages(&self.conn)?;
