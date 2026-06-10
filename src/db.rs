@@ -118,7 +118,7 @@ fn history_schema() -> String {
 /**
  * Schema version for bob.db - update when schema changes.
  */
-const SCHEMA_VERSION: i32 = 20260609;
+const SCHEMA_VERSION: i32 = 20260610;
 
 /**
  * Schema version for history.db - update when history schema changes.
@@ -436,13 +436,11 @@ impl Database {
              ) STRICT;
 
              CREATE TABLE resolved_depends (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                  package_id INTEGER NOT NULL REFERENCES scan_index(id) ON DELETE CASCADE,
                  depends_on_id INTEGER NOT NULL REFERENCES scan_index(id) ON DELETE CASCADE,
-                 UNIQUE(package_id, depends_on_id)
-             ) STRICT;
+                 PRIMARY KEY (package_id, depends_on_id)
+             ) STRICT, WITHOUT ROWID;
 
-             CREATE INDEX idx_resolved_depends_package ON resolved_depends(package_id);
              CREATE INDEX idx_resolved_depends_depends_on ON resolved_depends(depends_on_id);
 
              CREATE TABLE builds (
