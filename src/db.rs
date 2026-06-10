@@ -1100,12 +1100,16 @@ impl Database {
     }
 
     /**
-     * Buildable packages as `(id, pkgname, pkg_location)` rows.
+     * Buildable packages as `(id, pkgname, pkg_location)` rows, most
+     * depended-upon first.
      */
     pub fn get_buildable_rows(&self) -> Result<Vec<(i64, String, String)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, pkgname, pkg_location FROM buildable ORDER BY id")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT p.id, p.pkgname, p.pkg_location
+             FROM buildable p
+             JOIN package_state s ON s.package_id = p.id
+             ORDER BY s.dep_count DESC, p.id",
+        )?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
@@ -1113,14 +1117,17 @@ impl Database {
 
     /**
      * Resolved dependency edges between buildable packages as
-     * `(package_id, depends_on_id)` pairs.
+     * `(package_id, depends_on_id)` pairs.  Each package's edges order
+     * its most depended-upon dependencies first.
      */
     pub fn get_buildable_depends(&self) -> Result<Vec<(i64, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT rd.package_id, rd.depends_on_id
              FROM resolved_depends rd
              JOIN buildable p ON p.id = rd.package_id
-             JOIN buildable d ON d.id = rd.depends_on_id",
+             JOIN buildable d ON d.id = rd.depends_on_id
+             JOIN package_state s ON s.package_id = rd.depends_on_id
+             ORDER BY rd.package_id, s.dep_count DESC, rd.depends_on_id",
         )?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()

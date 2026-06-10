@@ -72,10 +72,13 @@ pub fn check_up_to_date(config: &Config, pkgsrc: &Pkgsrc, db: &Database) -> Resu
     /*
      * Dependency graph over buildable package ids, loaded from the
      * resolution results stored in the database. Forward deps determine
-     * wave ordering, reverse deps enable propagation.
+     * wave ordering, reverse deps enable propagation.  `order` ranks
+     * the most depended-upon packages first so processing, and with it
+     * rebuild-reason attribution, follows that priority.
      */
-    let packages: HashMap<i64, (String, String)> = db
-        .get_buildable_rows()?
+    let rows = db.get_buildable_rows()?;
+    let order: Vec<i64> = rows.iter().map(|&(id, ..)| id).collect();
+    let packages: HashMap<i64, (String, String)> = rows
         .into_iter()
         .map(|(id, pkgname, pkg_location)| (id, (pkgname, pkg_location)))
         .collect();
@@ -115,9 +118,12 @@ pub fn check_up_to_date(config: &Config, pkgsrc: &Pkgsrc, db: &Database) -> Resu
      * dependents are marked with DependencyRefresh via propagation.
      */
     while !remaining.is_empty() {
-        let ready: Vec<i64> = remaining
+        let ready: Vec<i64> = order
             .iter()
-            .filter(|id| forward_deps[*id].iter().all(|dep| !remaining.contains(dep)))
+            .filter(|id| {
+                remaining.contains(id)
+                    && forward_deps[*id].iter().all(|dep| !remaining.contains(dep))
+            })
             .copied()
             .collect();
 

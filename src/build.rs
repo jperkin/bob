@@ -367,32 +367,40 @@ fn dependency_change(
     let removed_set: HashSet<&str> = recorded.difference(&expected_deps).copied().collect();
 
     if !removed_set.is_empty() {
-        let expected_by_base: HashMap<String, (&str, String)> = expected_deps
+        /*
+         * `depends` arrives most depended-upon first, so updated
+         * entries are reported in that priority order.  Entries with
+         * no expected counterpart are reported as removed, in the
+         * order the package file recorded them.
+         */
+        let removed_entries: Vec<(&str, String, String)> = recorded_deps
             .iter()
-            .map(|&name| {
-                let pkg = PkgName::new(name);
-                (
-                    pkg.pkgbase().to_string(),
-                    (name, pkg.pkgversion().to_string()),
-                )
+            .map(String::as_str)
+            .filter(|n| removed_set.contains(n))
+            .map(|n| {
+                let pkg = PkgName::new(n);
+                (n, pkg.pkgbase().to_string(), pkg.pkgversion().to_string())
             })
             .collect();
 
+        let mut handled: HashSet<&str> = HashSet::new();
         let mut updated = Vec::new();
-        let mut removed = Vec::new();
 
-        for &name in &removed_set {
-            let pkg = PkgName::new(name);
-            if let Some((_, new_ver)) = expected_by_base.get(pkg.pkgbase()) {
-                updated.push((
-                    pkg.pkgbase().to_string(),
-                    pkg.pkgversion().to_string(),
-                    new_ver.clone(),
-                ));
-            } else {
-                removed.push(name.to_string());
+        for &name in depends {
+            let new = PkgName::new(name);
+            for (n, base, old_ver) in &removed_entries {
+                if !handled.contains(n) && base == new.pkgbase() {
+                    handled.insert(n);
+                    updated.push((base.clone(), old_ver.clone(), new.pkgversion().to_string()));
+                }
             }
         }
+
+        let mut removed: Vec<String> = removed_entries
+            .iter()
+            .filter(|(n, ..)| !handled.contains(n))
+            .map(|(n, ..)| n.to_string())
+            .collect();
 
         debug!(?updated, ?removed, "Dependency list changed");
         let reason = if updated.is_empty() {
@@ -418,7 +426,15 @@ fn dependency_change(
         return Some(reason);
     }
 
-    for &dep in &recorded {
+    /*
+     * `depends` arrives most depended-upon first, so the dependency
+     * credited for a refresh or missing package is the highest
+     * priority one.
+     */
+    for &dep in depends {
+        if !recorded.contains(dep) {
+            continue;
+        }
         let dep_pkg = packages_dir.join(format!("{}.tgz", dep));
         let dep_mtime = match dep_pkg.metadata().and_then(|m| m.modified()) {
             Ok(t) => t,
