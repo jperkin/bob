@@ -82,12 +82,18 @@ struct CpuLoad {
     /// Open kstat chain.  `None` until the first sample or after a
     /// failed one; the next sample opens a fresh chain.
     ctl: Option<kstat_rs::Ctl>,
+    /// Ticks read at the end of the previous sample, the baseline for
+    /// the next interval.
+    prev: Option<(u64, u64, u64)>,
 }
 
 #[cfg(target_os = "illumos")]
 impl CpuLoad {
     fn new() -> Self {
-        CpuLoad { ctl: None }
+        CpuLoad {
+            ctl: None,
+            prev: None,
+        }
     }
 
     /**
@@ -134,11 +140,15 @@ impl CpuLoad {
             Some(ctl) => ctl,
             None => Ctl::new().ok()?,
         };
-        let (u1, k1, i1) = read_ticks(&mut ctl)?;
+        let (u1, k1, i1) = match self.prev.take() {
+            Some(prev) => prev,
+            None => read_ticks(&mut ctl)?,
+        };
         std::thread::sleep(interval);
         let mut ctl = ctl.update().ok()?;
         let (u2, k2, i2) = read_ticks(&mut ctl)?;
         self.ctl = Some(ctl);
+        self.prev = Some((u2, k2, i2));
 
         let du = u2.saturating_sub(u1);
         let dk = k2.saturating_sub(k1);
@@ -194,6 +204,10 @@ impl Drop for CpuSamplerHandle {
  * platform or permissions issue).
  */
 pub fn start_cpu_sampler() -> Option<CpuSamplerHandle> {
+    /*
+     * Single probe measurement over a short window to verify CPU
+     * sampling works on this platform.
+     */
     CpuLoad::new().sample(Duration::from_millis(100))?;
 
     let stop = Arc::new(AtomicBool::new(false));
