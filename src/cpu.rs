@@ -41,75 +41,116 @@ pub struct CpuSample {
 }
 
 /**
- * Measure system CPU load over `interval`.
- *
- * Sleeps for `interval`, then returns `(user_pct, sys_pct)` as values
- * 0--100.  Returns `None` if the platform does not support measurement
- * or if the measurement fails.
+ * Platform CPU load reader, created once per sampler thread.
  */
 #[cfg(not(target_os = "illumos"))]
-fn cpu_load(interval: Duration) -> Option<(u8, u8)> {
-    use systemstat::{Platform, System};
-    let sys = System::new();
-    let measurement = sys.cpu_load_aggregate().ok()?;
-    std::thread::sleep(interval);
-    let cpu = measurement.done().ok()?;
-    let user = ((cpu.user + cpu.nice) * 100.0).round().min(100.0) as u8;
-    let system = ((cpu.system + cpu.interrupt) * 100.0).round().min(100.0) as u8;
-    Some((user, system))
+struct CpuLoad;
+
+#[cfg(not(target_os = "illumos"))]
+impl CpuLoad {
+    fn new() -> Self {
+        CpuLoad
+    }
+
+    /**
+     * Measure system CPU load over `interval`.
+     *
+     * Sleeps for `interval`, then returns `(user_pct, sys_pct)` as values
+     * 0--100.  Returns `None` if the platform does not support measurement
+     * or if the measurement fails.
+     */
+    fn sample(&mut self, interval: Duration) -> Option<(u8, u8)> {
+        use systemstat::{Platform, System};
+        let sys = System::new();
+        let measurement = sys.cpu_load_aggregate().ok()?;
+        std::thread::sleep(interval);
+        let cpu = measurement.done().ok()?;
+        let user = ((cpu.user + cpu.nice) * 100.0).round().min(100.0) as u8;
+        let system = ((cpu.system + cpu.interrupt) * 100.0).round().min(100.0) as u8;
+        Some((user, system))
+    }
+}
+
+/**
+ * Platform CPU load reader, created once per sampler thread.
+ *
+ * kstat_open() copies every kstat header on the system, so the chain is
+ * held open across samples and refreshed with kstat_chain_update().
+ */
+#[cfg(target_os = "illumos")]
+struct CpuLoad {
+    /// Open kstat chain.  `None` until the first sample or after a
+    /// failed one; the next sample opens a fresh chain.
+    ctl: Option<kstat_rs::Ctl>,
 }
 
 #[cfg(target_os = "illumos")]
-fn cpu_load(interval: Duration) -> Option<(u8, u8)> {
-    use kstat_rs::{Ctl, Data, NamedData};
+impl CpuLoad {
+    fn new() -> Self {
+        CpuLoad { ctl: None }
+    }
 
-    fn read_ticks(ctl: &mut Ctl) -> Option<(u64, u64, u64)> {
-        let mut user: u64 = 0;
-        let mut kernel: u64 = 0;
-        let mut idle: u64 = 0;
-        for mut ks in ctl.filter(Some("cpu"), None, Some("sys")) {
-            if let Ok(Data::Named(named)) = ctl.read(&mut ks) {
-                for n in &named {
-                    match n.name {
-                        "cpu_ticks_user" => {
-                            if let NamedData::UInt64(v) = n.value {
-                                user += v;
+    /**
+     * Measure system CPU load over `interval`.
+     *
+     * Sleeps for `interval`, then returns `(user_pct, sys_pct)` as values
+     * 0--100.  Returns `None` if the measurement fails.
+     */
+    fn sample(&mut self, interval: Duration) -> Option<(u8, u8)> {
+        use kstat_rs::{Ctl, Data, NamedData};
+
+        fn read_ticks(ctl: &mut Ctl) -> Option<(u64, u64, u64)> {
+            let mut user: u64 = 0;
+            let mut kernel: u64 = 0;
+            let mut idle: u64 = 0;
+            for mut ks in ctl.filter(Some("cpu"), None, Some("sys")) {
+                if let Ok(Data::Named(named)) = ctl.read(&mut ks) {
+                    for n in &named {
+                        match n.name {
+                            "cpu_ticks_user" => {
+                                if let NamedData::UInt64(v) = n.value {
+                                    user += v;
+                                }
                             }
-                        }
-                        "cpu_ticks_kernel" => {
-                            if let NamedData::UInt64(v) = n.value {
-                                kernel += v;
+                            "cpu_ticks_kernel" => {
+                                if let NamedData::UInt64(v) = n.value {
+                                    kernel += v;
+                                }
                             }
-                        }
-                        "cpu_ticks_idle" => {
-                            if let NamedData::UInt64(v) = n.value {
-                                idle += v;
+                            "cpu_ticks_idle" => {
+                                if let NamedData::UInt64(v) = n.value {
+                                    idle += v;
+                                }
                             }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
             }
+            Some((user, kernel, idle))
         }
-        Some((user, kernel, idle))
-    }
 
-    let mut ctl = Ctl::new().ok()?;
-    let (u1, k1, i1) = read_ticks(&mut ctl)?;
-    std::thread::sleep(interval);
-    ctl = ctl.update().ok()?;
-    let (u2, k2, i2) = read_ticks(&mut ctl)?;
+        let mut ctl = match self.ctl.take() {
+            Some(ctl) => ctl,
+            None => Ctl::new().ok()?,
+        };
+        let (u1, k1, i1) = read_ticks(&mut ctl)?;
+        std::thread::sleep(interval);
+        let mut ctl = ctl.update().ok()?;
+        let (u2, k2, i2) = read_ticks(&mut ctl)?;
+        self.ctl = Some(ctl);
 
-    let du = u2.saturating_sub(u1);
-    let dk = k2.saturating_sub(k1);
-    let di = i2.saturating_sub(i1);
-    let total = du + dk + di;
-    if total == 0 {
-        return None;
+        let du = u2.saturating_sub(u1);
+        let dk = k2.saturating_sub(k1);
+        let di = i2.saturating_sub(i1);
+        let total = du + dk + di;
+        if total == 0 {
+            return None;
+        }
+        let user = ((du * 100) / total).min(100) as u8;
+        let system = ((dk * 100) / total).min(100) as u8;
+        Some((user, system))
     }
-    let user = ((du * 100) / total).min(100) as u8;
-    let system = ((dk * 100) / total).min(100) as u8;
-    Some((user, system))
 }
 
 /**
@@ -153,7 +194,7 @@ impl Drop for CpuSamplerHandle {
  * platform or permissions issue).
  */
 pub fn start_cpu_sampler() -> Option<CpuSamplerHandle> {
-    cpu_load(Duration::from_millis(100))?;
+    CpuLoad::new().sample(Duration::from_millis(100))?;
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::clone(&stop);
@@ -162,8 +203,9 @@ pub fn start_cpu_sampler() -> Option<CpuSamplerHandle> {
 
     let thread = std::thread::spawn(move || {
         debug!("CPU sampler started");
+        let mut load = CpuLoad::new();
         while !stop_flag.load(Ordering::Relaxed) {
-            if let Some((user, sys)) = cpu_load(SAMPLE_INTERVAL) {
+            if let Some((user, sys)) = load.sample(SAMPLE_INTERVAL) {
                 let ts = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_secs() as i64)
