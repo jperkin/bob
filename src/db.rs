@@ -557,10 +557,9 @@ impl Database {
         }
 
         let package_id = self.conn.last_insert_rowid();
-        self.conn.execute(
-            "INSERT OR IGNORE INTO package_state (package_id) VALUES (?1)",
-            params![package_id],
-        )?;
+        self.conn
+            .prepare_cached("INSERT OR IGNORE INTO package_state (package_id) VALUES (?1)")?
+            .execute(params![package_id])?;
 
         debug!(pkgname = pkgname, package_id = package_id, "Stored package");
         Ok(())
