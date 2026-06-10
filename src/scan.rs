@@ -1215,7 +1215,8 @@ impl Scan {
      *
      * Uses pkgbase for efficient lookup when available, falling back
      * to all packages for patterns without a known base.  Matching
-     * and version comparison are handled by `best_match_pbulk`.
+     * and version comparison are handled by a pbulk
+     * [`BestMatch`](pkgsrc::pattern::BestMatch) accumulator.
      *
      * Returns:
      * - `Ok(Some(id))` - index into `names` of the best matching package
@@ -1227,15 +1228,13 @@ impl Scan {
         pkgbase_map: &HashMap<&str, Vec<usize>>,
         names: &[PkgName],
     ) -> Result<Option<usize>, pkgsrc::PatternError> {
-        let mut best: Option<&str> = None;
+        let mut matcher = pattern.best_matcher_pbulk();
         let mut best_id: Option<usize> = None;
         if let Some(bases) = pattern.pkgbases() {
             for base in bases {
                 if let Some(candidates) = pkgbase_map.get(base) {
                     for &id in candidates {
-                        let prev = best;
-                        best = pattern.best_match_pbulk(best, names[id].pkgname())?;
-                        if best != prev {
+                        if matcher.consider(names[id].pkgname())? {
                             best_id = Some(id);
                         }
                     }
@@ -1243,9 +1242,7 @@ impl Scan {
             }
         } else {
             for (id, candidate) in names.iter().enumerate() {
-                let prev = best;
-                best = pattern.best_match_pbulk(best, candidate.pkgname())?;
-                if best != prev {
+                if matcher.consider(candidate.pkgname())? {
                     best_id = Some(id);
                 }
             }
