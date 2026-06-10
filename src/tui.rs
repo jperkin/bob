@@ -84,12 +84,33 @@ pub fn print_failed(msg: &str, elapsed: Duration) {
 /// Used for both event polling timeout and render throttling.
 pub const REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 
-/**
- * The progress display terminal events are delivered to, set for the
- * lifetime of each TUI [`refresh_loop`].  Events arriving with no
- * active display are discarded.
+/*
+ * Terminal input handling.  Reading terminal input and asking the
+ * terminal where the cursor is cannot happen at the same time, and
+ * creating an inline display asks where the cursor is.  The input
+ * thread therefore only reads input while a display is registered,
+ * and deregistering waits for any read in progress to finish, so a
+ * display is never created while input is being read.
  */
-static ACTIVE_PROGRESS: Mutex<Option<Arc<Mutex<Progress>>>> = Mutex::new(None);
+
+/**
+ * The display input events are delivered to, and whether the input
+ * thread is currently reading input.
+ */
+struct InputState {
+    display: Option<Arc<Mutex<Progress>>>,
+    reading: bool,
+}
+
+static INPUT_STATE: Mutex<InputState> = Mutex::new(InputState {
+    display: None,
+    reading: false,
+});
+
+/**
+ * Woken when a display registers or the input thread stops reading.
+ */
+static INPUT_CONDVAR: std::sync::Condvar = std::sync::Condvar::new();
 
 /**
  * Spawns the terminal input thread on first use.
@@ -97,21 +118,58 @@ static ACTIVE_PROGRESS: Mutex<Option<Arc<Mutex<Progress>>>> = Mutex::new(None);
 static INPUT_THREAD: std::sync::Once = std::sync::Once::new();
 
 /**
- * Block reading terminal events for the lifetime of the process,
- * handling each against the active progress display and rendering the
- * result.  Exits if the terminal cannot be read.
+ * How long each wait for terminal input lasts, and so how long
+ * deregistering a display can take.
+ */
+const INPUT_POLL: Duration = Duration::from_millis(500);
+
+/**
+ * Deliver terminal input to the registered display for the lifetime
+ * of the process.  Exits if the terminal cannot be read.
  */
 fn input_loop() {
     loop {
-        let Ok(event) = event::read() else {
+        let Ok(mut state) = INPUT_STATE.lock() else {
             return;
         };
-        let active = ACTIVE_PROGRESS.lock().ok().and_then(|a| a.clone());
-        if let Some(progress) = active
-            && let Ok(mut p) = progress.lock()
-        {
-            let _ = p.handle_event(event);
-            let _ = p.render();
+        while state.display.is_none() {
+            let Ok(s) = INPUT_CONDVAR.wait(state) else {
+                return;
+            };
+            state = s;
+        }
+        state.reading = true;
+        drop(state);
+
+        let failed = loop {
+            match event::poll(INPUT_POLL) {
+                Ok(true) => {
+                    let Ok(event) = event::read() else {
+                        break true;
+                    };
+                    let display = INPUT_STATE.lock().ok().and_then(|s| s.display.clone());
+                    if let Some(display) = display
+                        && let Ok(mut p) = display.lock()
+                    {
+                        let _ = p.handle_event(event);
+                        let _ = p.render();
+                    }
+                }
+                Ok(false) => {}
+                Err(_) => break true,
+            }
+            match INPUT_STATE.lock() {
+                Ok(state) if state.display.is_some() => {}
+                _ => break false,
+            }
+        };
+
+        if let Ok(mut state) = INPUT_STATE.lock() {
+            state.reading = false;
+        }
+        INPUT_CONDVAR.notify_all();
+        if failed {
+            return;
         }
     }
 }
@@ -131,9 +189,10 @@ pub fn refresh_loop(
 
     let is_plain = progress.lock().map(|p| p.is_plain()).unwrap_or(false);
     if !is_plain {
-        if let Ok(mut active) = ACTIVE_PROGRESS.lock() {
-            *active = Some(Arc::clone(&progress));
+        if let Ok(mut input) = INPUT_STATE.lock() {
+            input.display = Some(Arc::clone(&progress));
         }
+        INPUT_CONDVAR.notify_all();
         INPUT_THREAD.call_once(|| {
             crate::spawn_named("input", input_loop);
         });
@@ -144,8 +203,14 @@ pub fn refresh_loop(
             let _ = p.render();
         }
     }
-    if !is_plain && let Ok(mut active) = ACTIVE_PROGRESS.lock() {
-        *active = None;
+    if !is_plain && let Ok(mut input) = INPUT_STATE.lock() {
+        input.display = None;
+        while input.reading {
+            let Ok(i) = INPUT_CONDVAR.wait(input) else {
+                return;
+            };
+            input = i;
+        }
     }
 }
 
@@ -801,8 +866,12 @@ impl Progress {
         if tui && io::stdout().is_terminal() && enable_raw_mode().is_ok() {
             match MultiProgress::new(title, finished_title, total, num_workers) {
                 Ok(mp) => return Ok(Self::Tui(mp)),
-                Err(_) => {
+                Err(e) => {
                     let _ = disable_raw_mode();
+                    tracing::warn!(
+                        error = format!("{e:#}"),
+                        "Terminal setup failed, using plain progress"
+                    );
                 }
             }
         }
