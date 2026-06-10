@@ -932,36 +932,34 @@ impl Database {
      */
     pub fn store_pbulk_weights(&self) -> Result<()> {
         let selected = query_selected_packages(&self.conn)?;
-        let mut incoming: HashMap<i64, HashSet<i64>> =
-            selected.iter().map(|p| (p.id, HashSet::new())).collect();
-        let mut reverse_deps: HashMap<i64, HashSet<i64>> =
-            selected.iter().map(|p| (p.id, HashSet::new())).collect();
-        let pbulk_weights: HashMap<i64, usize> =
-            selected.iter().map(|p| (p.id, p.pbulk_weight)).collect();
-
+        let by_id: HashMap<i64, usize> = selected
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.id, i))
+            .collect();
+        let weights: Vec<usize> = selected.iter().map(|p| p.pbulk_weight).collect();
+        let mut rdeps: Vec<Vec<usize>> = vec![Vec::new(); selected.len()];
         for (pkg, dep) in query_resolved_deps(&self.conn)? {
-            if let (Some(fwd), true) = (incoming.get_mut(&pkg), reverse_deps.contains_key(&dep)) {
-                fwd.insert(dep);
-            }
-            if let Some(rev) = reverse_deps.get_mut(&dep)
-                && incoming.contains_key(&pkg)
-            {
-                rev.insert(pkg);
+            if let (Some(&p), Some(&d)) = (by_id.get(&pkg), by_id.get(&dep)) {
+                rdeps[d].push(p);
             }
         }
+        drop(by_id);
 
-        let (total_pbulk_weights, dep_counts) =
-            crate::scheduler::compute_total_pbulk_weights(&incoming, &reverse_deps, &pbulk_weights);
+        let (total_weights, dep_counts) =
+            crate::scheduler::compute_total_pbulk_weights_by_position(&weights, &rdeps);
 
         let tx = self.transaction()?;
         let mut stmt = self.conn.prepare(
             "UPDATE package_state SET total_pbulk_weight = ?2, dep_count = ?3 \
              WHERE package_id = ?1",
         )?;
-        for id in incoming.keys() {
-            let weight = total_pbulk_weights.get(id).copied().unwrap_or(0);
-            let deps = dep_counts.get(id).copied().unwrap_or(0);
-            stmt.execute(params![id, weight as i64, deps as i64])?;
+        for (i, pkg) in selected.iter().enumerate() {
+            stmt.execute(params![
+                pkg.id,
+                total_weights[i] as i64,
+                dep_counts[i] as i64
+            ])?;
         }
         drop(stmt);
         tx.commit()

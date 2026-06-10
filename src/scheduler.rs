@@ -618,9 +618,58 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
 /**
  * Compute total PBULK_WEIGHTs and transitive dependent counts via BFS.
  *
- * For each package, walks the reverse dependency graph to find all
- * unique transitive dependents, summing their PBULK_WEIGHTs.
- * Diamond dependencies are counted once (deduplicated).
+ * `weights[i]` is package i's own PBULK_WEIGHT and `rdeps[i]` lists the
+ * positions of the packages that depend directly on it.  For each
+ * package, walks the reverse dependency graph to find all unique
+ * transitive dependents, summing their PBULK_WEIGHTs.  Diamond
+ * dependencies are counted once (deduplicated).
+ */
+pub(crate) fn compute_total_pbulk_weights_by_position(
+    weights: &[usize],
+    rdeps: &[Vec<usize>],
+) -> (Vec<usize>, Vec<usize>) {
+    let n = weights.len();
+    let mut total_weights = vec![0usize; n];
+    let mut dep_counts = vec![0usize; n];
+    let mut visit_gen = vec![0u32; n];
+    let mut epoch = 0u32;
+    let mut queue: VecDeque<usize> = VecDeque::new();
+
+    for i in 0..n {
+        epoch += 1;
+        queue.clear();
+
+        let mut weight_sum = weights[i];
+        let mut count = 0usize;
+
+        for &r in &rdeps[i] {
+            if visit_gen[r] != epoch {
+                visit_gen[r] = epoch;
+                queue.push_back(r);
+            }
+        }
+        while let Some(node) = queue.pop_front() {
+            weight_sum += weights[node];
+            count += 1;
+            for &r in &rdeps[node] {
+                if visit_gen[r] != epoch {
+                    visit_gen[r] = epoch;
+                    queue.push_back(r);
+                }
+            }
+        }
+
+        total_weights[i] = weight_sum;
+        dep_counts[i] = count;
+    }
+
+    (total_weights, dep_counts)
+}
+
+/**
+ * Map-keyed wrapper over
+ * [`compute_total_pbulk_weights_by_position`], keyed by the packages
+ * in `incoming`.
  */
 pub(crate) fn compute_total_pbulk_weights<K>(
     incoming: &HashMap<K, HashSet<K>>,
@@ -647,39 +696,8 @@ where
         }
     }
 
-    let mut total_weights = vec![0usize; n];
-    let mut dep_counts = vec![0usize; n];
-    let mut visit_gen = vec![0u32; n];
-    let mut epoch = 0u32;
-    let mut queue: VecDeque<usize> = VecDeque::new();
-
-    for i in 0..n {
-        epoch += 1;
-        queue.clear();
-
-        let mut weight_sum = weights[i];
-        let mut count = 0usize;
-
-        for &r in &rdeps_indexed[i] {
-            if visit_gen[r] != epoch {
-                visit_gen[r] = epoch;
-                queue.push_back(r);
-            }
-        }
-        while let Some(node) = queue.pop_front() {
-            weight_sum += weights[node];
-            count += 1;
-            for &r in &rdeps_indexed[node] {
-                if visit_gen[r] != epoch {
-                    visit_gen[r] = epoch;
-                    queue.push_back(r);
-                }
-            }
-        }
-
-        total_weights[i] = weight_sum;
-        dep_counts[i] = count;
-    }
+    let (total_weights, dep_counts) =
+        compute_total_pbulk_weights_by_position(&weights, &rdeps_indexed);
 
     let mut tw_map: HashMap<K, usize> = HashMap::with_capacity(n);
     let mut dc_map: HashMap<K, usize> = HashMap::with_capacity(n);
