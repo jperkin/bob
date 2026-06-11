@@ -334,10 +334,6 @@ fn publish_report(config: &Config, build_id: &str, dry_run: bool) -> Result<()> 
     Ok(())
 }
 
-// ========================================================================
-// PRE-PUBLISH VALIDATION
-// ========================================================================
-
 fn send_email(config: &Config, db: &Database, build_id: &str, dry_run: bool) -> Result<()> {
     let publish = config
         .publish()
@@ -459,10 +455,6 @@ fn validate_pre_publish(packages: &PublishPackages, successful: &[String]) -> Re
 
     Ok(())
 }
-
-// ========================================================================
-// RSYNC AND SSH
-// ========================================================================
 
 fn write_rsync_filter(packages: &[&String], path: &Path) -> Result<()> {
     let mut file = std::fs::File::create(path)
@@ -604,20 +596,20 @@ fn format_remote(host: &str, user: Option<&str>) -> String {
     }
 }
 
-// ========================================================================
-// HTML REPORT GENERATION
-// ========================================================================
-
-const BUILD_PHASES: &[(&str, &str)] = &[
-    ("pre-clean", "pre-clean.log"),
-    ("depends", "depends.log"),
-    ("checksum", "checksum.log"),
-    ("configure", "configure.log"),
-    ("build", "build.log"),
-    ("install", "install.log"),
-    ("package", "package.log"),
-    ("deinstall", "deinstall.log"),
-    ("clean", "clean.log"),
+/*
+ * Build phases in execution order.  Each phase logs to `<name>.log`,
+ * a rule the report script relies on when expanding phase links.
+ */
+const BUILD_PHASES: &[&str] = &[
+    "pre-clean",
+    "depends",
+    "checksum",
+    "configure",
+    "build",
+    "install",
+    "package",
+    "deinstall",
+    "clean",
 ];
 
 struct FailedPackageInfo<'a> {
@@ -975,7 +967,6 @@ th[aria-sort=\"ascending\"]::after { content: \" \\25B2\"; font-size: 0.75em; }\
 th[aria-sort=\"descending\"]::after { content: \" \\25BC\"; font-size: 0.75em; }\n\
 .data { font-size: 0.8125rem; white-space: nowrap; margin: 0 auto; }\n\
 .data tbody tr:nth-child(even) td { background: #fdfaf7; }\n\
-.r { text-align: right; }\n\
 .header { margin-bottom: 1em; padding-bottom: 0.625em; border-bottom: 1px solid #e8ddd4; }\n\
 .header-table { width: 100%; white-space: nowrap; border: none; margin: 0; }\n\
 .header-table td { border: none; padding: 0 0.5em; vertical-align: middle; }\n\
@@ -993,17 +984,17 @@ th[aria-sort=\"descending\"]::after { content: \" \\25BC\"; font-size: 0.75em; }
 .vars td { font-size: 0.75rem; }\n\
 .stats td:not(.vk) { text-align: right; }\n\
 .phase { margin-right: 0.375em; }\n\
-.indirect { color: #aaa; }\n\
-.reason { color: #888; }\n\
+tr.indirect td { color: #aaa; }\n\
+tr.indirect td:nth-child(7) { color: #888; }\n\
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }\n\
 .col-err { width: 75%; }\n\
-.col-pkg span, .col-path span { display: inline-block; max-width: 18em; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }\n\
-.col-breaks, .col-dur { text-align: right; }\n\
-@media (max-width: 100em) { .col-status { display: none; } }\n\
-@media (max-width: 93em) { .col-maint { display: none; } }\n\
-@media (max-width: 80em) { .col-dur { display: none; } }\n\
-@media (max-width: 75em) { .col-path { display: none; } }\n\
-@media (max-width: 58em) { .col-breaks { display: none; } }\n";
+.fl td:nth-child(-n+2) { max-width: 18em; overflow: hidden; text-overflow: ellipsis; }\n\
+.fl th:nth-child(3), .fl td:nth-child(3), .fl th:nth-child(4), .fl td:nth-child(4) { text-align: right; }\n\
+@media (max-width: 100em) { #failed-table th:nth-child(6), #failed-table td:nth-child(6) { display: none; } }\n\
+@media (max-width: 93em) { #failed-table th:nth-child(5), #failed-table td:nth-child(5) { display: none; } }\n\
+@media (max-width: 80em) { .fl th:nth-child(4), .fl td:nth-child(4) { display: none; } }\n\
+@media (max-width: 75em) { .fl th:nth-child(2), .fl td:nth-child(2) { display: none; } }\n\
+@media (max-width: 58em) { .fl th:nth-child(3), .fl td:nth-child(3) { display: none; } }\n";
 
 fn write_html_report(
     db: &Database,
@@ -1034,8 +1025,8 @@ fn write_html_report(
                 .and_then(|stage| {
                     BUILD_PHASES
                         .iter()
-                        .find(|(name, _)| *name == stage.into_str())
-                        .map(|(_, log)| (*log).to_string())
+                        .find(|name| **name == stage.into_str())
+                        .map(|name| format!("{name}.log"))
                 })
                 .or_else(|| {
                     /*
@@ -1098,9 +1089,19 @@ fn write_html_report(
     writeln!(file, "<style>")?;
     write!(file, "{}", REPORT_CSS)?;
     writeln!(file, "</style>")?;
-    write_sort_script(&mut file)?;
+    write_script(&mut file)?;
     writeln!(file, "</head>")?;
-    writeln!(file, "<body>")?;
+
+    let pkgpath_base = meta.vcs_info.web_url().and_then(|base| {
+        meta.vcs_info
+            .revision_full
+            .as_ref()
+            .map(|rev| format!("{}/tree/{}", base, rev))
+    });
+    match &pkgpath_base {
+        Some(base) => writeln!(file, "<body data-pp=\"{}\">", escape_html(base))?,
+        None => writeln!(file, "<body>")?,
+    }
 
     write_header(&mut file, &platform, &display_date)?;
 
@@ -1111,26 +1112,12 @@ fn write_html_report(
     write_misc_table(&mut file, meta.vcs_info, summary.duration, db, diff)?;
     writeln!(file, "</div>")?;
 
-    let pkgpath_base = meta.vcs_info.web_url().and_then(|base| {
-        meta.vcs_info
-            .revision_full
-            .as_ref()
-            .map(|rev| format!("{}/tree/{}", base, rev))
-    });
-
     if let Some(d) = diff {
-        write_diff_section(
-            &mut file,
-            d,
-            &failed_info,
-            pkgpath_base.as_deref(),
-            commits,
-            meta.vcs_info,
-        )?;
+        write_diff_section(&mut file, d, &failed_info, commits, meta.vcs_info)?;
     }
 
     if !summary.scanfail.is_empty() {
-        write_scanfail_table(&mut file, &summary.scanfail, pkgpath_base.as_deref())?;
+        write_scanfail_table(&mut file, &summary.scanfail)?;
     }
 
     let mut maintainers: HashMap<String, String> = HashMap::new();
@@ -1145,7 +1132,6 @@ fn write_html_report(
         &failed_info,
         &maintainers,
         logdir,
-        pkgpath_base.as_deref(),
     )?;
 
     writeln!(file, "</body>")?;
@@ -1154,7 +1140,14 @@ fn write_html_report(
     Ok(())
 }
 
-fn write_sort_script(file: &mut std::fs::File) -> Result<()> {
+/*
+ * Client-side table sorting, plus expansion of the compact link forms
+ * the report is written in: pkgpath cells become links against the
+ * repository base URL in `<body data-pp>`, the `data-l` phase list
+ * becomes per-phase log links, and truncated cells gain a tooltip on
+ * hover.
+ */
+fn write_script(file: &mut std::fs::File) -> Result<()> {
     writeln!(file, "<script>")?;
     writeln!(file, "function cmpVal(cells, col, type) {{")?;
     writeln!(
@@ -1204,6 +1197,65 @@ fn write_sort_script(file: &mut std::fs::File) -> Result<()> {
         "  for (var i = 0; i < h.length; i++) h[i].setAttribute('aria-sort', i == col ? (desc ? 'descending' : 'ascending') : 'none');"
     )?;
     writeln!(file, "}}")?;
+    writeln!(file, "function linkify(id, col, base) {{")?;
+    writeln!(file, "  var t = document.getElementById(id);")?;
+    writeln!(file, "  if (!t) return;")?;
+    writeln!(file, "  var rows = t.tBodies[0].rows;")?;
+    writeln!(file, "  for (var i = 0; i < rows.length; i++) {{")?;
+    writeln!(file, "    var td = rows[i].cells[col];")?;
+    writeln!(file, "    if (!td || !td.textContent) continue;")?;
+    writeln!(file, "    var a = document.createElement('a');")?;
+    writeln!(file, "    a.href = base + '/' + td.textContent;")?;
+    writeln!(file, "    a.textContent = td.textContent;")?;
+    writeln!(file, "    td.textContent = '';")?;
+    writeln!(file, "    td.appendChild(a);")?;
+    writeln!(file, "  }}")?;
+    writeln!(file, "}}")?;
+    writeln!(file, "function phaseLinks() {{")?;
+    writeln!(file, "  var t = document.getElementById('failed-table');")?;
+    writeln!(file, "  if (!t) return;")?;
+    writeln!(file, "  var rows = t.tBodies[0].rows;")?;
+    writeln!(file, "  for (var i = 0; i < rows.length; i++) {{")?;
+    writeln!(file, "    var td = rows[i].cells[6];")?;
+    writeln!(file, "    var l = td.getAttribute('data-l');")?;
+    writeln!(file, "    if (!l) continue;")?;
+    writeln!(file, "    var pkg = rows[i].cells[0].textContent;")?;
+    writeln!(file, "    var names = l.split(' ');")?;
+    writeln!(file, "    for (var j = 0; j < names.length; j++) {{")?;
+    writeln!(file, "      var a = document.createElement('a');")?;
+    writeln!(file, "      a.href = pkg + '/' + names[j] + '.log';")?;
+    writeln!(file, "      a.textContent = names[j];")?;
+    writeln!(file, "      a.className = 'phase';")?;
+    writeln!(
+        file,
+        "      if (j) td.appendChild(document.createTextNode(' '));"
+    )?;
+    writeln!(file, "      td.appendChild(a);")?;
+    writeln!(file, "    }}")?;
+    writeln!(file, "  }}")?;
+    writeln!(file, "}}")?;
+    writeln!(
+        file,
+        "document.addEventListener('DOMContentLoaded', function() {{"
+    )?;
+    writeln!(file, "  var pp = document.body.getAttribute('data-pp');")?;
+    writeln!(file, "  if (pp) {{")?;
+    writeln!(file, "    linkify('failed-table', 1, pp);")?;
+    writeln!(file, "    linkify('diff-new-failures', 1, pp);")?;
+    writeln!(file, "    linkify('scanfail-table', 0, pp);")?;
+    writeln!(file, "  }}")?;
+    writeln!(file, "  phaseLinks();")?;
+    writeln!(file, "}});")?;
+    writeln!(
+        file,
+        "document.addEventListener('mouseover', function(e) {{"
+    )?;
+    writeln!(file, "  var td = e.target.closest('td');")?;
+    writeln!(
+        file,
+        "  if (td && !td.title && td.offsetWidth < td.scrollWidth) td.title = td.textContent;"
+    )?;
+    writeln!(file, "}});")?;
     writeln!(file, "</script>")?;
     Ok(())
 }
@@ -1419,25 +1471,21 @@ fn write_misc_table(
     Ok(())
 }
 
-fn generate_phase_links(pkg_name: &str, log_dir: &Path) -> String {
-    if !log_dir.exists() {
-        return String::new();
-    }
-    let mut links = Vec::new();
+/*
+ * Space-separated list of phases with a log file present, expanded
+ * into log links client-side.
+ */
+fn phase_list(log_dir: &Path) -> String {
+    let mut names = Vec::new();
     if log_dir.join("setup.log").exists() {
-        links.push(format!(
-            "<a href=\"{pkg_name}/setup.log\" class=\"phase\">setup</a>"
-        ));
+        names.push("setup");
     }
-    for (phase_name, log_file) in BUILD_PHASES {
-        let log_path = log_dir.join(log_file);
-        if log_path.exists() {
-            links.push(format!(
-                "<a href=\"{pkg_name}/{log_file}\" class=\"phase\">{phase_name}</a>"
-            ));
+    for &name in BUILD_PHASES {
+        if log_dir.join(format!("{name}.log")).exists() {
+            names.push(name);
         }
     }
-    links.join(" ")
+    names.join(" ")
 }
 
 /*
@@ -1452,45 +1500,33 @@ fn pkg_log_link(pkgname: &str, log: Option<&str>) -> String {
     }
 }
 
-/*
- * The same link wrapped in a titled span for table cells.
- */
-fn pkg_log_cell(pkgname: &str, log: Option<&str>) -> String {
-    format!(
-        "<span title=\"{}\">{}</span>",
-        escape_html(pkgname),
-        pkg_log_link(pkgname, log)
-    )
-}
-
 fn write_failed_table(
     file: &mut std::fs::File,
     title: &str,
     failed_info: &[FailedPackageInfo],
     maintainers: &HashMap<String, String>,
     logdir: &Path,
-    pkgpath_base: Option<&str>,
 ) -> Result<()> {
     let t = "failed-table";
     writeln!(
         file,
-        "<table id=\"{t}\" class=\"data\" data-sort-col=\"6\" data-sort-desc=\"0\">"
+        "<table id=\"{t}\" class=\"data fl\" data-sort-col=\"6\" data-sort-desc=\"0\">"
     )?;
     writeln!(file, "<caption class=\"sr-only\">Failed packages</caption>")?;
     writeln!(file, "<thead><tr>")?;
-    write_sortable_th(file, t, 0, "str", title, "col-pkg", "", "none")?;
-    write_sortable_th(file, t, 1, "str", "PkgPath", "col-path", "", "none")?;
-    write_sortable_th(file, t, 2, "num", "Breaks", "col-breaks", "", "none")?;
-    write_sortable_th(file, t, 3, "num", "Duration", "col-dur", "", "none")?;
-    write_sortable_th(file, t, 4, "str", "Maintainer", "col-maint", "", "none")?;
-    write_sortable_th(file, t, 5, "str", "Status", "col-status", "", "none")?;
+    write_sortable_th(file, t, 0, "str", title, "", "", "none")?;
+    write_sortable_th(file, t, 1, "str", "PkgPath", "", "", "none")?;
+    write_sortable_th(file, t, 2, "num", "Breaks", "", "", "none")?;
+    write_sortable_th(file, t, 3, "num", "Duration", "", "", "none")?;
+    write_sortable_th(file, t, 4, "str", "Maintainer", "", "", "none")?;
+    write_sortable_th(file, t, 5, "str", "Status", "", "", "none")?;
     write_sortable_th(
         file,
         t,
         6,
         "num",
         "Build Logs",
-        "col-logs",
+        "",
         ", 2, 'num'",
         "ascending",
     )?;
@@ -1508,21 +1544,14 @@ fn write_failed_table(
 
     for info in failed_info {
         let pkg_name = info.result.pkgname.pkgname();
-        let pkgpath_str = info
-            .result
-            .pkgpath
-            .as_ref()
-            .map(|p| p.as_path().display().to_string())
-            .unwrap_or_default();
-        let escaped_path = escape_html(&pkgpath_str);
-        let pkgpath = match pkgpath_base {
-            Some(base) if !pkgpath_str.is_empty() => format!(
-                "<span title=\"{0}\"><a href=\"{1}/{0}\">{0}</a></span>",
-                escaped_path,
-                escape_html(base),
-            ),
-            _ => format!("<span title=\"{0}\">{0}</span>", escaped_path),
-        };
+        let pkgpath = escape_html(
+            &info
+                .result
+                .pkgpath
+                .as_ref()
+                .map(|p| p.as_path().display().to_string())
+                .unwrap_or_default(),
+        );
         let maintainer = maintainers
             .get(pkg_name)
             .map(|s| s.as_str())
@@ -1541,17 +1570,15 @@ fn write_failed_table(
                 .map(|b| pkg_log_link(b, log_by_name.get(b.as_str()).copied()))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let reason = format!("Blocked by {links}");
             writeln!(
                 file,
-                "<tr><td class=\"col-pkg indirect\"><span title=\"{0}\">{0}</span></td><td class=\"col-path indirect\">{1}</td><td class=\"col-breaks r indirect\" data-sort=\"{2}\">{3}</td><td class=\"col-dur r indirect\" data-sort=\"0\"></td><td class=\"col-maint indirect\">{4}</td><td class=\"col-status indirect\">{5}</td><td class=\"col-logs reason\" data-sort=\"1\">{6}</td></tr>",
+                "<tr class=\"indirect\"><td>{}</td><td>{}</td><td>{}</td><td></td><td>{}</td><td>{}</td><td data-sort=\"1\">Blocked by {}</td></tr>",
                 escape_html(pkg_name),
                 pkgpath,
-                info.breaks_count,
                 breaks_display,
                 escape_html(maintainer),
                 info.result.state.as_str(),
-                reason
+                links
             )?;
             continue;
         }
@@ -1559,23 +1586,17 @@ fn write_failed_table(
         let dur_secs = info.result.build_stats.duration.as_secs();
         let duration = bob::format_duration(info.result.build_stats.duration);
 
-        let pkg_link = pkg_log_cell(pkg_name, info.failed_log.as_deref());
-
-        let log_dir = logdir.join(pkg_name);
-        let phase_links = generate_phase_links(pkg_name, &log_dir);
-
         writeln!(
             file,
-            "<tr><td class=\"col-pkg\">{}</td><td class=\"col-path\">{}</td><td class=\"col-breaks r\" data-sort=\"{}\">{}</td><td class=\"col-dur r\" data-sort=\"{}\">{}</td><td class=\"col-maint\">{}</td><td class=\"col-status\">{}</td><td class=\"col-logs\" data-sort=\"0\">{}</td></tr>",
-            pkg_link,
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td data-sort=\"{}\">{}</td><td>{}</td><td>{}</td><td data-l=\"{}\"></td></tr>",
+            pkg_log_link(pkg_name, info.failed_log.as_deref()),
             pkgpath,
-            info.breaks_count,
             breaks_display,
             dur_secs,
             duration,
             escape_html(maintainer),
             info.result.state.as_str(),
-            phase_links,
+            phase_list(&logdir.join(pkg_name)),
         )?;
     }
 
@@ -1588,7 +1609,6 @@ fn write_diff_section(
     file: &mut std::fs::File,
     diff: &bob::db::BuildDiff,
     failed_info: &[FailedPackageInfo],
-    pkgpath_base: Option<&str>,
     commits: Option<&HashMap<String, Vec<bob::vcs::CommitInfo>>>,
     vcs_info: &bob::vcs::VcsInfo,
 ) -> Result<()> {
@@ -1629,20 +1649,20 @@ fn write_diff_section(
     let title = format!("New Failures Since {}", escape_html(&diff.build1_id));
     writeln!(
         file,
-        "<table id=\"{t}\" class=\"data\" data-sort-col=\"2\" data-sort-desc=\"1\">"
+        "<table id=\"{t}\" class=\"data fl\" data-sort-col=\"2\" data-sort-desc=\"1\">"
     )?;
     writeln!(
         file,
         "<caption class=\"sr-only\">New failures since previous build</caption>"
     )?;
     writeln!(file, "<thead><tr>")?;
-    write_sortable_th(file, t, 0, "str", &title, "col-pkg", "", "none")?;
-    write_sortable_th(file, t, 1, "str", "PkgPath", "col-path", "", "none")?;
-    write_sortable_th(file, t, 2, "num", "Breaks", "col-breaks", "", "none")?;
-    write_sortable_th(file, t, 3, "num", "Duration", "col-dur", "", "none")?;
-    write_sortable_th(file, t, 4, "str", "Previously", "col-prev", "", "none")?;
+    write_sortable_th(file, t, 0, "str", &title, "", "", "none")?;
+    write_sortable_th(file, t, 1, "str", "PkgPath", "", "", "none")?;
+    write_sortable_th(file, t, 2, "num", "Breaks", "", "", "none")?;
+    write_sortable_th(file, t, 3, "num", "Duration", "", "", "none")?;
+    write_sortable_th(file, t, 4, "str", "Previously", "", "", "none")?;
     if show_commits {
-        write_sortable_th(file, t, 5, "str", "Commits", "col-commits", "", "none")?;
+        write_sortable_th(file, t, 5, "str", "Commits", "", "", "none")?;
     }
     writeln!(file, "</tr></thead>")?;
     writeln!(file, "<tbody>")?;
@@ -1654,16 +1674,6 @@ fn write_diff_section(
             .or(e.build1_pkgname.as_deref())
             .unwrap_or("-");
         let info = info_by_name.get(pkgname);
-
-        let escaped_path = escape_html(&e.pkgpath);
-        let pkgpath_cell = match pkgpath_base {
-            Some(base) => format!(
-                "<span title=\"{0}\"><a href=\"{1}/{0}\">{0}</a></span>",
-                escaped_path,
-                escape_html(base),
-            ),
-            None => format!("<span title=\"{0}\">{0}</span>", escaped_path),
-        };
 
         let breaks = info.map(|i| i.breaks_count).unwrap_or(0);
         let breaks_display = if breaks > 0 {
@@ -1682,8 +1692,6 @@ fn write_diff_section(
 
         let previously: &str = e.build1_outcome.map_or("absent", |o| o.as_str());
 
-        let pkg_link = pkg_log_cell(pkgname, info.and_then(|i| i.failed_log.as_deref()));
-
         let commits_cell = if show_commits {
             let entries = commits.and_then(|m| m.get(&e.pkgpath));
             let mut parts: Vec<String> = Vec::new();
@@ -1697,21 +1705,20 @@ fn write_diff_section(
                     parts.push(part);
                 }
             }
-            format!("<td class=\"col-commits\">{}</td>", parts.join(" "))
+            format!("<td>{}</td>", parts.join(" "))
         } else {
             String::new()
         };
 
         writeln!(
             file,
-            "<tr><td class=\"col-pkg\">{}</td>\
-             <td class=\"col-path\">{}</td>\
-             <td class=\"col-breaks r\" data-sort=\"{}\">{}</td>\
-             <td class=\"col-dur r\" data-sort=\"{}\">{}</td>\
-             <td class=\"col-prev\">{}</td>{}</tr>",
-            pkg_link,
-            pkgpath_cell,
-            breaks,
+            "<tr><td>{}</td>\
+             <td>{}</td>\
+             <td>{}</td>\
+             <td data-sort=\"{}\">{}</td>\
+             <td>{}</td>{}</tr>",
+            pkg_log_link(pkgname, info.and_then(|i| i.failed_log.as_deref())),
+            escape_html(&e.pkgpath),
             breaks_display,
             dur_secs,
             duration,
@@ -1832,7 +1839,6 @@ fn compute_diff_commits(
 fn write_scanfail_table(
     file: &mut std::fs::File,
     scanfail: &[(pkgsrc::PkgPath, String)],
-    pkgpath_base: Option<&str>,
 ) -> Result<()> {
     let t = "scanfail-table";
     writeln!(
@@ -1847,20 +1853,10 @@ fn write_scanfail_table(
     writeln!(file, "<tbody>")?;
 
     for (pkgpath, error_msg) in scanfail {
-        let path_str = pkgpath.as_path().display().to_string();
-        let path_html = match pkgpath_base {
-            Some(base) => format!(
-                "<a href=\"{}/{}\">{}</a>",
-                escape_html(base),
-                escape_html(&path_str),
-                escape_html(&path_str)
-            ),
-            None => escape_html(&path_str),
-        };
         writeln!(
             file,
             "<tr><td>{}</td><td>{}</td></tr>",
-            path_html,
+            escape_html(&pkgpath.as_path().display().to_string()),
             escape_html(error_msg)
         )?;
     }
