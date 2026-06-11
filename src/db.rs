@@ -286,10 +286,6 @@ impl Database {
         Ok(db)
     }
 
-    pub fn dbdir(&self) -> &Path {
-        &self.dbdir
-    }
-
     /** Borrow the underlying database connection. */
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
@@ -567,7 +563,7 @@ impl Database {
      * Committing per pkgpath keeps completed results durable as the scan
      * streams, instead of buffering them in one long-lived transaction.
      */
-    pub fn store_scan_pkgpath(&self, pkgpath: &str, indexes: &[ScanIndex]) -> Result<()> {
+    pub(crate) fn store_scan_pkgpath(&self, pkgpath: &str, indexes: &[ScanIndex]) -> Result<()> {
         let tx = self.transaction()?;
         for index in indexes {
             self.store_package(pkgpath, index)?;
@@ -616,7 +612,7 @@ impl Database {
      * yet. These are dependencies that were discovered during scanning but the
      * scan was interrupted before they could be processed.
      */
-    pub fn get_unscanned_dependencies(&self) -> Result<HashSet<String>> {
+    pub(crate) fn get_unscanned_dependencies(&self) -> Result<HashSet<String>> {
         let scanned = self.get_scanned_pkgpaths()?;
         let mut stmt = self
             .conn
@@ -804,7 +800,7 @@ impl Database {
      * first.  Status/scheduling queries only operate on selected
      * packages.
      */
-    pub fn store_resolution(&self, summary: &crate::scan::ScanSummary) -> Result<()> {
+    pub(crate) fn store_resolution(&self, summary: &crate::scan::ScanSummary) -> Result<()> {
         let id_map: HashMap<String, i64> = self
             .conn
             .prepare("SELECT pkgname, id FROM scan_index")?
@@ -882,7 +878,7 @@ impl Database {
      * them in `package_state` for read commands to order by.  Run after
      * [`store_resolution`](Self::store_resolution).
      */
-    pub fn store_pbulk_weights(&self) -> Result<()> {
+    pub(crate) fn store_pbulk_weights(&self) -> Result<()> {
         let selected = query_selected_packages(&self.conn)?;
         let by_id: HashMap<i64, usize> = selected
             .iter()
@@ -937,7 +933,7 @@ impl Database {
     /**
      * Clear all resolved dependencies.
      */
-    pub fn clear_resolved_depends(&self) -> Result<()> {
+    pub(crate) fn clear_resolved_depends(&self) -> Result<()> {
         self.conn.execute("DELETE FROM resolved_depends", [])?;
         Ok(())
     }
@@ -1114,7 +1110,7 @@ impl Database {
     /**
      * Store a build result by pkgname.
      */
-    pub fn store_build_by_name(&self, result: &BuildResult) -> Result<()> {
+    pub(crate) fn store_build_by_name(&self, result: &BuildResult) -> Result<()> {
         let id: i64 = self
             .conn
             .query_row(
@@ -1530,7 +1526,7 @@ impl Database {
     /**
      * Store version control information in the database.
      */
-    pub fn store_vcs_info(&self, info: &crate::vcs::VcsInfo) -> Result<()> {
+    pub(crate) fn store_vcs_info(&self, info: &crate::vcs::VcsInfo) -> Result<()> {
         let json = serde_json::to_string(info)?;
         self.conn.execute(
             "INSERT OR REPLACE INTO metadata (key, value) VALUES ('vcs_info', ?1)",
@@ -1691,7 +1687,7 @@ impl Database {
     /**
      * Record a build in the history database.
      */
-    pub fn record_history(&self, rec: &crate::History) -> Result<()> {
+    pub(crate) fn record_history(&self, rec: &crate::History) -> Result<()> {
         let conn = self.history_conn()?;
         record_history_to(conn, rec)
     }
@@ -2012,7 +2008,7 @@ impl Database {
     /**
      * Write CPU usage samples to the `cpu_usage` table in history.db.
      */
-    pub fn store_cpu_usage(&self, samples: &[crate::cpu::CpuSample]) -> Result<()> {
+    pub(crate) fn store_cpu_usage(&self, samples: &[crate::cpu::CpuSample]) -> Result<()> {
         if samples.is_empty() {
             return Ok(());
         }

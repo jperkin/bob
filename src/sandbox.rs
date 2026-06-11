@@ -101,7 +101,7 @@ use tracing::{debug, info, info_span, warn};
  * so only use this when terminal isolation is required (builds, not
  * scans).
  */
-pub trait CommandSetsid {
+pub(crate) trait CommandSetsid {
     fn new_session(&mut self) -> &mut Self;
 }
 
@@ -166,7 +166,10 @@ pub(crate) const UNMOUNT_MAX_DELAY_MS: u64 = 1024;
  * Uses wait4() instead of try_wait() to collect resource usage from the
  * child process.  Returns the exit status and CPU time (user + system).
  */
-pub fn wait_with_shutdown(child: &mut Child, state: &RunState) -> Result<(ExitStatus, Duration)> {
+pub(crate) fn wait_with_shutdown(
+    child: &mut Child,
+    state: &RunState,
+) -> Result<(ExitStatus, Duration)> {
     let pid = child.id() as libc::pid_t;
     loop {
         if state.is_shutdown() {
@@ -237,7 +240,7 @@ fn wait_channel_with_shutdown<T>(
  * Uses a single helper thread that calls wait_with_output() (which handles
  * pipe draining correctly via internal threads).
  */
-pub fn wait_output_with_shutdown(child: Child, state: &RunState) -> Result<Output> {
+pub(crate) fn wait_output_with_shutdown(child: Child, state: &RunState) -> Result<Output> {
     let pid = child.id();
     let (tx, rx) = std::sync::mpsc::channel();
 
@@ -256,7 +259,7 @@ pub fn wait_output_with_shutdown(child: Child, state: &RunState) -> Result<Outpu
  * The parse result is returned alongside the exit status and stderr,
  * leaving the caller to decide which takes precedence on failure.
  */
-pub fn wait_parse_with_shutdown<T, F>(
+pub(crate) fn wait_parse_with_shutdown<T, F>(
     mut child: Child,
     state: &RunState,
     parse: F,
@@ -314,11 +317,9 @@ impl Sandbox {
     /**
      * Create a new [`Sandbox`] instance for build operations.  This is
      * used even if sandboxes have not been enabled, as it provides a
-     * consistent interface to run commands through using
-     * [`execute_command`].  If sandboxes are enabled then commands are
-     * executed via `chroot(8)`, otherwise they are executed directly.
-     *
-     * [`execute_command`]: Sandbox::execute_command
+     * consistent interface to run commands through.  If sandboxes are
+     * enabled then commands are executed via `chroot(8)`, otherwise
+     * they are executed directly.
      */
     pub fn new(config: &Config, pkgsrc: Option<&Pkgsrc>) -> Sandbox {
         Self::with_context(config, pkgsrc, ActionContext::Build)
@@ -461,7 +462,7 @@ impl Sandbox {
      * child in a new session (prevents `/dev/tty` access by build tools,
      * but forces `fork+exec` which is expensive on illumos).
      */
-    pub fn command(&self, id: Option<usize>, cmd: &Path) -> Command {
+    pub(crate) fn command(&self, id: Option<usize>, cmd: &Path) -> Command {
         let build_vars = matches!(self.context, ActionContext::Build)
             .then(|| self.config.environment().and_then(|e| e.build.as_ref()))
             .flatten()
@@ -502,7 +503,7 @@ impl Sandbox {
     /**
      * Apply the build-time `clear` / `inherit` policy to a Command.
      */
-    pub fn apply_build_environment(&self, cmd: &mut Command) {
+    pub(crate) fn apply_build_environment(&self, cmd: &mut Command) {
         let Some(ctx) = self.config.environment().and_then(|e| e.build.as_ref()) else {
             return;
         };
@@ -539,7 +540,7 @@ impl Sandbox {
      * Kill all processes in a sandbox by id.
      * This is used for graceful shutdown on Ctrl+C.
      */
-    pub fn kill_processes_by_id(&self, id: Option<usize>) {
+    pub(crate) fn kill_processes_by_id(&self, id: Option<usize>) {
         let Some(id) = id else { return };
         let sandbox = self.path(id);
         if sandbox.exists() {
@@ -803,7 +804,7 @@ impl Sandbox {
      * (the atomic mkdir on `.bob` prevents races) and sets it up.
      * On any failure, all successfully created sandboxes are destroyed.
      */
-    pub fn claim_ids(&self, n: usize) -> Result<Vec<usize>> {
+    pub(crate) fn claim_ids(&self, n: usize) -> Result<Vec<usize>> {
         let results: Vec<Result<usize>> = (0..n).into_par_iter().map(|_| self.claim_id()).collect();
 
         let mut claimed = Vec::with_capacity(n);
@@ -835,7 +836,7 @@ impl Sandbox {
      * runs configured actions and marks complete.  Returns `Ok(false)`
      * if the ID is already taken by another process.
      */
-    pub fn create(&self, id: usize) -> Result<bool> {
+    pub(crate) fn create(&self, id: usize) -> Result<bool> {
         let sandbox = self.path(id);
         fs::create_dir_all(&sandbox)
             .with_context(|| format!("Failed to create {}", sandbox.display()))?;
@@ -859,7 +860,7 @@ impl Sandbox {
     /**
      * Execute inline script content via /bin/sh.
      */
-    pub fn execute_script(
+    pub(crate) fn execute_script(
         &self,
         id: Option<usize>,
         content: &str,
@@ -889,7 +890,7 @@ impl Sandbox {
     /**
      * Execute a command directly without shell interpretation.
      */
-    pub fn execute_command<I, S>(
+    pub(crate) fn execute_command<I, S>(
         &self,
         id: Option<usize>,
         cmd: &Path,
@@ -1859,7 +1860,7 @@ impl SandboxScope {
      * On error or interrupt, newly created sandboxes are rolled back but
      * previously owned sandboxes remain (they'll be cleaned up on drop).
      */
-    pub fn ensure(&mut self, n: usize) -> Result<&[usize]> {
+    pub(crate) fn ensure(&mut self, n: usize) -> Result<&[usize]> {
         if n <= self.owned.len() {
             return Ok(&self.owned);
         }
@@ -1881,7 +1882,7 @@ impl SandboxScope {
      * Index 0 is the first sandbox allocated, etc.  Use this to map
      * worker indices to sandbox IDs.
      */
-    pub fn ids(&self) -> Option<&[usize]> {
+    pub(crate) fn ids(&self) -> Option<&[usize]> {
         if self.owned.is_empty() {
             None
         } else {
@@ -1892,28 +1893,28 @@ impl SandboxScope {
     /**
      * Access the underlying sandbox for operations.
      */
-    pub fn sandbox(&self) -> &Sandbox {
+    pub(crate) fn sandbox(&self) -> &Sandbox {
         &self.sandbox
     }
 
     /**
      * Return whether sandboxes are enabled.
      */
-    pub fn enabled(&self) -> bool {
+    pub(crate) fn enabled(&self) -> bool {
         self.sandbox.enabled()
     }
 
     /**
      * Return the number of sandboxes currently managed.
      */
-    pub fn count(&self) -> usize {
+    pub(crate) fn count(&self) -> usize {
         self.owned.len()
     }
 
     /**
      * Access the run state flag.
      */
-    pub fn state(&self) -> &RunState {
+    pub(crate) fn state(&self) -> &RunState {
         &self.state
     }
 }

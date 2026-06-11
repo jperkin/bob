@@ -23,7 +23,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use tracing::{debug, warn};
 
 impl Sandbox {
-    pub fn mount_bindfs(
+    pub(crate) fn mount_bindfs(
         &self,
         src: &Path,
         dest: &Path,
@@ -58,7 +58,7 @@ impl Sandbox {
         }))
     }
 
-    pub fn mount_devfs(
+    pub(crate) fn mount_devfs(
         &self,
         _src: &Path,
         dest: &Path,
@@ -76,7 +76,7 @@ impl Sandbox {
         ))
     }
 
-    pub fn mount_fdfs(
+    pub(crate) fn mount_fdfs(
         &self,
         _src: &Path,
         _dest: &Path,
@@ -85,7 +85,7 @@ impl Sandbox {
         bail!("fd mounts are not supported on macOS");
     }
 
-    pub fn mount_nfs(
+    pub(crate) fn mount_nfs(
         &self,
         src: &Path,
         dest: &Path,
@@ -103,7 +103,7 @@ impl Sandbox {
         ))
     }
 
-    pub fn mount_procfs(
+    pub(crate) fn mount_procfs(
         &self,
         _src: &Path,
         _dest: &Path,
@@ -112,7 +112,7 @@ impl Sandbox {
         bail!("procfs mounts are not supported on macOS");
     }
 
-    pub fn mount_tmpfs(
+    pub(crate) fn mount_tmpfs(
         &self,
         _src: &Path,
         dest: &Path,
@@ -147,31 +147,31 @@ impl Sandbox {
         self.run_umount(&mut cmd, dest)
     }
 
-    pub fn unmount_bindfs(&self, dest: &Path) -> anyhow::Result<()> {
+    pub(crate) fn unmount_bindfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_devfs(&self, dest: &Path) -> anyhow::Result<()> {
+    pub(crate) fn unmount_devfs(&self, dest: &Path) -> anyhow::Result<()> {
         let mut cmd = Command::new("/sbin/umount");
         cmd.arg(dest).process_group(0);
         self.run_umount(&mut cmd, dest)
     }
 
     /* Not actually supported but try to unmount it anyway. */
-    pub fn unmount_fdfs(&self, dest: &Path) -> anyhow::Result<()> {
+    pub(crate) fn unmount_fdfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_nfs(&self, dest: &Path) -> anyhow::Result<()> {
+    pub(crate) fn unmount_nfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 
     /* Not actually supported but try to unmount it anyway. */
-    pub fn unmount_procfs(&self, dest: &Path) -> anyhow::Result<()> {
+    pub(crate) fn unmount_procfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 
-    pub fn unmount_tmpfs(&self, dest: &Path) -> anyhow::Result<()> {
+    pub(crate) fn unmount_tmpfs(&self, dest: &Path) -> anyhow::Result<()> {
         self.unmount_common(dest)
     }
 
@@ -187,7 +187,7 @@ impl Sandbox {
      * Uses a lock directory for concurrency safety when multiple sandboxes
      * are being created simultaneously.
      */
-    pub fn create_mdns_listener(&self, id: usize) -> anyhow::Result<()> {
+    pub(crate) fn create_mdns_listener(&self, id: usize) -> anyhow::Result<()> {
         let sandbox_path = self.path(id);
         let sock_path = sandbox_path.join("var/run/mDNSResponder");
         let plist = Path::new("/var/run/com.apple.mDNSResponder.plist");
@@ -316,7 +316,7 @@ impl Sandbox {
     /**
      * Remove the mDNSResponder listener socket for this sandbox.
      */
-    pub fn destroy_mdns_listener(&self, id: usize) -> anyhow::Result<()> {
+    pub(crate) fn destroy_mdns_listener(&self, id: usize) -> anyhow::Result<()> {
         let sandbox_path = self.path(id);
         let sock_path = sandbox_path.join("var/run/mDNSResponder");
         let plist = Path::new("/var/run/com.apple.mDNSResponder.plist");

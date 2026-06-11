@@ -61,7 +61,7 @@ impl VcsInfo {
      * Tries git first, then CVS.  Returns a default (empty) `VcsInfo`
      * if no VCS is detected.
      */
-    pub fn from_path(path: &Path) -> Self {
+    pub(crate) fn from_path(path: &Path) -> Self {
         if let Some(info) = Self::try_git(path) {
             debug!(
                 vcs = "git",

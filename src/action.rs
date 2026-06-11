@@ -185,7 +185,7 @@ pub struct Only {
 
 impl Only {
     /// Returns true if the action should run in the given environment.
-    pub fn matches(&self, env: ActionContext) -> bool {
+    pub(crate) fn matches(&self, env: ActionContext) -> bool {
         if let Some(want) = self.environment
             && want != env
         {
@@ -391,7 +391,7 @@ pub enum FSType {
 }
 
 impl Action {
-    pub fn from_lua(t: &Table) -> LuaResult<Self> {
+    pub(crate) fn from_lua(t: &Table) -> LuaResult<Self> {
         // "dir" can be used as shorthand when src and dest are the same
         let dir = t.get::<Option<String>>("dir")?.map(PathBuf::from);
         let src = t
@@ -419,53 +419,53 @@ impl Action {
     /// Replace this action's runtime `only` predicate.  Used by
     /// `parse_actions` after it processes the parse-time `only.set`
     /// check.
-    pub fn set_only(&mut self, only: Only) {
+    pub(crate) fn set_only(&mut self, only: Only) {
         self.only = only;
     }
 
-    pub fn only(&self) -> &Only {
+    pub(crate) fn only(&self) -> &Only {
         &self.only
     }
 
-    pub fn src(&self) -> Option<&PathBuf> {
+    pub(crate) fn src(&self) -> Option<&PathBuf> {
         self.src.as_ref()
     }
 
-    pub fn dest(&self) -> Option<&PathBuf> {
+    pub(crate) fn dest(&self) -> Option<&PathBuf> {
         self.dest.as_ref()
     }
 
-    pub fn action_type(&self) -> Result<ActionType, Error> {
+    pub(crate) fn action_type(&self) -> Result<ActionType, Error> {
         ActionType::from_str(&self.action)
             .context(format!("unsupported action type '{}'", self.action))
     }
 
-    pub fn fs_type(&self) -> Result<FSType, Error> {
+    pub(crate) fn fs_type(&self) -> Result<FSType, Error> {
         match &self.fs {
             Some(fs) => FSType::from_str(fs).context(format!("unsupported filesystem type '{fs}'")),
             None => bail!("'mount' action requires 'fs' field"),
         }
     }
 
-    pub fn opts(&self) -> Option<&String> {
+    pub(crate) fn opts(&self) -> Option<&String> {
         self.opts.as_ref()
     }
 
-    pub fn create_cmd(&self) -> Option<&ScriptValue> {
+    pub(crate) fn create_cmd(&self) -> Option<&ScriptValue> {
         self.create.as_ref()
     }
 
-    pub fn destroy_cmd(&self) -> Option<&ScriptValue> {
+    pub(crate) fn destroy_cmd(&self) -> Option<&ScriptValue> {
         self.destroy.as_ref()
     }
 
-    pub fn chroot(&self) -> bool {
+    pub(crate) fn chroot(&self) -> bool {
         self.chroot
     }
 
     /// Validate the action configuration.
     /// Returns an error if the action is misconfigured.
-    pub fn validate(&self) -> Result<(), Error> {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
         let action_type = self.action_type()?;
 
         match action_type {

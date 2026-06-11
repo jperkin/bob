@@ -34,7 +34,7 @@ const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 /**
  * A single CPU usage measurement.
  */
-pub struct CpuSample {
+pub(crate) struct CpuSample {
     pub timestamp: i64,
     pub user_pct: u8,
     pub sys_pct: u8,
@@ -166,8 +166,8 @@ impl CpuLoad {
 /**
  * Handle to a running CPU sampler thread.
  *
- * Call [`CpuSamplerHandle::stop`] to signal the thread to exit and
- * retrieve the collected samples.
+ * Stopping the handle signals the thread to exit and retrieves the
+ * collected samples; dropping it discards them.
  */
 pub struct CpuSamplerHandle {
     stop: Arc<AtomicBool>,
@@ -176,7 +176,7 @@ pub struct CpuSamplerHandle {
 }
 
 impl CpuSamplerHandle {
-    pub fn stop(mut self) -> Vec<CpuSample> {
+    pub(crate) fn stop(mut self) -> Vec<CpuSample> {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(t) = self.thread.take() {
             let _ = t.join();

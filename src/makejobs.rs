@@ -159,7 +159,7 @@ pub struct PkgMakeJobs {
 }
 
 impl PkgMakeJobs {
-    pub fn new(safe: bool) -> Self {
+    pub(crate) fn new(safe: bool) -> Self {
         Self {
             safe,
             allocated: None,
@@ -168,7 +168,7 @@ impl PkgMakeJobs {
     }
 
     /// Whether the package supports parallel make.
-    pub fn safe(&self) -> bool {
+    pub(crate) fn safe(&self) -> bool {
         self.safe
     }
 
@@ -178,18 +178,18 @@ impl PkgMakeJobs {
     }
 
     /// Actual MAKE_JOBS value used by bmake.
-    pub fn jobs(&self) -> Option<usize> {
+    pub(crate) fn jobs(&self) -> Option<usize> {
         self.jobs
     }
 
     /// Record the scheduler's job allocation.
-    pub fn allocate(&mut self, jobs: usize) {
+    pub(crate) fn allocate(&mut self, jobs: usize) {
         debug_assert!(self.safe, "allocate called on unsafe package");
         self.allocated = Some(jobs);
     }
 
     /// Record the actual MAKE_JOBS value from bmake.
-    pub fn set_jobs(&mut self, n: usize) {
+    pub(crate) fn set_jobs(&mut self, n: usize) {
         self.jobs = Some(n);
     }
 }

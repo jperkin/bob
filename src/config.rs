@@ -928,14 +928,14 @@ impl Config {
             .and_then(|s| s.wrkobjdir.as_ref())
     }
 
-    pub fn hooks(&self) -> &[Action] {
+    pub(crate) fn hooks(&self) -> &[Action] {
         match &self.file.sandboxes {
             Some(sandboxes) => &sandboxes.hooks,
             None => &[],
         }
     }
 
-    pub fn sandboxes(&self) -> &Option<Sandboxes> {
+    pub(crate) fn sandboxes(&self) -> &Option<Sandboxes> {
         &self.file.sandboxes
     }
 
@@ -954,7 +954,7 @@ impl Config {
         &self.file.summary
     }
 
-    pub fn report_branch(&self) -> Option<&str> {
+    pub(crate) fn report_branch(&self) -> Option<&str> {
         self.file
             .publish
             .as_ref()
@@ -962,7 +962,7 @@ impl Config {
             .and_then(|r| r.branch.as_deref())
     }
 
-    pub fn bindfs(&self) -> &str {
+    pub(crate) fn bindfs(&self) -> &str {
         self.file
             .sandboxes
             .as_ref()
@@ -974,7 +974,7 @@ impl Config {
         &self.log_level
     }
 
-    pub fn tui(&self) -> bool {
+    pub(crate) fn tui(&self) -> bool {
         self.file
             .options
             .as_ref()
@@ -1114,7 +1114,7 @@ pub fn default_config_path() -> Result<PathBuf> {
  * `/var/db/bob`), uses that directly.  Otherwise uses the XDG data
  * directory (`~/.local/share/bob`).
  */
-pub fn default_data_dir() -> Result<PathBuf> {
+pub(crate) fn default_data_dir() -> Result<PathBuf> {
     match option_env!("BOB_DATADIR") {
         Some(dir) => Ok(PathBuf::from(dir)),
         None => {

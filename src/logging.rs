@@ -14,7 +14,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-/*
+/*!
  * Logging infrastructure, outputs bunyan-style JSON to a logs directory.
  */
 

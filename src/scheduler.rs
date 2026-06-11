@@ -113,7 +113,7 @@ impl PackageTable {
     /**
      * Iterate all `(id, info)` pairs in id order.
      */
-    pub fn iter(&self) -> impl Iterator<Item = (PackageId, &PackageInfo)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (PackageId, &PackageInfo)> {
         self.rows
             .iter()
             .enumerate()
@@ -537,7 +537,7 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
     /**
      * Get the static dep_count for a package.
      */
-    pub fn dep_count(&self, pkg: &K) -> usize {
+    pub(crate) fn dep_count(&self, pkg: &K) -> usize {
         self.dep_counts.get(pkg).copied().unwrap_or(0)
     }
 

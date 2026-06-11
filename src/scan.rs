@@ -59,7 +59,7 @@ use tracing::{debug, error, info, info_span, trace, warn};
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedPackage {
     /// The scan index data including resolved dependencies.
-    pub index: ScanIndex,
+    pub(crate) index: ScanIndex,
     /// Package path.
     pub pkgpath: PkgPath,
 }
@@ -76,7 +76,7 @@ impl ResolvedPackage {
     }
 
     /// Whether this package is part of the pkgsrc bootstrap.
-    pub fn bootstrap_pkg(&self) -> bool {
+    pub(crate) fn bootstrap_pkg(&self) -> bool {
         self.index
             .bootstrap_pkg
             .as_ref()
@@ -89,13 +89,8 @@ impl ResolvedPackage {
     }
 
     /// Returns multi_version if set.
-    pub fn multi_version(&self) -> Option<&[String]> {
+    pub(crate) fn multi_version(&self) -> Option<&[String]> {
         self.index.multi_version.as_deref()
-    }
-
-    /// Returns PBULK_WEIGHT, defaulting to 100 if missing.
-    pub fn pbulk_weight(&self) -> usize {
-        self.index.pbulk_weight.map_or(100, |w| w as usize)
     }
 }
 
@@ -155,7 +150,7 @@ impl ScanResult {
     }
 
     /// Returns the resolved package if buildable.
-    pub fn as_buildable(&self) -> Option<&ResolvedPackage> {
+    pub(crate) fn as_buildable(&self) -> Option<&ResolvedPackage> {
         match self {
             ScanResult::Buildable(pkg) => Some(pkg),
             _ => None,
@@ -163,7 +158,7 @@ impl ScanResult {
     }
 
     /// Returns resolved dependencies.
-    pub fn depends(&self) -> &[PkgName] {
+    pub(crate) fn depends(&self) -> &[PkgName] {
         match self {
             ScanResult::Buildable(pkg) => pkg.depends(),
             ScanResult::Skipped {

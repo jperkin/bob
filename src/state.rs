@@ -33,10 +33,9 @@ const SIGINT_WINDOW: Duration = Duration::from_millis(100);
  * Thread-safe run state, shared across threads via internal `Arc`.
  *
  * Signal handlers store values via the inner `AtomicUsize`.
- * Use [`interrupted`] and [`is_shutdown`] to query state.
+ * Use [`interrupted`] to query state.
  *
  * [`interrupted`]: RunState::interrupted
- * [`is_shutdown`]: RunState::is_shutdown
  */
 #[derive(Clone, Debug, Default)]
 pub struct RunState(Arc<AtomicUsize>);
@@ -56,7 +55,7 @@ impl RunState {
     }
 
     /** Advance state by one step (RUNNING -> STOPPING -> SHUTDOWN). */
-    pub fn advance(&self) {
+    fn advance(&self) {
         self.0.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -71,12 +70,12 @@ impl RunState {
     }
 
     /** Returns true if stopping (finishing current work, no new dispatches). */
-    pub fn is_stopping(&self) -> bool {
+    pub(crate) fn is_stopping(&self) -> bool {
         self.load() == Self::STOPPING
     }
 
     /** Returns true if immediate shutdown has been requested. */
-    pub fn is_shutdown(&self) -> bool {
+    pub(crate) fn is_shutdown(&self) -> bool {
         self.load() >= Self::SHUTDOWN
     }
 

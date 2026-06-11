@@ -19,7 +19,6 @@
 pub mod action;
 pub mod build;
 pub mod config;
-pub mod cpu;
 pub mod db;
 pub mod fmt;
 pub mod logging;
@@ -28,12 +27,13 @@ pub mod pkgstate;
 pub mod sandbox;
 pub mod scan;
 pub mod scheduler;
-pub mod state;
-pub mod summary;
 pub mod vcs;
 
+mod cpu;
 mod history;
 mod init;
+mod state;
+mod summary;
 mod tui;
 
 use std::io::{self, Write};
@@ -41,6 +41,7 @@ use std::io::{self, Write};
 /**
  * Column alignment for tabular output.
  */
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Align {
     #[default]
@@ -53,6 +54,7 @@ pub enum Align {
  *
  * Default to left alignment.
  */
+#[doc(hidden)]
 pub trait ColumnAlign: strum::EnumProperty {
     fn align(&self) -> Align {
         match self.get_str("align") {
@@ -67,6 +69,7 @@ pub trait ColumnAlign: strum::EnumProperty {
  *
  * Use this in loops to gracefully handle SIGPIPE (e.g., when piped to `head`).
  */
+#[doc(hidden)]
 pub fn try_println(s: &str) -> bool {
     let result = writeln!(io::stdout(), "{}", s);
     !matches!(result, Err(e) if e.kind() == io::ErrorKind::BrokenPipe)
@@ -78,7 +81,7 @@ pub fn try_println(s: &str) -> bool {
  * activity to be attributed.  Panics if the thread cannot be spawned,
  * matching `std::thread::spawn`.
  */
-pub fn spawn_named<T, F>(name: impl Into<String>, f: F) -> std::thread::JoinHandle<T>
+pub(crate) fn spawn_named<T, F>(name: impl Into<String>, f: F) -> std::thread::JoinHandle<T>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
@@ -92,7 +95,7 @@ where
 /**
  * Return the current time as seconds since the Unix epoch.
  */
-pub fn epoch_secs() -> Result<i64, std::time::SystemTimeError> {
+pub(crate) fn epoch_secs() -> Result<i64, std::time::SystemTimeError> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -103,12 +106,14 @@ pub fn epoch_secs() -> Result<i64, std::time::SystemTimeError> {
  * minted at `Database::open` and stored as the primary key in
  * `build_metadata` and the `build_id` column of `build_history`.
  */
+#[doc(hidden)]
 pub const BUILD_ID_FORMAT: &str = "%Y%m%dT%H%M%SZ";
 
 /**
  * Parse a build_id string into the timestamp it encodes, or `None`
  * if `s` is not in the expected [`BUILD_ID_FORMAT`].
  */
+#[doc(hidden)]
 pub fn parse_build_id(s: &str) -> Option<chrono::NaiveDateTime> {
     chrono::NaiveDateTime::parse_from_str(s, BUILD_ID_FORMAT).ok()
 }
@@ -118,6 +123,7 @@ pub fn parse_build_id(s: &str) -> Option<chrono::NaiveDateTime> {
  * count of seconds.  Units: `d` days, `w` weeks, `m` months (30 days),
  * `y` years (365 days).
  */
+#[doc(hidden)]
 pub fn parse_duration_secs(s: &str) -> Result<i64, String> {
     let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
     let (num_part, unit) = s.split_at(split);
@@ -140,6 +146,7 @@ pub fn parse_duration_secs(s: &str) -> Result<i64, String> {
 }
 
 /// Error indicating the operation was interrupted (e.g., by Ctrl+C).
+#[doc(hidden)]
 #[derive(Debug)]
 pub struct Interrupted;
 
@@ -156,26 +163,35 @@ impl std::error::Error for Interrupted {}
 // The typical workflow is:
 //   Config::load() → Scan::new() → scan.start() → scan.resolve()
 //   → Build::new() → build.start()
+//
+// Hidden from rustdoc to keep the crate root page readable; items from
+// public modules are documented there instead.
 
-pub use action::{Action, ActionType, FSType};
+#[doc(hidden)]
 pub use build::{
-    Build, BuildCounts, BuildReason, BuildResult, BuildSummary, PkgBuildStats, Stage,
-    pkg_up_to_date,
+    Build, BuildReason, BuildResult, BuildSummary, PkgBuildStats, Stage, pkg_up_to_date,
 };
-pub use config::{
-    Config, DynamicConfig, Options, Pkgsrc, PkgsrcEnv, Sandboxes, Summary, WrkObjDir, WrkObjKind,
-};
-pub use cpu::{CpuSample, CpuSamplerHandle, start_cpu_sampler};
+#[doc(hidden)]
+pub use config::{Config, Summary, WrkObjKind};
+#[doc(hidden)]
+pub use cpu::{CpuSamplerHandle, start_cpu_sampler};
+#[doc(hidden)]
 pub use db::Database;
+#[doc(hidden)]
 pub use history::{History, HistoryKind};
+#[doc(hidden)]
 pub use init::Init;
-pub use makejobs::PkgMakeJobs;
+#[doc(hidden)]
 pub use pkgstate::{PackageCounts, PackageState};
+#[doc(hidden)]
 pub use sandbox::Sandbox;
-pub use scan::{ResolvedPackage, Scan, ScanResult, ScanSummary};
-pub use scheduler::{
-    PackageId, PackageInfo, PackageNode, PackageTable, ScheduledPackage, Scheduler,
-};
+#[doc(hidden)]
+pub use scan::{Scan, ScanResult, ScanSummary};
+#[doc(hidden)]
+pub use scheduler::{PackageNode, Scheduler};
+#[doc(hidden)]
 pub use state::RunState;
+#[doc(hidden)]
 pub use summary::generate_pkg_summary;
+#[doc(hidden)]
 pub use tui::{format_duration, print_elapsed, print_failed, print_status};
