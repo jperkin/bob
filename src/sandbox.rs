@@ -1348,13 +1348,6 @@ impl Sandbox {
         Ok(())
     }
 
-    /**
-     * Count discovered sandboxes (complete or incomplete).
-     */
-    pub fn count_existing(&self) -> Result<usize> {
-        Ok(self.discover_sandboxes()?.len())
-    }
-
     /*
      * Remove any empty directories from a mount point up to the root of the
      * sandbox.
