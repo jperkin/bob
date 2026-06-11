@@ -639,6 +639,29 @@ struct ReportMeta<'a> {
     vcs_info: &'a bob::vcs::VcsInfo,
 }
 
+/*
+ * Build summary and per-package break counts shared by the text and
+ * HTML reports.
+ */
+fn report_summary(db: &Database) -> Result<(BuildSummary, HashMap<String, usize>)> {
+    let mut results = db.get_all_build_results()?;
+    let duration = db.get_build_duration()?;
+    let breaks_counts = db.dep_counts()?;
+    let scanfail: Vec<(pkgsrc::PkgPath, String)> = db
+        .get_scan_failures()?
+        .into_iter()
+        .filter_map(|(p, e)| pkgsrc::PkgPath::new(&p).ok().map(|pp| (pp, e)))
+        .chain(db.get_unresolved_reasons()?)
+        .collect();
+    results.extend(db.get_scan_outcomes()?);
+    let summary = BuildSummary {
+        duration,
+        results,
+        scanfail,
+    };
+    Ok((summary, breaks_counts))
+}
+
 fn write_text_report(
     db: &Database,
     logdir: &Path,
@@ -656,28 +679,11 @@ fn write_text_report(
         .platform()
         .unwrap_or_else(|| "unknown".to_string());
 
-    let mut results = db.get_all_build_results()?;
-    let duration = db.get_build_duration()?;
-
-    let breaks_counts: HashMap<String, usize> = db.dep_counts()?;
-
-    let scanfail: Vec<(pkgsrc::PkgPath, String)> = db
-        .get_scan_failures()?
-        .into_iter()
-        .filter_map(|(p, e)| pkgsrc::PkgPath::new(&p).ok().map(|pp| (pp, e)))
-        .chain(db.get_unresolved_reasons()?)
-        .collect();
-    results.extend(db.get_scan_outcomes()?);
-
-    let summary = BuildSummary {
-        duration,
-        results,
-        scanfail,
-    };
+    let (summary, breaks_counts) = report_summary(db)?;
 
     let c = summary.counts();
 
-    let dur_secs = duration.as_secs();
+    let dur_secs = summary.duration.as_secs();
     let hours = dur_secs / 3600;
     let minutes = (dur_secs % 3600) / 60;
     let seconds = dur_secs % 60;
@@ -1017,24 +1023,7 @@ fn write_html_report(
     diff: Option<&bob::db::BuildDiff>,
     commits: Option<&HashMap<String, Vec<bob::vcs::CommitInfo>>>,
 ) -> Result<()> {
-    let mut results = db.get_all_build_results()?;
-    let duration = db.get_build_duration()?;
-
-    let breaks_counts: HashMap<String, usize> = db.dep_counts()?;
-
-    let scanfail: Vec<(pkgsrc::PkgPath, String)> = db
-        .get_scan_failures()?
-        .into_iter()
-        .filter_map(|(p, e)| pkgsrc::PkgPath::new(&p).ok().map(|pp| (pp, e)))
-        .chain(db.get_unresolved_reasons()?)
-        .collect();
-    results.extend(db.get_scan_outcomes()?);
-
-    let summary = BuildSummary {
-        duration,
-        results,
-        scanfail,
-    };
+    let (summary, breaks_counts) = report_summary(db)?;
 
     let mut file = std::fs::File::create(path)?;
     let m = &meta.pkgsrc_env.metadata;
