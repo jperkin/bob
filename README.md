@@ -153,6 +153,25 @@ $ bob clean
 
 to clear the previous database state, before running a new `bob build`.
 
+## Commands
+
+A summary of the most commonly used commands.  Run `bob help <command>` for
+full details of each.
+
+| Command         | Purpose                                              |
+| --------------- | ---------------------------------------------------- |
+| `bob build`     | Scan and then build all configured packages          |
+| `bob dev`       | Create a sandbox and start an interactive shell      |
+| `bob status`    | Show the state of every package in the current build |
+| `bob log <pkg>` | Show the failing build log for a package             |
+| `bob rebuild`   | Rebuild specific or previously failed packages       |
+| `bob diff`      | Compare package results between two builds           |
+| `bob history`   | Show results and timings from previous builds        |
+| `bob publish`   | Upload packages and reports to a remote server       |
+| `bob ls`        | List individual build sessions and package counts    |
+| `bob prune`     | Remove build sessions from the history database      |
+| `bob clean`     | Remove build state before building updated pkgsrc    |
+
 ## Design Goals
 
 There are two main methods currently used to update a pkgsrc installation.
