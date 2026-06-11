@@ -957,8 +957,10 @@ impl Sandbox {
     }
 
     /*
-     * Unpack a tar archive into dest.  A hard link entry replaces any
-     * existing file at its destination, matching tar(1) behaviour.
+     * Unpack a tar archive into dest, matching tar(1) hard link
+     * behaviour: an entry whose target is its own destination and
+     * already exists is skipped, and an existing file at the
+     * destination of any other hard link is replaced.
      */
     fn unpack_archive<R: Read>(&self, archive: &mut tar::Archive<R>, dest: &Path) -> Result<()> {
         for entry in archive.entries()? {
@@ -968,6 +970,10 @@ impl Sandbox {
                 && let Ok(meta) = fs::symlink_metadata(&dst)
                 && !meta.is_dir()
             {
+                let src = entry.link_name()?.and_then(|p| Self::entry_dest(dest, &p));
+                if src.as_deref() == Some(dst.as_path()) {
+                    continue;
+                }
                 fs::remove_file(&dst)
                     .with_context(|| format!("Failed to remove {}", dst.display()))?;
             }
