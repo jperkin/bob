@@ -683,17 +683,7 @@ fn write_text_report(
 
     let c = summary.counts();
 
-    let dur_secs = summary.duration.as_secs();
-    let hours = dur_secs / 3600;
-    let minutes = (dur_secs % 3600) / 60;
-    let seconds = dur_secs % 60;
-    let duration_str = if hours > 0 {
-        format!("{}h {}m {}s", hours, minutes, seconds)
-    } else if minutes > 0 {
-        format!("{}m {}s", minutes, seconds)
-    } else {
-        format!("{}s", seconds)
-    };
+    let duration_str = bob::format_duration(summary.duration);
 
     if let Some(url) = report_url {
         writeln!(file, "URL: {}/report.html", url)?;
@@ -1424,20 +1414,7 @@ fn write_misc_table(
             escape_html(&new_rev),
         )?;
     }
-    let dur_secs = duration.as_secs();
-    let duration_str = if dur_secs >= 3600 {
-        format!(
-            "{}h {}m {}s",
-            dur_secs / 3600,
-            (dur_secs % 3600) / 60,
-            dur_secs % 60
-        )
-    } else if dur_secs >= 60 {
-        format!("{}m {}s", dur_secs / 60, dur_secs % 60)
-    } else {
-        format!("{}s", dur_secs)
-    };
-    write_var_row(file, "Duration", &duration_str)?;
+    write_var_row(file, "Duration", &bob::format_duration(duration))?;
     writeln!(file, "</table>")?;
     Ok(())
 }
@@ -1580,11 +1557,7 @@ fn write_failed_table(
         }
 
         let dur_secs = info.result.build_stats.duration.as_secs();
-        let duration = if dur_secs >= 60 {
-            format!("{}m {}s", dur_secs / 60, dur_secs % 60)
-        } else {
-            format!("{}s", dur_secs)
-        };
+        let duration = bob::format_duration(info.result.build_stats.duration);
 
         let pkg_link = pkg_log_cell(pkg_name, info.failed_log.as_deref());
 
@@ -1700,15 +1673,10 @@ fn write_diff_section(
         };
 
         let (dur_secs, duration) = match info {
-            Some(i) => {
-                let s = i.result.build_stats.duration.as_secs();
-                let d = if s >= 60 {
-                    format!("{}m {}s", s / 60, s % 60)
-                } else {
-                    format!("{}s", s)
-                };
-                (s, d)
-            }
+            Some(i) => (
+                i.result.build_stats.duration.as_secs(),
+                bob::format_duration(i.result.build_stats.duration),
+            ),
             None => (0, String::new()),
         };
 

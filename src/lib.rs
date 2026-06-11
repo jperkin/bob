@@ -178,4 +178,4 @@ pub use scheduler::{
 };
 pub use state::RunState;
 pub use summary::generate_pkg_summary;
-pub use tui::{print_elapsed, print_failed, print_status};
+pub use tui::{format_duration, print_elapsed, print_failed, print_status};
