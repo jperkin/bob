@@ -941,9 +941,8 @@ impl<'a> PkgBuilder<'a> {
             loop {
                 buf.clear();
                 match reader.read_until(b'\n', &mut buf) {
-                    Ok(0) => break,
+                    Ok(0) | Err(_) => break,
                     Ok(_) => {}
-                    Err(_) => break,
                 };
                 // Write raw bytes to log file to preserve original output
                 let _ = log.write_all(&buf);

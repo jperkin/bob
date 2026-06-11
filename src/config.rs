@@ -1620,7 +1620,6 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Option<Pkgsrc>> {
     let make = get_required_string(pkgsrc, "make")?;
 
     let pkgpaths: Option<Vec<PkgPath>> = match pkgsrc.get::<Value>("pkgpaths")? {
-        Value::Nil => None,
         Value::Table(t) => {
             let mut paths = Vec::new();
             for (i, val) in t.sequence_values::<Value>().enumerate() {

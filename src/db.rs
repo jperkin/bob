@@ -104,10 +104,8 @@ fn history_schema() -> String {
                 HistoryKind::Outcome => "INTEGER NOT NULL REFERENCES outcome_types(id)",
                 HistoryKind::Stage => "INTEGER REFERENCES stage_types(id)",
                 HistoryKind::Duration | HistoryKind::Timestamp => "INTEGER NOT NULL",
-                HistoryKind::MakeJobs => "INTEGER",
-                HistoryKind::DiskUsage => "INTEGER",
-                HistoryKind::Wrkobjdir => "TEXT",
-                HistoryKind::BuildId => "TEXT",
+                HistoryKind::MakeJobs | HistoryKind::DiskUsage => "INTEGER",
+                HistoryKind::Wrkobjdir | HistoryKind::BuildId => "TEXT",
             };
             format!("{name} {sql}")
         })

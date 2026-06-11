@@ -1245,8 +1245,7 @@ impl Scan {
                         let indirect = dep_reason.indirect();
                         use PackageState::*;
                         let dominated = match blocking_reason {
-                            None => true,
-                            Some(IndirectPreSkipped) => true,
+                            None | Some(IndirectPreSkipped) => true,
                             Some(IndirectUnresolved) if indirect == IndirectPreFailed => true,
                             _ => false,
                         };
