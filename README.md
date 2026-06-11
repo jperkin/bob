@@ -36,6 +36,18 @@ Bob works out-of-the-box on NetBSD, Linux, macOS[^1], and illumos.
 
 [^1]: Requires MacFUSE and bindfs due to macOS limitations.
 
+## Requirements
+
+* Root privileges when sandboxes are enabled (the default).  Sandboxes are
+  created using mounts and chroot, which require root on all supported
+  platforms.  With sandboxes disabled, for example for local scans against
+  an existing pkgsrc installation, bob can run as a normal user.
+* A pkgsrc checkout, for example in `/usr/pkgsrc`.
+* On all systems other than NetBSD, a pkgsrc bootstrap kit.  This is a
+  tarball containing the core pkgsrc tools, created by the `bootstrap`
+  script that ships with pkgsrc.
+* Rust 1.88 or newer, if installing with cargo.
+
 ## Getting Started
 
 There are two ways to install bob.  The preferred method is to install using
@@ -81,12 +93,27 @@ required.
 
 ### Customise
 
-The defaults are designed to work out of the box, but you are likely to want to
-change some things, for example which packages to build, enable an unprivileged
-build user, or add any additional mount points required.
+The generated configuration file is fully commented and designed to work out
+of the box.  These are the settings most installations need to change first,
+all in the `pkgsrc` section:
 
-On non-NetBSD systems you will also need a pkgsrc bootstrap kit, with the
-absolute path set in the `pkgsrc.bootstrap` config option.
+```lua
+pkgsrc = {
+    -- Where your pkgsrc checkout lives.
+    basedir = "/usr/pkgsrc",
+    -- Required on all systems other than NetBSD.
+    bootstrap = "/path/to/bootstrap.tar.gz",
+    -- The packages to build, as category/package directories.
+    pkgpaths = {
+        "mail/mutt",
+        "sysutils/coreutils",
+    },
+}
+```
+
+Beyond that, common changes are enabling an unprivileged build user, adding
+any additional mount points required, and setting `build_threads` and
+`scan_threads` to suit the machine.
 
 For a complete example, have a look at
 <https://github.com/jperkin/bob/blob/main/examples/smartos-trunk.lua>.  This is
