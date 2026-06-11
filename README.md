@@ -4,8 +4,9 @@
 [![Documentation](https://docs.rs/bob/badge.svg)](https://docs.rs/bob)
 [![License](https://img.shields.io/crates/l/bob.svg)](https://github.com/jperkin/bob)
 
-Bob is a comprehensive utility for building pkgsrc packages in parallel inside
-sandboxes.
+Bob is a comprehensive utility for building [pkgsrc](https://www.pkgsrc.org/)
+packages in parallel inside sandboxes.  pkgsrc is a portable framework for
+building third-party software on many operating systems.
 
 Bob is designed to be an easy-to-use and complete replacement for build tools
 such as pbulk, pkg\_chk, or pkg\_rolling-replace, while providing a modern
@@ -24,13 +25,13 @@ bulk build reporting and publishing, and failure analysis.
 
 ## Features
 
-- [x] Powerful, fast, and robust, while remaining easy to use.
-- [x] Native, customisable sandbox implementations for common operating systems.
-- [x] Parallel scan and build processes inside concurrent sandboxes.
-- [x] Dynamic `MAKE_JOBS` and `WRKOBJDIR` scheduler for optimal performance.
-- [x] [Ratatui](https://ratatui.rs)-based user interface.
-- [x] Simple, flexible, and extendable Lua-based configuration.
-- [x] Easily support multiple branch builds or different OS targets.
+- Powerful, fast, and robust, while remaining easy to use.
+- Native, customisable sandbox implementations for common operating systems.
+- Parallel scan and build processes inside concurrent sandboxes.
+- Dynamic `MAKE_JOBS` and `WRKOBJDIR` scheduler for optimal performance.
+- [Ratatui](https://ratatui.rs)-based user interface.
+- Simple, flexible, and extendable Lua-based configuration.
+- Easily support multiple branch builds or different OS targets.
 
 Bob works out-of-the-box on NetBSD, Linux, macOS[^1], and illumos.
 
@@ -219,9 +220,8 @@ Bob combines these methods into a best-of-both approach:
  * Perform a pbulk-style scan of the requested packages to ensure all of the
    dependencies are correct.
 
- * Build packages inside sandboxes, using a directed acyclic graph to perform
-   builds in the correct order, and take advantage of parallel builds where
-   possible.
+ * Build packages inside sandboxes, in dependency order, in parallel where
+   dependencies allow.
 
  * Provide a very flexible configuration interface for local customisation.
 
