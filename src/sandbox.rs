@@ -84,7 +84,7 @@ use std::fs;
 use std::io::{BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, OnceLock};
@@ -935,7 +935,7 @@ impl Sandbox {
             let mut archive = tar::Archive::new(gz);
             archive.set_preserve_permissions(true);
             archive.set_preserve_ownerships(true);
-            archive.unpack(&dest).with_context(|| {
+            self.unpack_archive(&mut archive, &dest).with_context(|| {
                 format!(
                     "Failed to unpack bootstrap {} to {}",
                     bootstrap.display(),
@@ -954,6 +954,43 @@ impl Sandbox {
         }
 
         Ok(())
+    }
+
+    /*
+     * Unpack a tar archive into dest.  A hard link entry replaces any
+     * existing file at its destination, matching tar(1) behaviour.
+     */
+    fn unpack_archive<R: Read>(&self, archive: &mut tar::Archive<R>, dest: &Path) -> Result<()> {
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            if entry.header().entry_type().is_hard_link()
+                && let Some(dst) = Self::entry_dest(dest, &entry.path()?)
+                && let Ok(meta) = fs::symlink_metadata(&dst)
+                && !meta.is_dir()
+            {
+                fs::remove_file(&dst)
+                    .with_context(|| format!("Failed to remove {}", dst.display()))?;
+            }
+            entry.unpack_in(dest)?;
+        }
+        Ok(())
+    }
+
+    /*
+     * Resolve an archive entry path within dest using the same rules
+     * as Entry::unpack_in: root components are dropped, and paths
+     * containing parent references return None.
+     */
+    fn entry_dest(dest: &Path, path: &Path) -> Option<PathBuf> {
+        let mut out = dest.to_path_buf();
+        for comp in path.components() {
+            match comp {
+                Component::Prefix(_) | Component::RootDir | Component::CurDir => {}
+                Component::ParentDir => return None,
+                Component::Normal(c) => out.push(c),
+            }
+        }
+        Some(out)
     }
 
     /**
