@@ -1,5 +1,10 @@
 # Changelog
 
+## Version 0.99.7 (2026-06-11)
+
+* Bump dependencies to include illumos patches, `cargo install bob` now
+  works again on illumos.
+
 ## Version 0.99.6 (2026-06-11)
 
 * Significant performance improvements throughout, especially for full
