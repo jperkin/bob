@@ -84,7 +84,7 @@ impl RunState {
      * Register signal handlers for graceful interruption.
      *
      * SIGINT advances state: RUNNING -> STOPPING -> SHUTDOWN, with
-     * deliveries inside [`SIGINT_WINDOW`] counting as one keypress.
+     * deliveries inside `SIGINT_WINDOW` counting as one keypress.
      * SIGTERM goes straight to SHUTDOWN.
      */
     pub fn register_signals(&self) -> Result<()> {
