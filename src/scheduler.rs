@@ -623,7 +623,7 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
     /** Set the allocator for MAKE_JOBS allocation. */
     pub fn set_allocator(&mut self, mut allocator: makejobs::Allocator) {
         let mut cpu_times: Vec<usize> = self.pkg_cpu_history.values().copied().collect();
-        cpu_times.sort();
+        cpu_times.sort_unstable();
         allocator.calibrate(&cpu_times);
         self.allocator = Some(allocator);
     }

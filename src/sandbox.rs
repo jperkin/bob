@@ -779,7 +779,7 @@ impl Sandbox {
                 ids.push(id);
             }
         }
-        ids.sort();
+        ids.sort_unstable();
         Ok(ids)
     }
 
@@ -826,7 +826,7 @@ impl Sandbox {
             return Err(e);
         }
 
-        claimed.sort();
+        claimed.sort_unstable();
         Ok(claimed)
     }
 
@@ -1236,7 +1236,7 @@ impl Sandbox {
             .into_iter()
             .filter(|id| ids.contains(id))
             .collect();
-        targets.sort();
+        targets.sort_unstable();
         self.destroy_set(targets)
     }
 

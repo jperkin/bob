@@ -450,7 +450,7 @@ fn print_build_status(
                 .filter(|p| p.make_jobs_safe.unwrap_or(true))
                 .filter_map(|p| pkg_cpu_ms(&cpu_times, p).map(|c| c as usize))
                 .collect();
-            cpu.sort();
+            cpu.sort_unstable();
             alloc.calibrate(&cpu);
             Some(alloc)
         }
