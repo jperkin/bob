@@ -116,12 +116,12 @@ fn history_schema() -> String {
 /**
  * Schema version for bob.db - update when schema changes.
  */
-const SCHEMA_VERSION: i32 = 20260610;
+const SCHEMA_VERSION: i32 = 20260611;
 
 /**
  * Schema version for history.db - update when history schema changes.
  */
-const HISTORY_SCHEMA_VERSION: i32 = 20260611;
+const HISTORY_SCHEMA_VERSION: i32 = 20260612;
 
 /**
  * Summary of a package's most recent build from history.
@@ -448,7 +448,6 @@ impl Database {
              ) STRICT;
 
              CREATE INDEX idx_builds_outcome ON builds(outcome);
-             CREATE INDEX idx_builds_package ON builds(package_id);
 
              CREATE TABLE scan_outcomes (
                  package_id INTEGER PRIMARY KEY
@@ -2353,6 +2352,7 @@ const HISTORY_MIGRATIONS: &[HistoryMigration] = &[
     (20260515, 20260609, migrate_history_20260515_to_20260609),
     (20260609, 20260610, migrate_history_20260609_to_20260610),
     (20260610, 20260611, migrate_history_20260610_to_20260611),
+    (20260611, 20260612, migrate_history_20260611_to_20260612),
 ];
 
 /**
@@ -2533,6 +2533,28 @@ fn migrate_history_20260610_to_20260611(conn: &Connection) -> Result<()> {
 }
 
 /**
+ * Migrate history.db from v20260611 to v20260612.
+ *
+ * Drops indexes with no consumer: `idx_history_pkgpath` and
+ * `idx_history_pkgpath_pkgbase` are prefixes of
+ * `idx_history_pkg_latest`, `idx_history_pkgpath_outcome` matches no
+ * query, and `idx_history_build_id` is subsumed by the
+ * `UNIQUE(build_id, pkgpath, pkgbase)` constraint index.
+ */
+fn migrate_history_20260611_to_20260612(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
+        "DROP INDEX IF EXISTS idx_history_pkgpath;
+         DROP INDEX IF EXISTS idx_history_pkgpath_pkgbase;
+         DROP INDEX IF EXISTS idx_history_pkgpath_outcome;
+         DROP INDEX IF EXISTS idx_history_build_id;",
+    )?;
+    tx.execute("UPDATE schema_version SET version = ?1", params![20260612])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/**
  * Open and initialize the history database connection.
  */
 fn open_history_conn(dbdir: &Path) -> Result<Connection> {
@@ -2601,16 +2623,8 @@ pub(crate) fn create_history_schema(conn: &Connection) -> Result<()> {
              UNIQUE (build_id, pkgpath, pkgbase)
          );
 
-         CREATE INDEX idx_history_pkgpath
-             ON build_history(pkgpath);
-         CREATE INDEX idx_history_pkgpath_pkgbase
-             ON build_history(pkgpath, pkgbase);
-         CREATE INDEX idx_history_pkgpath_outcome
-             ON build_history(pkgpath, outcome);
          CREATE INDEX idx_history_timestamp
              ON build_history(timestamp);
-         CREATE INDEX idx_history_build_id
-             ON build_history(build_id, pkgpath, id);
          CREATE INDEX idx_history_outcome_pkg
              ON build_history(outcome, pkgpath, pkgbase);
          CREATE INDEX idx_history_pkg_latest
