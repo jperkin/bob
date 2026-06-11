@@ -229,6 +229,62 @@ pub fn refresh_loop(
     }
 }
 
+/**
+ * Handle to a running progress refresh thread.
+ */
+pub struct ProgressRefresh {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl ProgressRefresh {
+    /**
+     * Stop the refresh thread and wait for it to exit.
+     */
+    pub fn stop(self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.thread.join();
+    }
+}
+
+/**
+ * Create a shared progress display with `cached` and `skipped`
+ * pre-marked, and start a thread refreshing it periodically.  Call
+ * [`ProgressRefresh::stop`] once the work is finished.
+ */
+#[allow(clippy::too_many_arguments)]
+pub fn start_progress(
+    thread_name: &str,
+    title: &str,
+    finished_title: &str,
+    total: usize,
+    num_workers: usize,
+    tui: bool,
+    cached: usize,
+    skipped: usize,
+    state: &crate::RunState,
+) -> (Arc<Mutex<Progress>>, ProgressRefresh) {
+    let progress = Arc::new(Mutex::new(Progress::new(
+        title,
+        finished_title,
+        total,
+        num_workers,
+        tui,
+    )));
+    if let Ok(mut p) = progress.lock() {
+        p.state_mut().cached = cached;
+        p.state_mut().skipped = skipped;
+    }
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let progress_refresh = Arc::clone(&progress);
+    let stop_flag = Arc::clone(&stop);
+    let state = state.clone();
+    let thread = crate::spawn_named(thread_name, move || {
+        refresh_loop(progress_refresh, &stop_flag, &state)
+    });
+    (progress, ProgressRefresh { stop, thread })
+}
+
 /// Fixed-width column for status verbs and progress titles,
 /// matching cargo's 12-character status column.
 const STATUS_WIDTH: usize = 12;

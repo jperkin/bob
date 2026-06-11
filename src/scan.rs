@@ -41,7 +41,7 @@
 
 use crate::config::{Pkgsrc, PkgsrcEnv};
 use crate::sandbox::{SandboxScope, wait_output_with_shutdown, wait_parse_with_shutdown};
-use crate::tui::{Progress, format_duration};
+use crate::tui::format_duration;
 use crate::{Config, Interrupted, RunState, Sandbox};
 use crate::{PackageCounts, PackageState};
 use anyhow::{Context, Result, bail};
@@ -51,8 +51,7 @@ use petgraph::graph::DiGraph;
 use pkgsrc::{Pattern, PatternCache, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, error, info, info_span, trace, warn};
 
@@ -660,31 +659,17 @@ impl Scan {
         // Set up multi-line progress display using ratatui inline viewport
         // Note: finished_title is unused since we print our own summary
         let total_count = self.initial_cached + self.incoming.len();
-        let progress = Arc::new(Mutex::new(Progress::new(
+        let (progress, refresh) = crate::tui::start_progress(
+            "scan-refresh",
             "Scanning",
             "",
             total_count,
             self.config.scan_threads(),
             self.config.tui(),
-        )));
-
-        // Mark cached packages in progress display
-        if self.initial_cached > 0
-            && let Ok(mut p) = progress.lock()
-        {
-            p.state_mut().cached = self.initial_cached;
-        }
-
-        // Flag to stop the refresh thread
-        let stop_refresh = Arc::new(AtomicBool::new(false));
-
-        // Spawn a thread to periodically refresh the display (for timer updates)
-        let progress_refresh = Arc::clone(&progress);
-        let stop_flag = Arc::clone(&stop_refresh);
-        let shutdown_for_refresh = shutdown_flag.clone();
-        let refresh_thread = crate::spawn_named("scan-refresh", move || {
-            crate::tui::refresh_loop(progress_refresh, &stop_flag, &shutdown_for_refresh)
-        });
+            self.initial_cached,
+            0,
+            &shutdown_flag,
+        );
 
         let mut db_error: Option<anyhow::Error> = None;
 
@@ -882,8 +867,7 @@ impl Scan {
         }
 
         // Stop the refresh thread and print final summary
-        stop_refresh.store(true, Ordering::Relaxed);
-        let _ = refresh_thread.join();
+        refresh.stop();
 
         if !shutdown_flag.interrupted() {
             // Get elapsed time and clean up TUI without printing generic summary

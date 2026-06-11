@@ -49,7 +49,7 @@ use crate::makejobs::PkgMakeJobs;
 use crate::sandbox::{CommandSetsid, SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
 use crate::scan::ResolvedPackage;
 use crate::scheduler::{PackageId, PackageTable, Scheduler};
-use crate::tui::{OutputBuffers, Progress};
+use crate::tui::OutputBuffers;
 use crate::{Config, RunState, Sandbox};
 use crate::{PackageCounts, PackageState};
 use anyhow::{Context, bail};
@@ -65,8 +65,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc, mpsc::Sender};
+use std::sync::{Arc, mpsc, mpsc::Sender};
 use std::task::Poll;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::{debug, error, info, info_span, trace, warn};
@@ -2077,33 +2076,18 @@ impl Build {
         println!("Building packages...");
 
         // Set up multi-line progress display using ratatui inline viewport
-        let progress = Arc::new(Mutex::new(Progress::new(
+        let (progress, refresh) = crate::tui::start_progress(
+            "build-refresh",
             "Building",
             "Built",
             total_packages,
             n,
             self.config.tui(),
-        )));
-
-        // Mark cached and indirect-failed packages in progress display
-        if (cached_count > 0 || indirect_failed_count > 0)
-            && let Ok(mut p) = progress.lock()
-        {
-            p.state_mut().cached = cached_count;
-            p.state_mut().skipped = indirect_failed_count;
-        }
-
-        // Flag to stop the refresh thread
-        let stop_refresh = Arc::new(AtomicBool::new(false));
-
-        // Spawn a thread to periodically refresh the display (for timer updates)
-        let progress_refresh = Arc::clone(&progress);
-        let stop_flag = Arc::clone(&stop_refresh);
-        let state_for_refresh = state_flag.clone();
+            cached_count,
+            indirect_failed_count,
+            &state_flag,
+        );
         let output_buffers = progress.lock().ok().and_then(|p| p.output_buffers());
-        let refresh_thread = crate::spawn_named("build-refresh", move || {
-            crate::tui::refresh_loop(progress_refresh, &stop_flag, &state_for_refresh)
-        });
 
         /*
          * Configure a mananger channel.  This is used for clients to indicate
@@ -2531,8 +2515,7 @@ impl Build {
         }
 
         // Stop the refresh thread
-        stop_refresh.store(true, Ordering::Relaxed);
-        let _ = refresh_thread.join();
+        refresh.stop();
 
         if !state_flag.interrupted()
             && let Ok(mut p) = progress.lock()
