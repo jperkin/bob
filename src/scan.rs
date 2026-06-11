@@ -26,7 +26,7 @@
  * 2. Run `make pbulk-index` on each package to discover dependencies
  * 3. Recursively discover all transitive dependencies
  * 4. Resolve dependency patterns to specific package versions
- * 5. Verify no circular dependencies exist
+ * 5. Mark circular dependencies as unresolved
  * 6. Return buildable and skipped package lists
  *
  * # Skip Reasons
@@ -50,7 +50,7 @@ use petgraph::algo::tarjan_scc;
 use petgraph::graph::DiGraph;
 use pkgsrc::{Pattern, PatternCache, PkgName, PkgPath, ScanIndex};
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, error, info, info_span, trace, warn};
@@ -188,6 +188,13 @@ impl std::fmt::Display for ScanResult {
     }
 }
 
+/*
+ * Prefix of per-package circular dependency reasons.  The error
+ * summary uses it to filter member rotations in favour of one
+ * canonical chain per group.
+ */
+const CYCLE_PREFIX: &str = "Circular dependency: ";
+
 /// Result of scanning and resolving packages.
 ///
 /// Returned by [`Scan::resolve`], contains all scanned packages with their outcomes.
@@ -197,6 +204,9 @@ pub struct ScanSummary {
     pub pkgpaths: usize,
     /// All packages in scan order with their outcomes.
     pub packages: Vec<ScanResult>,
+    /// One canonical dependency chain per circular dependency group.
+    #[serde(default)]
+    pub cycles: Vec<String>,
 }
 
 /// Counts of packages by state, plus buildable and scanfail totals.
@@ -229,17 +239,23 @@ impl ScanSummary {
         self.packages.iter().filter_map(|p| p.as_buildable())
     }
 
-    /// Scan failures and unresolved dependency errors.
+    /**
+     * Scan failures, unresolved dependency errors, and one canonical
+     * chain per circular dependency group.
+     */
     pub fn errors(&self) -> impl Iterator<Item = &str> {
-        self.packages.iter().filter_map(|p| match p {
-            ScanResult::ScanFail { error, .. } => Some(error.as_str()),
-            ScanResult::Skipped {
-                state: PackageState::Unresolved,
-                reason: Some(reason),
-                ..
-            } => Some(reason.as_str()),
-            _ => None,
-        })
+        self.packages
+            .iter()
+            .filter_map(|p| match p {
+                ScanResult::ScanFail { error, .. } => Some(error.as_str()),
+                ScanResult::Skipped {
+                    state: PackageState::Unresolved,
+                    reason: Some(reason),
+                    ..
+                } if !reason.starts_with(CYCLE_PREFIX) => Some(reason.as_str()),
+                _ => None,
+            })
+            .chain(self.cycles.iter().map(String::as_str))
     }
 
     /// Print the "Resolved N total packages..." line.
@@ -1250,36 +1266,57 @@ impl Scan {
     }
 
     /**
-     * Check for circular dependencies in buildable packages.
+     * Find circular dependencies among buildable packages.
      *
      * Edges are `(dep, dependent)` pairs of indices into `names`.  Any
      * strongly connected group of packages, or a package depending on
-     * itself, is an error listing every package in each group.
+     * itself, is returned as a group of indices sorted by pkgname.
      */
-    fn check_circular_deps(names: &[PkgName], edges: &[(u32, u32)]) -> Result<()> {
+    fn find_circular_deps(names: &[PkgName], edges: &[(u32, u32)]) -> Vec<Vec<usize>> {
         let graph = DiGraph::<(), ()>::from_edges(edges.iter().copied());
-        let mut groups: Vec<Vec<&PkgName>> = Vec::new();
+        let mut groups: Vec<Vec<usize>> = Vec::new();
         for scc in tarjan_scc(&graph) {
             if scc.len() > 1 || graph.find_edge(scc[0], scc[0]).is_some() {
-                let mut group: Vec<&PkgName> = scc.iter().map(|n| &names[n.index()]).collect();
-                group.sort_by(|a, b| a.pkgname().cmp(b.pkgname()));
+                let mut group: Vec<usize> = scc.iter().map(|n| n.index()).collect();
+                group.sort_by_key(|&id| names[id].pkgname());
                 groups.push(group);
             }
         }
-        if groups.is_empty() {
-            return Ok(());
+        groups
+    }
+
+    /**
+     * Shortest dependency chain from `start` back to itself within
+     * `group`, as indices `[start, ..., start]`.  A self-dependency
+     * returns `[start, start]`.  Returns None if no chain exists,
+     * which cannot happen for a member of a strongly connected group.
+     */
+    fn shortest_cycle(depends: &[Vec<usize>], group: &[usize], start: usize) -> Option<Vec<usize>> {
+        let members: HashSet<usize> = group.iter().copied().collect();
+        let mut parent: HashMap<usize, usize> = HashMap::new();
+        let mut queue = VecDeque::from([start]);
+        while let Some(cur) = queue.pop_front() {
+            for &dep in &depends[cur] {
+                if dep == start {
+                    let mut tail = Vec::new();
+                    let mut node = cur;
+                    while node != start {
+                        tail.push(node);
+                        node = *parent.get(&node)?;
+                    }
+                    tail.reverse();
+                    let mut chain = vec![start];
+                    chain.extend(tail);
+                    chain.push(start);
+                    return Some(chain);
+                }
+                if members.contains(&dep) && !parent.contains_key(&dep) {
+                    parent.insert(dep, cur);
+                    queue.push_back(dep);
+                }
+            }
         }
-        error!(?groups, "Circular dependencies detected");
-        let blocks: Vec<String> = groups
-            .iter()
-            .map(|g| {
-                g.iter()
-                    .map(|n| format!("\t{}", n))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .collect();
-        bail!("Circular dependencies detected:\n{}", blocks.join("\n\n"));
+        None
     }
 
     /**
@@ -1313,8 +1350,9 @@ impl Scan {
      * **Phase 4 - Propagate failures**: Walk the dependency graph to mark
      * packages with failed/skipped dependencies as IndirectFail/IndirectSkip.
      *
-     * **Phase 5 - Check cycles**: Error if any buildable packages form a
-     * circular dependency group.
+     * **Phase 5 - Check cycles**: Mark any buildable packages forming a
+     * circular dependency group as unresolved, each with its shortest
+     * dependency chain back to itself, and propagate to their dependents.
      *
      * **Phase 6 - Build results**: Transform the packages into a
      * `Vec<ScanResult>`, filtering inactive packages for limited scans,
@@ -1566,8 +1604,40 @@ impl Scan {
                 edges.push((dep as u32, id as u32));
             }
         }
-        Self::check_circular_deps(&names, &edges)?;
+        let groups = Self::find_circular_deps(&names, &edges);
         drop(edges);
+        let mut cycles: Vec<String> = Vec::new();
+        if !groups.is_empty() {
+            for group in &groups {
+                let members = group
+                    .iter()
+                    .map(|&id| names[id].pkgname())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                error!(%members, "Circular dependency detected");
+                for &id in group {
+                    let chain = match Self::shortest_cycle(&depends, group, id) {
+                        Some(c) => c
+                            .iter()
+                            .map(|&i| names[i].pkgname())
+                            .collect::<Vec<_>>()
+                            .join(" -> "),
+                        None => members.clone(),
+                    };
+                    let reason = format!("{CYCLE_PREFIX}{chain}");
+                    /*
+                     * The first member's chain (sorted by pkgname) is
+                     * the group's canonical form in the error summary.
+                     */
+                    if id == group[0] {
+                        cycles.push(reason.clone());
+                    }
+                    skip_reasons[id] = Some(PackageState::Unresolved);
+                    unresolved_reasons.entry(id).or_default().push(reason);
+                }
+            }
+            Self::propagate_failures(&depends, &mut skip_reasons);
+        }
 
         let mut packages: Vec<ScanResult> = Vec::new();
         let mut count_filtered = 0;
@@ -1629,7 +1699,11 @@ impl Scan {
             .map(|p| p.pkgpath())
             .collect::<HashSet<_>>()
             .len();
-        let summary = ScanSummary { pkgpaths, packages };
+        let summary = ScanSummary {
+            pkgpaths,
+            packages,
+            cycles,
+        };
 
         let c = summary.counts();
         info!(

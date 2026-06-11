@@ -3,7 +3,7 @@
 use anyhow::Result;
 use bob::PackageState::*;
 use bob::Scan;
-use bob::scan::ScanSummary;
+use bob::scan::{ScanResult, ScanSummary};
 use pkgsrc::ScanIndex;
 use std::fs::File;
 use std::io::BufReader;
@@ -166,14 +166,40 @@ PKG_FAIL_REASON=
 
     let scan_data = parse_scan_data(data);
     let mut scan = Scan::default();
-    let result = scan.resolve(scan_data.into_iter().map(Ok));
+    let result = scan.resolve(scan_data.into_iter().map(Ok))?;
 
-    // Should fail with circular dependency error
-    assert!(result.is_err(), "circular dependencies should be detected");
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("Circular dependencies detected"),
-        "error should mention circular dependencies: {err}"
+    /*
+     * The cycle is reported, not fatal: every member is marked
+     * unresolved with its own dependency chain back to itself,
+     * while the error summary carries one canonical chain.
+     */
+    let c = result.counts();
+    assert_eq!(c.buildable, 0);
+    assert_eq!(c.states[Unresolved], 3);
+
+    let errors: Vec<_> = result.errors().collect();
+    assert_eq!(
+        errors,
+        vec!["Circular dependency: a-1.0 -> b-1.0 -> c-1.0 -> a-1.0"]
+    );
+
+    let reasons: Vec<_> = result
+        .packages
+        .iter()
+        .filter_map(|p| match p {
+            ScanResult::Skipped {
+                reason: Some(r), ..
+            } => Some(r.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        vec![
+            "Circular dependency: a-1.0 -> b-1.0 -> c-1.0 -> a-1.0",
+            "Circular dependency: b-1.0 -> c-1.0 -> a-1.0 -> b-1.0",
+            "Circular dependency: c-1.0 -> a-1.0 -> b-1.0 -> c-1.0",
+        ]
     );
 
     Ok(())
