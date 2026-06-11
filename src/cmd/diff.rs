@@ -179,7 +179,7 @@ fn print_filtered(
     from: Option<&HashSet<PackageState>>,
     to: Option<&HashSet<PackageState>>,
 ) -> Result<()> {
-    let mut entries: Vec<&DiffEntry> = diff
+    let entries: Vec<&DiffEntry> = diff
         .new_failures
         .iter()
         .chain(diff.version_changes.iter())
@@ -203,16 +203,7 @@ fn print_filtered(
         label(to),
     );
 
-    let mut out = Writer::stdout(chosen, opts);
-    out.message(&format!("--- {}", diff.build1_id));
-    out.message(&format!("+++ {}", diff.build2_id));
-    out.message(&summary);
-
-    entries.sort_by_key(|e| std::cmp::Reverse(get_breaks(e, breaks)));
-    for e in &entries {
-        out.write(Some(' '), *e, breaks);
-    }
-    out.finish()
+    write_diff(diff, breaks, chosen, opts, &summary, vec![(' ', entries)])
 }
 
 fn get_breaks(e: &DiffEntry, breaks: &HashMap<String, usize>) -> usize {
@@ -221,6 +212,31 @@ fn get_breaks(e: &DiffEntry, breaks: &HashMap<String, usize>) -> usize {
         .or(e.build1_pkgname.as_deref())
         .and_then(|n| breaks.get(n).copied())
         .unwrap_or(0)
+}
+
+/*
+ * Write a diff listing: the header lines, then each section's entries
+ * prefixed and sorted by break count, most first.
+ */
+fn write_diff(
+    diff: &BuildDiff,
+    breaks: &HashMap<String, usize>,
+    chosen: Vec<Column>,
+    opts: OutputOptions,
+    summary: &str,
+    sections: Vec<(char, Vec<&DiffEntry>)>,
+) -> Result<()> {
+    let mut out = Writer::stdout(chosen, opts);
+    out.message(&format!("--- {}", diff.build1_id));
+    out.message(&format!("+++ {}", diff.build2_id));
+    out.message(summary);
+    for (prefix, mut entries) in sections {
+        entries.sort_by_key(|e| std::cmp::Reverse(get_breaks(e, breaks)));
+        for e in entries {
+            out.write(Some(prefix), e, breaks);
+        }
+    }
+    out.finish()
 }
 
 fn print_diff(
@@ -258,30 +274,14 @@ fn print_diff(
         format!("@@ {} @@", parts.join(", "))
     };
 
-    let mut out = Writer::stdout(chosen, opts);
-    out.message(&format!("--- {}", diff.build1_id));
-    out.message(&format!("+++ {}", diff.build2_id));
-    out.message(&summary);
-
-    let emit = |out: &mut Writer<std::io::StdoutLock<'static>>,
-                prefix: char,
-                entries: &mut [&DiffEntry]| {
-        entries.sort_by_key(|e| std::cmp::Reverse(get_breaks(e, breaks)));
-        for e in entries.iter() {
-            out.write(Some(prefix), *e, breaks);
-        }
-    };
-
-    let mut failures: Vec<_> = diff.new_failures.iter().collect();
-    emit(&mut out, '+', &mut failures);
-    let mut version_changes: Vec<_> = diff.version_changes.iter().collect();
-    emit(&mut out, '~', &mut version_changes);
-    let mut fixes: Vec<_> = diff.fixes.iter().collect();
-    emit(&mut out, '-', &mut fixes);
+    let mut sections: Vec<(char, Vec<&DiffEntry>)> = vec![
+        ('+', diff.new_failures.iter().collect()),
+        ('~', diff.version_changes.iter().collect()),
+        ('-', diff.fixes.iter().collect()),
+    ];
     if show_all {
-        let mut other: Vec<_> = diff.other_changes.iter().collect();
-        emit(&mut out, ' ', &mut other);
+        sections.push((' ', diff.other_changes.iter().collect()));
     }
 
-    out.finish()
+    write_diff(diff, breaks, chosen, opts, &summary, sections)
 }
