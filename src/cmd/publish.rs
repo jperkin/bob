@@ -1474,6 +1474,29 @@ fn generate_phase_links(pkg_name: &str, log_dir: &Path) -> String {
     links.join(" ")
 }
 
+/*
+ * Render a pkgname as a link to its failing stage log, or plain text
+ * when no log is available.
+ */
+fn pkg_log_link(pkgname: &str, log: Option<&str>) -> String {
+    let e = escape_html(pkgname);
+    match log {
+        Some(log) => format!("<a href=\"{e}/{log}\">{e}</a>"),
+        None => e,
+    }
+}
+
+/*
+ * The same link wrapped in a titled span for table cells.
+ */
+fn pkg_log_cell(pkgname: &str, log: Option<&str>) -> String {
+    format!(
+        "<span title=\"{}\">{}</span>",
+        escape_html(pkgname),
+        pkg_log_link(pkgname, log)
+    )
+}
+
 fn write_failed_table(
     file: &mut std::fs::File,
     title: &str,
@@ -1508,6 +1531,15 @@ fn write_failed_table(
     writeln!(file, "</tr></thead>")?;
     writeln!(file, "<tbody>")?;
 
+    let log_by_name: HashMap<&str, &str> = failed_info
+        .iter()
+        .filter_map(|i| {
+            i.failed_log
+                .as_deref()
+                .map(|log| (i.result.pkgname.pkgname(), log))
+        })
+        .collect();
+
     for info in failed_info {
         let pkg_name = info.result.pkgname.pkgname();
         let pkgpath_str = info
@@ -1540,16 +1572,13 @@ fn write_failed_table(
             let links = info
                 .blockers
                 .iter()
-                .map(|blocker| {
-                    let e = escape_html(blocker);
-                    format!("<a href=\"#failed-{e}\">{e}</a>")
-                })
+                .map(|b| pkg_log_link(b, log_by_name.get(b.as_str()).copied()))
                 .collect::<Vec<_>>()
                 .join(", ");
             let reason = format!("Blocked by {links}");
             writeln!(
                 file,
-                "<tr id=\"failed-{0}\"><td class=\"col-pkg indirect\"><span title=\"{0}\">{0}</span></td><td class=\"col-path indirect\">{1}</td><td class=\"col-breaks r indirect\" data-sort=\"{2}\">{3}</td><td class=\"col-dur r indirect\" data-sort=\"0\"></td><td class=\"col-maint indirect\">{4}</td><td class=\"col-status indirect\">{5}</td><td class=\"col-logs reason\" data-sort=\"1\">{6}</td></tr>",
+                "<tr><td class=\"col-pkg indirect\"><span title=\"{0}\">{0}</span></td><td class=\"col-path indirect\">{1}</td><td class=\"col-breaks r indirect\" data-sort=\"{2}\">{3}</td><td class=\"col-dur r indirect\" data-sort=\"0\"></td><td class=\"col-maint indirect\">{4}</td><td class=\"col-status indirect\">{5}</td><td class=\"col-logs reason\" data-sort=\"1\">{6}</td></tr>",
                 escape_html(pkg_name),
                 pkgpath,
                 info.breaks_count,
@@ -1568,21 +1597,14 @@ fn write_failed_table(
             format!("{}s", dur_secs)
         };
 
-        let escaped = escape_html(pkg_name);
-        let pkg_link = match &info.failed_log {
-            Some(log) => format!(
-                "<span title=\"{0}\"><a href=\"{0}/{1}\">{0}</a></span>",
-                escaped, log
-            ),
-            None => format!("<span title=\"{0}\">{0}</span>", escaped),
-        };
+        let pkg_link = pkg_log_cell(pkg_name, info.failed_log.as_deref());
 
         let log_dir = logdir.join(pkg_name);
         let phase_links = generate_phase_links(pkg_name, &log_dir);
 
         writeln!(
             file,
-            "<tr id=\"failed-{id}\"><td class=\"col-pkg\">{}</td><td class=\"col-path\">{}</td><td class=\"col-breaks r\" data-sort=\"{}\">{}</td><td class=\"col-dur r\" data-sort=\"{}\">{}</td><td class=\"col-maint\">{}</td><td class=\"col-status\">{}</td><td class=\"col-logs\" data-sort=\"0\">{}</td></tr>",
+            "<tr><td class=\"col-pkg\">{}</td><td class=\"col-path\">{}</td><td class=\"col-breaks r\" data-sort=\"{}\">{}</td><td class=\"col-dur r\" data-sort=\"{}\">{}</td><td class=\"col-maint\">{}</td><td class=\"col-status\">{}</td><td class=\"col-logs\" data-sort=\"0\">{}</td></tr>",
             pkg_link,
             pkgpath,
             info.breaks_count,
@@ -1592,7 +1614,6 @@ fn write_failed_table(
             escape_html(maintainer),
             info.result.state.as_str(),
             phase_links,
-            id = escaped
         )?;
     }
 
@@ -1704,14 +1725,7 @@ fn write_diff_section(
 
         let previously: &str = e.build1_outcome.map_or("absent", |o| o.as_str());
 
-        let escaped = escape_html(pkgname);
-        let pkg_link = match info.and_then(|i| i.failed_log.as_deref()) {
-            Some(log) => format!(
-                "<span title=\"{0}\"><a href=\"{0}/{1}\">{0}</a></span>",
-                escaped, log
-            ),
-            None => format!("<span title=\"{0}\">{0}</span>", escaped),
-        };
+        let pkg_link = pkg_log_cell(pkgname, info.and_then(|i| i.failed_log.as_deref()));
 
         let commits_cell = if show_commits {
             let entries = commits.and_then(|m| m.get(&e.pkgpath));
