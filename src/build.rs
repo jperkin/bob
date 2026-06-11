@@ -2257,30 +2257,16 @@ impl Build {
             let sandbox_ids = sandbox_ids;
             let mut clients = clients.clone();
             let mut jobs = jobs;
-            let mut announced_interrupt = false;
 
             // Track which thread is building which package
             let mut thread_packages: HashMap<usize, PackageId> = HashMap::new();
 
             loop {
                 if state_for_manager.is_shutdown() {
-                    let was_first = if let Ok(mut p) = progress_clone.lock() {
-                        p.finish_interrupted().unwrap_or(false)
-                    } else {
-                        false
-                    };
-                    if was_first {
-                        eprintln!("Interrupted, shutting down...");
-                    }
                     for (_, client) in clients.drain() {
                         let _ = client.send(ChannelCommand::Shutdown);
                     }
                     break;
-                } else if state_for_manager.is_stopping() && !announced_interrupt {
-                    if let Ok(mut p) = progress_clone.lock() {
-                        p.announce_interrupt();
-                    }
-                    announced_interrupt = true;
                 }
 
                 let command = match manager_rx.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
@@ -2546,12 +2532,10 @@ impl Build {
         stop_refresh.store(true, Ordering::Relaxed);
         let _ = refresh_thread.join();
 
-        if let Ok(mut p) = progress.lock() {
-            if state_flag.interrupted() {
-                let _ = p.finish_interrupted();
-            } else {
-                let _ = p.finish();
-            }
+        if !state_flag.interrupted()
+            && let Ok(mut p) = progress.lock()
+        {
+            let _ = p.finish();
         }
 
         // Collect results from manager

@@ -729,11 +729,6 @@ impl Scan {
         loop {
             // Check for interrupt (stop or shutdown).
             if shutdown_flag.interrupted() {
-                if shutdown_flag.is_stopping()
-                    && let Ok(mut p) = progress.lock()
-                {
-                    p.announce_interrupt();
-                }
                 break;
             }
 
@@ -845,11 +840,6 @@ impl Scan {
 
             // Check for interrupt after batch completes.
             if shutdown_flag.interrupted() {
-                if shutdown_flag.is_stopping()
-                    && let Ok(mut p) = progress.lock()
-                {
-                    p.announce_interrupt();
-                }
                 break;
             }
 
@@ -902,17 +892,6 @@ impl Scan {
         // Stop the refresh thread and print final summary
         stop_refresh.store(true, Ordering::Relaxed);
         let _ = refresh_thread.join();
-
-        if shutdown_flag.interrupted() {
-            let was_first = if let Ok(mut p) = progress.lock() {
-                p.finish_interrupted().unwrap_or(false)
-            } else {
-                false
-            };
-            if was_first && shutdown_flag.is_shutdown() {
-                eprintln!("Interrupted, shutting down...");
-            }
-        }
 
         if !shutdown_flag.interrupted() {
             // Get elapsed time and clean up TUI without printing generic summary

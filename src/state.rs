@@ -19,6 +19,15 @@ use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+
+/**
+ * Window in which repeated SIGINTs count as a single keypress.  One
+ * Ctrl+C can be delivered more than once: the terminal signals the
+ * whole foreground process group, and a wrapper such as time(1) also
+ * relays the signal it received to its child.
+ */
+const SIGINT_WINDOW: Duration = Duration::from_millis(100);
 
 /**
  * Thread-safe run state, shared across threads via internal `Arc`.
@@ -74,7 +83,8 @@ impl RunState {
     /**
      * Register signal handlers for graceful interruption.
      *
-     * SIGINT advances state: RUNNING -> STOPPING -> SHUTDOWN.
+     * SIGINT advances state: RUNNING -> STOPPING -> SHUTDOWN, with
+     * deliveries inside [`SIGINT_WINDOW`] counting as one keypress.
      * SIGTERM goes straight to SHUTDOWN.
      */
     pub fn register_signals(&self) -> Result<()> {
@@ -82,9 +92,16 @@ impl RunState {
             Signals::new([SIGINT, SIGTERM]).context("Failed to register signal handlers")?;
         let state = self.clone();
         crate::spawn_named("signals", move || {
+            let mut last: Option<Instant> = None;
             for sig in signals.forever() {
                 match sig {
-                    SIGINT => state.advance(),
+                    SIGINT => {
+                        let now = Instant::now();
+                        if last.is_none_or(|t| now.duration_since(t) > SIGINT_WINDOW) {
+                            last = Some(now);
+                            state.advance();
+                        }
+                    }
                     SIGTERM => state.shutdown(),
                     _ => {}
                 }

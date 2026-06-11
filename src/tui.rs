@@ -20,7 +20,7 @@
 
 use crossterm::ExecutableCommand;
 use crossterm::cursor::{MoveTo, Show};
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -179,6 +179,11 @@ fn input_loop() {
  * down, rendering once per [`REFRESH_INTERVAL`].  In TUI mode the
  * display is registered with the input thread, which handles terminal
  * events as they arrive.
+ *
+ * Interrupt messages are owned here so both display modes behave
+ * identically: a stopping state is announced within one interval, and
+ * if the run was interrupted the display is finished on exit, printing
+ * the shutdown message when shutdown was requested.
  */
 pub fn refresh_loop(
     progress: Arc<Mutex<Progress>>,
@@ -200,6 +205,9 @@ pub fn refresh_loop(
     while !stop.load(Ordering::Relaxed) && !state.is_shutdown() {
         std::thread::sleep(REFRESH_INTERVAL);
         if let Ok(mut p) = progress.lock() {
+            if state.is_stopping() {
+                p.announce_interrupt();
+            }
             let _ = p.render();
         }
     }
@@ -211,6 +219,13 @@ pub fn refresh_loop(
             };
             input = i;
         }
+    }
+    if state.interrupted()
+        && let Ok(mut p) = progress.lock()
+        && p.finish_interrupted().unwrap_or(false)
+        && state.is_shutdown()
+    {
+        eprintln!("Interrupted, shutting down...");
     }
 }
 
@@ -840,6 +855,21 @@ impl PlainProgress {
             interrupt_announced: false,
         }
     }
+
+    fn announce_interrupt(&mut self) {
+        if !self.interrupt_announced {
+            self.interrupt_announced = true;
+            eprintln!("Stopping, ^C to force quit");
+        }
+    }
+
+    fn finish_interrupted(&mut self) -> io::Result<bool> {
+        if self.state.suppressed {
+            return Ok(false);
+        }
+        self.state.suppressed = true;
+        Ok(true)
+    }
 }
 
 /**
@@ -970,12 +1000,7 @@ impl Progress {
 
     pub fn announce_interrupt(&mut self) {
         match self {
-            Self::Plain(p) => {
-                if !p.interrupt_announced {
-                    p.interrupt_announced = true;
-                    eprintln!("Interrupted, stopping...");
-                }
-            }
+            Self::Plain(p) => p.announce_interrupt(),
             Self::Tui(p) => p.announce_interrupt(),
         }
     }
@@ -1024,7 +1049,7 @@ impl Progress {
 
     pub fn finish_interrupted(&mut self) -> io::Result<bool> {
         match self {
-            Self::Plain(_) => Ok(false),
+            Self::Plain(p) => p.finish_interrupted(),
             Self::Tui(p) => p.finish_interrupted(),
         }
     }
@@ -1216,19 +1241,15 @@ impl MultiProgress {
                 return Ok(true);
             }
             /*
-             * Handle Ctrl+C.  First press: show a stopping indicator
-             * in the status bar and keep the TUI active so the user
-             * can watch in-progress work finish.  Second press: tear
-             * down the TUI and print the shutdown message.
+             * Raw mode means the terminal does not turn Ctrl+C into
+             * SIGINT, so raise it here.  The signal advances the run
+             * state and the refresh loop handles the messages, the
+             * same as a terminal-delivered interrupt in plain mode.
              */
-            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                if self.interrupt_announced {
-                    if self.finish_interrupted().unwrap_or(false) {
-                        eprintln!("Interrupted, shutting down...");
-                    }
-                } else {
-                    self.announce_interrupt();
-                }
+            if key.kind == KeyEventKind::Press
+                && key.code == KeyCode::Char('c')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+            {
                 unsafe {
                     libc::raise(libc::SIGINT);
                 }
