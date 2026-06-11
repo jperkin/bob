@@ -121,7 +121,7 @@ const SCHEMA_VERSION: i32 = 20260610;
 /**
  * Schema version for history.db - update when history schema changes.
  */
-const HISTORY_SCHEMA_VERSION: i32 = 20260610;
+const HISTORY_SCHEMA_VERSION: i32 = 20260611;
 
 /**
  * Summary of a package's most recent build from history.
@@ -2352,6 +2352,7 @@ const HISTORY_MIGRATIONS: &[HistoryMigration] = &[
     (20260513, 20260515, migrate_history_20260513_to_20260515),
     (20260515, 20260609, migrate_history_20260515_to_20260609),
     (20260609, 20260610, migrate_history_20260609_to_20260610),
+    (20260610, 20260611, migrate_history_20260610_to_20260611),
 ];
 
 /**
@@ -2515,6 +2516,23 @@ fn migrate_history_20260609_to_20260610(conn: &Connection) -> Result<()> {
 }
 
 /**
+ * Migrate history.db from v20260610 to v20260611.
+ *
+ * Adds `idx_history_build_outcome`, a covering index for the
+ * per-build outcome counts in `list_history_builds`.
+ */
+fn migrate_history_20260610_to_20260611(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_history_build_outcome
+             ON build_history(build_id, outcome);",
+    )?;
+    tx.execute("UPDATE schema_version SET version = ?1", params![20260611])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/**
  * Open and initialize the history database connection.
  */
 fn open_history_conn(dbdir: &Path) -> Result<Connection> {
@@ -2597,6 +2615,8 @@ pub(crate) fn create_history_schema(conn: &Connection) -> Result<()> {
              ON build_history(outcome, pkgpath, pkgbase);
          CREATE INDEX idx_history_pkg_latest
              ON build_history(pkgpath, pkgbase, id, outcome);
+         CREATE INDEX idx_history_build_outcome
+             ON build_history(build_id, outcome);
 
          CREATE TABLE wall_times (
              history_id INTEGER NOT NULL
