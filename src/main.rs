@@ -260,6 +260,11 @@ enum Cmd {
         packages: Vec<String>,
     },
     /// Publish packages and reports to a remote server
+    ///
+    /// Destinations are configured in the 'publish' section of the
+    /// configuration file.  Combine flags to select what is published,
+    /// for example 'bob publish -pre' uploads the binary packages and
+    /// the build report, and sends the report email.
     #[command(arg_required_else_help = true)]
     Publish {
         /// Publish binary packages
@@ -279,6 +284,10 @@ enum Cmd {
         baseline: Option<String>,
     },
     /// Remove current build state (database and build logs)
+    ///
+    /// Removes the build database and all per-package build logs, ready
+    /// for a fresh scan and build, for example after updating pkgsrc.
+    /// Build history is kept; use 'bob prune' to manage that.
     Clean {
         /// Only remove package log directories, preserve database
         #[arg(short = 'l', long = "logs-only")]
@@ -314,14 +323,23 @@ enum Cmd {
         #[command(flatten)]
         builds: cmd::list::BuildsArgs,
     },
-    /// Remove old build history
+    /// Remove build sessions from the history database
     Prune {
         #[command(flatten)]
         args: cmd::prune::PruneArgs,
     },
     /// Create a sandbox and start an interactive shell
+    ///
+    /// Creates a fresh sandbox using the 'environment.dev' settings,
+    /// starts an interactive shell inside it for pkgsrc development or
+    /// debugging build failures, and destroys the sandbox when the
+    /// shell exits.  Shorthand for 'bob sandbox exec'.
     Dev,
     /// Create and destroy build sandboxes
+    ///
+    /// Direct sandbox management.  Builds create and destroy their own
+    /// sandboxes; these commands are for inspecting them, cleaning up
+    /// after failures, and development.
     Sandbox {
         #[command(subcommand)]
         cmd: cmd::sandbox::SandboxCmd,
