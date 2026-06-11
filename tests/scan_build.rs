@@ -948,10 +948,9 @@ fn test_scan_resume() -> Result<()> {
 
     // Set shutdown flag after a short delay to interrupt the scan.
     // We use a thread to set it while the scan is running.
-    let state_clone = state.clone();
     let _trigger = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(200));
-        state_clone.shutdown();
+        state.shutdown();
     });
 
     // Start scan - may be interrupted
@@ -2680,7 +2679,7 @@ fn test_pkg_summary_skipped_when_new_packages_fail() -> Result<()> {
 
     // Full scan to get all packages
     let sandbox = Sandbox::new(&config, Some(&h.pkgsrc));
-    let mut scope = SandboxScope::new(sandbox, state.clone());
+    let mut scope = SandboxScope::new(sandbox, state);
     let mut scan = Scan::new(&config, Some(&h.pkgsrc));
     scan.init_from_db(&db)?;
     scan.start(&db, &mut scope, &h.pkgsrc)?;
