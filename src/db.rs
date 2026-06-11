@@ -38,7 +38,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use indexmap::IndexMap;
 use pkgsrc::{AllDepends, BootstrapPkg, MakeJobsSafe, PkgName, PkgPath, ScanDepends, ScanIndex};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -587,12 +587,7 @@ impl Database {
      * Get pkgname by package ID.
      */
     pub fn get_pkgname(&self, package_id: i64) -> Result<String> {
-        self.conn
-            .query_row(
-                "SELECT pkgname FROM scan_index WHERE id = ?1",
-                [package_id],
-                |row| row.get(0),
-            )
+        self.query_one("SELECT pkgname FROM scan_index WHERE id = ?1", [package_id])?
             .context("Package not found")
     }
 
@@ -610,11 +605,10 @@ impl Database {
      * Get all scanned pkgpaths.
      */
     pub fn get_scanned_pkgpaths(&self) -> Result<HashSet<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT DISTINCT pkg_location FROM scan_index")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        rows.collect::<Result<HashSet<_>, _>>().map_err(Into::into)
+        Ok(self
+            .query_rows("SELECT DISTINCT pkg_location FROM scan_index", [])?
+            .into_iter()
+            .collect())
     }
 
     /**
@@ -874,15 +868,10 @@ impl Database {
      * Load scan failures from the database.
      */
     pub fn get_scan_failures(&self) -> Result<Vec<(String, String)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT pkgpath, error FROM scan_failures ORDER BY pkgpath")?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
+        self.query_rows(
+            "SELECT pkgpath, error FROM scan_failures ORDER BY pkgpath",
+            [],
+        )
     }
 
     /**
@@ -932,7 +921,7 @@ impl Database {
      * Get all transitive reverse dependencies using recursive CTE.
      */
     pub fn get_transitive_reverse_deps(&self, package_id: i64) -> Result<Vec<i64>> {
-        let mut stmt = self.conn.prepare(
+        self.query_rows(
             "WITH RECURSIVE affected(id) AS (
                 SELECT ?1
                 UNION
@@ -941,9 +930,8 @@ impl Database {
                 JOIN affected a ON rd.depends_on_id = a.id
             )
             SELECT id FROM affected WHERE id != ?1",
-        )?;
-        let rows = stmt.query_map([package_id], |row| row.get::<_, i64>(0))?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            [package_id],
+        )
     }
 
     /**
@@ -985,17 +973,14 @@ impl Database {
      * pkgname.  The count is the number of packages broken if it fails.
      */
     pub fn dep_counts(&self) -> Result<HashMap<String, usize>> {
-        let mut stmt = self.conn.prepare(
+        let rows: Vec<(String, i64)> = self.query_rows(
             "SELECT p.pkgname, s.dep_count
              FROM scan_index p
              JOIN package_state s ON s.package_id = p.id
              WHERE s.selected = 1",
+            [],
         )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
-        })?;
-        rows.collect::<std::result::Result<_, _>>()
-            .map_err(Into::into)
+        Ok(rows.into_iter().map(|(p, n)| (p, n as usize)).collect())
     }
 
     /**
@@ -1047,17 +1032,11 @@ impl Database {
      * without resolving dependencies.
      */
     pub fn get_buildable_pkgpaths(&self) -> Result<HashMap<PkgName, PkgPath>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT pkgname, pkg_location FROM buildable")?;
-        let mut out = HashMap::new();
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let pkgname: String = row.get(0)?;
-            let pkg_location: String = row.get(1)?;
-            out.insert(pkgname.into(), pkg_location.parse()?);
-        }
-        Ok(out)
+        let rows: Vec<(String, String)> =
+            self.query_rows("SELECT pkgname, pkg_location FROM buildable", [])?;
+        rows.into_iter()
+            .map(|(pkgname, pkg_location)| Ok((pkgname.into(), pkg_location.parse()?)))
+            .collect()
     }
 
     /**
@@ -1065,15 +1044,13 @@ impl Database {
      * depended-upon first.
      */
     pub fn get_buildable_rows(&self) -> Result<Vec<(i64, String, String)>> {
-        let mut stmt = self.conn.prepare(
+        self.query_rows(
             "SELECT p.id, p.pkgname, p.pkg_location
              FROM buildable p
              JOIN package_state s ON s.package_id = p.id
              ORDER BY s.dep_count DESC, p.pkgname",
-        )?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+            [],
+        )
     }
 
     /**
@@ -1082,17 +1059,15 @@ impl Database {
      * its most depended-upon dependencies first.
      */
     pub fn get_buildable_depends(&self) -> Result<Vec<(i64, i64)>> {
-        let mut stmt = self.conn.prepare(
+        self.query_rows(
             "SELECT rd.package_id, rd.depends_on_id
              FROM resolved_depends rd
              JOIN buildable p ON p.id = rd.package_id
              JOIN buildable d ON d.id = rd.depends_on_id
              JOIN package_state s ON s.package_id = rd.depends_on_id
              ORDER BY rd.package_id, s.dep_count DESC, d.pkgname",
-        )?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(Into::into)
+            [],
+        )
     }
 
     // ========================================================================
@@ -1268,7 +1243,7 @@ impl Database {
      * Returns (pkgname, pkgpath, reason) for each blocking dependency.
      */
     pub fn get_blockers(&self, package_id: i64) -> Result<Vec<(String, String, String)>> {
-        let mut stmt = self.conn.prepare(
+        let rows: Vec<(String, String, i32)> = self.query_rows(
             "WITH RECURSIVE
              blocking(id, outcome) AS (
                  -- Direct dependencies that have failed/skipped builds
@@ -1291,9 +1266,6 @@ impl Database {
              -- Only show root causes (failed or prefailed/preskipped), not indirect
              WHERE bl.outcome IN (?4, ?5, ?6, ?7)
              ORDER BY p.pkgname",
-        )?;
-
-        let rows = stmt.query_map(
             params![
                 package_id,
                 PackageState::Success.id(),
@@ -1303,23 +1275,14 @@ impl Database {
                 PackageState::PreSkipped.id(),
                 PackageState::Unresolved.id(),
             ],
-            |row| {
-                let pkgname: String = row.get(0)?;
-                let pkgpath: String = row.get(1)?;
-                let outcome_id: i32 = row.get(2)?;
-                let kind = PackageState::try_from(outcome_id).map_err(|_| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        2,
-                        rusqlite::types::Type::Integer,
-                        format!("unknown outcome type id: {}", outcome_id).into(),
-                    )
-                })?;
-                let status = kind.as_str();
-                Ok((pkgname, pkgpath, status.to_string()))
-            },
         )?;
-
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        rows.into_iter()
+            .map(|(pkgname, pkgpath, outcome_id)| {
+                let kind = PackageState::try_from(outcome_id)
+                    .map_err(|_| anyhow!("unknown outcome type id: {}", outcome_id))?;
+                Ok((pkgname, pkgpath, kind.as_str().to_string()))
+            })
+            .collect()
     }
 
     /**
@@ -1327,7 +1290,7 @@ impl Database {
      * Returns (pkgname, pkgpath) for each blocked package.
      */
     pub fn get_blocked_by(&self, package_id: i64) -> Result<Vec<(String, String)>> {
-        let mut stmt = self.conn.prepare(
+        self.query_rows(
             "WITH RECURSIVE
              affected(id) AS (
                  -- Direct reverse dependencies
@@ -1344,11 +1307,8 @@ impl Database {
              FROM affected a
              JOIN scan_index p ON a.id = p.id
              ORDER BY p.pkgname",
-        )?;
-
-        let rows = stmt.query_map([package_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
-
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            [package_id],
+        )
     }
 
     /**
@@ -1358,32 +1318,26 @@ impl Database {
      * or timing.  Counted and reported alongside the real build results.
      */
     pub fn get_scan_outcomes(&self) -> Result<Vec<BuildResult>> {
-        let mut stmt = self.conn.prepare(
+        let rows: Vec<(String, Option<String>, i32)> = self.query_rows(
             "SELECT p.pkgname, p.pkg_location, o.outcome
              FROM scan_outcomes o
              JOIN scan_index p ON o.package_id = p.id
              ORDER BY p.pkgname",
+            [],
         )?;
-        let rows = stmt.query_map([], |row| {
-            let outcome: i32 = row.get("outcome")?;
-            let state = PackageState::try_from(outcome).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    2,
-                    rusqlite::types::Type::Integer,
-                    e.into(),
-                )
-            })?;
-            Ok(BuildResult {
-                pkgname: PkgName::new(&row.get::<_, String>("pkgname")?),
-                pkgpath: row
-                    .get::<_, Option<String>>("pkg_location")?
-                    .and_then(|p| PkgPath::new(&p).ok()),
-                state,
-                log_dir: None,
-                build_stats: PkgBuildStats::default(),
+        rows.into_iter()
+            .map(|(pkgname, pkg_location, outcome)| {
+                let state = PackageState::try_from(outcome)
+                    .map_err(|_| anyhow!("unknown outcome type id: {}", outcome))?;
+                Ok(BuildResult {
+                    pkgname: PkgName::new(&pkgname),
+                    pkgpath: pkg_location.and_then(|p| PkgPath::new(&p).ok()),
+                    state,
+                    log_dir: None,
+                    build_stats: PkgBuildStats::default(),
+                })
             })
-        })?;
-        Ok(rows.collect::<Result<_, _>>()?)
+            .collect()
     }
 
     /**
@@ -1392,22 +1346,17 @@ impl Database {
      * [`get_scan_failures`](Self::get_scan_failures).
      */
     pub fn get_unresolved_reasons(&self) -> Result<Vec<(PkgPath, String)>> {
-        let mut stmt = self.conn.prepare(
+        let rows: Vec<(String, String)> = self.query_rows(
             "SELECT p.pkg_location, o.detail
              FROM scan_outcomes o
              JOIN scan_index p ON o.package_id = p.id
              WHERE o.outcome = ?1 AND o.detail IS NOT NULL
              ORDER BY p.pkgname",
+            [PackageState::Unresolved.id()],
         )?;
-        let rows = stmt.query_map([PackageState::Unresolved.id()], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (location, reason) = row?;
-            out.push((PkgPath::new(&location)?, reason));
-        }
-        Ok(out)
+        rows.into_iter()
+            .map(|(location, reason)| Ok((PkgPath::new(&location)?, reason)))
+            .collect()
     }
 
     /**
@@ -1609,39 +1558,26 @@ impl Database {
      * Get all package names with failed build outcomes.
      */
     pub fn get_failed_packages(&self) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
+        self.query_rows(
             "SELECT p.pkgname FROM builds b
              JOIN scan_index p ON b.package_id = p.id
              WHERE b.outcome = ?1
              ORDER BY p.pkgname",
-        )?;
-
-        let pkgnames = stmt
-            .query_map([PackageState::Failed.id()], |row| row.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(pkgnames)
+            [PackageState::Failed.id()],
+        )
     }
 
     /**
      * Get all package names with successful build outcomes.
      */
     pub fn get_successful_packages(&self) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
+        self.query_rows(
             "SELECT p.pkgname FROM builds b
              JOIN scan_index p ON b.package_id = p.id
              WHERE b.outcome IN (?1, ?2)
              ORDER BY p.pkgname",
-        )?;
-
-        let pkgnames = stmt
-            .query_map(
-                params![PackageState::Success.id(), PackageState::UpToDate.id(),],
-                |row| row.get::<_, String>(0),
-            )?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(pkgnames)
+            params![PackageState::Success.id(), PackageState::UpToDate.id()],
+        )
     }
 
     /**
@@ -1653,17 +1589,12 @@ impl Database {
      * the published dependents.
      */
     pub fn get_restricted_packages(&self) -> Result<HashMap<String, String>> {
-        let mut stmt = self.conn.prepare(
+        let rows: Vec<(String, String)> = self.query_rows(
             "SELECT pkgname, no_bin_on_ftp FROM scan_index
              WHERE no_bin_on_ftp IS NOT NULL AND no_bin_on_ftp != ''",
+            [],
         )?;
-        let restricted = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<std::result::Result<HashMap<_, _>, _>>()?;
-
-        Ok(restricted)
+        Ok(rows.into_iter().collect())
     }
 
     /**
