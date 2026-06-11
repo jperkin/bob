@@ -115,6 +115,7 @@ impl HistoryKind {
 
     /// Generate the `after_long_help` text for `bob history`.
     pub fn columns_help() -> String {
+        use std::fmt::Write as _;
         let all_cols = Self::all_columns();
         let max_name = all_cols.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
 
@@ -122,30 +123,33 @@ impl HistoryKind {
         for col in Self::VARIANTS {
             let name: &str = col.into();
             let desc = col.get_message().unwrap_or("");
-            help.push_str(&format!("  {:<width$}  {}\n", name, desc, width = max_name));
+            let _ = writeln!(help, "  {:<width$}  {}", name, desc, width = max_name);
         }
         for s in Stage::VARIANTS {
             let name = s.into_str();
-            help.push_str(&format!(
-                "  {:<width$}  Wall time for {} stage\n",
+            let _ = writeln!(
+                help,
+                "  {:<width$}  Wall time for {} stage",
                 name,
                 name,
                 width = max_name
-            ));
+            );
         }
         for s in Stage::VARIANTS {
             let name = s.into_str();
-            help.push_str(&format!(
-                "  {:<width$}  CPU time for {} stage\n",
+            let _ = writeln!(
+                help,
+                "  {:<width$}  CPU time for {} stage",
                 format!("{CPU_PREFIX}{name}"),
                 name,
                 width = max_name
-            ));
+            );
         }
-        help.push_str(&format!(
+        let _ = write!(
+            help,
             "\nDefault columns: {}",
             Self::default_names().join(",")
-        ));
+        );
 
         help
     }

@@ -65,13 +65,14 @@ pub fn run(db: &Database, args: LogArgs) -> Result<()> {
             }
         }
         _ => {
+            use std::fmt::Write as _;
             let mut msg = format!("Multiple failed packages match '{}':\n", args.package);
             for r in &matches {
                 let pkgpath = r
                     .pkgpath
                     .as_ref()
                     .map_or(String::new(), |p| format!(" ({})", p));
-                msg.push_str(&format!("  {}{}\n", r.pkgname.pkgname(), pkgpath));
+                let _ = writeln!(msg, "  {}{}", r.pkgname.pkgname(), pkgpath);
             }
             bail!("{}", msg.trim_end());
         }

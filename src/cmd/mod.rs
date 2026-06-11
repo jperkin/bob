@@ -371,6 +371,7 @@ pub fn col_defs(chosen: &[Column]) -> Vec<Col> {
  * `long_help` value.
  */
 pub fn cols_help(supported: &[Column], defaults: &[Column]) -> String {
+    use std::fmt::Write as _;
     let entries: Vec<(String, std::borrow::Cow<'static, str>)> = supported
         .iter()
         .map(|c| (c.key().into_owned(), c.desc()))
@@ -378,10 +379,10 @@ pub fn cols_help(supported: &[Column], defaults: &[Column]) -> String {
     let width = entries.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
     let mut out = String::from("Columns:\n");
     for (k, d) in &entries {
-        out.push_str(&format!("  {:<width$}  {}\n", k, d));
+        let _ = writeln!(out, "  {:<width$}  {}", k, d);
     }
     let default_names: Vec<String> = defaults.iter().map(|c| c.key().into_owned()).collect();
-    out.push_str(&format!("\nDefault columns: {}", default_names.join(",")));
+    let _ = write!(out, "\nDefault columns: {}", default_names.join(","));
     out
 }
 
