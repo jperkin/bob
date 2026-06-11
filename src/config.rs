@@ -962,6 +962,7 @@ impl Config {
             .and_then(|r| r.branch.as_deref())
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn bindfs(&self) -> &str {
         self.file
             .sandboxes
