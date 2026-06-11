@@ -1,5 +1,49 @@
 # Changelog
 
+## Version 0.99.6 (2026-06-11)
+
+* Significant performance improvements throughout, especially for full
+  pkgsrc builds: scanning, dependency resolution, build startup,
+  `bob status`, and report generation are all faster and use less memory.
+
+* New `bob list builds` command (with `bob ls` as a shorthand), replacing
+  `bob diff -l`, showing a summary of each build in the history database
+  with package counts and durations.
+
+* New `bob prune` command to remove build sessions from the history
+  database, selected by range, by age, or by keeping only the most recent.
+
+* Improve consistency across all output commands with regard to arguments,
+  column selection, sorting, and table, CSV, or JSON output.
+
+* Improve the live build log view: better multi-panel layout with large
+  numbers of workers, smoother switching between the inline and
+  multi-panel views, and fixes for missing Ctrl+C messages in plain mode
+  and a display issue on NetBSD.
+
+* `bob dev` now works without a pkgsrc config section, making it useful as
+  a general-purpose sandbox session manager.  Improve sandbox `create` and
+  `destroy` commands to help manage individual sandboxes.
+
+* Fix unpacking of bootstrap kits that contain hard links, matching
+  tar(1) behaviour.  Previously such kits would fail to unpack.
+
+* More robust sandbox creation and destruction, with clearer warnings and
+  errors when filesystems cannot be unmounted.
+
+* Build reports now link "Blocked by" entries directly to the failing
+  stage log of the responsible package, and durations over an hour are
+  displayed with an hours component.
+
+* `bob history` now records and displays up-to-date packages.
+
+* Fix package counts for multi-version packages, and for builds where
+  every package was already up to date.
+
+* Update dependencies to the latest versions compatible with Rust 1.88.
+
+* Many miscellaneous improvements, fixes, and cleanups.
+
 ## Version 0.99.5 (2026-05-09)
 
 * Sandbox setup actions and per-package pre/post-build hook `cmd` actions no
