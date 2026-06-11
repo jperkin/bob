@@ -962,9 +962,10 @@ impl Sandbox {
      *  2. Remove prefix, pkg_dbdir, and pkg_refcount_dbdir
      *
      * Returns Err if a hook destroy command fails; the caller decides
-     * whether to log and continue or treat as fatal.  Failures during
-     * prefix/pkg_dbdir cleanup are best-effort (warned and skipped) so
-     * one bad path does not prevent the rest from being cleaned up.
+     * whether to log and continue or treat as fatal.  Prefix and
+     * pkg_dbdir cleanup is best-effort and errors are ignored: the
+     * prefix is commonly a mount point, so removing the directory
+     * itself is expected to fail.
      *
      * The pkgsrc paths are removed only when [`set_pkgsrc_env`] has
      * been called, since they are unknown otherwise.  If they were
@@ -993,6 +994,7 @@ impl Sandbox {
         };
 
         if let Some(pkgsrc) = self.pkgsrc_env.get() {
+            let mut targets = Vec::new();
             for path in [
                 &pkgsrc.prefix,
                 &pkgsrc.pkg_dbdir,
@@ -1004,15 +1006,10 @@ impl Sandbox {
                 };
                 if target.exists() {
                     debug!(path = %target.display(), "Removing");
-                    if let Err(e) = fs::remove_dir_all(&target) {
-                        warn!(
-                            path = %target.display(),
-                            error = format!("{e:#}"),
-                            "Failed to remove directory"
-                        );
-                    }
+                    targets.push(target);
                 }
             }
+            self.remove_dirs(&targets);
         }
 
         hook_result
@@ -1023,6 +1020,31 @@ impl Sandbox {
      */
     fn resolve_path(&self, sandbox_id: usize, path: &Path) -> PathBuf {
         self.mountpath(sandbox_id, &path.to_path_buf())
+    }
+
+    /**
+     * Remove directories recursively by running rm(1), keeping the
+     * unlink load in a child process.  Removal is best-effort and
+     * errors are ignored.  If rm cannot be spawned the directories
+     * are removed in-process instead.
+     */
+    fn remove_dirs(&self, paths: &[PathBuf]) {
+        if paths.is_empty() {
+            return;
+        }
+        let mut cmd = Command::new("/bin/rm");
+        cmd.arg("-rf")
+            .arg("--")
+            .args(paths)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        if cmd.status().is_err() {
+            for path in paths {
+                let _ = fs::remove_dir_all(path);
+            }
+        }
     }
 
     /**
