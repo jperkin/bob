@@ -627,24 +627,6 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
         allocator.calibrate(&cpu_times);
         self.allocator = Some(allocator);
     }
-
-    /**
-     * Pre-allocate jobs for all safe packages.
-     *
-     * Uses non-sole-builder mode to show the steady-state allocation
-     * each package would receive when running alongside others.
-     * Call after [`set_allocator`](Self::set_allocator).
-     */
-    pub fn allocate_all(&mut self) {
-        if let Some(ref alloc) = self.allocator {
-            for (pkg, mj) in &mut self.pkg_make_jobs {
-                if mj.safe() {
-                    let cpu_time = self.pkg_cpu_history.get(pkg).copied();
-                    mj.allocate(alloc.assign(cpu_time));
-                }
-            }
-        }
-    }
 }
 
 /**
