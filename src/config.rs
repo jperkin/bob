@@ -1925,7 +1925,7 @@ fn parse_publish(globals: &Table) -> LuaResult<Option<Publish>> {
             let from: Option<String> = t.get::<Option<String>>("from")?;
             let to: Vec<String> = match t.get::<Value>("to")? {
                 Value::Nil => Vec::new(),
-                Value::String(s) => vec![s.to_string_lossy().to_string()],
+                Value::String(s) => vec![s.to_string_lossy()],
                 Value::Table(r) => r
                     .sequence_values::<String>()
                     .collect::<LuaResult<Vec<_>>>()?,
