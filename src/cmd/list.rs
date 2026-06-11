@@ -207,9 +207,9 @@ fn list_builds(db: &Database, args: BuildsArgs) -> Result<()> {
             no_header: args.no_header,
             raw: args.raw,
         },
-    )?;
+    );
     for b in &builds {
-        out.write(None, b, &())?;
+        out.write(None, b, &());
     }
     out.finish()?;
     Ok(())

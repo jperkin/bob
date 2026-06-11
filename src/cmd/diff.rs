@@ -203,14 +203,14 @@ fn print_filtered(
         label(to),
     );
 
-    let mut out = Writer::stdout(chosen, opts)?;
-    out.message(&format!("--- {}", diff.build1_id))?;
-    out.message(&format!("+++ {}", diff.build2_id))?;
-    out.message(&summary)?;
+    let mut out = Writer::stdout(chosen, opts);
+    out.message(&format!("--- {}", diff.build1_id));
+    out.message(&format!("+++ {}", diff.build2_id));
+    out.message(&summary);
 
     entries.sort_by_key(|e| std::cmp::Reverse(get_breaks(e, breaks)));
     for e in &entries {
-        out.write(Some(' '), *e, breaks)?;
+        out.write(Some(' '), *e, breaks);
     }
     out.finish()
 }
@@ -258,31 +258,29 @@ fn print_diff(
         format!("@@ {} @@", parts.join(", "))
     };
 
-    let mut out = Writer::stdout(chosen, opts)?;
-    out.message(&format!("--- {}", diff.build1_id))?;
-    out.message(&format!("+++ {}", diff.build2_id))?;
-    out.message(&summary)?;
+    let mut out = Writer::stdout(chosen, opts);
+    out.message(&format!("--- {}", diff.build1_id));
+    out.message(&format!("+++ {}", diff.build2_id));
+    out.message(&summary);
 
     let emit = |out: &mut Writer<std::io::StdoutLock<'static>>,
                 prefix: char,
-                entries: &mut [&DiffEntry]|
-     -> Result<()> {
+                entries: &mut [&DiffEntry]| {
         entries.sort_by_key(|e| std::cmp::Reverse(get_breaks(e, breaks)));
         for e in entries.iter() {
-            out.write(Some(prefix), *e, breaks)?;
+            out.write(Some(prefix), *e, breaks);
         }
-        Ok(())
     };
 
     let mut failures: Vec<_> = diff.new_failures.iter().collect();
-    emit(&mut out, '+', &mut failures)?;
+    emit(&mut out, '+', &mut failures);
     let mut version_changes: Vec<_> = diff.version_changes.iter().collect();
-    emit(&mut out, '~', &mut version_changes)?;
+    emit(&mut out, '~', &mut version_changes);
     let mut fixes: Vec<_> = diff.fixes.iter().collect();
-    emit(&mut out, '-', &mut fixes)?;
+    emit(&mut out, '-', &mut fixes);
     if show_all {
         let mut other: Vec<_> = diff.other_changes.iter().collect();
-        emit(&mut out, ' ', &mut other)?;
+        emit(&mut out, ' ', &mut other);
     }
 
     out.finish()

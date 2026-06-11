@@ -126,7 +126,7 @@ fn print_history(
             no_header,
             raw,
         },
-    )?;
+    );
     for rec in &records {
         let row: Vec<Cell> = cols
             .iter()
@@ -139,7 +139,7 @@ fn print_history(
                 Ok::<_, anyhow::Error>(Cell::Text(s))
             })
             .collect::<Result<_>>()?;
-        fmt.row(row)?;
+        fmt.row(row);
     }
     fmt.finish()?;
 

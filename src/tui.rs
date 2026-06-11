@@ -222,7 +222,7 @@ pub fn refresh_loop(
     }
     if state.interrupted()
         && let Ok(mut p) = progress.lock()
-        && p.finish_interrupted().unwrap_or(false)
+        && p.finish_interrupted()
         && state.is_shutdown()
     {
         eprintln!("Interrupted, shutting down...");
@@ -863,12 +863,12 @@ impl PlainProgress {
         }
     }
 
-    fn finish_interrupted(&mut self) -> io::Result<bool> {
+    fn finish_interrupted(&mut self) -> bool {
         if self.state.suppressed {
-            return Ok(false);
+            return false;
         }
         self.state.suppressed = true;
-        Ok(true)
+        true
     }
 }
 
@@ -892,10 +892,10 @@ impl Progress {
         total: usize,
         num_workers: usize,
         tui: bool,
-    ) -> io::Result<Self> {
+    ) -> Self {
         if tui && io::stdout().is_terminal() && enable_raw_mode().is_ok() {
             match MultiProgress::new(title, finished_title, total, num_workers) {
-                Ok(mp) => return Ok(Self::Tui(mp)),
+                Ok(mp) => return Self::Tui(mp),
                 Err(e) => {
                     let _ = disable_raw_mode();
                     tracing::warn!(
@@ -905,12 +905,12 @@ impl Progress {
                 }
             }
         }
-        Ok(Self::Plain(PlainProgress::new(
+        Self::Plain(PlainProgress::new(
             title,
             finished_title,
             total,
             num_workers,
-        )))
+        ))
     }
 
     pub fn is_plain(&self) -> bool {
@@ -974,7 +974,7 @@ impl Progress {
         }
     }
 
-    pub fn print_progress_dot(&mut self, done: usize, total: usize) -> io::Result<()> {
+    pub fn print_progress_dot(&mut self, done: usize, total: usize) {
         if let Self::Plain(p) = self {
             p.plain_dots += 1;
             if p.plain_dots >= 50 {
@@ -983,10 +983,9 @@ impl Progress {
                 p.plain_dots = 0;
             }
         }
-        Ok(())
     }
 
-    pub fn flush_progress_dots(&mut self, done: usize, total: usize) -> io::Result<()> {
+    pub fn flush_progress_dots(&mut self, done: usize, total: usize) {
         if let Self::Plain(p) = self
             && p.plain_dots > 0
         {
@@ -995,7 +994,6 @@ impl Progress {
             println!("    {:<50}  {:>11}", dots, counter);
             p.plain_dots = 0;
         }
-        Ok(())
     }
 
     pub fn announce_interrupt(&mut self) {
@@ -1047,7 +1045,7 @@ impl Progress {
         }
     }
 
-    pub fn finish_interrupted(&mut self) -> io::Result<bool> {
+    pub fn finish_interrupted(&mut self) -> bool {
         match self {
             Self::Plain(p) => p.finish_interrupted(),
             Self::Tui(p) => p.finish_interrupted(),
@@ -1597,9 +1595,9 @@ impl MultiProgress {
         Ok(self.state.elapsed())
     }
 
-    fn finish_interrupted(&mut self) -> io::Result<bool> {
+    fn finish_interrupted(&mut self) -> bool {
         if self.state.suppressed {
-            return Ok(false);
+            return false;
         }
         self.state.suppressed = true;
         if self.view_mode == ViewMode::MultiPanel {
@@ -1607,7 +1605,7 @@ impl MultiProgress {
         }
         let _ = self.clear_viewport();
         let _ = disable_raw_mode();
-        Ok(true)
+        true
     }
 }
 

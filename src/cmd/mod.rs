@@ -529,16 +529,16 @@ pub struct Formatter<W: std::io::Write> {
 }
 
 impl<W: std::io::Write> Formatter<W> {
-    pub fn new(writer: W, cols: Vec<Col>, opts: OutputOptions) -> anyhow::Result<Self> {
-        Ok(Self {
+    pub fn new(writer: W, cols: Vec<Col>, opts: OutputOptions) -> Self {
+        Self {
             writer,
             cols,
             opts,
             events: Vec::new(),
-        })
+        }
     }
 
-    pub fn row<I: IntoIterator<Item = Cell>>(&mut self, cells: I) -> anyhow::Result<()> {
+    pub fn row<I: IntoIterator<Item = Cell>>(&mut self, cells: I) {
         self.row_with_prefix(None, cells)
     }
 
@@ -546,17 +546,15 @@ impl<W: std::io::Write> Formatter<W> {
         &mut self,
         prefix: Option<char>,
         cells: I,
-    ) -> anyhow::Result<()> {
+    ) {
         self.events.push(OutputEvent::Row {
             prefix,
             cells: cells.into_iter().collect(),
         });
-        Ok(())
     }
 
-    pub fn message(&mut self, msg: &str) -> anyhow::Result<()> {
+    pub fn message(&mut self, msg: &str) {
         self.events.push(OutputEvent::Message(msg.to_string()));
-        Ok(())
     }
 
     pub fn finish(self) -> anyhow::Result<()> {
@@ -588,24 +586,19 @@ pub struct Writer<W: std::io::Write> {
 }
 
 impl<W: std::io::Write> Writer<W> {
-    pub fn new(writer: W, chosen: Vec<Column>, opts: OutputOptions) -> anyhow::Result<Self> {
+    pub fn new(writer: W, chosen: Vec<Column>, opts: OutputOptions) -> Self {
         let cols = col_defs(&chosen);
-        Ok(Self {
-            formatter: Formatter::new(writer, cols, opts)?,
+        Self {
+            formatter: Formatter::new(writer, cols, opts),
             chosen,
-        })
+        }
     }
 
-    pub fn message(&mut self, msg: &str) -> anyhow::Result<()> {
+    pub fn message(&mut self, msg: &str) {
         self.formatter.message(msg)
     }
 
-    pub fn write<S: ColumnSource>(
-        &mut self,
-        prefix: Option<char>,
-        source: &S,
-        ctx: &S::Ctx,
-    ) -> anyhow::Result<()> {
+    pub fn write<S: ColumnSource>(&mut self, prefix: Option<char>, source: &S, ctx: &S::Ctx) {
         let cells: Vec<Cell> = self.chosen.iter().map(|&c| source.cell(c, ctx)).collect();
         self.formatter.row_with_prefix(prefix, cells)
     }
@@ -616,7 +609,7 @@ impl<W: std::io::Write> Writer<W> {
 }
 
 impl Writer<std::io::StdoutLock<'static>> {
-    pub fn stdout(chosen: Vec<Column>, opts: OutputOptions) -> anyhow::Result<Self> {
+    pub fn stdout(chosen: Vec<Column>, opts: OutputOptions) -> Self {
         Writer::new(std::io::stdout().lock(), chosen, opts)
     }
 }

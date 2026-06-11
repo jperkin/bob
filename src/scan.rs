@@ -644,7 +644,7 @@ impl Scan {
             }
 
             if scope.enabled() {
-                self.run_post_build()?;
+                self.run_post_build();
             }
             return Ok(());
         }
@@ -660,16 +660,13 @@ impl Scan {
         // Set up multi-line progress display using ratatui inline viewport
         // Note: finished_title is unused since we print our own summary
         let total_count = self.initial_cached + self.incoming.len();
-        let progress = Arc::new(Mutex::new(
-            Progress::new(
-                "Scanning",
-                "",
-                total_count,
-                self.config.scan_threads(),
-                self.config.tui(),
-            )
-            .context("Failed to initialize progress display")?,
-        ));
+        let progress = Arc::new(Mutex::new(Progress::new(
+            "Scanning",
+            "",
+            total_count,
+            self.config.scan_threads(),
+            self.config.tui(),
+        )));
 
         // Mark cached packages in progress display
         if self.initial_cached > 0
@@ -803,7 +800,7 @@ impl Scan {
                     scanned_count += 1;
                     if let Ok(mut p) = progress.lock() {
                         let total = p.state_mut().total.saturating_sub(p.state_mut().cached);
-                        let _ = p.print_progress_dot(scanned_count, total);
+                        p.print_progress_dot(scanned_count, total);
                     }
 
                     let scanpkgs = match result {
@@ -830,7 +827,7 @@ impl Scan {
 
             if let Ok(mut p) = progress.lock() {
                 let total = p.state_mut().total.saturating_sub(p.state_mut().cached);
-                let _ = p.flush_progress_dots(scanned_count, total);
+                p.flush_progress_dots(scanned_count, total);
             }
 
             // Check for interrupt after batch completes.
@@ -922,7 +919,7 @@ impl Scan {
         }
 
         if scope.enabled() {
-            self.run_post_build()?;
+            self.run_post_build();
         }
 
         if shutdown_flag.interrupted() {
@@ -937,11 +934,10 @@ impl Scan {
     }
 
     /// Run post-build operations (hook destroy actions + prefix cleanup).
-    fn run_post_build(&self) -> anyhow::Result<()> {
+    fn run_post_build(&self) {
         if let Err(e) = self.sandbox.run_post_build(self.sandbox_id) {
             warn!(error = format!("{e:#}"), "post-build error");
         }
-        Ok(())
     }
 
     /// Returns scan failures as formatted error strings.

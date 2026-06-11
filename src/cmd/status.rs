@@ -694,9 +694,9 @@ fn print_build_status(
             no_header,
             raw,
         },
-    )?;
+    );
     for row in rows {
-        fmt.row(row.into_iter().map(Cell::Text))?;
+        fmt.row(row.into_iter().map(Cell::Text));
     }
     fmt.finish()?;
 

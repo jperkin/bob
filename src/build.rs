@@ -2078,10 +2078,13 @@ impl Build {
         println!("Building packages...");
 
         // Set up multi-line progress display using ratatui inline viewport
-        let progress = Arc::new(Mutex::new(
-            Progress::new("Building", "Built", total_packages, n, self.config.tui())
-                .context("Failed to initialize progress display")?,
-        ));
+        let progress = Arc::new(Mutex::new(Progress::new(
+            "Building",
+            "Built",
+            total_packages,
+            n,
+            self.config.tui(),
+        )));
 
         // Mark cached and indirect-failed packages in progress display
         if (cached_count > 0 || indirect_failed_count > 0)
