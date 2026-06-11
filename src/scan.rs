@@ -155,11 +155,6 @@ impl ScanResult {
         }
     }
 
-    /// Returns true if this package is buildable.
-    pub fn is_buildable(&self) -> bool {
-        matches!(self, ScanResult::Buildable(_))
-    }
-
     /// Returns the resolved package if buildable.
     pub fn as_buildable(&self) -> Option<&ResolvedPackage> {
         match self {
