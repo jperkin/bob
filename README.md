@@ -115,6 +115,11 @@ Beyond that, common changes are enabling an unprivileged build user, adding
 any additional mount points required, and setting `build_threads` and
 `scan_threads` to suit the machine.
 
+A complete reference for every configuration section is in the
+[config module documentation](https://docs.rs/bob/latest/bob/config/), with
+sandbox actions and their `bob_*` variables covered by the
+[action module documentation](https://docs.rs/bob/latest/bob/action/).
+
 For a complete example, have a look at
 <https://github.com/jperkin/bob/blob/main/examples/smartos-trunk.lua>.  This is
 the exact configuration file used to publish the daily SmartOS trunk builds.

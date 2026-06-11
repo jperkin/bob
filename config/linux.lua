@@ -4,6 +4,9 @@
   This is designed to work out of the box (you will need to supply a working
   bootstrap kit), but you will almost certainly want to customise it for
   optimum performance.
+
+  Full reference for every section, action, and variable:
+  https://docs.rs/bob/latest/bob/config/
 ]]
 
 -- General configuration variables.

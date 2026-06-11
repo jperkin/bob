@@ -22,17 +22,21 @@
  *
  * # Configuration File Structure
  *
- * A configuration file has five main sections:
+ * A configuration file has six main sections:
  *
  * - [`options`](#options-section) - General build options (optional)
  * - [`pkgsrc`](#pkgsrc-section) - pkgsrc paths and package list (optional;
  *   required for commands that operate on the pkgsrc tree)
  * - [`sandboxes`](#sandboxes-section) - Sandbox configuration (optional)
+ * - [`summary`](#summary-section) - pkg_summary generation (optional)
  * - [`dynamic`](#dynamic-section) - Dynamic resource allocation (optional)
  * - [`publish`](#publish-section) - Remote publishing configuration (optional)
  *
  * Omitting `pkgsrc` lets `bob` run `bob dev` against a chroot defined
  * purely by `sandboxes.setup`, for example to drive non-pkgsrc builds.
+ *
+ * Lua functions provided by bob for use in the configuration file are
+ * listed in [Helper Functions](#helper-functions).
  *
  * # Options Section
  *
@@ -46,6 +50,7 @@
  * | `scan_threads` | integer | 1 | Number of parallel scan processes for dependency discovery. |
  * | `strict_scan` | boolean | false | If true, abort on scan errors. If false, continue and report failures separately. |
  * | `log_level` | string | "info" | Log level: "trace", "debug", "info", "warn", or "error". Can be overridden by `RUST_LOG` env var. |
+ * | `tui` | boolean | true | Enable the inline progress display.  Set to false for plain line-based output.  Non-terminal output is always plain. |
  *
  * # Pkgsrc Section
  *
@@ -81,6 +86,7 @@
  * | Field | Type | Required | Description |
  * |-------|------|----------|-------------|
  * | `basedir` | string | yes | Base directory for sandbox roots. Sandboxes are created as numbered subdirectories. |
+ * | `bindfs` | string | no | Path to the bindfs binary, default `"bindfs"`.  Used on macOS only. |
  * | `setup` | table | no | Actions to perform during sandbox creation and destruction. See the [`action`](crate::action) module for details. |
  * | `hooks` | table | no | Per-package hook actions. Any "create" action runs after bob's internal pre-build (unpacks bootstrap kit if needed); any "destroy" action runs before bob's internal post-build (wipes PREFIX and PKG_DBDIR). |
  * | `environment` | table | no | Environment variables for sandbox processes. If omitted, the parent environment is inherited unchanged. See [Environment](#environment). |
@@ -138,6 +144,90 @@
  * | Field | Type | Default | Description |
  * |-------|------|---------|-------------|
  * | `shell` | string | `/bin/sh` | Path to the interactive shell binary used for the dev session.  The path is resolved inside the sandbox chroot, so the binary must exist there (typically arranged by a `setup` action that mounts or copies it). |
+ *
+ * # Summary Section
+ *
+ * The `summary` section is optional and controls the `pkg_summary` files
+ * generated at the end of a successful build.  All fields have defaults.
+ *
+ * | Field | Type | Default | Description |
+ * |-------|------|---------|-------------|
+ * | `compression` | table | `{ "gz", "zst" }` | Compression formats to generate, one `pkg_summary.<format>` per entry.  Valid values are `"gz"` and `"zst"`. |
+ * | `file_cksum` | boolean | false | Include a `FILE_CKSUM` checksum entry for each package. |
+ * | `include_restricted` | boolean | false | Include packages that set `NO_BIN_ON_FTP`.  Enable only when the packages will not be published. |
+ *
+ * # Dynamic Section
+ *
+ * The `dynamic` section is optional.  When present, bob chooses
+ * `MAKE_JOBS` and `WRKOBJDIR` for each package build using recorded
+ * build history, package weight, and knowledge of upcoming builds.
+ * Conservative values are used on first builds with no history.  If
+ * `MAKE_JOBS` or `WRKOBJDIR` are set in `mk.conf` they must use `?=` so
+ * that bob's settings take precedence.
+ *
+ * | Field | Type | Description |
+ * |-------|------|-------------|
+ * | `jobs` | integer | Total `MAKE_JOBS` budget shared across all build threads.  Packages with long recorded build times receive a larger share. |
+ * | `wrkobjdir` | table | Per-package `WRKOBJDIR` selection.  See below. |
+ *
+ * The `wrkobjdir` sub-table assigns each build to fast storage when its
+ * recorded disk usage fits, and to disk otherwise:
+ *
+ * | Field | Type | Description |
+ * |-------|------|-------------|
+ * | `tmpfs` | string | `WRKOBJDIR` for builds whose recorded disk usage is under `threshold`, typically a tmpfs mount. |
+ * | `disk` | string | `WRKOBJDIR` for all other builds. |
+ * | `threshold` | string | Disk usage limit for `tmpfs` assignment, as a size string such as `"1G"`. |
+ * | `failed_threshold` | string | Previously failed builds are assigned to `disk` by default, as their disk usage cannot be guaranteed.  When set, failed builds with recorded usage under this limit are assigned to `tmpfs` instead.  Around half of `threshold` is recommended. |
+ * | `always_disk` | table | Package paths always assigned to `disk`, for builds that use far more space during the build than their recorded usage shows. |
+ *
+ * # Publish Section
+ *
+ * The `publish` section is optional and configures `bob publish`.  Both
+ * destinations are rsync-over-ssh targets.
+ *
+ * | Field | Type | Default | Description |
+ * |-------|------|---------|-------------|
+ * | `rsync` | string | `"rsync"` | Path to the rsync binary. |
+ * | `packages` | table | none | Binary package upload, used by `bob publish -p`.  See below. |
+ * | `report` | table | none | Report upload and email, used by `bob publish -r` and `-e`.  See below. |
+ *
+ * ## publish.packages
+ *
+ * | Field | Type | Default | Description |
+ * |-------|------|---------|-------------|
+ * | `host` | string | required | Remote host to upload packages to. |
+ * | `path` | string | required | Remote directory for the packages. |
+ * | `user` | string | none | Remote user. |
+ * | `tmppath` | string | none | Stage the upload in this remote directory, hard linked against `path`, so it can be swapped into place once complete. |
+ * | `swapcmd` | string/script | none | Shell script run on the remote host over ssh after a staged upload, to swap `tmppath` into `path`.  Requires `tmppath`. |
+ * | `minimum` | integer | none | Abort publishing when fewer packages than this built successfully. |
+ * | `required` | table | `{}` | Glob patterns of package names that must have built successfully, otherwise publishing aborts. |
+ * | `rsync_args` | string | `"-av --delete-excluded -e ssh"` | Arguments passed to rsync. |
+ *
+ * ## publish.report
+ *
+ * | Field | Type | Default | Description |
+ * |-------|------|---------|-------------|
+ * | `host` | string | required | Remote host to upload the report to. |
+ * | `path` | string | required | Remote directory for the report. |
+ * | `user` | string | none | Remote user. |
+ * | `url` | string | none | Public URL of the published report, used in report links and the email. |
+ * | `branch` | string | none | pkgsrc branch name to record in the report when it cannot be derived from the checkout. |
+ * | `from` | string | none | Email sender.  Required by `bob publish -e`. |
+ * | `to` | string/table | `{}` | Email recipients.  Required by `bob publish -e`. |
+ * | `rsync_args` | string | `"-avz --delete-excluded -e ssh"` | Arguments passed to rsync. |
+ *
+ * # Helper Functions
+ *
+ * Bob provides these Lua functions for use anywhere in the configuration
+ * file:
+ *
+ * | Function | Description |
+ * |----------|-------------|
+ * | `read_pkgpaths(file)` | Read package paths from a file, one per line.  Blank lines and `#` comments are ignored. |
+ * | `scriptenv(run, env)` | Bundle a shell script body with environment variables to set when it runs.  For script-valued fields such as `cmd` actions and `publish.packages.swapcmd`. |
+ * | `dedent(s)` | Strip the common leading whitespace from a multi-line string, so script bodies can be indented to match the surrounding configuration. |
  */
 
 use crate::action::Action;

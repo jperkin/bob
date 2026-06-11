@@ -4,6 +4,9 @@
   Does not provide a sandboxes section as they are highly OS-specific.  As such
   this is only really useful for performing pkgsrc scans.  Do not try to use it
   for builds as without sandboxes your installed packages will be removed.
+
+  Full reference for every section, action, and variable:
+  https://docs.rs/bob/latest/bob/config/
 ]]
 
 -- General configuration variables.
