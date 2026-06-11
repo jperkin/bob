@@ -1994,6 +1994,22 @@ impl Database {
     }
 
     /**
+     * Stop a CPU sampler and store its samples, logging the outcome.
+     * `what` names the sample set in the log messages.
+     */
+    pub fn store_cpu_samples(&self, sampler: Option<crate::cpu::CpuSamplerHandle>, what: &str) {
+        let Some(sampler) = sampler else { return };
+        let samples = sampler.stop();
+        if samples.is_empty() {
+            return;
+        }
+        match self.store_cpu_usage(&samples) {
+            Ok(()) => debug!(count = samples.len(), "Saved {} samples", what),
+            Err(e) => warn!(error = format!("{e:#}"), "Failed to save {} samples", what),
+        }
+    }
+
+    /**
      * Write CPU usage samples to the `cpu_usage` table in history.db.
      */
     pub fn store_cpu_usage(&self, samples: &[crate::cpu::CpuSample]) -> Result<()> {

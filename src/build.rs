@@ -2503,16 +2503,7 @@ impl Build {
             "Worker threads completed"
         );
 
-        if let Some(sampler) = cpu_sampler {
-            let samples = sampler.stop();
-            if !samples.is_empty() {
-                if let Err(e) = db.store_cpu_usage(&samples) {
-                    warn!(error = format!("{e:#}"), "Failed to save CPU usage samples");
-                } else {
-                    debug!(count = samples.len(), "Saved CPU usage samples");
-                }
-            }
-        }
+        db.store_cpu_samples(cpu_sampler, "CPU usage");
 
         // Stop the refresh thread
         refresh.stop();

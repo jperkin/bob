@@ -96,19 +96,7 @@ impl BuildRunner {
 
         scan.start(&self.db, scope, &self.pkgsrc)?;
 
-        if let Some(sampler) = cpu_sampler {
-            let samples = sampler.stop();
-            if !samples.is_empty() {
-                if let Err(e) = self.db.store_cpu_usage(&samples) {
-                    tracing::warn!(
-                        error = format!("{e:#}"),
-                        "Failed to save scan CPU usage samples"
-                    );
-                } else {
-                    tracing::debug!(count = samples.len(), "Saved scan CPU usage samples");
-                }
-            }
-        }
+        self.db.store_cpu_samples(cpu_sampler, "scan CPU usage");
 
         let has_scan_errors = scan.scan_errors().next().is_some();
         if has_scan_errors {
