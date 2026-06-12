@@ -741,6 +741,27 @@ fn write_text_report(
         }
     }
 
+    if c.scanfail > 0 {
+        let max_path = summary
+            .scanfail
+            .iter()
+            .map(|(p, _)| p.as_path().display().to_string().len())
+            .max()
+            .unwrap_or(0);
+        writeln!(file)?;
+        writeln!(file, "Scan Failures")?;
+        writeln!(file, "{}", "-".repeat(76))?;
+        for (pkgpath, error_msg) in &summary.scanfail {
+            writeln!(
+                file,
+                "{:<width$}  {}",
+                pkgpath.as_path().display(),
+                error_msg,
+                width = max_path
+            )?;
+        }
+    }
+
     if let Some(d) = diff
         && !d.new_failures.is_empty()
     {
@@ -781,27 +802,6 @@ fn write_text_report(
                 String::new()
             };
             writeln!(file, "{:<44} {:>6}  {}", pkgname, breaks_str, previously)?;
-        }
-    }
-
-    if c.scanfail > 0 {
-        let max_path = summary
-            .scanfail
-            .iter()
-            .map(|(p, _)| p.as_path().display().to_string().len())
-            .max()
-            .unwrap_or(0);
-        writeln!(file)?;
-        writeln!(file, "Scan Failures")?;
-        writeln!(file, "{}", "-".repeat(76))?;
-        for (pkgpath, error_msg) in &summary.scanfail {
-            writeln!(
-                file,
-                "{:<width$}  {}",
-                pkgpath.as_path().display(),
-                error_msg,
-                width = max_path
-            )?;
         }
     }
 
@@ -1109,12 +1109,12 @@ fn write_html_report(
     write_misc_table(&mut file, meta.vcs_info, summary.duration, db, diff)?;
     writeln!(file, "</div>")?;
 
-    if let Some(d) = diff {
-        write_diff_section(&mut file, d, &failed_info, commits, meta.vcs_info)?;
-    }
-
     if !summary.scanfail.is_empty() {
         write_scanfail_table(&mut file, &summary.scanfail)?;
+    }
+
+    if let Some(d) = diff {
+        write_diff_section(&mut file, d, &failed_info, commits, meta.vcs_info)?;
     }
 
     let mut maintainers: HashMap<String, String> = HashMap::new();
