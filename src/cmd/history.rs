@@ -20,7 +20,7 @@ use clap::Args;
 use bob::db::Database;
 
 use super::util::pkg_pattern;
-use super::{Cell, Col, Formatter, OutputFormat, OutputOptions};
+use super::{Col, Formatter, OutputFormat, OutputOptions};
 
 #[derive(Debug, Args)]
 pub struct HistoryArgs {
@@ -99,18 +99,6 @@ fn print_history(
         .map(pkg_pattern)
         .collect::<Result<Vec<_>>>()?;
 
-    let stage_times = cols.iter().any(|c| bob::HistoryKind::is_stage_column(c));
-    let records = db.query_history(&patterns, all, stage_times)?;
-
-    if records.is_empty() {
-        if !patterns.is_empty() {
-            bail!("No history matches the pattern");
-        } else {
-            println!("No build history recorded");
-        }
-        return Ok(());
-    }
-
     let fmt_cols: Vec<Col> = cols
         .iter()
         .map(|&name| {
@@ -128,19 +116,18 @@ fn print_history(
             raw,
         },
     );
-    for rec in &records {
-        let row: Vec<Cell> = cols
-            .iter()
-            .map(|&col| {
-                let s = if raw {
-                    rec.format_col_raw(col)
-                } else {
-                    rec.format_col(col)?
-                };
-                Ok::<_, anyhow::Error>(Cell::Text(s))
-            })
-            .collect::<Result<_>>()?;
-        fmt.row(row);
+    let mut rows = 0usize;
+    db.for_each_history(&cols, &patterns, all, |cells| {
+        rows += 1;
+        fmt.row(cells);
+    })?;
+
+    if rows == 0 {
+        if !patterns.is_empty() {
+            bail!("No history matches the pattern");
+        }
+        println!("No build history recorded");
+        return Ok(());
     }
     fmt.finish()?;
 

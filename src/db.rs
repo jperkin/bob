@@ -41,6 +41,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use indexmap::IndexMap;
 use pkgsrc::{AllDepends, BootstrapPkg, MakeJobsSafe, PkgName, PkgPath, ScanDepends, ScanIndex};
+use rusqlite::functions::FunctionFlags;
+use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension, params};
 use tracing::{debug, warn};
 
@@ -48,6 +50,8 @@ use strum::VariantArray;
 
 use crate::build::{BuildResult, PkgBuildStats, Stage};
 use crate::config::PkgsrcEnv;
+use crate::fmt::Cell;
+use crate::history::CPU_PREFIX;
 use crate::scan::ScanResult;
 use crate::try_println;
 use crate::{HistoryKind, PackageState};
@@ -111,6 +115,156 @@ fn history_schema() -> String {
         })
         .collect::<Vec<_>>()
         .join(",\n                 ")
+}
+
+/**
+ * How a SQL value renders as a display cell.  Shared by every
+ * column-driven query: the declared SQL types cannot distinguish
+ * milliseconds from bytes from outcome ids, so each selected
+ * expression declares its rendering.
+ */
+enum CellKind {
+    Timestamp,
+    Text,
+    Outcome,
+    Stage,
+    UInt,
+    DurationMs,
+    Bytes,
+}
+
+impl CellKind {
+    /*
+     * NULL renders as an absent value regardless of type, matching
+     * the dashes the table formatter emits.
+     */
+    fn cell(&self, v: ValueRef<'_>) -> Result<Cell> {
+        if matches!(v, ValueRef::Null) {
+            return Ok(Cell::Null);
+        }
+        Ok(match self {
+            CellKind::Timestamp => Cell::Timestamp(v.as_i64()?),
+            CellKind::Text => Cell::Text(v.as_str()?.to_string()),
+            CellKind::Outcome => {
+                let id = v.as_i64()? as i32;
+                let state = PackageState::try_from(id)
+                    .map_err(|_| anyhow!("Unknown outcome type id: {}", id))?;
+                Cell::Text(state.as_str().to_string())
+            }
+            CellKind::Stage => {
+                let id = v.as_i64()? as i32;
+                let stage =
+                    Stage::from_repr(id).ok_or_else(|| anyhow!("Unknown stage id: {}", id))?;
+                Cell::Text(stage.into_str().to_string())
+            }
+            CellKind::UInt => Cell::UInt(v.as_i64()? as u64),
+            CellKind::DurationMs => Cell::DurationMs(v.as_i64()? as u64),
+            CellKind::Bytes => Cell::Bytes(v.as_i64()? as u64),
+        })
+    }
+}
+
+/**
+ * Register `bob_match(text)`, true when any of `patterns` matches.
+ * Lets pattern filtering run inside a query so non-matching rows are
+ * never returned.
+ */
+fn register_match(conn: &Connection, patterns: &[regex::Regex]) -> Result<()> {
+    let patterns = patterns.to_vec();
+    conn.create_scalar_function(
+        "bob_match",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        move |ctx| {
+            let text = ctx
+                .get_raw(0)
+                .as_str()
+                .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))?;
+            Ok(patterns.iter().any(|re| re.is_match(text)))
+        },
+    )?;
+    Ok(())
+}
+
+/**
+ * Execute a SELECT whose expressions are described by `kinds`, in
+ * order, and stream each row to `f` as one [`Cell`] per column.
+ *
+ * The generic half of column-driven queries: a command contributes
+ * only its column name to `(SQL expression, CellKind)` mapping and
+ * the statement around it.
+ */
+fn stream_cells(
+    conn: &Connection,
+    select: &str,
+    kinds: &[CellKind],
+    mut f: impl FnMut(Vec<Cell>),
+) -> Result<()> {
+    let mut stmt = conn.prepare(select)?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let mut cells = Vec::with_capacity(kinds.len());
+        for (i, kind) in kinds.iter().enumerate() {
+            cells.push(kind.cell(row.get_ref(i)?)?);
+        }
+        f(cells);
+    }
+    Ok(())
+}
+
+/**
+ * Resolve a `bob history` column name to the SQL expression
+ * producing its value and the cell kind it renders as.  Accepts
+ * [`HistoryKind`] column names, stage names (per-stage wall time),
+ * and `cpu:`-prefixed stage names (per-stage CPU time); per-stage
+ * values become scalar subqueries probing the `(history_id, stage)`
+ * key.
+ */
+fn history_col(name: &str) -> Result<(String, CellKind)> {
+    if let Some(kind) = HistoryKind::VARIANTS
+        .iter()
+        .find(|k| <&str>::from(*k) == name)
+    {
+        /*
+         * The stage column is only meaningful for failures: it
+         * records how far a failed build got.
+         */
+        let expr = match kind {
+            HistoryKind::Stage => format!(
+                "CASE WHEN outcome = {} THEN NULL ELSE stage END",
+                PackageState::Success.id()
+            ),
+            _ => name.to_string(),
+        };
+        let cell = match kind {
+            HistoryKind::Timestamp => CellKind::Timestamp,
+            HistoryKind::Outcome => CellKind::Outcome,
+            HistoryKind::Stage => CellKind::Stage,
+            HistoryKind::MakeJobs => CellKind::UInt,
+            HistoryKind::Duration => CellKind::DurationMs,
+            HistoryKind::DiskUsage => CellKind::Bytes,
+            HistoryKind::Pkgpath
+            | HistoryKind::Pkgname
+            | HistoryKind::Pkgbase
+            | HistoryKind::Wrkobjdir
+            | HistoryKind::BuildId => CellKind::Text,
+        };
+        return Ok((expr, cell));
+    }
+    let (table, stage_name) = match name.strip_prefix(CPU_PREFIX) {
+        Some(stage) => ("cpu_times", stage),
+        None => ("wall_times", name),
+    };
+    let stage = Stage::VARIANTS
+        .iter()
+        .find(|s| s.into_str() == stage_name)
+        .ok_or_else(|| anyhow!("Unknown history column '{}'", name))?;
+    let expr = format!(
+        "(SELECT duration FROM {table} \
+          WHERE history_id = bh.id AND stage = {})",
+        *stage as i32
+    );
+    Ok((expr, CellKind::DurationMs))
 }
 
 /**
@@ -1708,143 +1862,59 @@ impl Database {
     }
 
     /**
-     * Query build history, optionally filtering by regex on pkgpath
-     * or pkgname. Results are returned most recent first.  Defaults
-     * to Success and Failed outcomes only; `all = true` returns
-     * every recorded outcome including UpToDate and masked rows.
+     * Stream build history rows as display cells, most recent first.
      *
-     * Per-stage wall and CPU times are attached only when
-     * `stage_times` is set: joining them into the main query
-     * multiplies every record by its stage count, so they are
-     * fetched as separate linear passes instead.
+     * `columns` names exactly what to fetch: [`HistoryKind`] column
+     * names, stage names for per-stage wall time, or `cpu:`-prefixed
+     * stage names for per-stage CPU time.  The generated SQL selects
+     * only those expressions; per-stage values resolve to scalar
+     * subqueries against the wall/CPU time tables.
+     *
+     * Rows are limited to Success and Failed outcomes unless `all`
+     * is set, and filtered inside the query to those where any
+     * pattern matches pkgpath or pkgname.  Each row is passed to `f`
+     * as one [`Cell`] per requested column.
      */
-    pub fn query_history(
+    pub fn for_each_history(
         &self,
+        columns: &[&str],
         patterns: &[regex::Regex],
         all: bool,
-        stage_times: bool,
-    ) -> Result<Vec<crate::History>> {
+        f: impl FnMut(Vec<Cell>),
+    ) -> Result<()> {
         let conn = self.history_conn()?;
-        let cols: String = HistoryKind::VARIANTS
+        let (exprs, kinds): (Vec<String>, Vec<CellKind>) = columns
             .iter()
-            .map(<&str>::from)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let where_clause = if all {
+            .map(|name| history_col(name))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .unzip();
+
+        let mut clauses: Vec<String> = Vec::new();
+        if !all {
+            clauses.push(format!(
+                "outcome IN ({}, {})",
+                PackageState::Success.id(),
+                PackageState::Failed.id()
+            ));
+        }
+        if !patterns.is_empty() {
+            register_match(conn, patterns)?;
+            clauses.push("(bob_match(pkgpath) OR bob_match(pkgname))".to_string());
+        }
+        let where_clause = if clauses.is_empty() {
             String::new()
         } else {
-            format!(
-                "WHERE outcome IN ({success}, {failed})",
-                success = PackageState::Success.id(),
-                failed = PackageState::Failed.id(),
-            )
+            format!("WHERE {}", clauses.join(" AND "))
         };
+
         let sql = format!(
-            "SELECT id, {cols} FROM build_history \
+            "SELECT {exprs} FROM build_history bh \
              {where_clause} \
              ORDER BY timestamp DESC, id DESC",
+            exprs = exprs.join(", "),
         );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, i32>(5)?,
-                row.get::<_, Option<i32>>(6)?,
-                row.get::<_, Option<i64>>(7)?.map(|v| v as usize),
-                row.get::<_, i64>(8)?,
-                row.get::<_, Option<i64>>(9)?,
-                row.get::<_, Option<String>>(10)?,
-                row.get::<_, Option<String>>(11)?,
-            ))
-        })?;
-
-        let mut results: Vec<crate::History> = Vec::new();
-        let mut indexes: HashMap<i64, usize> = HashMap::new();
-        for row in rows {
-            let (
-                id,
-                timestamp,
-                pkgpath,
-                pkgname,
-                pkgbase,
-                outcome_id,
-                stage_id,
-                make_jobs,
-                duration,
-                disk_usage,
-                wrkobjdir,
-                build_id,
-            ) = row?;
-
-            if !patterns.is_empty()
-                && !patterns
-                    .iter()
-                    .any(|re| re.is_match(&pkgpath) || re.is_match(&pkgname))
-            {
-                continue;
-            }
-
-            let outcome = PackageState::try_from(outcome_id)
-                .map_err(|_| anyhow::anyhow!("Unknown outcome type id: {}", outcome_id))?;
-            let stage = stage_id
-                .map(|id| {
-                    Stage::from_repr(id).ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", id))
-                })
-                .transpose()?;
-
-            if stage_times {
-                indexes.insert(id, results.len());
-            }
-            results.push(crate::History {
-                timestamp,
-                pkgpath,
-                pkgname,
-                pkgbase,
-                outcome,
-                stage,
-                make_jobs,
-                duration: Duration::from_millis(duration as u64),
-                disk_usage: disk_usage.map(|s| s as u64),
-                wrkobjdir: wrkobjdir.and_then(|s| s.parse().ok()),
-                stage_durations: Vec::new(),
-                stage_cpu_times: Vec::new(),
-                build_id,
-            });
-        }
-
-        if stage_times && !results.is_empty() {
-            let mut attach = |table: &str, wall: bool| -> Result<()> {
-                let sql = format!("SELECT history_id, stage, duration FROM {table}");
-                let mut stmt = conn.prepare(&sql)?;
-                let mut rows = stmt.query([])?;
-                while let Some(row) = rows.next()? {
-                    let Some(&idx) = indexes.get(&row.get::<_, i64>(0)?) else {
-                        continue;
-                    };
-                    let stage_id: i32 = row.get(1)?;
-                    let stage = Stage::from_repr(stage_id)
-                        .ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", stage_id))?;
-                    let dur = Duration::from_millis(row.get::<_, i64>(2)? as u64);
-                    let Some(rec) = results.get_mut(idx) else {
-                        continue;
-                    };
-                    if wall {
-                        rec.stage_durations.push((stage, dur));
-                    } else {
-                        rec.stage_cpu_times.push((stage, dur));
-                    }
-                }
-                Ok(())
-            };
-            attach("wall_times", true)?;
-            attach("cpu_times", false)?;
-        }
-
-        Ok(results)
+        stream_cells(conn, &sql, &kinds, f)
     }
 
     /**
@@ -2069,6 +2139,21 @@ impl Database {
                 duration_ms: row.get::<_, i64>(6)? as u64,
             })
         })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to list history builds")
+    }
+
+    /**
+     * All build IDs recorded in history, most recent first.
+     */
+    pub fn history_build_ids(&self) -> Result<Vec<String>> {
+        let conn = self.history_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT build_id FROM build_history WHERE build_id IS NOT NULL \
+             UNION SELECT build_id FROM build_metadata \
+             ORDER BY build_id DESC",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
         rows.collect::<Result<Vec<_>, _>>()
             .context("Failed to list history builds")
     }

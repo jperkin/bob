@@ -116,24 +116,24 @@ pub fn run(db: &Database, args: DiffArgs) -> Result<()> {
     let (build1_id, build2_id) = match (args.build1, args.build2) {
         (Some(b1), Some(b2)) => (b1, b2),
         (Some(b1), None) => {
-            let builds = db.list_history_builds()?;
+            let builds = db.history_build_ids()?;
             if builds.is_empty() {
                 bail!("No builds in history");
             }
-            (b1, builds[0].build_id.clone())
+            (b1, builds[0].clone())
         }
         (None, Some(_)) => {
             bail!("Specify both build IDs, or none for the two most recent");
         }
         (None, None) => {
-            let builds = db.list_history_builds()?;
+            let builds = db.history_build_ids()?;
             if builds.len() < 2 {
                 bail!(
                     "Need at least two builds to compare. \
                      Use 'bob list builds' to see available builds."
                 );
             }
-            (builds[1].build_id.clone(), builds[0].build_id.clone())
+            (builds[1].clone(), builds[0].clone())
         }
     };
 

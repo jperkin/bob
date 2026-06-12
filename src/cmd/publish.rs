@@ -258,21 +258,18 @@ fn resolve_baseline(
     build_id: &str,
     baseline: Option<&str>,
 ) -> Result<Option<String>> {
-    let builds = db.list_history_builds()?;
+    let builds = db.history_build_ids()?;
     match baseline {
         Some(b) => {
             if b == build_id {
                 bail!("--baseline must differ from the current build ({build_id})");
             }
-            if !builds.iter().any(|h| h.build_id == b) {
+            if !builds.iter().any(|h| h == b) {
                 bail!("Build ID '{b}' not found in history");
             }
             Ok(Some(b.to_string()))
         }
-        None => Ok(builds
-            .iter()
-            .find(|h| h.build_id != build_id)
-            .map(|h| h.build_id.clone())),
+        None => Ok(builds.iter().find(|h| h.as_str() != build_id).cloned()),
     }
 }
 

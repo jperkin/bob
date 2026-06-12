@@ -31,7 +31,7 @@ use crate::build::Stage;
 use crate::{ColumnAlign, PackageState};
 
 /// Prefix for selecting CPU time instead of wall time for a stage.
-const CPU_PREFIX: &str = "cpu:";
+pub(crate) const CPU_PREFIX: &str = "cpu:";
 
 /**
  * Columns in the `build_history` table.
@@ -100,15 +100,6 @@ impl HistoryKind {
                     .map(|s| (format!("{CPU_PREFIX}{}", s.into_str()), s.align())),
             )
             .collect()
-    }
-
-    /**
-     * Whether a column name is a per-stage wall or CPU time, the
-     * columns backed by the `wall_times` and `cpu_times` tables.
-     */
-    pub fn is_stage_column(name: &str) -> bool {
-        let name = name.strip_prefix(CPU_PREFIX).unwrap_or(name);
-        Stage::VARIANTS.iter().any(|s| s.into_str() == name)
     }
 
     /// Column names shown by default.
@@ -193,132 +184,4 @@ pub struct History {
     pub stage_durations: Vec<(Stage, Duration)>,
     pub stage_cpu_times: Vec<(Stage, Duration)>,
     pub build_id: Option<String>,
-}
-
-impl History {
-    /**
-     * Format a column value for display.
-     *
-     * Handles both [`HistoryKind`] variants (exhaustive match) and
-     * [`Stage`] per-stage duration columns.
-     */
-    pub fn format_col(&self, name: &str) -> anyhow::Result<String> {
-        let fmt_dur = |d: Duration| crate::fmt::duration_ms(d.as_millis() as u64);
-        let dash = || "-".to_string();
-
-        if let Some(stage_name) = name.strip_prefix(CPU_PREFIX)
-            && let Some(stage) = Stage::VARIANTS.iter().find(|s| s.into_str() == stage_name)
-        {
-            return Ok(self
-                .stage_cpu_times
-                .iter()
-                .find(|(st, _)| st == stage)
-                .map(|(_, d)| fmt_dur(*d))
-                .unwrap_or_else(dash));
-        }
-
-        if let Some(stage) = Stage::VARIANTS.iter().find(|s| s.into_str() == name) {
-            return Ok(self
-                .stage_durations
-                .iter()
-                .find(|(st, _)| st == stage)
-                .map(|(_, d)| fmt_dur(*d))
-                .unwrap_or_else(dash));
-        }
-
-        let col = HistoryKind::VARIANTS
-            .iter()
-            .find(|c| <&str>::from(*c) == name)
-            .expect("column already validated");
-        Ok(match col {
-            HistoryKind::Timestamp => crate::fmt::timestamp(self.timestamp)?,
-            HistoryKind::Pkgpath => self.pkgpath.clone(),
-            HistoryKind::Pkgname => self.pkgname.clone(),
-            HistoryKind::Pkgbase => self.pkgbase.clone(),
-            HistoryKind::Outcome => self.outcome.as_str().to_string(),
-            HistoryKind::Stage => {
-                if self.outcome == PackageState::Success {
-                    dash()
-                } else {
-                    self.stage
-                        .map(|s| s.into_str().to_string())
-                        .unwrap_or_else(dash)
-                }
-            }
-            HistoryKind::MakeJobs => self.make_jobs.map(|j| j.to_string()).unwrap_or_else(dash),
-            HistoryKind::Duration => fmt_dur(self.duration),
-            HistoryKind::DiskUsage => self
-                .disk_usage
-                .map(crate::fmt::size_bytes)
-                .unwrap_or_else(dash),
-            HistoryKind::Wrkobjdir => self
-                .wrkobjdir
-                .as_ref()
-                .map(|k| k.to_string())
-                .unwrap_or_else(dash),
-            HistoryKind::BuildId => self.build_id.clone().unwrap_or_else(dash),
-        })
-    }
-
-    /**
-     * Format a column value as raw numeric output.
-     *
-     * Durations are output as milliseconds, sizes as bytes, and
-     * timestamps as epoch seconds.  All other columns are identical
-     * to [`format_col`](Self::format_col).
-     */
-    pub fn format_col_raw(&self, name: &str) -> String {
-        let fmt_dur = |d: Duration| d.as_millis().to_string();
-        let dash = || "-".to_string();
-
-        if let Some(stage_name) = name.strip_prefix(CPU_PREFIX)
-            && let Some(stage) = Stage::VARIANTS.iter().find(|s| s.into_str() == stage_name)
-        {
-            return self
-                .stage_cpu_times
-                .iter()
-                .find(|(st, _)| st == stage)
-                .map(|(_, d)| fmt_dur(*d))
-                .unwrap_or_else(dash);
-        }
-
-        if let Some(stage) = Stage::VARIANTS.iter().find(|s| s.into_str() == name) {
-            return self
-                .stage_durations
-                .iter()
-                .find(|(st, _)| st == stage)
-                .map(|(_, d)| fmt_dur(*d))
-                .unwrap_or_else(dash);
-        }
-
-        let col = HistoryKind::VARIANTS
-            .iter()
-            .find(|c| <&str>::from(*c) == name)
-            .expect("column already validated");
-        match col {
-            HistoryKind::Timestamp => self.timestamp.to_string(),
-            HistoryKind::Pkgpath => self.pkgpath.clone(),
-            HistoryKind::Pkgname => self.pkgname.clone(),
-            HistoryKind::Pkgbase => self.pkgbase.clone(),
-            HistoryKind::Outcome => self.outcome.as_str().to_string(),
-            HistoryKind::Stage => {
-                if self.outcome == PackageState::Success {
-                    dash()
-                } else {
-                    self.stage
-                        .map(|s| s.into_str().to_string())
-                        .unwrap_or_else(dash)
-                }
-            }
-            HistoryKind::MakeJobs => self.make_jobs.map(|j| j.to_string()).unwrap_or_else(dash),
-            HistoryKind::Duration => fmt_dur(self.duration),
-            HistoryKind::DiskUsage => self.disk_usage.map(|b| b.to_string()).unwrap_or_else(dash),
-            HistoryKind::Wrkobjdir => self
-                .wrkobjdir
-                .as_ref()
-                .map(|k| k.to_string())
-                .unwrap_or_else(dash),
-            HistoryKind::BuildId => self.build_id.clone().unwrap_or_else(dash),
-        }
-    }
 }

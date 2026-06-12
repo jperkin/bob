@@ -37,7 +37,7 @@ pub struct PruneArgs {
 
 pub fn run(db: &Database, args: PruneArgs) -> Result<()> {
     let current = db.build_id().ok();
-    let builds = db.list_history_builds()?;
+    let builds = db.history_build_ids()?;
 
     let to_drop = if let Some(range) = args.range.as_deref() {
         select_range(&builds, range)?
@@ -75,7 +75,7 @@ pub fn run(db: &Database, args: PruneArgs) -> Result<()> {
  * a date used as an upper bound matches anything up to and including
  * 23:59:59 that day; as a lower bound, from 00:00:00.
  */
-fn select_range(builds: &[bob::db::BuildListEntry], range: &str) -> Result<Vec<String>> {
+fn select_range(builds: &[String], range: &str) -> Result<Vec<String>> {
     let (lower, upper) = if let Some((lhs, rhs)) = range.split_once("..") {
         if rhs.is_empty() {
             bail!("open-ended ranges (X..) are not supported");
@@ -97,29 +97,29 @@ fn select_range(builds: &[bob::db::BuildListEntry], range: &str) -> Result<Vec<S
     let mut out: Vec<String> = builds
         .iter()
         .filter(|b| {
-            lower.as_deref().is_none_or(|l| b.build_id.as_str() >= l)
-                && upper.as_deref().is_none_or(|u| b.build_id.as_str() <= u)
+            lower.as_deref().is_none_or(|l| b.as_str() >= l)
+                && upper.as_deref().is_none_or(|u| b.as_str() <= u)
         })
-        .map(|b| b.build_id.clone())
+        .cloned()
         .collect();
     out.reverse();
     Ok(out)
 }
 
-fn select_keep_last(builds: &[bob::db::BuildListEntry], n: usize) -> Vec<String> {
-    let mut out: Vec<String> = builds.iter().skip(n).map(|b| b.build_id.clone()).collect();
+fn select_keep_last(builds: &[String], n: usize) -> Vec<String> {
+    let mut out: Vec<String> = builds.iter().skip(n).cloned().collect();
     out.reverse();
     out
 }
 
-fn select_older_than(builds: &[bob::db::BuildListEntry], dur: &str) -> Result<Vec<String>> {
+fn select_older_than(builds: &[String], dur: &str) -> Result<Vec<String>> {
     let secs = bob::parse_duration_secs(dur).map_err(|e| anyhow::anyhow!(e))?;
     let cutoff = chrono::Utc::now() - chrono::Duration::seconds(secs);
     let cutoff_id = cutoff.format(bob::BUILD_ID_FORMAT).to_string();
     let mut out: Vec<String> = builds
         .iter()
-        .filter(|b| b.build_id.as_str() < cutoff_id.as_str())
-        .map(|b| b.build_id.clone())
+        .filter(|b| b.as_str() < cutoff_id.as_str())
+        .cloned()
         .collect();
     out.reverse();
     Ok(out)
