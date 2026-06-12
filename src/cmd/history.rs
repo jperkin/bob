@@ -99,7 +99,8 @@ fn print_history(
         .map(pkg_pattern)
         .collect::<Result<Vec<_>>>()?;
 
-    let records = db.query_history(&patterns, all)?;
+    let stage_times = cols.iter().any(|c| bob::HistoryKind::is_stage_column(c));
+    let records = db.query_history(&patterns, all, stage_times)?;
 
     if records.is_empty() {
         if !patterns.is_empty() {

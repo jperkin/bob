@@ -1712,36 +1712,37 @@ impl Database {
      * or pkgname. Results are returned most recent first.  Defaults
      * to Success and Failed outcomes only; `all = true` returns
      * every recorded outcome including UpToDate and masked rows.
+     *
+     * Per-stage wall and CPU times are attached only when
+     * `stage_times` is set: joining them into the main query
+     * multiplies every record by its stage count, so they are
+     * fetched as separate linear passes instead.
      */
     pub fn query_history(
         &self,
         patterns: &[regex::Regex],
         all: bool,
+        stage_times: bool,
     ) -> Result<Vec<crate::History>> {
         let conn = self.history_conn()?;
         let cols: String = HistoryKind::VARIANTS
             .iter()
-            .map(|v| format!("bh.{}", <&str>::from(v)))
+            .map(<&str>::from)
             .collect::<Vec<_>>()
             .join(", ");
         let where_clause = if all {
             String::new()
         } else {
             format!(
-                "WHERE bh.outcome IN ({success}, {failed})",
+                "WHERE outcome IN ({success}, {failed})",
                 success = PackageState::Success.id(),
                 failed = PackageState::Failed.id(),
             )
         };
         let sql = format!(
-            "SELECT bh.id, {cols}, \
-                    wt.stage, wt.duration, ct.duration \
-             FROM build_history bh \
-             LEFT JOIN wall_times wt ON wt.history_id = bh.id \
-             LEFT JOIN cpu_times ct ON ct.history_id = bh.id \
-                                   AND ct.stage = wt.stage \
+            "SELECT id, {cols} FROM build_history \
              {where_clause} \
-             ORDER BY bh.timestamp DESC, bh.id DESC",
+             ORDER BY timestamp DESC, id DESC",
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| {
@@ -1758,15 +1759,11 @@ impl Database {
                 row.get::<_, Option<i64>>(9)?,
                 row.get::<_, Option<String>>(10)?,
                 row.get::<_, Option<String>>(11)?,
-                row.get::<_, Option<i32>>(12)?,
-                row.get::<_, Option<i64>>(13)?,
-                row.get::<_, Option<i64>>(14)?,
             ))
         })?;
 
         let mut results: Vec<crate::History> = Vec::new();
-        let mut current_id: Option<i64> = None;
-        let mut current_accepted = false;
+        let mut indexes: HashMap<i64, usize> = HashMap::new();
         for row in rows {
             let (
                 id,
@@ -1781,32 +1778,7 @@ impl Database {
                 disk_usage,
                 wrkobjdir,
                 build_id,
-                wt_stage,
-                wt_duration,
-                ct_duration,
             ) = row?;
-
-            if Some(id) == current_id {
-                if current_accepted
-                    && let Some(last) = results.last_mut()
-                    && let Some(stage_id) = wt_stage
-                {
-                    let stage = Stage::from_repr(stage_id)
-                        .ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", stage_id))?;
-                    if let Some(ms) = wt_duration {
-                        last.stage_durations
-                            .push((stage, Duration::from_millis(ms as u64)));
-                    }
-                    if let Some(ms) = ct_duration {
-                        last.stage_cpu_times
-                            .push((stage, Duration::from_millis(ms as u64)));
-                    }
-                }
-                continue;
-            }
-
-            current_id = Some(id);
-            current_accepted = false;
 
             if !patterns.is_empty()
                 && !patterns
@@ -1816,7 +1788,6 @@ impl Database {
                 continue;
             }
 
-            current_accepted = true;
             let outcome = PackageState::try_from(outcome_id)
                 .map_err(|_| anyhow::anyhow!("Unknown outcome type id: {}", outcome_id))?;
             let stage = stage_id
@@ -1825,19 +1796,9 @@ impl Database {
                 })
                 .transpose()?;
 
-            let mut stage_durations = Vec::new();
-            let mut stage_cpu_times = Vec::new();
-            if let Some(st_id) = wt_stage {
-                let st = Stage::from_repr(st_id)
-                    .ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", st_id))?;
-                if let Some(ms) = wt_duration {
-                    stage_durations.push((st, Duration::from_millis(ms as u64)));
-                }
-                if let Some(ms) = ct_duration {
-                    stage_cpu_times.push((st, Duration::from_millis(ms as u64)));
-                }
+            if stage_times {
+                indexes.insert(id, results.len());
             }
-
             results.push(crate::History {
                 timestamp,
                 pkgpath,
@@ -1849,10 +1810,38 @@ impl Database {
                 duration: Duration::from_millis(duration as u64),
                 disk_usage: disk_usage.map(|s| s as u64),
                 wrkobjdir: wrkobjdir.and_then(|s| s.parse().ok()),
-                stage_durations,
-                stage_cpu_times,
+                stage_durations: Vec::new(),
+                stage_cpu_times: Vec::new(),
                 build_id,
             });
+        }
+
+        if stage_times && !results.is_empty() {
+            let mut attach = |table: &str, wall: bool| -> Result<()> {
+                let sql = format!("SELECT history_id, stage, duration FROM {table}");
+                let mut stmt = conn.prepare(&sql)?;
+                let mut rows = stmt.query([])?;
+                while let Some(row) = rows.next()? {
+                    let Some(&idx) = indexes.get(&row.get::<_, i64>(0)?) else {
+                        continue;
+                    };
+                    let stage_id: i32 = row.get(1)?;
+                    let stage = Stage::from_repr(stage_id)
+                        .ok_or_else(|| anyhow::anyhow!("Unknown stage id: {}", stage_id))?;
+                    let dur = Duration::from_millis(row.get::<_, i64>(2)? as u64);
+                    let Some(rec) = results.get_mut(idx) else {
+                        continue;
+                    };
+                    if wall {
+                        rec.stage_durations.push((stage, dur));
+                    } else {
+                        rec.stage_cpu_times.push((stage, dur));
+                    }
+                }
+                Ok(())
+            };
+            attach("wall_times", true)?;
+            attach("cpu_times", false)?;
         }
 
         Ok(results)

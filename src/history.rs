@@ -102,6 +102,15 @@ impl HistoryKind {
             .collect()
     }
 
+    /**
+     * Whether a column name is a per-stage wall or CPU time, the
+     * columns backed by the `wall_times` and `cpu_times` tables.
+     */
+    pub fn is_stage_column(name: &str) -> bool {
+        let name = name.strip_prefix(CPU_PREFIX).unwrap_or(name);
+        Stage::VARIANTS.iter().any(|s| s.into_str() == name)
+    }
+
     /// Column names shown by default.
     pub fn default_names() -> Vec<&'static str> {
         use HistoryKind::*;
