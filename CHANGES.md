@@ -1,5 +1,20 @@
 # Changelog
 
+## Version 1.0.0 (2026-06-12)
+
+* Speed up `bob history`, `bob ls`, and build lookups in `bob diff`,
+  `bob prune`, and `bob publish`.
+
+* Circular dependencies found during the scan phase no longer abort the
+  build unless strict scans are enabled.  Affected packages are recorded
+  as unresolved and included in the build report and email.
+
+* Build reports now list scan failures before new failures.
+
+* Significantly reduce the size of the HTML build report.
+
+* Improve documentation rendering on docs.rs.
+
 ## Version 0.99.7 (2026-06-11)
 
 * Bump dependencies to include illumos patches, `cargo install bob` now
