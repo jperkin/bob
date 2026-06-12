@@ -69,7 +69,7 @@ Cargo-installed bob uses an XDG directory layout by default:
 Install the binary using cargo:
 
 ```
-$ cargo install bob
+$ cargo install bob --locked
 ```
 
 Then create a default configuration file using `bob init`:
