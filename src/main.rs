@@ -15,7 +15,6 @@
  */
 
 use anyhow::{Context, Result, bail};
-use bob::Init;
 use bob::Interrupted;
 use bob::PackageState;
 use bob::RunState;
@@ -461,7 +460,7 @@ fn run() -> Result<()> {
 
     match args.cmd {
         Cmd::Init => {
-            Init::create(args.config.as_deref())?;
+            bob::config::init(args.config.as_deref())?;
         }
         Cmd::Scan { scan_only } => {
             let runner = BuildRunner::new(args.config.as_deref())?;

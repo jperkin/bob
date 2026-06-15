@@ -31,7 +31,6 @@ pub mod vcs;
 
 mod cpu;
 mod history;
-mod init;
 mod state;
 mod summary;
 mod tui;
@@ -179,8 +178,6 @@ pub use cpu::{CpuSamplerHandle, start_cpu_sampler};
 pub use db::Database;
 #[doc(hidden)]
 pub use history::{History, HistoryKind};
-#[doc(hidden)]
-pub use init::Init;
 #[doc(hidden)]
 pub use pkgstate::{PackageCounts, PackageState};
 #[doc(hidden)]
