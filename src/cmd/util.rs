@@ -16,7 +16,7 @@
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use pkgsrc::ScanIndex;
@@ -25,7 +25,7 @@ use regex::Regex;
 use bob::PackageState;
 use bob::config::Config;
 use bob::db::{Database, ScanIndexFields};
-use bob::scan::Scan;
+use bob::scan::{Scan, ScanCounts};
 use bob::try_println;
 
 /**
@@ -89,16 +89,7 @@ pub fn presolve(file: &PathBuf, output: Option<&PathBuf>, strict: bool, verbose:
 
     if let Some(path) = output {
         std::fs::write(path, &out)?;
-        let c = result.counts();
-        let s = &c.states;
-        let skipped =
-            s[PackageState::PreSkipped] + s[PackageState::PreFailed] + s[PackageState::Unresolved];
-        eprintln!(
-            "Wrote {} buildable, {} skipped to {}",
-            c.buildable,
-            skipped,
-            path.display()
-        );
+        report_wrote(&result.counts(), path);
     } else {
         print!("{}", out);
     }
@@ -198,16 +189,7 @@ pub fn print_presolve(config: &Config, output: Option<&PathBuf>, sort: bool) -> 
             write!(w, "{pkg}")?;
         }
         w.flush()?;
-        let c = result.counts();
-        let s = &c.states;
-        let skipped =
-            s[PackageState::PreSkipped] + s[PackageState::PreFailed] + s[PackageState::Unresolved];
-        eprintln!(
-            "Wrote {} buildable, {} skipped to {}",
-            c.buildable,
-            skipped,
-            path.display()
-        );
+        report_wrote(&result.counts(), path);
     } else {
         for pkg in &result.packages {
             for line in pkg.to_string().lines() {
@@ -219,4 +201,16 @@ pub fn print_presolve(config: &Config, output: Option<&PathBuf>, sort: bool) -> 
     }
 
     Ok(())
+}
+
+fn report_wrote(counts: &ScanCounts, path: &Path) {
+    let s = &counts.states;
+    let skipped =
+        s[PackageState::PreSkipped] + s[PackageState::PreFailed] + s[PackageState::Unresolved];
+    eprintln!(
+        "Wrote {} buildable, {} skipped to {}",
+        counts.buildable,
+        skipped,
+        path.display()
+    );
 }
