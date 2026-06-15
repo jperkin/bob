@@ -25,7 +25,7 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use tracing::debug;
 
@@ -220,10 +220,7 @@ pub fn start_cpu_sampler() -> Option<CpuSamplerHandle> {
         let mut load = CpuLoad::new();
         while !stop_flag.load(Ordering::Relaxed) {
             if let Some((user, sys)) = load.sample(SAMPLE_INTERVAL) {
-                let ts = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
+                let ts = crate::epoch_secs().unwrap_or(0);
                 if let Ok(mut v) = samples_ref.lock() {
                     v.push(CpuSample {
                         timestamp: ts,
