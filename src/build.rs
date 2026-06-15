@@ -614,7 +614,7 @@ impl<'a> PkgBuilder<'a> {
     fn build(
         &self,
         stats: &mut PkgBuildStats,
-        callback: &mut ChannelCallback,
+        callback: &ChannelCallback,
     ) -> anyhow::Result<PkgBuildResult> {
         let pkgname_str = self.pkginfo.pkgname().pkgname();
         let pkgpath = &self.pkginfo.pkgpath;
@@ -1202,7 +1202,7 @@ impl<'a> ChannelCallback<'a> {
         }
     }
 
-    fn stage(&mut self, stage: &str) {
+    fn stage(&self, stage: &str) {
         let _ = self.status_tx.send(ChannelCommand::StageUpdate(
             self.sandbox_id,
             Some(stage.to_string()),
@@ -1503,12 +1503,12 @@ impl PackageBuild {
             wrkdir.clone(),
         );
 
-        let mut callback = ChannelCallback::new(self.worker_id, status_tx);
+        let callback = ChannelCallback::new(self.worker_id, status_tx);
         let mut stats = PkgBuildStats {
             make_jobs: self.make_jobs,
             ..PkgBuildStats::default()
         };
-        let result = builder.build(&mut stats, &mut callback);
+        let result = builder.build(&mut stats, &callback);
 
         let _ = status_tx.send(ChannelCommand::StageUpdate(
             self.worker_id,
