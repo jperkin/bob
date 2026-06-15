@@ -556,11 +556,6 @@ enum RunAs {
     User,
 }
 
-/// Callback for status updates during build.
-trait BuildCallback: Send {
-    fn stage(&mut self, stage: &str);
-}
-
 /// Session-level build data shared across all package builds.
 #[derive(Debug)]
 struct BuildSession {
@@ -616,10 +611,10 @@ impl<'a> PkgBuilder<'a> {
     }
 
     /// Run the full build process.
-    fn build<C: BuildCallback>(
+    fn build(
         &self,
         stats: &mut PkgBuildStats,
-        callback: &mut C,
+        callback: &mut ChannelCallback,
     ) -> anyhow::Result<PkgBuildResult> {
         let pkgname_str = self.pkginfo.pkgname().pkgname();
         let pkgpath = &self.pkginfo.pkgpath;
@@ -1206,9 +1201,7 @@ impl<'a> ChannelCallback<'a> {
             status_tx,
         }
     }
-}
 
-impl<'a> BuildCallback for ChannelCallback<'a> {
     fn stage(&mut self, stage: &str) {
         let _ = self.status_tx.send(ChannelCommand::StageUpdate(
             self.sandbox_id,
