@@ -24,7 +24,7 @@ use bob::db::{Database, ScanIndexFields};
 use bob::logging;
 use bob::sandbox::{Sandbox, SandboxScope};
 use bob::scan::Scan;
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -265,6 +265,12 @@ enum Cmd {
     /// for example 'bob publish -pre' uploads the binary packages and
     /// the build report, and sends the report email.
     #[command(arg_required_else_help = true)]
+    #[command(group(
+        ArgGroup::new("action")
+            .required(true)
+            .multiple(true)
+            .args(["packages", "report", "email"])
+    ))]
     Publish {
         /// Publish binary packages
         #[arg(short, long)]
