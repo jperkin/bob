@@ -281,6 +281,9 @@ enum Cmd {
         /// Build ID to use as baseline for diff (default: previous build)
         #[arg(short, long, value_name = "BUILD_ID")]
         baseline: Option<String>,
+        /// Generate the report without a baseline comparison
+        #[arg(short = 'N', long, conflicts_with = "baseline")]
+        no_diff: bool,
     },
     /// Remove current build state (database and build logs)
     ///
@@ -556,6 +559,7 @@ fn run() -> Result<()> {
             email,
             dry_run,
             baseline,
+            no_diff,
         } => {
             let runner = BuildRunner::new(args.config.as_deref())?;
             cmd::publish::run(
@@ -567,6 +571,7 @@ fn run() -> Result<()> {
                 email,
                 dry_run,
                 baseline.as_deref(),
+                no_diff,
             )?;
         }
         Cmd::Clean { logs_only } => {

@@ -71,13 +71,14 @@ pub fn run(
     email: bool,
     dry_run: bool,
     baseline: Option<&str>,
+    no_diff: bool,
 ) -> Result<()> {
     let build_id = db
         .build_id()
         .context("No build recorded.  Perform a build first.")?;
 
     if report || email {
-        generate_reports(config, pkgsrc, db, &build_id, baseline)?;
+        generate_reports(config, pkgsrc, db, &build_id, baseline, no_diff)?;
     }
 
     if report {
@@ -177,6 +178,7 @@ fn generate_reports(
     db: &Database,
     build_id: &str,
     baseline: Option<&str>,
+    no_diff: bool,
 ) -> Result<()> {
     let publish = config
         .publish()
@@ -204,8 +206,16 @@ fn generate_reports(
         .as_ref()
         .map(|u| format!("{}/{}", u, build_id));
 
-    let diff = resolve_baseline(db, build_id, baseline)?
-        .and_then(|b| db.compute_build_diff(&b, build_id).ok());
+    let diff = if no_diff {
+        None
+    } else {
+        resolve_baseline(db, build_id, baseline)?
+            .map(|b| {
+                db.compute_build_diff(&b, build_id)
+                    .with_context(|| format!("Failed to compute diff against baseline {b}"))
+            })
+            .transpose()?
+    };
 
     let commits = diff
         .as_ref()
