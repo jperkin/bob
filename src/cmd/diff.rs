@@ -17,6 +17,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
+use pkgsrc::PkgName;
 
 use bob::PackageState;
 use bob::db::{BuildDiff, Database, DiffEntry};
@@ -29,6 +30,7 @@ use super::{
 const SUPPORTED: &[Column] = &[
     Column::Pkgname,
     Column::Pkgpath,
+    Column::Pkgbase,
     Column::Breaks,
     Column::Stage,
     Column::StagePrev,
@@ -85,6 +87,12 @@ impl ColumnSource for DiffEntry {
                 .or(self.build1_pkgname.as_deref())
                 .map_or(Cell::Null, Cell::from),
             Column::Pkgpath => self.pkgpath.as_str().into(),
+            Column::Pkgbase => self
+                .build2_pkgname
+                .as_deref()
+                .or(self.build1_pkgname.as_deref())
+                .map(|n| PkgName::new(n).pkgbase().to_string())
+                .map_or(Cell::Null, Cell::from),
             Column::Breaks => get_breaks(self, breaks).into(),
             Column::Stage => match self.build2_outcome {
                 Some(k) if k.is_success() => Cell::Null,

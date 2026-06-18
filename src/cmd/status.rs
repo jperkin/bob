@@ -24,81 +24,69 @@ use clap::Args;
 use clap::builder::styling::Style;
 use pkgsrc::PkgName;
 use regex::Regex;
-use strum::{EnumProperty, VariantArray};
+use strum::VariantArray;
 
 use bob::build::Stage;
 use bob::db::{Database, PackageStatusRow};
-use bob::{ColumnAlign, Config, PackageState, WrkObjKind};
+use bob::{Config, PackageState, WrkObjKind};
 
 use super::util::pkg_pattern;
 use super::{
-    Cell, Col, Formatter, OutputFormat, OutputOptions, SortKey, parse_sort_specs,
-    parse_status_filter, sort_indexed_rows, status_filter_aliases,
+    Cell, Col, Column, Formatter, OutputFormat, OutputOptions, SortKey, parse_sort_specs,
+    parse_status_filter, select_columns, sort_indexed_rows, status_filter_aliases,
 };
 
-#[derive(Clone, Copy, strum::EnumProperty, strum::IntoStaticStr, strum::VariantArray)]
-#[strum(serialize_all = "snake_case")]
-enum StatusCol {
-    #[strum(props(default = "true", max = "40", desc = "Package name"))]
-    Pkgname,
-    #[strum(props(max = "35", desc = "Package path (category/name)"))]
-    Pkgpath,
-    #[strum(props(default = "true", desc = "Current build status"))]
-    Status,
-    #[strum(props(default = "true", desc = "Status detail or reason"))]
-    Reason,
-    #[strum(props(desc = "MULTI_VERSION package build variables"))]
-    MultiVersion,
-    #[strum(props(max = "6", align = "right", desc = "Number of dependent packages"))]
-    Deps,
-    #[strum(props(max = "8", align = "right", desc = "Scheduler priority order"))]
-    Priority,
-    #[strum(props(max = "8", align = "right", desc = "Previous build CPU time"))]
-    Cpu,
-    #[strum(props(
-        max = "9",
-        align = "right",
-        desc = "MAKE_JOBS used by current build, otherwise predicted allocation"
-    ))]
-    MakeJobs,
-    #[strum(props(
-        max = "9",
-        desc = "WRKOBJDIR used by current build, otherwise predicted routing"
-    ))]
-    Wrkobjdir,
-    #[strum(props(
-        max = "10",
-        align = "right",
-        desc = "WRKDIR size at end of current build"
-    ))]
-    DiskUsage,
+/**
+ * Columns offered by `bob status`, in display order.  Names,
+ * alignment and descriptions come from [`Column`]; only the default
+ * selection and per-column widths are status-specific.
+ */
+const STATUS_COLS: &[Column] = &[
+    Column::Pkgname,
+    Column::Pkgpath,
+    Column::Pkgbase,
+    Column::Status,
+    Column::Reason,
+    Column::MultiVersion,
+    Column::Deps,
+    Column::Priority,
+    Column::Cpu,
+    Column::MakeJobs,
+    Column::Wrkobjdir,
+    Column::DiskUsage,
+];
+
+/**
+ * Columns shown when no `-o`/`-l` selection is given.
+ */
+const STATUS_DEFAULT: &[Column] = &[Column::Pkgname, Column::Status, Column::Reason];
+
+/**
+ * Maximum display width for a status column, or `usize::MAX` for the
+ * free-text columns that are never truncated.
+ */
+fn status_max(col: Column) -> usize {
+    match col {
+        Column::Pkgname | Column::Pkgbase => 40,
+        Column::Pkgpath => 35,
+        Column::Deps => 6,
+        Column::Priority | Column::Cpu => 8,
+        Column::MakeJobs | Column::Wrkobjdir => 9,
+        Column::DiskUsage => 10,
+        _ => usize::MAX,
+    }
 }
 
 /**
- * Alignment from per-variant `align` props.
+ * Column description for `--help`.  `status` shows the actual value
+ * when a package built, otherwise a prediction, so two columns differ
+ * from the shared [`Column`] text.
  */
-impl bob::ColumnAlign for StatusCol {}
-
-impl StatusCol {
-    fn max_width(self) -> usize {
-        self.get_str("max")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(usize::MAX)
-    }
-
-    fn is_default(self) -> bool {
-        self.get_str("default").is_some()
-    }
-
-    fn desc(self) -> &'static str {
-        self.get_str("desc").expect("desc prop")
-    }
-
-    fn find(name: &str) -> Option<Self> {
-        Self::VARIANTS
-            .iter()
-            .find(|v| <&str>::from(*v) == name)
-            .copied()
+fn status_desc(col: Column) -> std::borrow::Cow<'static, str> {
+    match col {
+        Column::MakeJobs => "MAKE_JOBS used, otherwise predicted allocation".into(),
+        Column::Wrkobjdir => "WRKOBJDIR used, otherwise predicted routing".into(),
+        _ => col.desc(),
     }
 }
 
@@ -171,17 +159,18 @@ fn write_item(out: &mut String, name: &str, desc: &str, name_pad: usize, literal
 }
 
 /**
- * Render the `Possible values:` block listing every [`StatusCol`] variant.
+ * Render the `Possible values:` block listing every status [`Column`].
  *
  * Heading wording and styling match clap's auto-generated possible-values
  * block (see `-f, --format` in this command), so all flags read the same.
  */
 fn columns_section() -> String {
     let literal = literal_style();
-    let width = longest(StatusCol::VARIANTS.iter().map(<&str>::from));
+    let names: Vec<String> = STATUS_COLS.iter().map(|c| c.key().into_owned()).collect();
+    let width = longest(names.iter().map(String::as_str));
     let mut out = String::from("Possible values:\n");
-    for c in StatusCol::VARIANTS {
-        write_item(&mut out, <&str>::from(c), c.desc(), width, literal);
+    for &c in STATUS_COLS {
+        write_item(&mut out, &c.key(), &status_desc(c), width, literal);
     }
     out
 }
@@ -388,33 +377,16 @@ fn print_build_status(
     show_all: bool,
     sort: Option<&[String]>,
 ) -> Result<()> {
-    let all_names: Vec<&str> = StatusCol::VARIANTS.iter().map(|v| v.into()).collect();
-    let cols: Vec<&str> = if columns.is_some() {
-        columns
-            .map(|c| c.iter().map(|s| s.as_str()).collect())
-            .unwrap_or_default()
-    } else if long {
-        all_names.clone()
-    } else {
-        StatusCol::VARIANTS
-            .iter()
-            .filter(|v| v.is_default())
-            .map(|v| v.into())
-            .collect()
-    };
+    let cols = select_columns(columns, long, STATUS_DEFAULT, STATUS_COLS)?;
 
-    for col in &cols {
-        if !all_names.contains(col) {
-            bail!(
-                "Unknown column '{}'. Valid columns: {}",
-                col,
-                all_names.join(", ")
-            );
-        }
-    }
-
-    let sort_specs: Vec<(StatusCol, bool)> = match sort {
-        Some(values) => parse_sort_specs(values, StatusCol::find, &all_names)?,
+    let all_names: Vec<String> = STATUS_COLS.iter().map(|c| c.key().into_owned()).collect();
+    let name_refs: Vec<&str> = all_names.iter().map(String::as_str).collect();
+    let sort_specs: Vec<(Column, bool)> = match sort {
+        Some(values) => parse_sort_specs(
+            values,
+            |n| Column::parse(n).filter(|c| STATUS_COLS.contains(c)),
+            &name_refs,
+        )?,
         None => Vec::new(),
     };
 
@@ -438,10 +410,8 @@ fn print_build_status(
      * Built only when the make_jobs column is shown or sorted on and a
      * jobs budget is configured.
      */
-    let need_make_jobs = cols.contains(&"make_jobs")
-        || sort_specs
-            .iter()
-            .any(|(c, _)| matches!(c, StatusCol::MakeJobs));
+    let need_make_jobs =
+        cols.contains(&Column::MakeJobs) || sort_specs.iter().any(|(c, _)| *c == Column::MakeJobs);
     let make_jobs_alloc = match (need_make_jobs, config.jobs()) {
         (true, Some(jobs)) => {
             let mut alloc = bob::makejobs::Allocator::new(config.build_threads(), jobs);
@@ -459,7 +429,8 @@ fn print_build_status(
 
     let need_history = cols
         .iter()
-        .any(|c| matches!(*c, "wrkobjdir" | "make_jobs" | "disk_usage"));
+        .chain(sort_specs.iter().map(|(c, _)| c))
+        .any(|c| matches!(c, Column::Wrkobjdir | Column::MakeJobs | Column::DiskUsage));
     /*
      * Scoped to the current build only -- rows from previous build
      * sessions (different build_id) are deliberately excluded so the
@@ -578,10 +549,8 @@ fn print_build_status(
         let actual_make_jobs = hist.and_then(|h| h.make_jobs);
         let actual_disk_usage = hist.and_then(|h| h.disk_usage);
 
-        let need_wrkobjdir = cols.contains(&"wrkobjdir")
-            || sort_specs
-                .iter()
-                .any(|(c, _)| matches!(c, StatusCol::Wrkobjdir));
+        let need_wrkobjdir = cols.contains(&Column::Wrkobjdir)
+            || sort_specs.iter().any(|(c, _)| *c == Column::Wrkobjdir);
         let resolved_wrkobjdir: Option<String> = if need_wrkobjdir {
             actual_wrkobjdir
                 .clone()
@@ -600,14 +569,15 @@ fn print_build_status(
         let row: Vec<String> = cols
             .iter()
             .map(|&col| match col {
-                "pkgname" => pkg.pkgname.clone(),
-                "pkgpath" => pkg.pkg_location.clone(),
-                "status" => kind.as_str().to_string(),
-                "reason" => reason.clone(),
-                "multi_version" => multi_version.clone(),
-                "deps" => pkg.dep_count.to_string(),
-                "priority" => pkg.total_pbulk_weight.to_string(),
-                "cpu" => cpu
+                Column::Pkgname => pkg.pkgname.clone(),
+                Column::Pkgpath => pkg.pkg_location.clone(),
+                Column::Pkgbase => PkgName::new(&pkg.pkgname).pkgbase().to_string(),
+                Column::Status => kind.as_str().to_string(),
+                Column::Reason => reason.clone(),
+                Column::MultiVersion => multi_version.clone(),
+                Column::Deps => pkg.dep_count.to_string(),
+                Column::Priority => pkg.total_pbulk_weight.to_string(),
+                Column::Cpu => cpu
                     .map(|c| {
                         if raw {
                             c.to_string()
@@ -616,11 +586,11 @@ fn print_build_status(
                         }
                     })
                     .unwrap_or_else(dash),
-                "wrkobjdir" => resolved_wrkobjdir.clone().unwrap_or_else(dash),
-                "make_jobs" => resolved_make_jobs
+                Column::Wrkobjdir => resolved_wrkobjdir.clone().unwrap_or_else(dash),
+                Column::MakeJobs => resolved_make_jobs
                     .map(|n| n.to_string())
                     .unwrap_or_else(dash),
-                "disk_usage" => actual_disk_usage
+                Column::DiskUsage => actual_disk_usage
                     .map(|s| {
                         if raw {
                             s.to_string()
@@ -636,17 +606,19 @@ fn print_build_status(
         let mut sort_keys: Vec<SortKey> = sort_specs
             .iter()
             .map(|(c, _)| match c {
-                StatusCol::Pkgname => SortKey::Str(pkg.pkgname.clone()),
-                StatusCol::Pkgpath => SortKey::Str(pkg.pkg_location.clone()),
-                StatusCol::Status => SortKey::Idx(kind as usize),
-                StatusCol::Reason => SortKey::Str(reason.clone()),
-                StatusCol::MultiVersion => SortKey::Str(multi_version.clone()),
-                StatusCol::Deps => SortKey::Num(Some(pkg.dep_count as u64)),
-                StatusCol::Priority => SortKey::Num(Some(pkg.total_pbulk_weight as u64)),
-                StatusCol::Cpu => SortKey::Num(cpu),
-                StatusCol::MakeJobs => SortKey::Num(resolved_make_jobs.map(u64::from)),
-                StatusCol::Wrkobjdir => SortKey::OptStr(resolved_wrkobjdir.clone()),
-                StatusCol::DiskUsage => SortKey::Num(actual_disk_usage),
+                Column::Pkgname => SortKey::Str(pkg.pkgname.clone()),
+                Column::Pkgpath => SortKey::Str(pkg.pkg_location.clone()),
+                Column::Pkgbase => SortKey::Str(PkgName::new(&pkg.pkgname).pkgbase().to_string()),
+                Column::Status => SortKey::Idx(kind as usize),
+                Column::Reason => SortKey::Str(reason.clone()),
+                Column::MultiVersion => SortKey::Str(multi_version.clone()),
+                Column::Deps => SortKey::Num(Some(pkg.dep_count as u64)),
+                Column::Priority => SortKey::Num(Some(pkg.total_pbulk_weight as u64)),
+                Column::Cpu => SortKey::Num(cpu),
+                Column::MakeJobs => SortKey::Num(resolved_make_jobs.map(u64::from)),
+                Column::Wrkobjdir => SortKey::OptStr(resolved_wrkobjdir.clone()),
+                Column::DiskUsage => SortKey::Num(actual_disk_usage),
+                _ => SortKey::Str(String::new()),
             })
             .collect();
 
@@ -681,10 +653,7 @@ fn print_build_status(
 
     let fmt_cols: Vec<Col> = cols
         .iter()
-        .map(|&name| {
-            let sc = StatusCol::find(name).expect("column already validated");
-            Col::new(<&'static str>::from(sc), sc.align()).max(sc.max_width())
-        })
+        .map(|&c| Col::new(c.key(), c.align()).max(status_max(c)))
         .collect();
     let mut fmt = Formatter::new(
         std::io::stdout().lock(),

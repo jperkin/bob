@@ -150,7 +150,6 @@ impl Col {
  * metadata.  Each command picks the subset it supports and provides a
  * source-specific extraction; nothing else varies across commands.
  */
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Column {
     // Package identity
@@ -171,7 +170,6 @@ pub enum Column {
     DiskUsage,
     MakeJobs,
     Wrkobjdir,
-    Timestamp,
     BuildId,
     // bob list builds counters
     Packages,
@@ -186,9 +184,6 @@ pub enum Column {
     Deps,
     Priority,
     Cpu,
-    // bob history per-stage durations / cpu time
-    StageDuration(crate::build::Stage),
-    StageCpu(crate::build::Stage),
 }
 
 impl Column {
@@ -208,7 +203,6 @@ impl Column {
             Self::DiskUsage => "disk_usage".into(),
             Self::MakeJobs => "make_jobs".into(),
             Self::Wrkobjdir => "wrkobjdir".into(),
-            Self::Timestamp => "timestamp".into(),
             Self::BuildId => "build_id".into(),
             Self::Packages => "packages".into(),
             Self::Succeeded => "succeeded".into(),
@@ -221,8 +215,6 @@ impl Column {
             Self::Deps => "deps".into(),
             Self::Priority => "priority".into(),
             Self::Cpu => "cpu".into(),
-            Self::StageDuration(s) => <&str>::from(s).into(),
-            Self::StageCpu(s) => format!("cpu:{}", <&str>::from(s)).into(),
         }
     }
 
@@ -240,9 +232,7 @@ impl Column {
             | Self::Masked
             | Self::Deps
             | Self::Priority
-            | Self::Cpu
-            | Self::StageDuration(_)
-            | Self::StageCpu(_) => Right,
+            | Self::Cpu => Right,
             _ => Left,
         }
     }
@@ -262,7 +252,6 @@ impl Column {
             Self::DiskUsage => "WRKDIR size at end of build".into(),
             Self::MakeJobs => "MAKE_JOBS used".into(),
             Self::Wrkobjdir => "WRKOBJDIR type".into(),
-            Self::Timestamp => "Build start time".into(),
             Self::BuildId => "Build session identifier".into(),
             Self::Packages => "Total packages in the build".into(),
             Self::Succeeded => "Packages built successfully".into(),
@@ -275,8 +264,6 @@ impl Column {
             Self::Deps => "Number of dependent packages".into(),
             Self::Priority => "Scheduler priority order".into(),
             Self::Cpu => "Previous build CPU time".into(),
-            Self::StageDuration(s) => format!("Wall time for {} stage", <&str>::from(s)).into(),
-            Self::StageCpu(s) => format!("CPU time for {} stage", <&str>::from(s)).into(),
         }
     }
 
@@ -287,9 +274,6 @@ impl Column {
 
     /// Parse a column name (e.g. from `-o`).
     pub fn parse(s: &str) -> Option<Self> {
-        if let Some(stage) = s.strip_prefix("cpu:") {
-            return stage.parse().ok().map(Self::StageCpu);
-        }
         Some(match s {
             "pkgname" => Self::Pkgname,
             "pkgpath" => Self::Pkgpath,
@@ -304,7 +288,6 @@ impl Column {
             "disk_usage" => Self::DiskUsage,
             "make_jobs" => Self::MakeJobs,
             "wrkobjdir" => Self::Wrkobjdir,
-            "timestamp" => Self::Timestamp,
             "build_id" => Self::BuildId,
             "packages" => Self::Packages,
             "succeeded" => Self::Succeeded,
@@ -317,7 +300,7 @@ impl Column {
             "deps" => Self::Deps,
             "priority" => Self::Priority,
             "cpu" => Self::Cpu,
-            _ => return s.parse().ok().map(Self::StageDuration),
+            _ => return None,
         })
     }
 }
