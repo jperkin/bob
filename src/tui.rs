@@ -1121,8 +1121,9 @@ struct PanelCache {
 }
 
 /*
- * Recent progress lines retained so they can be redrawn after a terminal
- * resize clears the screen.
+ * Floor for the number of recent progress lines retained so they can be
+ * redrawn after a terminal resize clears the screen.  A taller terminal keeps
+ * at least its own height so the area above the viewport can be fully refilled.
  */
 const HISTORY_LINES: usize = 256;
 
@@ -1202,7 +1203,8 @@ impl MultiProgress {
             })?;
         }
         self.history.push_back(line);
-        while self.history.len() > HISTORY_LINES {
+        let cap = HISTORY_LINES.max(self.last_size.height as usize);
+        while self.history.len() > cap {
             self.history.pop_front();
         }
         Ok(())
@@ -1738,6 +1740,12 @@ impl MultiProgress {
      * with explicit, individually flushed commands instead.
      */
     fn clear_viewport(&mut self) -> io::Result<()> {
+        /*
+         * A resize may not have been processed before teardown; rebuild the
+         * geometry so the viewport top and the final recorded line are correct
+         * before erasing.  A no-op unless a resize is still pending.
+         */
+        self.resync()?;
         let top = self.terminal.get_frame().area().y;
         let mut out = stdout();
         out.execute(MoveTo(0, top))?;
