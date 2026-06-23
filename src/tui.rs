@@ -938,7 +938,7 @@ impl PlainProgress {
  */
 pub enum Progress {
     Plain(PlainProgress),
-    Tui(MultiProgress),
+    Tui(Box<MultiProgress>),
 }
 
 impl Progress {
@@ -951,7 +951,7 @@ impl Progress {
     ) -> Self {
         if tui && io::stdout().is_terminal() && enable_raw_mode().is_ok() {
             match MultiProgress::new(title, finished_title, total, num_workers) {
-                Ok(mp) => return Self::Tui(mp),
+                Ok(mp) => return Self::Tui(Box::new(mp)),
                 Err(e) => {
                     let _ = disable_raw_mode();
                     tracing::warn!(
@@ -1120,7 +1120,15 @@ struct PanelCache {
     rows: Vec<String>,
 }
 
-/// Line-based progress display using ratatui inline viewport.
+/*
+ * Recent progress lines retained so they can be redrawn after a terminal
+ * resize clears the screen.
+ */
+const HISTORY_LINES: usize = 256;
+
+/**
+ * Line-based progress display using ratatui inline viewport.
+ */
 pub(crate) struct MultiProgress {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     fullscreen: Option<Box<Terminal<CrosstermBackend<Stdout>>>>,
@@ -1130,6 +1138,8 @@ pub(crate) struct MultiProgress {
     num_workers: usize,
     panel_cache: Vec<Option<PanelCache>>,
     pending_messages: Vec<Line<'static>>,
+    history: VecDeque<Line<'static>>,
+    last_width: u16,
     interrupt_announced: bool,
 }
 
@@ -1145,6 +1155,7 @@ impl MultiProgress {
         let backend = CrosstermBackend::new(stdout());
         let viewport = Viewport::Inline(height);
         let terminal = Terminal::with_options(backend, TerminalOptions { viewport })?;
+        let last_width = terminal.size()?.width;
         let output_buffers = OutputBuffers::new(num_workers);
 
         Ok(Self {
@@ -1156,6 +1167,8 @@ impl MultiProgress {
             num_workers,
             panel_cache: (0..num_workers).map(|_| None).collect(),
             pending_messages: Vec::new(),
+            history: VecDeque::new(),
+            last_width,
             interrupt_announced: false,
         })
     }
@@ -1170,6 +1183,27 @@ impl MultiProgress {
 
     fn clear_output_buffer(&mut self, id: usize) {
         self.output_buffers.clear(id);
+    }
+
+    /*
+     * Scroll a finished line above the viewport and keep a copy so the recent
+     * lines can be redrawn after a resize clears the screen.
+     *
+     * A horizontal shrink leaves the viewport geometry stale until the next
+     * render repairs it; the draw is skipped in that window and left to the
+     * repaint, while the line is always recorded so it is not lost.
+     */
+    fn scroll_line(&mut self, line: Line<'static>) -> io::Result<()> {
+        if self.terminal.size()?.width >= self.last_width {
+            self.terminal.insert_before(1, |buf| {
+                buf.set_line(0, 0, &line, line.width() as u16);
+            })?;
+        }
+        self.history.push_back(line);
+        while self.history.len() > HISTORY_LINES {
+            self.history.pop_front();
+        }
+        Ok(())
     }
 
     fn print_status(
@@ -1198,9 +1232,7 @@ impl MultiProgress {
             self.pending_messages.push(line);
             return Ok(());
         }
-        self.terminal.insert_before(1, |buf| {
-            buf.set_line(0, 0, &line, line.width() as u16);
-        })?;
+        self.scroll_line(line)?;
         Ok(())
     }
 
@@ -1233,6 +1265,7 @@ impl MultiProgress {
             return Ok(());
         }
         self.state.update_timer_width();
+        let prev_top = self.terminal.get_frame().area().y;
         let interrupt_announced = self.interrupt_announced;
         let state = &self.state;
 
@@ -1280,6 +1313,39 @@ impl MultiProgress {
             frame.render_widget(status, chunks[state.workers.len()]);
         })?;
 
+        /*
+         * ratatui clears the screen and moves the viewport to the top on a
+         * horizontal shrink.  Redraw the recent progress lines and return the
+         * viewport to the row it was on.
+         */
+        let width = self.terminal.get_frame().area().width;
+        if width < self.last_width {
+            self.repaint_history(prev_top)?;
+        }
+        self.last_width = width;
+
+        Ok(())
+    }
+
+    /*
+     * Redraw recent progress lines above the viewport so it returns to row
+     * `top` after a resize clears the screen.  Only bob's own lines are
+     * known, so the remaining space is filled with blank lines.
+     */
+    fn repaint_history(&mut self, top: u16) -> io::Result<()> {
+        let rows = self.terminal.size()?.height as usize;
+        let target = (top as usize).min(rows.saturating_sub(self.num_workers + 1));
+        let shown = target.min(self.history.len());
+        let start = self.history.len() - shown;
+        let lines: Vec<Line<'static>> = self.history.range(start..).cloned().collect();
+        for _ in 0..target - shown {
+            self.terminal.insert_before(1, |_| {})?;
+        }
+        for line in lines {
+            self.terminal.insert_before(1, |buf| {
+                buf.set_line(0, 0, &line, line.width() as u16);
+            })?;
+        }
         Ok(())
     }
 
@@ -1336,12 +1402,24 @@ impl MultiProgress {
         self.fullscreen = None;
         self.view_mode = ViewMode::Inline;
 
+        /*
+         * The terminal may have been resized while in fullscreen, leaving the
+         * inline viewport geometry stale.  Sync it to the current size and
+         * redraw history if it shrank, the same as a resize in inline mode, so
+         * later inserts and the teardown clear use the right coordinates.
+         */
+        let prev_top = self.terminal.get_frame().area().y;
+        self.terminal.autoresize()?;
+        let width = self.terminal.get_frame().area().width;
+        if width < self.last_width {
+            self.repaint_history(prev_top)?;
+        }
+        self.last_width = width;
+
         // Print any messages that were buffered while in fullscreen mode
-        for line in self.pending_messages.drain(..) {
-            self.terminal.insert_before(1, |buf| {
-                let area = buf.area;
-                buf.set_line(0, 0, &line, area.width);
-            })?;
+        let pending: Vec<Line<'static>> = self.pending_messages.drain(..).collect();
+        for line in pending {
+            self.scroll_line(line)?;
         }
 
         Ok(())
