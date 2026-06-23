@@ -27,7 +27,7 @@ use crossterm::terminal::{
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Rect, Size},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
@@ -1139,7 +1139,8 @@ pub(crate) struct MultiProgress {
     panel_cache: Vec<Option<PanelCache>>,
     pending_messages: Vec<Line<'static>>,
     history: VecDeque<Line<'static>>,
-    last_width: u16,
+    last_size: Size,
+    dirty: bool,
     interrupt_announced: bool,
 }
 
@@ -1155,7 +1156,7 @@ impl MultiProgress {
         let backend = CrosstermBackend::new(stdout());
         let viewport = Viewport::Inline(height);
         let terminal = Terminal::with_options(backend, TerminalOptions { viewport })?;
-        let last_width = terminal.size()?.width;
+        let last_size = terminal.size()?;
         let output_buffers = OutputBuffers::new(num_workers);
 
         Ok(Self {
@@ -1168,7 +1169,8 @@ impl MultiProgress {
             panel_cache: (0..num_workers).map(|_| None).collect(),
             pending_messages: Vec::new(),
             history: VecDeque::new(),
-            last_width,
+            last_size,
+            dirty: false,
             interrupt_announced: false,
         })
     }
@@ -1189,12 +1191,12 @@ impl MultiProgress {
      * Scroll a finished line above the viewport and keep a copy so the recent
      * lines can be redrawn after a resize clears the screen.
      *
-     * A horizontal shrink leaves the viewport geometry stale until the next
-     * render repairs it; the draw is skipped in that window and left to the
-     * repaint, while the line is always recorded so it is not lost.
+     * A resize leaves the viewport geometry stale until handle_event rebuilds
+     * it; the draw is skipped in that window and left to the rebuild's repaint,
+     * while the line is always recorded so it is not lost.
      */
     fn scroll_line(&mut self, line: Line<'static>) -> io::Result<()> {
-        if self.terminal.size()?.width >= self.last_width {
+        if self.terminal.size()? == self.last_size {
             self.terminal.insert_before(1, |buf| {
                 buf.set_line(0, 0, &line, line.width() as u16);
             })?;
@@ -1264,8 +1266,16 @@ impl MultiProgress {
         if self.state.suppressed {
             return Ok(());
         }
+        /*
+         * A resize is repaired by handle_event on the input thread, where the
+         * cursor query is safe.  Skip drawing until then so ratatui's own
+         * resize, which clears the screen and moves the viewport, never runs
+         * here.
+         */
+        if self.terminal.size()? != self.last_size {
+            return Ok(());
+        }
         self.state.update_timer_width();
-        let prev_top = self.terminal.get_frame().area().y;
         let interrupt_announced = self.interrupt_announced;
         let state = &self.state;
 
@@ -1313,32 +1323,21 @@ impl MultiProgress {
             frame.render_widget(status, chunks[state.workers.len()]);
         })?;
 
-        /*
-         * ratatui clears the screen and moves the viewport to the top on a
-         * horizontal shrink.  Redraw the recent progress lines and return the
-         * viewport to the row it was on.
-         */
-        let width = self.terminal.get_frame().area().width;
-        if width < self.last_width {
-            self.repaint_history(prev_top)?;
-        }
-        self.last_width = width;
-
         Ok(())
     }
 
     /*
-     * Redraw recent progress lines above the viewport so it returns to row
-     * `top` after a resize clears the screen.  Only bob's own lines are
-     * known, so the remaining space is filled with blank lines.
+     * Refill the screen above the bottom-anchored viewport with recent
+     * history.  Only bob's own lines are known, so any remaining space is
+     * filled with blank lines.
      */
-    fn repaint_history(&mut self, top: u16) -> io::Result<()> {
+    fn repaint_history(&mut self) -> io::Result<()> {
         let rows = self.terminal.size()?.height as usize;
-        let target = (top as usize).min(rows.saturating_sub(self.num_workers + 1));
-        let shown = target.min(self.history.len());
+        let fill = rows.saturating_sub(self.num_workers + 1);
+        let shown = fill.min(self.history.len());
         let start = self.history.len() - shown;
         let lines: Vec<Line<'static>> = self.history.range(start..).cloned().collect();
-        for _ in 0..target - shown {
+        for _ in 0..fill - shown {
             self.terminal.insert_before(1, |_| {})?;
         }
         for line in lines {
@@ -1349,9 +1348,49 @@ impl MultiProgress {
         Ok(())
     }
 
+    /*
+     * Rebuild the inline viewport at the bottom of the terminal after a
+     * resize.  ratatui re-anchors from a cursor offset bob does not maintain,
+     * so drive the layout from the current terminal size: clear, park the
+     * cursor on the last row, recreate the viewport so it anchors at the
+     * bottom, and repaint recent history above it.
+     *
+     * A resize event sets `dirty`, which forces a rebuild even when the final
+     * size matches the last: a fast shrink-then-grow can damage the screen
+     * while ending at the same dimensions.  Recreating queries the cursor, so
+     * this runs only from the input thread, where no read is in progress.
+     */
+    fn resync(&mut self) -> io::Result<()> {
+        let size = self.terminal.size()?;
+        if !self.dirty && size == self.last_size {
+            return Ok(());
+        }
+        self.dirty = false;
+        let height = (self.num_workers + 1) as u16;
+        let mut out = stdout();
+        out.execute(crossterm::terminal::Clear(
+            crossterm::terminal::ClearType::All,
+        ))?;
+        out.execute(MoveTo(0, size.height.saturating_sub(1)))?;
+        let backend = CrosstermBackend::new(stdout());
+        let viewport = Viewport::Inline(height);
+        self.terminal = Terminal::with_options(backend, TerminalOptions { viewport })?;
+        self.last_size = size;
+        self.repaint_history()?;
+        Ok(())
+    }
+
     fn handle_event(&mut self, event: Event) -> io::Result<bool> {
         if self.state.suppressed {
             return Ok(false);
+        }
+
+        if let Event::Resize(..) = event {
+            self.dirty = true;
+            if self.view_mode == ViewMode::Inline {
+                self.resync()?;
+            }
+            return Ok(true);
         }
 
         if let Event::Key(key) = event {
@@ -1402,19 +1441,8 @@ impl MultiProgress {
         self.fullscreen = None;
         self.view_mode = ViewMode::Inline;
 
-        /*
-         * The terminal may have been resized while in fullscreen, leaving the
-         * inline viewport geometry stale.  Sync it to the current size and
-         * redraw history if it shrank, the same as a resize in inline mode, so
-         * later inserts and the teardown clear use the right coordinates.
-         */
-        let prev_top = self.terminal.get_frame().area().y;
-        self.terminal.autoresize()?;
-        let width = self.terminal.get_frame().area().width;
-        if width < self.last_width {
-            self.repaint_history(prev_top)?;
-        }
-        self.last_width = width;
+        /* Rebuild the viewport if the terminal changed size while in fullscreen. */
+        self.resync()?;
 
         // Print any messages that were buffered while in fullscreen mode
         let pending: Vec<Line<'static>> = self.pending_messages.drain(..).collect();
