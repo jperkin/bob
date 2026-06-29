@@ -1244,10 +1244,42 @@ impl Sandbox {
     /**
      * Run an unmount command, retrying a busy mountpoint before giving up.
      *
-     * Failures are retried with exponential backoff, defined per-platform.
+     * The first attempt runs under `LC_ALL=C` so a path reported as
+     * already not mounted matches a fixed wording, making a destroy re-run
+     * idempotent in the case where it is a nested mount on top of a read-only
+     * source, and so the target directory will always exist.
+     *
+     * Remaining attempts run in the caller's locale, so a genuine failure is
+     * reported to the user in their own language.  A busy mountpoint is
+     * retried with exponential backoff, defined per-platform.
      */
     fn run_umount(&self, cmd: &mut Command, dest: &Path) -> Result<()> {
+        /* First attempt under a fixed locale.  A plain success is done. */
+        let saved_lc_all = std::env::var_os("LC_ALL");
+        cmd.env("LC_ALL", "C");
         let mut out = cmd.output().context("Unable to execute unmount")?;
+        if out.status.success() {
+            return Ok(());
+        }
+        /*
+         * A failure reporting "not mounted" is also done.
+         *
+         * "not mounted": Linux, illumos
+         * "not currently mounted": NetBSD
+         */
+        let diag = String::from_utf8_lossy(&out.stderr).to_ascii_lowercase();
+        if diag.contains("not mounted") || diag.contains("not currently mounted") {
+            return Ok(());
+        }
+        /*
+         * Still mounted.  Restore the caller's locale so the error they
+         * ultimately see is in their own language.
+         */
+        if let Some(v) = &saved_lc_all {
+            cmd.env("LC_ALL", v);
+        } else {
+            cmd.env_remove("LC_ALL");
+        }
         for retry in 0..UNMOUNT_MAX_RETRIES {
             if out.status.success() {
                 if retry > 0 {
