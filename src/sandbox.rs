@@ -1509,6 +1509,11 @@ impl Sandbox {
                             .with_context(|| format!("Failed to create {}", parent.display()))?;
                     }
                     cp_r::CopyOptions::new()
+                        .filter(|_, entry| {
+                            Ok(entry
+                                .file_type()
+                                .map_or(true, |t| t.is_file() || t.is_dir() || t.is_symlink()))
+                        })
                         .copy_tree(src, &dest)
                         .with_context(|| {
                             format!("Failed to copy {} to {}", src.display(), dest.display())
