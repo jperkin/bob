@@ -1,5 +1,7 @@
 AGENTS.md
 CLAUDE.md
+*.swp
+/book/book
 /scripts
 /target
 /todo
