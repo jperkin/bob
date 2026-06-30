@@ -155,6 +155,8 @@ sandboxes = {
         -- Enable DNS resolution via mDNSResponder socket per-sandbox
         { action = "macos-mdns-listener" },
 
+	{ action = "copy", dir = "/var/db/timezone" },
+
         -- At this point everything should be set up so that chrooted commands
         -- will execute successfully.  Perform additional chroot setup.
         { action = "cmd", chroot = true, create = [[
