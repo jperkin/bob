@@ -1508,9 +1508,11 @@ impl Sandbox {
                         fs::create_dir_all(parent)
                             .with_context(|| format!("Failed to create {}", parent.display()))?;
                     }
-                    copy_dir::copy_dir(src, &dest).with_context(|| {
-                        format!("Failed to copy {} to {}", src.display(), dest.display())
-                    })?;
+                    cp_r::CopyOptions::new()
+                        .copy_tree(src, &dest)
+                        .with_context(|| {
+                            format!("Failed to copy {} to {}", src.display(), dest.display())
+                        })?;
                     fs::set_permissions(&dest, fs::metadata(src)?.permissions())?;
                     None
                 }
