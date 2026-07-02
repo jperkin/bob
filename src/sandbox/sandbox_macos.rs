@@ -127,6 +127,7 @@ impl Sandbox {
             .status()
             .context(format!("Unable to execute {}", cmd))?;
         if status.success() {
+            let _ = fs::File::create(dest.join(".metadata_never_index"));
             let fseventsd = dest.join(".fseventsd");
             let _ = fs::create_dir_all(&fseventsd);
             let _ = fs::File::create(fseventsd.join("no_log"));
