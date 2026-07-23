@@ -798,6 +798,19 @@ impl Config {
     pub fn load_with_pkgsrc(config_path: Option<&Path>) -> Result<(Config, Pkgsrc)> {
         let (config, pkgsrc) = Self::load_with_optional_pkgsrc(config_path)?;
         let pkgsrc = pkgsrc.context("pkgsrc section required for this command")?;
+
+        /*
+         * Validate bootstrap path exists if specified.
+         */
+        if let Some(bootstrap) = pkgsrc.bootstrap.as_ref()
+            && !bootstrap.exists()
+        {
+            anyhow::bail!(
+                "pkgsrc.bootstrap file {} does not exist",
+                bootstrap.display()
+            );
+        }
+
         Ok((config, pkgsrc))
     }
 
@@ -839,18 +852,6 @@ impl Config {
             })?;
 
         let base_dir = filename.parent().unwrap_or_else(|| Path::new("."));
-
-        /*
-         * Validate bootstrap path exists if specified.
-         */
-        if let Some(bootstrap) = pkgsrc.as_ref().and_then(|p| p.bootstrap.as_ref())
-            && !bootstrap.exists()
-        {
-            anyhow::bail!(
-                "pkgsrc.bootstrap file {} does not exist",
-                bootstrap.display()
-            );
-        }
 
         /*
          * Resolve dbdir: explicit value from options, or the platform
