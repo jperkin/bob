@@ -149,9 +149,7 @@ sandboxes = {
         { action = "mount", fs = "null", dir = "/sbin", opts = "-o ro" },
         { action = "mount", fs = "null", dir = "/libexec", opts = "-o ro" },
         { action = "mount", fs = "null", dir = "/lib", opts = "-o ro" },
-        { action = "mount", fs = "null", dir = "/usr/X11R7", opts = "-o ro" },
         { action = "mount", fs = "null", dir = "/usr/bin", opts = "-o ro" },
-        { action = "mount", fs = "null", dir = "/usr/games", opts = "-o ro" },
         { action = "mount", fs = "null", dir = "/usr/include", opts = "-o ro" },
         { action = "mount", fs = "null", dir = "/usr/lib", opts = "-o ro" },
         { action = "mount", fs = "null", dir = "/usr/libdata", opts = "-o ro" },
@@ -159,6 +157,12 @@ sandboxes = {
         { action = "mount", fs = "null", dir = "/usr/share", opts = "-o ro" },
         { action = "mount", fs = "null", dir = "/usr/sbin", opts = "-o ro" },
         { action = "mount", fs = "null", dir = "/var/mail", opts = "-o ro" },
+
+	-- Optional sets or potential to not exist should not cause errors.
+        { action = "mount", fs = "null", dir = "/usr/X11R7", opts = "-o ro",
+          only = { exists = "/usr/X11R7" } },
+        { action = "mount", fs = "null", dir = "/usr/games", opts = "-o ro",
+          only = { exists = "/usr/games" } },
 
         { action = "copy", dir = "/etc" },
 
