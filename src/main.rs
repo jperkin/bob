@@ -217,7 +217,7 @@ Each of the main target commands depend on the previous being up-to-date, so
 #[command(
     name = "bob",
     author,
-    version,
+    version = env!("BOB_VERSION"),
     about,
     long_about = long_about(),
 )]
