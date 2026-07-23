@@ -46,9 +46,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
  * full line is printed by [`print_elapsed`] after the work completes.
  */
 pub fn print_status(msg: &str) {
-    if io::stdout().is_terminal() {
-        print!("{}...", msg);
-        let _ = io::Write::flush(&mut io::stdout());
+    if io::stderr().is_terminal() {
+        eprint!("{}...", msg);
+        let _ = io::Write::flush(&mut io::stderr());
     }
 }
 
@@ -60,10 +60,10 @@ pub fn print_status(msg: &str) {
  * "msg... done (Xs)" as a single line.
  */
 pub fn print_elapsed(msg: &str, elapsed: Duration) {
-    if io::stdout().is_terminal() {
-        println!(" done ({:.1}s)", elapsed.as_secs_f32());
+    if io::stderr().is_terminal() {
+        eprintln!(" done ({:.1}s)", elapsed.as_secs_f32());
     } else {
-        println!("{}... done ({:.1}s)", msg, elapsed.as_secs_f32());
+        eprintln!("{}... done ({:.1}s)", msg, elapsed.as_secs_f32());
     }
 }
 
@@ -73,10 +73,10 @@ pub fn print_elapsed(msg: &str, elapsed: Duration) {
  * [`print_status`] is closed honestly rather than left dangling.
  */
 pub fn print_failed(msg: &str, elapsed: Duration) {
-    if io::stdout().is_terminal() {
-        println!(" failed ({:.1}s)", elapsed.as_secs_f32());
+    if io::stderr().is_terminal() {
+        eprintln!(" failed ({:.1}s)", elapsed.as_secs_f32());
     } else {
-        println!("{}... failed ({:.1}s)", msg, elapsed.as_secs_f32());
+        eprintln!("{}... failed ({:.1}s)", msg, elapsed.as_secs_f32());
     }
 }
 
