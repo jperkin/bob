@@ -1617,6 +1617,31 @@ impl Database {
     }
 
     /**
+     * Whether every package added this session has been accounted for.
+     *
+     * Each selected package ends with a build result, or a scan outcome
+     * ruling it out.  One with neither is still waiting to be built.
+     */
+    pub fn build_complete(&self) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT NOT EXISTS (
+                     SELECT 1 FROM package_state s
+                     WHERE s.selected = 1
+                       AND NOT EXISTS (
+                           SELECT 1 FROM builds b WHERE b.package_id = s.package_id
+                       )
+                       AND NOT EXISTS (
+                           SELECT 1 FROM scan_outcomes o WHERE o.package_id = s.package_id
+                       )
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .context("Failed to check whether the build is complete")
+    }
+
+    /**
      * Store the pkgsrc environment to the database.  Errors if already present
      * as this should only ever be done once.
      */

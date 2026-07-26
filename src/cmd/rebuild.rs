@@ -53,21 +53,27 @@ pub fn prepare(
         return Ok(None);
     };
 
-    let mut to_rebuild: HashSet<String> = targets.iter().cloned().collect();
-
-    if args.only {
-        eprintln!("Warning: rebuilding without dependents may cause inconsistent packages");
-    } else {
-        for target in &targets {
-            if let Some(pkg) = db.get_package_by_name(target)? {
-                for dep_id in db.get_transitive_reverse_deps(pkg.id)? {
-                    to_rebuild.insert(db.get_pkgname(dep_id)?);
-                }
+    /*
+     * Dependents are invalidated either way.  --only builds just the
+     * targets, leaving the dependents waiting for a later build.
+     */
+    let mut to_clear: HashSet<String> = targets.iter().cloned().collect();
+    for target in &targets {
+        if let Some(pkg) = db.get_package_by_name(target)? {
+            for dep_id in db.get_transitive_reverse_deps(pkg.id)? {
+                to_clear.insert(db.get_pkgname(dep_id)?);
             }
         }
     }
 
-    let cleared = clear_build_cache(db, &to_rebuild)?;
+    let to_build: HashSet<String> = if args.only {
+        eprintln!("Warning: rebuilding without dependents may lead to inconsistent packages");
+        targets.iter().cloned().collect()
+    } else {
+        to_clear.clone()
+    };
+
+    let cleared = clear_build_cache(db, &to_clear)?;
     if cleared > 0 {
         println!("Cleared {} cached build result(s)", cleared);
     }
@@ -76,7 +82,7 @@ pub fn prepare(
         .get_buildable_packages()
         .context("No scan data cached - run 'bob scan' first")?;
     if !args.all {
-        buildable.retain(|k, _| to_rebuild.contains(k.pkgname()));
+        buildable.retain(|k, _| to_build.contains(k.pkgname()));
     }
 
     if buildable.is_empty() {

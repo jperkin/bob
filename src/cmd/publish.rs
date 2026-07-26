@@ -17,6 +17,9 @@
 /*!
  * Implementation of the `bob publish` command.
  *
+ * Every form of publishing requires the build to have run to
+ * completion, with all added packages accounted for.
+ *
  * Package publishing has two knobs in `publish.packages`:
  *
  * - `tmppath` (optional): if unset, rsync writes straight to `path`.
@@ -76,6 +79,10 @@ pub fn run(
     let build_id = db
         .build_id()
         .context("No build recorded.  Perform a build first.")?;
+
+    if !db.build_complete()? {
+        bail!("Build did not run to completion.  Finish the build before publishing.");
+    }
 
     if report || email {
         generate_reports(config, pkgsrc, db, &build_id, baseline, no_diff)?;
