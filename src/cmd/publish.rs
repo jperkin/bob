@@ -50,7 +50,6 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use glob::Pattern;
 use strum::VariantArray;
 use tracing::{debug, info};
 
@@ -58,6 +57,8 @@ use bob::build::{BuildResult, BuildSummary};
 use bob::config::{Config, Pkgsrc, Publish, PublishPackages, ScriptValue};
 use bob::db::Database;
 use bob::{PackageCounts, PackageState};
+
+use super::util::pkg_pattern;
 
 struct PublishResult {
     uploaded: usize,
@@ -119,7 +120,7 @@ fn publish_packages(config: &Config, db: &Database, dry_run: bool) -> Result<Pub
     let pkgsrc_env = db.load_pkgsrc_env()?;
     let successful = db.get_successful_packages()?;
 
-    validate_pre_publish(packages, &successful)?;
+    validate_pre_publish(packages, db, &successful)?;
 
     if dry_run {
         println!("Publishing packages (dry-run)...");
@@ -440,7 +441,15 @@ fn send_email(config: &Config, db: &Database, build_id: &str, dry_run: bool) -> 
     Ok(())
 }
 
-fn validate_pre_publish(packages: &PublishPackages, successful: &[String]) -> Result<()> {
+/*
+ * Check the `minimum` and `required` guards before anything is
+ * uploaded.
+ */
+fn validate_pre_publish(
+    packages: &PublishPackages,
+    db: &Database,
+    successful: &[String],
+) -> Result<()> {
     if let Some(minimum) = packages.minimum
         && successful.len() < minimum
     {
@@ -451,20 +460,56 @@ fn validate_pre_publish(packages: &PublishPackages, successful: &[String]) -> Re
         );
     }
 
+    if packages.required.is_empty() {
+        return Ok(());
+    }
+
+    let status = db.get_all_package_status()?;
+    let scanfail = db.get_scan_failures()?;
+    let mut errors: Vec<String> = Vec::new();
+
     for pattern_str in &packages.required {
-        let pattern = Pattern::new(pattern_str).with_context(|| {
-            format!(
-                "Invalid glob pattern in publish.packages.required: {}",
-                pattern_str
-            )
-        })?;
-        let matched = successful.iter().any(|p| pattern.matches(p));
-        if !matched {
-            bail!(
-                "Required pattern '{}' did not match any successful package",
-                pattern_str
-            );
+        let re = pkg_pattern(pattern_str)
+            .with_context(|| format!("In publish.packages.required: {}", pattern_str))?;
+        let mut matched = false;
+        let mut failed: Vec<String> = Vec::new();
+
+        for pkg in &status {
+            if !re.is_match(&pkg.pkgname) && !re.is_match(&pkg.pkg_location) {
+                continue;
+            }
+            matched = true;
+            let state = pkg
+                .build_outcome
+                .and_then(|o| PackageState::try_from(o).ok());
+            if !state.is_some_and(PackageState::is_success) {
+                failed.push(format!(
+                    "{} ({})",
+                    pkg.pkgname,
+                    state.map_or("not built", PackageState::as_str)
+                ));
+            }
         }
+
+        for (pkgpath, _) in &scanfail {
+            if re.is_match(pkgpath) {
+                matched = true;
+                failed.push(format!("{} (scan failed)", pkgpath));
+            }
+        }
+
+        if !matched {
+            errors.push(format!("{}: no package match found", pattern_str));
+        } else if !failed.is_empty() {
+            errors.push(format!("{}: {}", pattern_str, failed.join(", ")));
+        }
+    }
+
+    if !errors.is_empty() {
+        bail!(
+            "Required packages are unavailable:\n  {}",
+            errors.join("\n  ")
+        );
     }
 
     Ok(())
