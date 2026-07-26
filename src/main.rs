@@ -16,7 +16,6 @@
 
 use anyhow::{Context, Result, bail};
 use bob::Interrupted;
-use bob::PackageState;
 use bob::RunState;
 use bob::build::{self, Build};
 use bob::config::{Config, Pkgsrc};
@@ -153,20 +152,9 @@ impl BuildRunner {
     }
 
     /**
-     * Regenerate pkg_summary if the set of successful packages changed
-     * or any packages were rebuilt (their metadata may have changed).
-     *
-     * `prior` is the list of successful package names captured before any
-     * database mutations (build results stored, cache cleared, etc.).
+     * Generate pkg_summary.
      */
-    fn update_pkg_summary(&self, prior: &[String], summary: &build::BuildSummary) {
-        let changed = match self.db.get_successful_packages() {
-            Ok(current) => prior != current || summary.counts().states[PackageState::Success] > 0,
-            Err(_) => true,
-        };
-        if !changed {
-            return;
-        }
+    fn update_pkg_summary(&self) {
         bob::print_status("Generating pkg_summary");
         tracing::debug!("Generating pkg_summary");
         let start = std::time::Instant::now();
@@ -525,16 +513,15 @@ fn run() -> Result<()> {
             let mut scope = SandboxScope::new(sandbox, runner.state.clone());
             runner.run_scan_phase(&mut scan, &mut scope)?;
             scan.resolve_with_report(&runner.db, runner.config.strict_scan())?;
-            let prior = runner.db.get_successful_packages().unwrap_or_default();
             cmd::build::check_up_to_date(&runner.config, &runner.pkgsrc, &runner.db)?;
-            let summary = cmd::build::run_build_with(
+            cmd::build::run_build_with(
                 &runner.config,
                 &runner.pkgsrc,
                 &runner.db,
                 &runner.state,
                 scope,
             )?;
-            runner.update_pkg_summary(&prior, &summary);
+            runner.update_pkg_summary();
         }
         Cmd::Rebuild {
             all,
@@ -542,7 +529,6 @@ fn run() -> Result<()> {
             packages,
         } => {
             let runner = BuildRunner::new(args.config.as_deref())?;
-            let prior = runner.db.get_successful_packages().unwrap_or_default();
             let Some(buildable) = cmd::rebuild::prepare(
                 &runner.db,
                 cmd::rebuild::RebuildArgs {
@@ -556,8 +542,8 @@ fn run() -> Result<()> {
             };
             let sandbox = Sandbox::new(&runner.config, Some(&runner.pkgsrc));
             let scope = SandboxScope::new(sandbox, runner.state.clone());
-            let summary = runner.run_build(buildable, scope)?;
-            runner.update_pkg_summary(&prior, &summary);
+            runner.run_build(buildable, scope)?;
+            runner.update_pkg_summary();
         }
         Cmd::Publish {
             packages,
