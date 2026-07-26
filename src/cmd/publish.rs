@@ -146,7 +146,7 @@ fn publish_packages(config: &Config, db: &Database, dry_run: bool) -> Result<Pub
     );
 
     let filter_path = config.dbdir().join("rsync-filter");
-    write_rsync_filter(&uploadable, &filter_path)?;
+    write_rsync_filter(&uploadable, &config.summary().compression, &filter_path)?;
 
     let result = run_rsync(
         publish,
@@ -515,17 +515,18 @@ fn validate_pre_publish(
     Ok(())
 }
 
-fn write_rsync_filter(packages: &[&String], path: &Path) -> Result<()> {
+/*
+ * Write the rsync include list: the uploadable packages, plus a
+ * pkg_summary for each configured compression format.
+ */
+fn write_rsync_filter(packages: &[&String], formats: &[String], path: &Path) -> Result<()> {
     let mut file = std::fs::File::create(path)
         .with_context(|| format!("Failed to create {}", path.display()))?;
 
-    let mut lines: Vec<String> = vec![
-        "+ All/".to_string(),
-        "+ All/pkg_summary.bz2".to_string(),
-        "+ All/pkg_summary.gz".to_string(),
-        "+ All/pkg_summary.xz".to_string(),
-        "+ All/pkg_summary.zst".to_string(),
-    ];
+    let mut lines: Vec<String> = vec!["+ All/".to_string()];
+    for fmt in formats {
+        lines.push(format!("+ All/pkg_summary.{}", fmt));
+    }
 
     for pkgname in packages {
         lines.push(format!("+ All/{}.tgz", pkgname));
