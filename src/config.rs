@@ -226,6 +226,7 @@
  * | Function | Description |
  * |----------|-------------|
  * | `read_pkgpaths(file)` | Read package paths from a file, one per line.  Blank lines and `#` comments are ignored. |
+ * | `read_pkglist(file)` | Read package patterns from a file, one per line.  Blank lines and `#` comments are ignored. |
  * | `scriptenv(run, env)` | Bundle a shell script body with environment variables to set when it runs.  For script-valued fields such as `cmd` actions and `publish.packages.swapcmd`. |
  * | `dedent(s)` | Strip the common leading whitespace from a multi-line string, so script bodies can be indented to match the surrounding configuration. |
  */

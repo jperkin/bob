@@ -14,6 +14,21 @@ function read_pkgpaths(file)
 end
 
 --
+-- Read package patterns from a file, one per line.  Blank lines and
+-- comments starting with # are ignored.  Inline comments are supported.
+--
+function read_pkglist(file)
+    local pkgs = {}
+    for line in io.lines(file) do
+        local pkg = line:match("^%s*([^#%s]+)")
+        if pkg then
+            table.insert(pkgs, pkg)
+        end
+    end
+    return pkgs
+end
+
+--
 -- scriptenv(run, env) bundles a shell script body with the environment
 -- variables that should be set when it runs.  Intended for use inside
 -- a function wrapping a script-typed config field, so the env values
