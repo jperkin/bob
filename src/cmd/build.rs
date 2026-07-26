@@ -40,7 +40,7 @@ use bob::sandbox::SandboxScope;
  * Determines whether each package's binary is current with its sources by
  * checking file hashes, CVS IDs, and dependency states. Packages verified
  * as up-to-date are recorded with `PackageState::UpToDate` to skip during
- * build; others have their rebuild reason stored in the database.
+ * build; others are marked for rebuilding, with the reason.
  *
  * Processing uses topological waves to avoid redundant checks. Packages
  * are checked only after all their dependencies have been processed. When
@@ -106,7 +106,7 @@ pub fn check_up_to_date(config: &Config, pkgsrc: &Pkgsrc, db: &Database) -> Resu
             let pkgfile = packages_dir.join(format!("{}.tgz", pkgname));
             if !pkgfile.exists() {
                 needs_rebuild.insert(id);
-                db.store_build_reason(id, &bob::BuildReason::PackageNotFound.to_string())?;
+                db.mark_for_rebuild(id, &bob::BuildReason::PackageNotFound.to_string())?;
             }
         }
         tx.commit()?;
@@ -211,7 +211,7 @@ pub fn check_up_to_date(config: &Config, pkgsrc: &Pkgsrc, db: &Database) -> Resu
                     up_to_date_count += 1;
                 }
                 Ok(Some(reason)) => {
-                    db.store_build_reason(id, &reason.to_string())?;
+                    db.mark_for_rebuild(id, &reason.to_string())?;
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -219,14 +219,14 @@ pub fn check_up_to_date(config: &Config, pkgsrc: &Pkgsrc, db: &Database) -> Resu
                         error = format!("{e:#}"),
                         "Error checking up-to-date status"
                     );
-                    db.store_build_reason(id, &format!("check failed: {}", e))?;
+                    db.mark_for_rebuild(id, &format!("check failed: {}", e))?;
                 }
             }
         }
 
         for (id, dep) in propagated_from {
             let reason = bob::BuildReason::DependencyRefresh(packages[&dep].0.clone());
-            db.store_build_reason(id, &reason.to_string())?;
+            db.mark_for_rebuild(id, &reason.to_string())?;
         }
         tx.commit()?;
     }

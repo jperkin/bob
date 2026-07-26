@@ -920,12 +920,17 @@ impl Database {
     // ========================================================================
 
     /**
-     * Store why a package needs to be built.
+     * Mark a package for rebuilding, recording why.  Removes any
+     * previous build result.
      */
-    pub fn store_build_reason(&self, package_id: i64, reason: &str) -> Result<()> {
+    pub fn mark_for_rebuild(&self, package_id: i64, reason: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE package_state SET build_reason = ?1 WHERE package_id = ?2",
             params![reason, package_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM builds WHERE package_id = ?1",
+            params![package_id],
         )?;
         Ok(())
     }
