@@ -74,7 +74,6 @@ pub fn generate_pkg_summary(db: &Database, threads: usize, summary: &Summary) ->
 
     if pkgnames.is_empty() {
         debug!("No successful packages to include in pkg_summary");
-        return Ok(());
     }
 
     let packages_dir = pkgsrc_env.packages.join("All");
