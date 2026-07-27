@@ -154,27 +154,18 @@ impl BuildRunner {
     /**
      * Generate pkg_summary.
      */
-    fn update_pkg_summary(&self) {
+    fn update_pkg_summary(&self) -> Result<()> {
         bob::print_status("Generating pkg_summary");
         tracing::debug!("Generating pkg_summary");
         let start = std::time::Instant::now();
-        match bob::generate_pkg_summary(
-            &self.db,
-            self.config.build_threads(),
-            self.config.summary(),
-        ) {
-            Ok(()) => {
-                bob::print_elapsed("Generating pkg_summary", start.elapsed());
-                tracing::debug!(
-                    elapsed_ms = start.elapsed().as_millis(),
-                    "Finished generating pkg_summary"
-                );
-            }
-            Err(e) => {
-                println!();
-                eprintln!("Warning: Failed to generate pkg_summary: {}", e);
-            }
-        }
+        bob::generate_pkg_summary(&self.db, self.config.build_threads(), self.config.summary())
+            .context("Failed to generate pkg_summary")?;
+        bob::print_elapsed("Generating pkg_summary", start.elapsed());
+        tracing::debug!(
+            elapsed_ms = start.elapsed().as_millis(),
+            "Finished generating pkg_summary"
+        );
+        Ok(())
     }
 }
 
@@ -521,7 +512,7 @@ fn run() -> Result<()> {
                 &runner.state,
                 scope,
             )?;
-            runner.update_pkg_summary();
+            runner.update_pkg_summary()?;
         }
         Cmd::Rebuild {
             all,
@@ -543,7 +534,9 @@ fn run() -> Result<()> {
             let sandbox = Sandbox::new(&runner.config, Some(&runner.pkgsrc));
             let scope = SandboxScope::new(sandbox, runner.state.clone());
             runner.run_build(buildable, scope)?;
-            runner.update_pkg_summary();
+            if !only {
+                runner.update_pkg_summary()?;
+            }
         }
         Cmd::Publish {
             packages,
