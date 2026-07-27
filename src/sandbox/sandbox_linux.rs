@@ -20,6 +20,8 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitStatus};
 
+pub(crate) fn init() {}
+
 impl Sandbox {
     pub(crate) fn mount_bindfs(
         &self,

@@ -67,12 +67,20 @@
  */
 #[cfg(target_os = "linux")]
 mod sandbox_linux;
+#[cfg(target_os = "linux")]
+use sandbox_linux as platform;
 #[cfg(target_os = "macos")]
 mod sandbox_macos;
+#[cfg(target_os = "macos")]
+use sandbox_macos as platform;
 #[cfg(target_os = "netbsd")]
 mod sandbox_netbsd;
+#[cfg(target_os = "netbsd")]
+use sandbox_netbsd as platform;
 #[cfg(any(target_os = "illumos", target_os = "solaris"))]
 mod sandbox_sunos;
+#[cfg(any(target_os = "illumos", target_os = "solaris"))]
+use sandbox_sunos as platform;
 
 use crate::action::{Action, ActionContext, ActionType, FSType};
 use crate::config::{Config, Pkgsrc, PkgsrcEnv};
@@ -87,7 +95,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc::RecvTimeoutError;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Once, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, info_span, warn};
 
@@ -335,6 +343,13 @@ impl Sandbox {
     }
 
     fn with_context(config: &Config, pkgsrc: Option<&Pkgsrc>, context: ActionContext) -> Sandbox {
+        /*
+         * Process-wide setup the platform's sandbox commands need.
+         * Children inherit whatever it configures.
+         */
+        static INIT: Once = Once::new();
+        INIT.call_once(platform::init);
+
         Sandbox {
             config: config.clone(),
             pkgsrc: pkgsrc.cloned(),

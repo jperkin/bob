@@ -22,6 +22,28 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use tracing::{debug, warn};
 
+/**
+ * Raise the open file limit for bob and the processes it starts.  The
+ * macOS default of 256 has proven to be too low for bindfs.  Currently
+ * we clamp the maximum to 8192 to avoid any unnecessary overheads.
+ */
+pub(crate) fn init() {
+    let mut rlim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) != 0 {
+            warn!(error = %std::io::Error::last_os_error(), "Unable to read the open file limit");
+            return;
+        }
+        rlim.rlim_cur = rlim.rlim_cur.max(rlim.rlim_max.min(8192));
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) != 0 {
+            warn!(error = %std::io::Error::last_os_error(), "Unable to raise the open file limit");
+        }
+    }
+}
+
 impl Sandbox {
     pub(crate) fn mount_bindfs(
         &self,
@@ -30,32 +52,15 @@ impl Sandbox {
         opts: &[&str],
     ) -> anyhow::Result<Option<ExitStatus>> {
         let cmd = self.config.bindfs();
-        /*
-         * pre_exec raises the NOFILE limit for the bindfs process so it
-         * does not run out of file descriptors when mounting large
-         * directory trees (e.g. Xcode SDKs).  The unsafe block is
-         * required by the pre_exec API; setrlimit is async-signal-safe.
-         */
-        Ok(Some(unsafe {
+        Ok(Some(
             Command::new(cmd)
                 .args(opts)
                 .arg(src)
                 .arg(dest)
                 .process_group(0)
-                .pre_exec(|| {
-                    let mut rlim = libc::rlimit {
-                        rlim_cur: 0,
-                        rlim_max: 0,
-                    };
-                    if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
-                        rlim.rlim_cur = rlim.rlim_max;
-                        libc::setrlimit(libc::RLIMIT_NOFILE, &rlim);
-                    }
-                    Ok(())
-                })
                 .status()
-                .context(format!("Unable to execute {}", cmd))?
-        }))
+                .context(format!("Unable to execute {}", cmd))?,
+        ))
     }
 
     pub(crate) fn mount_devfs(
