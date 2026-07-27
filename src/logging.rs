@@ -127,12 +127,10 @@ where
             let mut guard = log.writer.lock().expect("setup.log mutex poisoned");
             let writer = match guard.as_mut() {
                 Some(w) => w,
-                None => {
-                    let f = File::create(&log.path).unwrap_or_else(|e| {
-                        panic!("Failed to create {}: {}", log.path.display(), e)
-                    });
-                    guard.insert(f)
-                }
+                None => match File::create(&log.path) {
+                    Ok(f) => guard.insert(f),
+                    Err(_) => return,
+                },
             };
             let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
             let level = event.metadata().level();
