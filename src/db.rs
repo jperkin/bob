@@ -275,7 +275,7 @@ const SCHEMA_VERSION: i32 = 20260611;
 /**
  * Schema version for history.db - update when history schema changes.
  */
-const HISTORY_SCHEMA_VERSION: i32 = 20260612;
+const HISTORY_SCHEMA_VERSION: i32 = 20260730;
 
 /**
  * Summary of a package's most recent build from history.
@@ -2152,7 +2152,8 @@ impl Database {
                     COALESCE(m.up_to_date, 0), \
                     COALESCE(a.failed, 0), \
                     COALESCE(a.masked, 0), \
-                    COALESCE(m.duration_ms, 0) \
+                    COALESCE(m.duration_ms, 0), \
+                    COALESCE(m.completed, 0) \
              FROM all_builds b \
              LEFT JOIN attempted a ON a.build_id = b.build_id \
              LEFT JOIN build_metadata m ON m.build_id = b.build_id \
@@ -2167,6 +2168,7 @@ impl Database {
                 failed: row.get::<_, i64>(4)? as usize,
                 masked: row.get::<_, i64>(5)? as usize,
                 duration_ms: row.get::<_, i64>(6)? as u64,
+                completed: row.get(7)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -2186,6 +2188,24 @@ impl Database {
         let rows = stmt.query_map([], |row| row.get(0))?;
         rows.collect::<Result<Vec<_>, _>>()
             .context("Failed to list history builds")
+    }
+
+    /**
+     * Build IDs that ran to completion, most recent first.
+     *
+     * A build that was interrupted, crashed, or is still running holds
+     * results only for the packages it reached, so it is not a sound
+     * baseline to compare a later build against.
+     */
+    pub fn completed_build_ids(&self) -> Result<Vec<String>> {
+        let conn = self.history_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT build_id FROM build_metadata WHERE completed = 1 \
+             ORDER BY build_id DESC",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("Failed to list completed builds")
     }
 
     /**
@@ -2235,6 +2255,22 @@ impl Database {
             "INSERT INTO build_metadata (build_id, up_to_date) VALUES (?1, ?2) \
              ON CONFLICT(build_id) DO UPDATE SET up_to_date = excluded.up_to_date",
             params![build_id, count as i64],
+        )?;
+        Ok(())
+    }
+
+    /**
+     * Record that a build ran to completion.
+     *
+     * Read back by [`Database::completed_build_ids`] to decide which
+     * builds a later report may use as its baseline.
+     */
+    pub fn mark_build_completed(&self, build_id: &str) -> Result<()> {
+        let conn = self.history_conn()?;
+        conn.execute(
+            "INSERT INTO build_metadata (build_id, completed) VALUES (?1, 1) \
+             ON CONFLICT(build_id) DO UPDATE SET completed = 1",
+            params![build_id],
         )?;
         Ok(())
     }
@@ -2439,6 +2475,7 @@ pub struct BuildListEntry {
     pub failed: usize,
     pub masked: usize,
     pub duration_ms: u64,
+    pub completed: bool,
 }
 
 /**
@@ -2457,6 +2494,7 @@ const HISTORY_MIGRATIONS: &[HistoryMigration] = &[
     (20260609, 20260610, migrate_history_20260609_to_20260610),
     (20260610, 20260611, migrate_history_20260610_to_20260611),
     (20260611, 20260612, migrate_history_20260611_to_20260612),
+    (20260612, 20260730, migrate_history_20260612_to_20260730),
 ];
 
 /**
@@ -2659,6 +2697,48 @@ fn migrate_history_20260611_to_20260612(conn: &Connection) -> Result<()> {
 }
 
 /**
+ * Migrate history.db from v20260612 to v20260730.
+ *
+ * Adds the `completed` column to `build_metadata`, recording whether a
+ * build ran to the end.
+ *
+ * Existing builds are classified by `revision`, which is written from
+ * the same point in the build that now sets `completed`, so a build
+ * that has no revision never reached it.  A build appearing only in
+ * `build_history` has no revision either: storing one creates the
+ * `build_metadata` row, so the row's absence means none was stored.
+ *
+ * Both readings need the tree to be under version control.  A history
+ * holding no revision anywhere carries no evidence either way, so
+ * every build in it is set completed, those with no `build_metadata`
+ * row included, leaving baseline choice as it was before the column
+ * existed.
+ */
+fn migrate_history_20260612_to_20260730(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
+        "ALTER TABLE build_metadata ADD COLUMN completed INTEGER NOT NULL DEFAULT 0;
+         UPDATE build_metadata SET completed =
+             CASE WHEN EXISTS (
+                      SELECT 1 FROM build_metadata WHERE revision IS NOT NULL
+                  )
+                  THEN revision IS NOT NULL
+                  ELSE 1
+             END;
+         INSERT INTO build_metadata (build_id, completed)
+             SELECT DISTINCT build_id, 1 FROM build_history
+             WHERE build_id IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM build_metadata WHERE revision IS NOT NULL
+               )
+             ON CONFLICT(build_id) DO NOTHING;",
+    )?;
+    tx.execute("UPDATE schema_version SET version = ?1", params![20260730])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/**
  * Open and initialize the history database connection.
  */
 fn open_history_conn(dbdir: &Path) -> Result<Connection> {
@@ -2763,7 +2843,8 @@ pub(crate) fn create_history_schema(conn: &Connection) -> Result<()> {
              build_id    TEXT PRIMARY KEY,
              revision    TEXT,
              up_to_date  INTEGER NOT NULL DEFAULT 0,
-             duration_ms INTEGER NOT NULL DEFAULT 0
+             duration_ms INTEGER NOT NULL DEFAULT 0,
+             completed   INTEGER NOT NULL DEFAULT 0
          );",
         HISTORY_SCHEMA_VERSION,
         outcome_types = outcome_values(),

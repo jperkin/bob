@@ -308,6 +308,7 @@ pub fn run_build_with(
     {
         tracing::warn!(error = format!("{e:#}"), "Failed to save build revision");
     }
+
     let history_inputs: Vec<_> = skipped_results
         .iter()
         .filter_map(|result| {
@@ -317,8 +318,26 @@ pub fn run_build_with(
             })
         })
         .collect();
-    if let Err(e) = db.record_history_batch(&history_inputs) {
-        tracing::warn!(error = format!("{e:#}"), "Failed to save skipped history");
+    let history_saved = match db.record_history_batch(&history_inputs) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(error = format!("{e:#}"), "Failed to save skipped history");
+            false
+        }
+    };
+
+    /*
+     * Marked once the build has run to the end and every skipped
+     * outcome reached history, so the rows for this build_id cover
+     * each package it selected.  An interrupted or crashed run never
+     * gets here and stays unmarked, keeping it out of the baseline
+     * pool for later reports.
+     */
+    if history_saved
+        && let Some(bid) = &build_id
+        && let Err(e) = db.mark_build_completed(bid)
+    {
+        tracing::warn!(error = format!("{e:#}"), "Failed to mark build complete");
     }
     summary.results.extend(skipped_results);
     summary.scanfail.extend(scanfail_results);

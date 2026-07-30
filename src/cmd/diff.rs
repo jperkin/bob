@@ -121,29 +121,45 @@ impl ColumnSource for DiffEntry {
 pub fn run(db: &Database, args: DiffArgs) -> Result<()> {
     let chosen = select_columns(args.columns.as_deref(), args.long, DEFAULT, SUPPORTED)?;
 
+    /*
+     * Only completed builds are picked automatically.  One that was
+     * interrupted holds results for the packages it reached and no
+     * rows at all for the rest, which read as changes against a build
+     * that has them.  Named build IDs are taken as given, with a
+     * warning if they carry that flaw.
+     */
+    let completed = db.completed_build_ids()?;
     let (build1_id, build2_id) = match (args.build1, args.build2) {
         (Some(b1), Some(b2)) => (b1, b2),
         (Some(b1), None) => {
-            let builds = db.history_build_ids()?;
-            if builds.is_empty() {
-                bail!("No builds in history");
-            }
-            (b1, builds[0].clone())
+            let Some(b2) = completed.first() else {
+                bail!("No completed builds in history");
+            };
+            (b1, b2.clone())
         }
         (None, Some(_)) => {
             bail!("Specify both build IDs, or none for the two most recent");
         }
         (None, None) => {
-            let builds = db.history_build_ids()?;
-            if builds.len() < 2 {
+            if completed.len() < 2 {
                 bail!(
-                    "Need at least two builds to compare. \
-                     Use 'bob list builds' to see available builds."
+                    "Need at least two completed builds to compare. \
+                     Use 'bob ls' to see available builds, or name two explicitly."
                 );
             }
-            (builds[1].clone(), builds[0].clone())
+            (completed[1].clone(), completed[0].clone())
         }
     };
+
+    let known = db.history_build_ids()?;
+    for id in [&build1_id, &build2_id] {
+        if known.contains(id) && !completed.contains(id) {
+            eprintln!(
+                "Warning: build {id} did not complete, packages it never \
+                 reached show as changes"
+            );
+        }
+    }
 
     let diff = db.compute_build_diff(&build1_id, &build2_id)?;
 

@@ -214,15 +214,21 @@ fn generate_reports(
         .as_ref()
         .map(|u| format!("{}/{}", u, build_id));
 
-    let diff = if no_diff {
-        None
-    } else {
-        resolve_baseline(db, build_id, baseline)?
-            .map(|b| {
-                db.compute_build_diff(&b, build_id)
-                    .with_context(|| format!("Failed to compute diff against baseline {b}"))
-            })
-            .transpose()?
+    let diff = match no_diff {
+        true => None,
+        false => match resolve_baseline(db, build_id, baseline)? {
+            Some(b) => {
+                println!("Comparing against build {}", b);
+                Some(
+                    db.compute_build_diff(&b, build_id)
+                        .with_context(|| format!("Failed to compute diff against baseline {b}"))?,
+                )
+            }
+            None => {
+                println!("No completed previous build, report has no comparison");
+                None
+            }
+        },
     };
 
     let commits = diff
@@ -276,18 +282,26 @@ fn resolve_baseline(
     build_id: &str,
     baseline: Option<&str>,
 ) -> Result<Option<String>> {
-    let builds = db.history_build_ids()?;
     match baseline {
         Some(b) => {
             if b == build_id {
                 bail!("--baseline must differ from the current build ({build_id})");
             }
-            if !builds.iter().any(|h| h == b) {
+            if !db.history_build_ids()?.iter().any(|h| h == b) {
                 bail!("Build ID '{b}' not found in history");
+            }
+            if !db.completed_build_ids()?.iter().any(|h| h == b) {
+                eprintln!(
+                    "Warning: baseline {b} did not complete, packages it never \
+                     reached will show as new failures"
+                );
             }
             Ok(Some(b.to_string()))
         }
-        None => Ok(builds.iter().find(|h| h.as_str() != build_id).cloned()),
+        None => Ok(db
+            .completed_build_ids()?
+            .into_iter()
+            .find(|h| h.as_str() != build_id)),
     }
 }
 

@@ -55,6 +55,17 @@ pub fn run(db: &Database, args: PruneArgs) -> Result<()> {
         bail!("refusing to prune current build_id: {cur}");
     }
 
+    /*
+     * The current build_id is a fresh one after 'bob clean', so the
+     * guard above does not cover the completed builds a report picks
+     * its baseline from.  Dropping the last of those cannot be undone
+     * and leaves reports with nothing to compare against.
+     */
+    let completed = db.completed_build_ids()?;
+    if !completed.is_empty() && completed.iter().all(|c| to_drop.contains(c)) {
+        bail!("refusing to prune every completed build: reports would have no baseline");
+    }
+
     if !args.dry_run {
         db.prune_builds(&to_drop)?;
     }

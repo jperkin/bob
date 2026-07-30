@@ -82,6 +82,8 @@ pub enum Cell {
     Null,
     /// Literal text.
     Text(String),
+    /// Boolean flag.
+    Bool(bool),
     /// Plain number.
     UInt(u64),
     /// Duration in milliseconds.
@@ -124,6 +126,7 @@ impl Cell {
         Ok(match self {
             Cell::Null => "-".to_string(),
             Cell::Text(s) => s.clone(),
+            Cell::Bool(b) => b.to_string(),
             Cell::UInt(u) => u.to_string(),
             Cell::DurationMs(ms) => {
                 if raw {
@@ -156,6 +159,7 @@ impl Cell {
         match self {
             Cell::Null => String::new(),
             Cell::Text(s) => s.clone(),
+            Cell::Bool(b) => b.to_string(),
             Cell::UInt(u) => u.to_string(),
             Cell::DurationMs(ms) => ms.to_string(),
             Cell::Bytes(b) => b.to_string(),
@@ -170,6 +174,7 @@ impl Cell {
         Ok(match self {
             Cell::Null => serde_json::Value::Null,
             Cell::Text(s) => serde_json::Value::String(s.clone()),
+            Cell::Bool(b) => serde_json::Value::Bool(*b),
             Cell::UInt(u) => serde_json::Value::from(*u),
             Cell::DurationMs(ms) => serde_json::Value::from(*ms),
             Cell::Bytes(b) => serde_json::Value::from(*b),

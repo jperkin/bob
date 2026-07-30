@@ -164,6 +164,7 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
 
 const COLS: &[Column] = &[
     Column::BuildId,
+    Column::Completed,
     Column::Packages,
     Column::Succeeded,
     Column::Uptodate,
@@ -181,6 +182,7 @@ impl ColumnSource for bob::db::BuildListEntry {
     fn cell(&self, col: Column, _: &Self::Ctx) -> Cell {
         match col {
             Column::BuildId => self.build_id.as_str().into(),
+            Column::Completed => Cell::Bool(self.completed),
             Column::Packages => self.package_count.into(),
             Column::Succeeded => self.succeeded.into(),
             Column::Uptodate => self.up_to_date.into(),
