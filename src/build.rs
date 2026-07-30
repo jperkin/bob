@@ -62,7 +62,7 @@ use pkgsrc::plist::{PlistEntry, parse};
 use pkgsrc::{PkgName, PkgPath};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, mpsc, mpsc::Sender};
@@ -70,10 +70,16 @@ use std::task::Poll;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::{debug, error, info, info_span, trace, warn};
 
-/// How long a worker thread sleeps when told no work is available.
-/// This prevents busy-spinning when all pending builds are blocked on
-/// dependencies. 100ms balances responsiveness with CPU efficiency.
+/** How long a worker thread sleeps when told no work is available.
+ * This prevents busy-spinning when all pending builds are blocked on
+ * dependencies.  100ms balances responsiveness with CPU efficiency.
+ */
 const WORKER_BACKOFF_INTERVAL: Duration = Duration::from_millis(100);
+
+/**
+ * Maximum command output held while looking for the end of a line.
+ */
+const MAX_LINE_BYTES: u64 = 64 * 1024;
 
 /**
  * Reason why a package needs to be built.
@@ -934,7 +940,11 @@ impl<'a> PkgBuilder<'a> {
 
             loop {
                 buf.clear();
-                match reader.read_until(b'\n', &mut buf) {
+                match reader
+                    .by_ref()
+                    .take(MAX_LINE_BYTES)
+                    .read_until(b'\n', &mut buf)
+                {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {}
                 };
