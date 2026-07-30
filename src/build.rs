@@ -962,9 +962,9 @@ impl<'a> PkgBuilder<'a> {
 
         /*
          * Wait for the tee thread to see pipe EOF.  Normally this is
-         * immediate, but if an orphaned process (or zombie) holds the
-         * pipe open, time out rather than blocking forever.  The
-         * detached thread is cleaned up at exit.
+         * immediate, but if an orphaned process holds the pipe open,
+         * time out rather than blocking forever.  The detached thread
+         * is cleaned up at exit.
          */
         if tee_done_rx.recv_timeout(Duration::from_secs(5)).is_ok() {
             let _ = tee_handle.join();
