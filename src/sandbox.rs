@@ -284,10 +284,10 @@ where
             let stdout = child.stdout.take().context("child stdout not piped")?;
             let stderr = child.stderr.take().context("child stderr not piped")?;
             let drain = crate::spawn_named("stderr-drain", move || {
-                let mut out = String::new();
+                let mut out = Vec::new();
                 let mut stderr = stderr;
-                let _ = stderr.read_to_string(&mut out);
-                out
+                let _ = stderr.read_to_end(&mut out);
+                String::from_utf8_lossy(&out).into_owned()
             });
             let mut reader = BufReader::new(stdout);
             let parsed = parse(&mut reader);
