@@ -905,8 +905,9 @@ impl<'a> PkgBuilder<'a> {
         let mut log = OpenOptions::new().create(true).append(true).open(logfile)?;
 
         // Write command being executed to the log file
-        let _ = writeln!(log, "=> {:?} {:?}", cmd, args);
-        let _ = log.flush();
+        writeln!(log, "=> {:?} {:?}", cmd, args).with_context(|| {
+            format!("Failed to capture command output in {}", logfile.display())
+        })?;
 
         // Wrap command in shell to merge stdout/stderr with 2>&1, like the
         // shell script's run_log function does.
@@ -927,54 +928,48 @@ impl<'a> PkgBuilder<'a> {
         let stdout = child.stdout.take().unwrap();
         let worker_id = self.worker_id;
         let output_buffers = self.session.output_buffers.clone();
-        let (tee_done_tx, tee_done_rx) = mpsc::sync_channel::<()>(1);
 
         /*
          * Read the command's output, teeing raw bytes to the log file.  In
          * TUI mode each line is also stored in the worker's shared ring
          * buffer for the multipanel view to render.
          */
-        let tee_handle = crate::spawn_named("tee", move || {
+        let tee_handle = crate::spawn_named("tee", move || -> std::io::Result<()> {
             let mut reader = BufReader::new(stdout);
             let mut buf = Vec::new();
 
             loop {
                 buf.clear();
-                match reader
+                if reader
                     .by_ref()
                     .take(MAX_LINE_BYTES)
-                    .read_until(b'\n', &mut buf)
+                    .read_until(b'\n', &mut buf)?
+                    == 0
                 {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {}
-                };
+                    return Ok(());
+                }
                 // Write raw bytes to log file to preserve original output
-                let _ = log.write_all(&buf);
+                log.write_all(&buf)?;
                 if let Some(ref buffers) = output_buffers {
                     buffers.push(worker_id, &buf);
                 }
             }
-
-            let _ = tee_done_tx.send(());
         });
 
-        let (status, cpu_time) = wait_with_shutdown(&mut child, &self.session.state)?;
+        let waited = wait_with_shutdown(&mut child, &self.session.state);
 
         /*
-         * Wait for the tee thread to see pipe EOF.  Normally this is
-         * immediate, but if an orphaned process holds the pipe open,
-         * time out rather than blocking forever.  The detached thread
-         * is cleaned up at exit.
+         * Wait for the tee thread on every path, including shutdown.
+         * It holds the log file open until it returns, and the caller
+         * removes the log directory once the package succeeds.
          */
-        if tee_done_rx.recv_timeout(Duration::from_secs(5)).is_ok() {
-            let _ = tee_handle.join();
-        } else {
-            warn!(
-                pkg = %self.pkginfo.index.pkgname,
-                "Tee thread stuck on pipe held by orphaned process, detaching"
-            );
-        }
+        let tee = match tee_handle.join() {
+            Ok(result) => result,
+            Err(_) => bail!("Log thread for {} panicked", logfile.display()),
+        };
 
+        let (status, cpu_time) = waited?;
+        tee.with_context(|| format!("Failed to capture command output in {}", logfile.display()))?;
         trace!(?cmd, ?status, "Command completed");
         Ok((status, cpu_time))
     }
