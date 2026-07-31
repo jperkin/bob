@@ -23,14 +23,12 @@ use anyhow::{Result, bail};
 use clap::Args;
 use clap::builder::styling::Style;
 use pkgsrc::PkgName;
-use regex::Regex;
 use strum::VariantArray;
 
 use bob::build::Stage;
 use bob::db::{Database, PackageStatusRow};
-use bob::{Config, PackageState, WrkObjKind};
+use bob::{Config, PackageState, PkgMatch, WrkObjKind};
 
-use super::util::pkg_pattern;
 use super::{
     Cell, Col, Column, Formatter, OutputFormat, OutputOptions, SortKey, parse_sort_specs,
     parse_status_filter, select_columns, sort_indexed_rows, status_filter_aliases,
@@ -306,7 +304,8 @@ pub struct StatusArgs {
     /// Sort by column(s); prefix '-' to reverse default order (numeric defaults descending, text ascending)
     #[arg(short = 'S', long, value_delimiter = ',', allow_hyphen_values = true)]
     sort: Option<Vec<String>>,
-    /// Package filters (regex on name or path)
+    /// Package filters (name or path)
+    #[arg(value_name = "PATTERN")]
     packages: Vec<String>,
 }
 
@@ -390,10 +389,10 @@ fn print_build_status(
         None => Vec::new(),
     };
 
-    let pkg_patterns: Vec<Regex> = pkg_filters
+    let pkg_patterns: Vec<PkgMatch> = pkg_filters
         .iter()
         .map(String::as_str)
-        .map(pkg_pattern)
+        .map(PkgMatch::new)
         .collect::<Result<Vec<_>>>()?;
 
     let status_rows = db.get_all_package_status()?;

@@ -169,7 +169,7 @@ impl CellKind {
  * Lets pattern filtering run inside a query so non-matching rows are
  * never returned.
  */
-fn register_match(conn: &Connection, patterns: &[regex::Regex]) -> Result<()> {
+fn register_match(conn: &Connection, patterns: &[crate::PkgMatch]) -> Result<()> {
     let patterns = patterns.to_vec();
     conn.create_scalar_function(
         "bob_match",
@@ -180,7 +180,7 @@ fn register_match(conn: &Connection, patterns: &[regex::Regex]) -> Result<()> {
                 .get_raw(0)
                 .as_str()
                 .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))?;
-            Ok(patterns.iter().any(|re| re.is_match(text)))
+            Ok(patterns.iter().any(|p| p.is_match(text)))
         },
     )?;
     Ok(())
@@ -1907,7 +1907,7 @@ impl Database {
     pub fn for_each_history(
         &self,
         columns: &[&str],
-        patterns: &[regex::Regex],
+        patterns: &[crate::PkgMatch],
         all: bool,
         f: impl FnMut(Vec<Cell>),
     ) -> Result<()> {

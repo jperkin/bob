@@ -17,9 +17,9 @@
 use anyhow::{Result, bail};
 use clap::Args;
 
+use bob::PkgMatch;
 use bob::db::Database;
 
-use super::util::pkg_pattern;
 use super::{Col, Formatter, OutputFormat, OutputOptions};
 
 #[derive(Debug, Args)]
@@ -42,7 +42,8 @@ pub struct HistoryArgs {
     /// Columns to display (comma-separated; use --help for full list)
     #[arg(short = 'o', long_help = bob::HistoryKind::columns_help(), value_delimiter = ',')]
     columns: Option<Vec<String>>,
-    /// Filter by pkgpath or pkgname (regex; any match)
+    /// Filter by pkgname or pkgpath
+    #[arg(value_name = "PATTERN")]
     packages: Vec<String>,
 }
 
@@ -93,10 +94,10 @@ fn print_history(
         }
     }
 
-    let patterns: Vec<regex::Regex> = packages
+    let patterns: Vec<PkgMatch> = packages
         .iter()
         .map(String::as_str)
-        .map(pkg_pattern)
+        .map(PkgMatch::new)
         .collect::<Result<Vec<_>>>()?;
 
     let fmt_cols: Vec<Col> = cols

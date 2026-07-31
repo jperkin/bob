@@ -56,9 +56,7 @@ use tracing::{debug, info};
 use bob::build::{BuildResult, BuildSummary};
 use bob::config::{Config, Pkgsrc, Publish, PublishPackages, ScriptValue};
 use bob::db::Database;
-use bob::{PackageCounts, PackageState};
-
-use super::util::pkg_pattern;
+use bob::{PackageCounts, PackageState, PkgMatch};
 
 struct PublishResult {
     uploaded: usize,
@@ -483,7 +481,7 @@ fn validate_pre_publish(
     let mut errors: Vec<String> = Vec::new();
 
     for pattern_str in &packages.required {
-        let re = pkg_pattern(pattern_str)
+        let re = PkgMatch::new(pattern_str)
             .with_context(|| format!("In publish.packages.required: {}", pattern_str))?;
         let mut matched = false;
         let mut failed: Vec<String> = Vec::new();

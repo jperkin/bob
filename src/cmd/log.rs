@@ -21,9 +21,8 @@ use std::process::Command;
 use anyhow::{Result, bail};
 use clap::Args;
 
-use crate::cmd::util::pkg_pattern;
 use bob::db::Database;
-use bob::{BuildResult, PackageState, Stage};
+use bob::{BuildResult, PackageState, PkgMatch, Stage};
 
 #[derive(Debug, Args)]
 pub struct LogArgs {
@@ -33,12 +32,13 @@ pub struct LogArgs {
     /// Show log for a specific stage instead of the failed stage
     #[arg(short, long, value_enum)]
     stage: Option<Stage>,
-    /// Package name or path pattern (regex)
+    /// Package name or path pattern
+    #[arg(value_name = "PATTERN")]
     package: String,
 }
 
 pub fn run(db: &Database, args: LogArgs) -> Result<()> {
-    let pattern = pkg_pattern(&args.package)?;
+    let pattern = PkgMatch::new(&args.package)?;
 
     let results = db.get_all_build_results()?;
 

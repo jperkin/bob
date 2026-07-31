@@ -157,6 +157,50 @@ impl std::fmt::Display for Interrupted {
 
 impl std::error::Error for Interrupted {}
 
+/**
+ * A user-supplied package pattern.
+ *
+ * A pattern containing `<` or `>` is compiled as a pkgsrc package
+ * pattern, anything else as a case-insensitive regex.
+ */
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub enum PkgMatch {
+    /// A pkgsrc package pattern, compiled from a pattern containing `<` or `>`.
+    Pkgsrc(pkgsrc::Pattern),
+    /// A case-insensitive regex, compiled from anything else.
+    Regex(regex::Regex),
+}
+
+impl PkgMatch {
+    /**
+     * Compile a pattern, returning an error naming the pattern and why
+     * it could not be parsed.
+     */
+    pub fn new(pattern: &str) -> anyhow::Result<Self> {
+        let compiled = if pattern.contains(['<', '>']) {
+            pkgsrc::Pattern::new(pattern)
+                .map(Self::Pkgsrc)
+                .map_err(|e| e.to_string())
+        } else {
+            regex::Regex::new(&format!("(?i){}", pattern))
+                .map(Self::Regex)
+                .map_err(|e| e.to_string())
+        };
+        compiled.map_err(|e| anyhow::anyhow!("Invalid pattern '{}': {}", pattern, e))
+    }
+
+    /**
+     * Whether `text` matches this pattern.
+     */
+    pub fn is_match(&self, text: &str) -> bool {
+        match self {
+            Self::Pkgsrc(p) => p.matches(text),
+            Self::Regex(r) => r.is_match(text),
+        }
+    }
+}
+
 // Re-export main types for convenience.
 //
 // The typical workflow is:

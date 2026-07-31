@@ -22,11 +22,10 @@ use clap::Subcommand;
 use crossterm::terminal;
 use pkgsrc::PkgName;
 
-use bob::PackageState;
 use bob::db::Database;
 use bob::try_println;
+use bob::{PackageState, PkgMatch};
 
-use super::util::pkg_pattern;
 use super::{
     Cell, Column, ColumnSource, OutputFormat, OutputOptions, Writer, cols_help, select_columns,
 };
@@ -77,12 +76,14 @@ pub enum ListCmd {
         /// Output pkgpath instead of pkgname
         #[arg(short, long)]
         path: bool,
-        /// Package to show tree for (regex pattern)
+        /// Package to show tree for
+        #[arg(value_name = "PATTERN")]
         package: Option<String>,
     },
     /// Show what is blocking a package from building
     Blockers {
-        /// Package name or pkgpath pattern (regex)
+        /// Package name or pkgpath pattern
+        #[arg(value_name = "PATTERN")]
         package: String,
         /// Output pkgpath instead of pkgname
         #[arg(short, long)]
@@ -91,7 +92,8 @@ pub enum ListCmd {
     /// Show packages blocked by a failed package
     #[command(alias = "broken-by")]
     BlockedBy {
-        /// Package name or pkgpath pattern (regex)
+        /// Package name or pkgpath pattern
+        #[arg(value_name = "PATTERN")]
         package: String,
         /// Output pkgpath instead of pkgname
         #[arg(short, long)]
@@ -218,11 +220,11 @@ fn list_builds(db: &Database, args: BuildsArgs) -> Result<()> {
 }
 
 /**
- * Resolve a user-supplied package pattern (regex) to the matching set
- * of packages from the scan database.  Errors if no packages match.
+ * Resolve a user-supplied package pattern to the matching set of
+ * packages from the scan database.  Errors if no packages match.
  */
 fn match_packages(db: &Database, pattern: &str) -> Result<Vec<bob::db::PackageRow>> {
-    let re = pkg_pattern(pattern)?;
+    let re = PkgMatch::new(pattern)?;
     let matches: Vec<bob::db::PackageRow> = db
         .get_all_packages()?
         .into_iter()
@@ -292,7 +294,7 @@ fn print_build_tree(
 
     // Determine package set
     let candidates: HashSet<PkgName> = if let Some(pattern) = package {
-        let re = pkg_pattern(pattern)?;
+        let re = PkgMatch::new(pattern)?;
 
         let matches: Vec<&PkgName> = pkgname_to_pkgpath
             .iter()

@@ -202,7 +202,7 @@
  * | `tmppath` | string | none | Stage the upload in this remote directory, hard linked against `path`, so it can be swapped into place once complete. |
  * | `swapcmd` | string/script | none | Shell script run on the remote host over ssh after a staged upload, to swap `tmppath` into `path`.  Requires `tmppath`. |
  * | `minimum` | integer | none | Abort publishing when fewer packages than this built successfully. |
- * | `required` | table | `{}` | Regular expressions matched against package names and paths.  Every package a pattern matches must have built successfully, otherwise publishing aborts. |
+ * | `required` | table | `{}` | Package patterns matched against package names and paths.  Every package a pattern matches must have built successfully, otherwise publishing aborts. |
  * | `rsync_args` | string | `"-av --delete-excluded -e ssh"` | Arguments passed to rsync. |
  *
  * ## publish.report
@@ -620,7 +620,7 @@ pub struct PublishPackages {
     pub swapcmd: Option<ScriptValue>,
     /// Minimum successful package count required before publishing.
     pub minimum: Option<usize>,
-    /// Regular expressions matched against package names and paths.
+    /// Package patterns matched against package names and paths.
     /// Every package a pattern matches must have built successfully.
     pub required: Vec<String>,
     /// rsync arguments for package publishing.  Default
