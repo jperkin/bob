@@ -17,13 +17,12 @@
 /*!
  * System-wide CPU usage sampling.
  *
- * A background thread periodically measures system CPU utilisation and
- * collects timestamped samples.  The caller retrieves them via
- * [`CpuSamplerHandle::stop`] and decides where to persist them.
+ * A background thread periodically measures CPU utilisation and load
+ * average, handing batches of samples to a sink supplied by the caller,
+ * which decides where to persist them.
  */
 
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -32,12 +31,33 @@ use tracing::debug;
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 
 /**
+ * Samples buffered before the sink is called.
+ */
+const FLUSH_SAMPLES: usize = 12;
+
+/**
  * A single CPU usage measurement.
  */
-pub(crate) struct CpuSample {
+pub struct CpuSample {
+    /// Seconds since the Unix epoch at the end of the sample interval.
     pub timestamp: i64,
+    /// User CPU across all cores, 0 to 100.
     pub user_pct: u8,
+    /// System CPU across all cores, 0 to 100.
     pub sys_pct: u8,
+    /// One, five, and fifteen minute load averages.
+    pub load: Option<(f64, f64, f64)>,
+}
+
+/**
+ * Read the one, five, and fifteen minute load averages.
+ */
+fn load_average() -> Option<(f64, f64, f64)> {
+    let mut avg = [0f64; 3];
+    match unsafe { libc::getloadavg(avg.as_mut_ptr(), avg.len() as libc::c_int) } {
+        3 => Some((avg[0], avg[1], avg[2])),
+        _ => None,
+    }
 }
 
 /**
@@ -166,26 +186,12 @@ impl CpuLoad {
 /**
  * Handle to a running CPU sampler thread.
  *
- * Stopping the handle signals the thread to exit and retrieves the
- * collected samples; dropping it discards them.
+ * Dropping the handle signals the thread to exit and waits for it, so
+ * whatever it has buffered reaches the sink.
  */
 pub struct CpuSamplerHandle {
     stop: Arc<AtomicBool>,
-    samples: Arc<Mutex<Vec<CpuSample>>>,
     thread: Option<std::thread::JoinHandle<()>>,
-}
-
-impl CpuSamplerHandle {
-    pub(crate) fn stop(mut self) -> Vec<CpuSample> {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
-        self.samples
-            .lock()
-            .map(|mut v| std::mem::take(&mut *v))
-            .unwrap_or_default()
-    }
 }
 
 impl Drop for CpuSamplerHandle {
@@ -198,12 +204,17 @@ impl Drop for CpuSamplerHandle {
 }
 
 /**
- * Start a background thread that samples system CPU usage.
+ * Start a background thread that samples CPU usage and load average,
+ * passing each batch of [`FLUSH_SAMPLES`] to `sink`, and whatever
+ * remains when the sampler stops.
  *
  * Returns `None` if the initial CPU measurement fails (unsupported
  * platform or permissions issue).
  */
-pub fn start_cpu_sampler() -> Option<CpuSamplerHandle> {
+pub fn start_cpu_sampler<F>(mut sink: F) -> Option<CpuSamplerHandle>
+where
+    F: FnMut(&[CpuSample]) + Send + 'static,
+{
     /*
      * Single probe measurement over a short window to verify CPU
      * sampling works on this platform.
@@ -212,30 +223,33 @@ pub fn start_cpu_sampler() -> Option<CpuSamplerHandle> {
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::clone(&stop);
-    let samples: Arc<Mutex<Vec<CpuSample>>> = Arc::new(Mutex::new(Vec::new()));
-    let samples_ref = Arc::clone(&samples);
 
     let thread = crate::spawn_named("cpu-sampler", move || {
         debug!("CPU sampler started");
         let mut load = CpuLoad::new();
+        let mut batch: Vec<CpuSample> = Vec::with_capacity(FLUSH_SAMPLES);
         while !stop_flag.load(Ordering::Relaxed) {
             if let Some((user, sys)) = load.sample(SAMPLE_INTERVAL) {
-                let ts = crate::epoch_secs().unwrap_or(0);
-                if let Ok(mut v) = samples_ref.lock() {
-                    v.push(CpuSample {
-                        timestamp: ts,
-                        user_pct: user,
-                        sys_pct: sys,
-                    });
+                batch.push(CpuSample {
+                    timestamp: crate::epoch_secs().unwrap_or(0),
+                    user_pct: user,
+                    sys_pct: sys,
+                    load: load_average(),
+                });
+                if batch.len() >= FLUSH_SAMPLES {
+                    sink(&batch);
+                    batch.clear();
                 }
             }
+        }
+        if !batch.is_empty() {
+            sink(&batch);
         }
         debug!("CPU sampler stopped");
     });
 
     Some(CpuSamplerHandle {
         stop,
-        samples,
         thread: Some(thread),
     })
 }

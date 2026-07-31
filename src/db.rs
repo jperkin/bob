@@ -275,7 +275,7 @@ const SCHEMA_VERSION: i32 = 20260611;
 /**
  * Schema version for history.db - update when history schema changes.
  */
-const HISTORY_SCHEMA_VERSION: i32 = 20260730;
+const HISTORY_SCHEMA_VERSION: i32 = 20260731;
 
 /**
  * Summary of a package's most recent build from history.
@@ -375,8 +375,7 @@ pub enum ScanIndexFields {
 /**
  * SQLite database for scan, build, and history data.
  *
- * The history connection is opened lazily on first use, so commands
- * that don't touch history (e.g. `bob scan`) never create `history.db`.
+ * The history connection is opened lazily on first use.
  */
 pub struct Database {
     conn: Connection,
@@ -2078,41 +2077,29 @@ impl Database {
     }
 
     /**
-     * Stop a CPU sampler and store its samples, logging the outcome.
-     * `what` names the sample set in the log messages.
+     * Build a sink for [`crate::cpu::start_cpu_sampler`] that writes
+     * each batch to `cpu_usage`, tagged with the current build and
+     * `phase`.
+     *
+     * The sampler runs on its own thread for the length of the run, so
+     * the sink owns a second history connection rather than borrowing
+     * this one.  Write failures are logged and the sampler continues.
      */
-    pub fn store_cpu_samples(&self, sampler: Option<crate::cpu::CpuSamplerHandle>, what: &str) {
-        let Some(sampler) = sampler else { return };
-        let samples = sampler.stop();
-        if samples.is_empty() {
-            return;
-        }
-        match self.store_cpu_usage(&samples) {
-            Ok(()) => debug!(count = samples.len(), "Saved {} samples", what),
-            Err(e) => warn!(error = format!("{e:#}"), "Failed to save {} samples", what),
-        }
-    }
-
-    /**
-     * Write CPU usage samples to the `cpu_usage` table in history.db.
-     */
-    pub(crate) fn store_cpu_usage(&self, samples: &[crate::cpu::CpuSample]) -> Result<()> {
-        if samples.is_empty() {
-            return Ok(());
-        }
-        let conn = self.history_conn()?;
-        let tx = conn.unchecked_transaction()?;
-        {
-            let mut stmt = tx.prepare_cached(
-                "INSERT INTO cpu_usage (timestamp, user_pct, sys_pct) \
-                 VALUES (?1, ?2, ?3)",
-            )?;
-            for s in samples {
-                stmt.execute(params![s.timestamp, s.user_pct as i32, s.sys_pct as i32])?;
+    pub fn cpu_sample_writer(
+        &self,
+        phase: &'static str,
+    ) -> Result<impl FnMut(&[crate::cpu::CpuSample]) + Send + 'static> {
+        let build_id = self.build_id()?;
+        let conn = open_history_conn(&self.dbdir)?;
+        Ok(move |samples: &[crate::cpu::CpuSample]| {
+            match write_cpu_usage(&conn, &build_id, phase, samples) {
+                Ok(()) => debug!(count = samples.len(), phase, "Saved CPU samples"),
+                Err(e) => warn!(
+                    error = format!("{e:#}"),
+                    phase, "Failed to save CPU samples"
+                ),
             }
-        }
-        tx.commit()?;
-        Ok(())
+        })
     }
 
     /**
@@ -2144,6 +2131,9 @@ impl Database {
                  SELECT build_id FROM attempted \
                  UNION \
                  SELECT build_id FROM build_metadata \
+                 UNION \
+                 SELECT DISTINCT build_id FROM cpu_usage \
+                     WHERE build_id IS NOT NULL \
              ) \
              SELECT b.build_id, \
                     COALESCE(a.succeeded, 0) + COALESCE(a.failed, 0) \
@@ -2177,12 +2167,17 @@ impl Database {
 
     /**
      * All build IDs recorded in history, most recent first.
+     *
+     * `cpu_usage` is included because a run that samples CPU but never
+     * reaches the up-to-date check, such as `bob scan --scan-only`,
+     * leaves rows there and nowhere else.
      */
     pub fn history_build_ids(&self) -> Result<Vec<String>> {
         let conn = self.history_conn()?;
         let mut stmt = conn.prepare(
             "SELECT build_id FROM build_history WHERE build_id IS NOT NULL \
              UNION SELECT build_id FROM build_metadata \
+             UNION SELECT DISTINCT build_id FROM cpu_usage WHERE build_id IS NOT NULL \
              ORDER BY build_id DESC",
         )?;
         let rows = stmt.query_map([], |row| row.get(0))?;
@@ -2209,10 +2204,10 @@ impl Database {
     }
 
     /**
-     * Delete the listed build_ids from `build_history` and
-     * `build_metadata`, then `VACUUM` to reclaim space.  Cascaded
-     * deletes via FK clean up `wall_times` and `cpu_times`.  No-op if
-     * `build_ids` is empty.
+     * Delete the listed build_ids from `build_history`, `build_metadata`
+     * and `cpu_usage`, then `VACUUM` to reclaim space.  Cascaded deletes
+     * via FK clean up `wall_times` and `cpu_times`.  No-op if `build_ids`
+     * is empty.
      */
     pub fn prune_builds(&self, build_ids: &[String]) -> Result<()> {
         if build_ids.is_empty() {
@@ -2223,9 +2218,11 @@ impl Database {
         {
             let mut hist = tx.prepare("DELETE FROM build_history WHERE build_id = ?1")?;
             let mut meta = tx.prepare("DELETE FROM build_metadata WHERE build_id = ?1")?;
+            let mut cpu = tx.prepare("DELETE FROM cpu_usage WHERE build_id = ?1")?;
             for id in build_ids {
                 hist.execute([id])?;
                 meta.execute([id])?;
+                cpu.execute([id])?;
             }
         }
         tx.commit()?;
@@ -2495,6 +2492,7 @@ const HISTORY_MIGRATIONS: &[HistoryMigration] = &[
     (20260610, 20260611, migrate_history_20260610_to_20260611),
     (20260611, 20260612, migrate_history_20260611_to_20260612),
     (20260612, 20260730, migrate_history_20260612_to_20260730),
+    (20260730, 20260731, migrate_history_20260730_to_20260731),
 ];
 
 /**
@@ -2739,6 +2737,66 @@ fn migrate_history_20260612_to_20260730(conn: &Connection) -> Result<()> {
 }
 
 /**
+ * Write a batch of CPU usage samples to the `cpu_usage` table.
+ */
+fn write_cpu_usage(
+    conn: &Connection,
+    build_id: &str,
+    phase: &str,
+    samples: &[crate::cpu::CpuSample],
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO cpu_usage \
+                 (build_id, phase, timestamp, user_pct, sys_pct, load1, load5, load15) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )?;
+        for s in samples {
+            stmt.execute(params![
+                build_id,
+                phase,
+                s.timestamp,
+                s.user_pct as i32,
+                s.sys_pct as i32,
+                s.load.map(|l| l.0),
+                s.load.map(|l| l.1),
+                s.load.map(|l| l.2),
+            ])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/**
+ * Migrate history.db from v20260730 to v20260731.
+ *
+ * Gives `cpu_usage` the build and phase it was recorded under, so
+ * samples can be attributed to a run and removed with it, and adds the
+ * load averages taken alongside each utilisation reading.
+ *
+ * Rows predating the columns are deleted.  They name no build, no
+ * phase and no load average, so nothing can be asked of them that the
+ * columns exist to answer, and `bob prune` would never reach them.
+ */
+fn migrate_history_20260730_to_20260731(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
+        "ALTER TABLE cpu_usage ADD COLUMN build_id TEXT;
+         ALTER TABLE cpu_usage ADD COLUMN phase    TEXT;
+         ALTER TABLE cpu_usage ADD COLUMN load1    REAL;
+         ALTER TABLE cpu_usage ADD COLUMN load5    REAL;
+         ALTER TABLE cpu_usage ADD COLUMN load15   REAL;
+         DELETE FROM cpu_usage WHERE build_id IS NULL;
+         CREATE INDEX IF NOT EXISTS idx_cpu_build ON cpu_usage(build_id);",
+    )?;
+    tx.execute("UPDATE schema_version SET version = ?1", params![20260731])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/**
  * Open and initialize the history database connection.
  */
 fn open_history_conn(dbdir: &Path) -> Result<Connection> {
@@ -2832,12 +2890,23 @@ pub(crate) fn create_history_schema(conn: &Connection) -> Result<()> {
              PRIMARY KEY (history_id, stage)
          );
 
+         /*
+          * build_id and phase are nullable only because samples
+          * recorded before they existed cannot be attributed to
+          * either; everything written now sets both.
+          */
          CREATE TABLE cpu_usage (
+             build_id  TEXT,
+             phase     TEXT,
              timestamp INTEGER NOT NULL,
-             user_pct INTEGER NOT NULL,
-             sys_pct INTEGER NOT NULL
+             user_pct  INTEGER NOT NULL,
+             sys_pct   INTEGER NOT NULL,
+             load1     REAL,
+             load5     REAL,
+             load15    REAL
          );
          CREATE INDEX idx_cpu_timestamp ON cpu_usage(timestamp);
+         CREATE INDEX idx_cpu_build ON cpu_usage(build_id);
 
          CREATE TABLE build_metadata (
              build_id    TEXT PRIMARY KEY,

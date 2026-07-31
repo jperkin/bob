@@ -90,11 +90,18 @@ impl BuildRunner {
             }
         }
 
-        let cpu_sampler = bob::start_cpu_sampler();
+        let cpu_sampler = self
+            .db
+            .cpu_sample_writer("scan")
+            .inspect_err(|e| {
+                tracing::warn!(error = format!("{e:#}"), "CPU sampling disabled");
+            })
+            .ok()
+            .and_then(bob::start_cpu_sampler);
 
         scan.start(&self.db, scope, &self.pkgsrc)?;
 
-        self.db.store_cpu_samples(cpu_sampler, "scan CPU usage");
+        drop(cpu_sampler);
 
         let has_scan_errors = scan.scan_errors().next().is_some();
         if has_scan_errors {

@@ -2071,7 +2071,13 @@ impl Build {
             logdir,
         };
 
-        let cpu_sampler = crate::cpu::start_cpu_sampler();
+        let cpu_sampler = db
+            .cpu_sample_writer("build")
+            .inspect_err(|e| {
+                warn!(error = format!("{e:#}"), "CPU sampling disabled");
+            })
+            .ok()
+            .and_then(crate::cpu::start_cpu_sampler);
         if cpu_sampler.is_some() {
             debug!("CPU usage sampler started");
         }
@@ -2506,7 +2512,7 @@ impl Build {
             "Worker threads completed"
         );
 
-        db.store_cpu_samples(cpu_sampler, "CPU usage");
+        drop(cpu_sampler);
 
         // Stop the refresh thread
         refresh.stop();
