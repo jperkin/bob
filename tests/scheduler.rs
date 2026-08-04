@@ -2083,7 +2083,7 @@ fn tail_after_mark_success_weighted() {
     let a = allocations.iter().find(|(p, _)| p == "A").unwrap().1;
     let b = allocations.iter().find(|(p, _)| p == "B").unwrap().1;
     let c = allocations.iter().find(|(p, _)| p == "C").unwrap().1;
-    assert_eq!((a, b, c), (19, 9, 4), "A={a} B={b} C={c}");
+    assert_eq!((a, b, c), (17, 9, 6), "A={a} B={b} C={c}");
 }
 
 /**

@@ -87,7 +87,7 @@ impl Allocator {
     pub fn new(workers: usize, jobs: usize) -> Self {
         let fair = jobs.div_ceil(workers.max(1));
         let min_jobs = 2.min(jobs);
-        let max_jobs = (fair + 2).max(jobs / 3).min(jobs);
+        let max_jobs = (fair + 2).min(jobs);
         Self {
             jobs,
             fair,
@@ -274,14 +274,14 @@ mod tests {
         let assigned: Vec<usize> = times.iter().map(|&v| alloc.assign(Some(v))).collect();
         assert_eq!(assigned, [2, 2, 3, 3, 3, 4, 4], "w=7 c=10");
 
-        /* w=24 c=32: min=2, max=10 (wide range, doubling times) */
+        /* w=24 c=32: min=2, max=4 (wide range, doubling times) */
         let times: Vec<usize> = (0..24).map(|i| 100 * (1 << i)).collect();
         let alloc = calibrated(24, 32, &times);
         let assigned: Vec<usize> = times.iter().map(|&v| alloc.assign(Some(v))).collect();
         assert_eq!(
             assigned,
             [
-                2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 7, 7, 7, 8, 8, 8, 9, 9, 9, 10, 10
+                2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4
             ],
             "w=24 c=32"
         );
