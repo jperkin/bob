@@ -478,3 +478,58 @@ fn tail_overcommitted_budget() {
         }
     }
 }
+
+/**
+ * Jobs set aside for a blocked package are still there when it starts.
+ *
+ * A primary GCC is boosted while two other packages run, one of which
+ * has a package waiting behind it.  When that one is built, the
+ * package it releases must find the jobs that were held for it, with
+ * the GCC still holding its boost.
+ */
+#[test]
+fn make_jobs_released_package_gets_its_share() {
+    let mut packages = HashMap::new();
+    let mut history = Vec::new();
+    let mut serial_pkgs = Vec::new();
+    for (i, pkg) in [p!(20000, 0), p!(1, 0), p!(0, 0)].iter().enumerate() {
+        add_pkg(
+            &mut packages,
+            &mut history,
+            &mut serial_pkgs,
+            format!("p{i}"),
+            pkg,
+            HashSet::new(),
+        );
+    }
+
+    let mut sched = Scheduler::from_graph(packages);
+    sched.set_allocator(bob::makejobs::Allocator::new(18, 32));
+
+    let mut jobs = Vec::new();
+    for _ in 0..3 {
+        if let Poll::Ready(Some(sp)) = sched.poll() {
+            jobs.push((sp.pkg.clone(), sp.make_jobs.allocated().unwrap_or(1)));
+        }
+    }
+    assert_eq!(
+        jobs,
+        [
+            ("p0".to_string(), 26),
+            ("p1".to_string(), 2),
+            ("p2".to_string(), 2)
+        ],
+    );
+
+    /* p1 is built, so the package waiting on it can start. */
+    sched.mark_success(&"p1".to_string());
+    let Poll::Ready(Some(sp)) = sched.poll() else {
+        panic!("expected the released package");
+    };
+    assert_eq!(sp.pkg, "p1d0");
+    assert_eq!(sp.make_jobs.allocated(), Some(2));
+
+    /* p1 has finished, so only p0, p2 and the released package hold jobs. */
+    let live = jobs[0].1 + jobs[2].1 + sp.make_jobs.allocated().unwrap_or(1);
+    assert!(live <= 32, "{live} jobs against a budget of 32");
+}
