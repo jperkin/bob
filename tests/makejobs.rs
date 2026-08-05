@@ -90,6 +90,8 @@ struct Pkg<'a> {
     /// Optional list of dependencies on this package, for testing with
     /// specific values set for them, otherwise assume zero.
     blocked: &'a [Pkg<'a>],
+    /// Whether the build supports parallel make.
+    parallel: bool,
 }
 
 /**
@@ -97,16 +99,28 @@ struct Pkg<'a> {
  *
  * The blocked packages are anonymous unless spelled out in the third
  * argument, which describes the first `blocked.len()` of the `deps`.
+ * A trailing `serial` marks a build that does not support parallel
+ * make (MAKE_JOBS_SAFE=no).
  */
 macro_rules! p {
+    ($deps:expr, $cpu:expr, serial) => {
+        p!($deps, $cpu, &[], false)
+    };
+    ($deps:expr, $cpu:expr, $blocked:expr, serial) => {
+        p!($deps, $cpu, $blocked, false)
+    };
     ($deps:expr, $cpu:expr) => {
-        p!($deps, $cpu, &[])
+        p!($deps, $cpu, &[], true)
     };
     ($deps:expr, $cpu:expr, $blocked:expr) => {
+        p!($deps, $cpu, $blocked, true)
+    };
+    ($deps:expr, $cpu:expr, $blocked:expr, $parallel:expr) => {
         Pkg {
             dependents: $deps,
             cpu: $cpu,
             blocked: $blocked,
+            parallel: $parallel,
         }
     };
 }
@@ -134,6 +148,7 @@ struct Runnable<'a> {
 fn add_pkg(
     packages: &mut HashMap<String, PackageNode<String>>,
     history: &mut Vec<(String, usize)>,
+    serial_pkgs: &mut Vec<String>,
     name: String,
     pkg: &Pkg,
     deps: HashSet<String>,
@@ -146,7 +161,13 @@ fn add_pkg(
             cpu_time: pkg.cpu as u64,
         },
     );
-    if pkg.cpu > 0 {
+    /*
+     * A build reads history only for the packages that support
+     * parallel make, so a serial one never reaches the allocator.
+     */
+    if !pkg.parallel {
+        serial_pkgs.push(name.clone());
+    } else if pkg.cpu > 0 {
         history.push((name.clone(), pkg.cpu));
     }
     for d in 0..pkg.dependents.saturating_sub(pkg.blocked.len()) {
@@ -154,6 +175,7 @@ fn add_pkg(
         add_pkg(
             packages,
             history,
+            serial_pkgs,
             format!("{name}d{d}"),
             &p!(0, 0),
             blocked_on,
@@ -164,6 +186,7 @@ fn add_pkg(
         add_pkg(
             packages,
             history,
+            serial_pkgs,
             format!("{name}b{b}"),
             blocked,
             blocked_on,
@@ -175,15 +198,19 @@ fn add_pkg(
  * Dispatch every runnable package and return what each was allocated.
  *
  * Results are `(base, jobs)` in dispatch order, which is most blocked
- * dependents first, then longest build.
+ * dependents first, then longest build.  A build that does not support
+ * parallel make is never allocated, so no MAKE_JOBS is set for it and
+ * bmake runs it with the single job it reads as `(1, 1)`.
  */
 fn running_jobs(case: &Runnable) -> Vec<(usize, usize)> {
     let mut packages = HashMap::new();
     let mut history = Vec::new();
+    let mut serial_pkgs = Vec::new();
     for (i, pkg) in case.packages.iter().enumerate() {
         add_pkg(
             &mut packages,
             &mut history,
+            &mut serial_pkgs,
             format!("p{i}"),
             pkg,
             HashSet::new(),
@@ -191,6 +218,9 @@ fn running_jobs(case: &Runnable) -> Vec<(usize, usize)> {
     }
 
     let mut sched = Scheduler::from_graph(packages);
+    for name in &serial_pkgs {
+        sched.set_make_jobs_unsafe(name);
+    }
     for (name, cpu) in &history {
         sched.set_pkg_cpu_history(name, *cpu);
     }
@@ -198,11 +228,13 @@ fn running_jobs(case: &Runnable) -> Vec<(usize, usize)> {
 
     (0..case.packages.len())
         .filter_map(|_| match sched.poll() {
-            Poll::Ready(Some(sp)) => {
-                let cpu = (sp.cpu_time > 0).then_some(sp.cpu_time as usize);
-                let base = sched.allocator()?.assign(cpu);
-                Some((base, sp.make_jobs.allocated().unwrap_or(0)))
-            }
+            Poll::Ready(Some(sp)) => Some(match sp.make_jobs.allocated() {
+                Some(jobs) => {
+                    let cpu = (sp.cpu_time > 0).then_some(sp.cpu_time as usize);
+                    (sched.allocator()?.assign(cpu), jobs)
+                }
+                None => (1, 1),
+            }),
             _ => None,
         })
         .collect()
@@ -326,6 +358,35 @@ fn make_jobs_early_gcc_builds_with_deps_and_cpu() {
                 p!(1, 1_000_000, &[p!(0, 100_000_000)]),
             ],
             expect: &[(2, 21), (2, 2), (2, 2)],
+        },
+    ]);
+}
+
+/**
+ * A build that does not support parallel make takes a single CPU, so
+ * only that much is set aside for it.
+ */
+#[test]
+fn make_jobs_serial_packages() {
+    check(&[
+        Runnable {
+            workers: 18,
+            jobs: 32,
+            packages: &[p!(20000, 0), p!(0, 0, serial), p!(0, 0)],
+            expect: &[(2, 29), (1, 1), (2, 2)],
+        },
+        Runnable {
+            workers: 18,
+            jobs: 32,
+            packages: &[p!(20000, 0), p!(0, 0, serial), p!(0, 0, serial)],
+            expect: &[(2, 30), (1, 1), (1, 1)],
+        },
+        /* Fewer workers, so more would have been set aside for each. */
+        Runnable {
+            workers: 4,
+            jobs: 16,
+            packages: &[p!(20000, 0), p!(0, 0, serial), p!(0, 0, serial)],
+            expect: &[(4, 14), (1, 1), (1, 1)],
         },
     ]);
 }

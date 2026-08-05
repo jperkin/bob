@@ -599,18 +599,14 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
             .running
             .iter()
             .filter(|p| *p != pkg)
-            .filter_map(|p| self.pkg_make_jobs.get(p))
-            .filter_map(|mj| mj.jobs().or(mj.allocated()))
+            .map(|p| self.assigned_jobs(p))
             .sum();
         let available = alloc.budget().saturating_sub(committed);
 
         let ready_weight: usize = self
             .ready
             .iter()
-            .map(|(_, p)| {
-                let ct = self.pkg_cpu_history.get(p).copied();
-                alloc.assign(ct)
-            })
+            .map(|(_, p)| self.expected_jobs(alloc, p))
             .sum();
         let total_weight = base + ready_weight;
 
@@ -649,8 +645,7 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
             .running
             .iter()
             .filter(|p| *p != pkg)
-            .filter_map(|p| self.pkg_make_jobs.get(p))
-            .filter_map(|mj| mj.jobs().or(mj.allocated()))
+            .map(|p| self.assigned_jobs(p))
             .sum();
 
         /*
@@ -673,10 +668,36 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
             .iter()
             .map(|(_, p)| p)
             .chain(blocked)
-            .map(|p| alloc.assign(self.pkg_cpu_history.get(p).copied()))
+            .map(|p| self.expected_jobs(alloc, p))
             .sum();
 
         base + alloc.budget().saturating_sub(committed + reserved + base)
+    }
+
+    /**
+     * Jobs a running package was given.
+     *
+     * A build that does not support parallel make is never allocated,
+     * but still occupies one CPU.
+     */
+    fn assigned_jobs(&self, pkg: &K) -> usize {
+        self.pkg_make_jobs
+            .get(pkg)
+            .and_then(|mj| mj.allocated())
+            .unwrap_or(1)
+    }
+
+    /**
+     * Jobs a package will want once it starts.
+     *
+     * A build that does not support parallel make will only ever use
+     * one CPU, so that is all there is to set aside for it.
+     */
+    fn expected_jobs(&self, alloc: &makejobs::Allocator, pkg: &K) -> usize {
+        match self.pkg_make_jobs.get(pkg) {
+            Some(mj) if !mj.safe() => 1,
+            _ => alloc.assign(self.pkg_cpu_history.get(pkg).copied()),
+        }
     }
 
     /**
