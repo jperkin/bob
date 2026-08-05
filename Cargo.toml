@@ -12,7 +12,7 @@ rust-version = "1.88.0"
 edition = "2024"
 
 [dependencies]
-anyhow = "1.0.102"
+anyhow = "1.0.104"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.6", features = ["derive"] }
 cp_r = "0.5"
@@ -24,9 +24,9 @@ glob = "0.3"
 indexmap = "2.14.0"
 lettre = { version = "0.11", default-features = false, features = ["sendmail-transport", "builder"] }
 libc = "0.2"
-mlua = { version = "0.12.0-rc.2", features = ["lua54", "vendored", "send"] }
+mlua = { version = "0.12.0", features = ["lua54", "vendored", "send"] }
 petgraph = "0.8"
-pkgsrc = { version = "0.14.0", features = ["serde"] }
+pkgsrc = { version = "0.14.1", features = ["serde"] }
 ratatui = { version = "0.30", features = ["scrolling-regions"] }
 rayon = "1.12.0"
 regex = "1"
