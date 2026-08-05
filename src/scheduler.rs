@@ -628,16 +628,8 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
      * machine otherwise idle.
      */
     fn spare_assign(&self, alloc: &makejobs::Allocator, pkg: &K, base: usize) -> usize {
-        let others: Vec<&K> = self
-            .running
-            .iter()
-            .filter(|p| *p != pkg)
-            .chain(self.ready.iter().map(|(_, p)| p))
-            .collect();
-        let unblockable: usize = others.iter().map(|p| self.dep_counts[*p]).sum();
-
-        let free = alloc.workers().saturating_sub(self.running.len());
-        if self.ready.len() + unblockable >= free {
+        let concurrent = self.concurrent_with(pkg, alloc.workers());
+        if concurrent.len() + 1 >= alloc.workers() {
             return base;
         }
 
@@ -647,38 +639,79 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
             .filter(|p| *p != pkg)
             .map(|p| self.assigned_jobs(p))
             .sum();
+        let reserved: usize = concurrent
+            .iter()
+            .filter(|p| !self.running.contains(*p))
+            .map(|p| self.expected_jobs(alloc, p))
+            .sum();
+        let spare = alloc.budget().saturating_sub(committed + reserved + base);
 
         /*
-         * Walk out to everything still waiting behind the others.  The
-         * guard above caps how many there can be, so the walk is over
-         * fewer packages than the machine has build slots.
+         * Split the spare jobs between this package and the others
+         * about to start, in proportion to how many packages each of
+         * them is holding up.  The extra one gives every package a
+         * share.
          */
-        let mut blocked: HashSet<&K> = HashSet::new();
-        let mut queue: VecDeque<&K> = others.iter().copied().collect();
+        let claims: usize = std::iter::once(pkg)
+            .chain(self.ready.iter().map(|(_, p)| p))
+            .filter(|p| self.pkg_make_jobs.get(p).is_some_and(|mj| mj.safe()))
+            .map(|p| 1 + self.pending_dependents(p))
+            .sum();
+        base + (spare * (1 + self.pending_dependents(pkg))).div_ceil(claims)
+    }
+
+    /**
+     * Number of pending packages that depend directly on this one.
+     */
+    fn pending_dependents(&self, pkg: &K) -> usize {
+        self.reverse_deps
+            .get(pkg)
+            .into_iter()
+            .flatten()
+            .filter(|d| self.incoming.contains_key(*d))
+            .count()
+    }
+
+    /**
+     * Packages that can be building at the same time as `pkg`.
+     *
+     * Everything else running, everything ready, and anything still
+     * waiting whose remaining dependencies are all in that set.  The
+     * search stops at `limit` packages, enough for the caller to see
+     * that the machine fills up.
+     */
+    fn concurrent_with(&self, pkg: &K, limit: usize) -> HashSet<&K> {
+        let mut set: HashSet<&K> = self
+            .running
+            .iter()
+            .filter(|p| *p != pkg)
+            .chain(self.ready.iter().map(|(_, p)| p))
+            .collect();
+
+        let mut queue: VecDeque<&K> = set.iter().copied().collect();
         while let Some(p) = queue.pop_front() {
             for dependent in self.reverse_deps.get(p).into_iter().flatten() {
-                if self.incoming.contains_key(dependent) && blocked.insert(dependent) {
+                if set.len() >= limit {
+                    return set;
+                }
+                if set.contains(dependent) {
+                    continue;
+                }
+                if let Some(waiting_on) = self.incoming.get(dependent)
+                    && waiting_on.iter().all(|d| set.contains(d))
+                {
+                    set.insert(dependent);
                     queue.push_back(dependent);
                 }
             }
         }
-
-        let reserved: usize = self
-            .ready
-            .iter()
-            .map(|(_, p)| p)
-            .chain(blocked)
-            .map(|p| self.expected_jobs(alloc, p))
-            .sum();
-
-        base + alloc.budget().saturating_sub(committed + reserved + base)
+        set
     }
 
     /**
      * Jobs a running package was given.
      *
-     * A build that does not support parallel make is never allocated,
-     * but still occupies one CPU.
+     * A serial build holds one CPU.
      */
     fn assigned_jobs(&self, pkg: &K) -> usize {
         self.pkg_make_jobs
@@ -690,8 +723,7 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
     /**
      * Jobs a package will want once it starts.
      *
-     * A build that does not support parallel make will only ever use
-     * one CPU, so that is all there is to set aside for it.
+     * A serial build uses one CPU, so that is what is set aside.
      */
     fn expected_jobs(&self, alloc: &makejobs::Allocator, pkg: &K) -> usize {
         match self.pkg_make_jobs.get(pkg) {

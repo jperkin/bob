@@ -388,6 +388,17 @@ fn make_jobs_serial_packages() {
             packages: &[p!(20000, 0), p!(0, 0, serial), p!(0, 0, serial)],
             expect: &[(4, 14), (1, 1), (1, 1)],
         },
+        /*
+         * A serial build holding up as much as a parallel one.  The
+         * spare goes to the builds that can use it, so the first takes
+         * the share the serial one would have diluted.
+         */
+        Runnable {
+            workers: 18,
+            jobs: 32,
+            packages: &[p!(1, 0), p!(1, 0, serial), p!(0, 0)],
+            expect: &[(2, 19), (1, 1), (2, 8)],
+        },
     ]);
 }
 
@@ -532,4 +543,46 @@ fn make_jobs_released_package_gets_its_share() {
     /* p1 has finished, so only p0, p2 and the released package hold jobs. */
     let live = jobs[0].1 + jobs[2].1 + sp.make_jobs.allocated().unwrap_or(1);
     assert!(live <= 32, "{live} jobs against a budget of 32");
+}
+
+/**
+ * Jobs are set aside for the packages that can start while this one
+ * builds, and equals share what is left.
+ *
+ * A and B are both runnable and D waits on both of them, so D can
+ * start once both have built.  A and B hold up the same one package,
+ * so they take the same share.
+ */
+#[test]
+fn make_jobs_shared_dependency_cannot_start() {
+    let mut packages = HashMap::new();
+    for name in ["A", "B"] {
+        packages.insert(
+            name.to_string(),
+            PackageNode {
+                deps: HashSet::new(),
+                pbulk_weight: 1,
+                cpu_time: 0,
+            },
+        );
+    }
+    packages.insert(
+        "D".to_string(),
+        PackageNode {
+            deps: HashSet::from(["A".to_string(), "B".to_string()]),
+            pbulk_weight: 1,
+            cpu_time: 0,
+        },
+    );
+
+    let mut sched = Scheduler::from_graph(packages);
+    sched.set_allocator(bob::makejobs::Allocator::new(18, 32));
+
+    let mut jobs = Vec::new();
+    for _ in 0..2 {
+        if let Poll::Ready(Some(sp)) = sched.poll() {
+            jobs.push((sp.pkg.clone(), sp.make_jobs.allocated().unwrap_or(1)));
+        }
+    }
+    assert_eq!(jobs, [("A".to_string(), 16), ("B".to_string(), 16)]);
 }
