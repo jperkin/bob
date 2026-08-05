@@ -573,6 +573,8 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
      *
      * Normal mode: use the allocator's log-scaled assignment.
      * Sole builder (mid-build, nothing else runnable): full budget.
+     * Spare (too little runnable work to fill the machine): see
+     * [`spare_assign`](Self::spare_assign).
      * Tail (no deps left to unblock): split available cores among
      * remaining packages proportionally to their base allocations
      * so that heavier packages get a larger share.
@@ -584,7 +586,7 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
             return alloc.budget();
         }
         if !self.incoming.is_empty() {
-            return base;
+            return self.spare_assign(alloc, pkg, base);
         }
 
         /*
@@ -620,12 +622,79 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
         scaled.max(base)
     }
 
-    /** Set the allocator for MAKE_JOBS allocation. */
+    /**
+     * Give a package additional budget if nothing else can use it.
+     *
+     * Occasionally during a build we will run into situations where fewer
+     * builds can run than workers available.  A common example is when using
+     * a pkgsrc GCC which 20,000+ packages can depend upon.  Ensure that if
+     * possible we give such builds additional jobs rather than leaving the
+     * machine otherwise idle.
+     */
+    fn spare_assign(&self, alloc: &makejobs::Allocator, pkg: &K, base: usize) -> usize {
+        let others: Vec<&K> = self
+            .running
+            .iter()
+            .filter(|p| *p != pkg)
+            .chain(self.ready.iter().map(|(_, p)| p))
+            .collect();
+        let unblockable: usize = others.iter().map(|p| self.dep_counts[*p]).sum();
+
+        let free = alloc.workers().saturating_sub(self.running.len());
+        if self.ready.len() + unblockable >= free {
+            return base;
+        }
+
+        let committed: usize = self
+            .running
+            .iter()
+            .filter(|p| *p != pkg)
+            .filter_map(|p| self.pkg_make_jobs.get(p))
+            .filter_map(|mj| mj.jobs().or(mj.allocated()))
+            .sum();
+
+        /*
+         * Walk out to everything still waiting behind the others.  The
+         * guard above caps how many there can be, so the walk is over
+         * fewer packages than the machine has build slots.
+         */
+        let mut blocked: HashSet<&K> = HashSet::new();
+        let mut queue: VecDeque<&K> = others.iter().copied().collect();
+        while let Some(p) = queue.pop_front() {
+            for dependent in self.reverse_deps.get(p).into_iter().flatten() {
+                if self.incoming.contains_key(dependent) && blocked.insert(dependent) {
+                    queue.push_back(dependent);
+                }
+            }
+        }
+
+        let reserved: usize = self
+            .ready
+            .iter()
+            .map(|(_, p)| p)
+            .chain(blocked)
+            .map(|p| alloc.assign(self.pkg_cpu_history.get(p).copied()))
+            .sum();
+
+        base + alloc.budget().saturating_sub(committed + reserved + base)
+    }
+
+    /**
+     * Set the allocator for MAKE_JOBS allocation.
+     */
     pub fn set_allocator(&mut self, mut allocator: makejobs::Allocator) {
         let mut cpu_times: Vec<usize> = self.pkg_cpu_history.values().copied().collect();
         cpu_times.sort_unstable();
         allocator.calibrate(&cpu_times);
         self.allocator = Some(allocator);
+    }
+
+    /**
+     * The calibrated allocator, once
+     * [`set_allocator`](Self::set_allocator) has run.
+     */
+    pub fn allocator(&self) -> Option<&makejobs::Allocator> {
+        self.allocator.as_ref()
     }
 }
 

@@ -55,6 +55,8 @@ use crate::db::{BuildStageTiming, PkgKey};
 pub struct Allocator {
     /// Total MAKE_JOBS budget across all workers (`dynamic.jobs` config).
     jobs: usize,
+    /// Number of concurrent build slots.
+    workers: usize,
     /// Equal share per worker: jobs / workers (rounded up).  Used as
     /// the default for packages with no build history.
     fair: usize,
@@ -90,6 +92,7 @@ impl Allocator {
         let max_jobs = (fair + 2).min(jobs);
         Self {
             jobs,
+            workers,
             fair,
             min_jobs,
             max_jobs,
@@ -116,9 +119,18 @@ impl Allocator {
         self.log_range = (max_t.ln() - self.log_min).max(1.0);
     }
 
-    /// Total job budget.
+    /**
+     * Total job budget.
+     */
     pub(crate) fn budget(&self) -> usize {
         self.jobs
+    }
+
+    /**
+     * Number of concurrent build slots.
+     */
+    pub(crate) fn workers(&self) -> usize {
+        self.workers
     }
 
     /**
@@ -268,7 +280,7 @@ mod tests {
         let assigned: Vec<usize> = times.iter().map(|&v| alloc.assign(Some(v))).collect();
         assert_eq!(assigned, [2, 3, 5, 6], "w=4 c=16");
 
-        /* w=7 c=10: min=2, max=3 (narrow range) */
+        /* w=7 c=10: min=2, max=4 (narrow range) */
         let times = [100, 300, 1_000, 3_000, 10_000, 30_000, 100_000];
         let alloc = calibrated(7, 10, &times);
         let assigned: Vec<usize> = times.iter().map(|&v| alloc.assign(Some(v))).collect();
