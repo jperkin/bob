@@ -75,7 +75,7 @@ fn tail_after_mark_success_weighted() {
     let a = allocations.iter().find(|(p, _)| p == "A").unwrap().1;
     let b = allocations.iter().find(|(p, _)| p == "B").unwrap().1;
     let c = allocations.iter().find(|(p, _)| p == "C").unwrap().1;
-    assert_eq!((a, b, c), (17, 9, 6), "A={a} B={b} C={c}");
+    assert_eq!((a, b, c), (18, 9, 5), "A={a} B={b} C={c}");
 }
 
 /**
@@ -448,7 +448,7 @@ fn nothing_blocked_splits_by_weight() {
             workers: 8,
             jobs: 32,
             packages: &[p!(0, 100_000), p!(0, 1_000), p!(0, 100)],
-            expect: &[(6, 17), (3, 9), (2, 6)],
+            expect: &[(6, 18), (3, 9), (2, 5)],
         },
     ]);
 }

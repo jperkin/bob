@@ -431,7 +431,7 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
                 let cpu_time = self.pkg_cpu_history.get(&pkg).copied();
                 let safe = self.pkg_make_jobs.get(&pkg).is_some_and(|mj| mj.safe());
                 if safe && let Some(ref alloc) = self.allocator {
-                    let jobs = self.tail_assign(alloc, &pkg, cpu_time);
+                    let jobs = self.assign_jobs(alloc, &pkg, cpu_time);
                     self.pkg_make_jobs.get_mut(&pkg).unwrap().allocate(jobs);
                 }
                 let make_jobs = self.pkg_make_jobs.get(&pkg).copied().unwrap_or_default();
@@ -569,95 +569,41 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
     }
 
     /**
-     * Compute MAKE_JOBS for a package, boosting in the build tail.
+     * Compute MAKE_JOBS for a package about to be dispatched.
      *
-     * Normal mode: use the allocator's log-scaled assignment.
-     * Sole builder (mid-build, nothing else runnable): full budget.
-     * Spare (too little runnable work to fill the machine): see
-     * [`spare_assign`](Self::spare_assign).
-     * Tail (no deps left to unblock): split available cores among
-     * remaining packages proportionally to their base allocations
-     * so that heavier packages get a larger share.
+     * Jobs are set aside for the packages already running and for
+     * those that can start while this one builds.  Whatever is left
+     * over is shared between this package and the ones ready to go,
+     * weighted by the jobs each will use and by how many packages each
+     * is holding up.
      */
-    fn tail_assign(&self, alloc: &makejobs::Allocator, pkg: &K, cpu_time: Option<usize>) -> usize {
+    fn assign_jobs(&self, alloc: &makejobs::Allocator, pkg: &K, cpu_time: Option<usize>) -> usize {
         let base = alloc.assign(cpu_time);
 
-        if self.running.len() == 1 && self.ready.is_empty() {
-            return alloc.budget();
-        }
-        if !self.incoming.is_empty() {
-            return self.spare_assign(alloc, pkg, base);
-        }
-
-        /*
-         * Tail: no packages waiting on dependencies.  Compute the
-         * budget not yet committed to other running packages, then
-         * split it proportionally among this package and the remaining
-         * ready packages using base allocations as weights.
-         */
         let committed: usize = self
             .running
             .iter()
             .filter(|p| *p != pkg)
             .map(|p| self.assigned_jobs(p))
             .sum();
-        let available = alloc.budget().saturating_sub(committed);
-
-        let ready_weight: usize = self
-            .ready
-            .iter()
-            .map(|(_, p)| self.expected_jobs(alloc, p))
-            .sum();
-        let total_weight = base + ready_weight;
-
-        if total_weight == 0 {
-            return available;
-        }
-
-        let scaled = (available as f64 * base as f64 / total_weight as f64).round() as usize;
-        scaled.max(base)
-    }
-
-    /**
-     * Give a package additional budget if nothing else can use it.
-     *
-     * Occasionally during a build we will run into situations where fewer
-     * builds can run than workers available.  A common example is when using
-     * a pkgsrc GCC which 20,000+ packages can depend upon.  Ensure that if
-     * possible we give such builds additional jobs rather than leaving the
-     * machine otherwise idle.
-     */
-    fn spare_assign(&self, alloc: &makejobs::Allocator, pkg: &K, base: usize) -> usize {
-        let concurrent = self.concurrent_with(pkg, alloc.workers());
-        if concurrent.len() + 1 >= alloc.workers() {
-            return base;
-        }
-
-        let committed: usize = self
-            .running
-            .iter()
-            .filter(|p| *p != pkg)
-            .map(|p| self.assigned_jobs(p))
-            .sum();
-        let reserved: usize = concurrent
+        let reserved: usize = self
+            .concurrent_with(pkg, alloc.workers())
             .iter()
             .filter(|p| !self.running.contains(*p))
             .map(|p| self.expected_jobs(alloc, p))
             .sum();
         let spare = alloc.budget().saturating_sub(committed + reserved + base);
 
-        /*
-         * Split the spare jobs between this package and the others
-         * about to start, in proportion to how many packages each of
-         * them is holding up.  The extra one gives every package a
-         * share.
-         */
-        let claims: usize = std::iter::once(pkg)
-            .chain(self.ready.iter().map(|(_, p)| p))
+        let claims: usize = self
+            .ready
+            .iter()
+            .map(|(_, p)| p)
             .filter(|p| self.pkg_make_jobs.get(p).is_some_and(|mj| mj.safe()))
-            .map(|p| 1 + self.pending_dependents(p))
+            .map(|p| self.expected_jobs(alloc, p) * (1 + self.pending_dependents(p)))
             .sum();
-        base + (spare * (1 + self.pending_dependents(pkg))).div_ceil(claims)
+        let claim = base * (1 + self.pending_dependents(pkg));
+
+        base + (spare * claim).div_ceil(claim + claims)
     }
 
     /**
