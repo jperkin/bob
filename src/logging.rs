@@ -216,5 +216,18 @@ pub fn init(dbdir: &PathBuf, log_level: &str) -> Result<()> {
         "Logging initialized"
     );
 
+    /*
+     * A panic payload carries the message alone, so record the thread
+     * and source location here where they are still known.
+     */
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(
+            thread = std::thread::current().name().unwrap_or("unnamed"),
+            "{info}"
+        );
+        default_hook(info);
+    }));
+
     Ok(())
 }

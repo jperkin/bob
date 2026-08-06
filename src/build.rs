@@ -2498,8 +2498,8 @@ impl Build {
         debug!("Joining worker threads");
         let join_start = Instant::now();
         for thread in threads {
-            if let Err(e) = thread.join() {
-                warn!("Worker thread panicked: {:?}", e);
+            if thread.join().is_err() {
+                warn!("Worker thread panicked");
             }
         }
         debug!(
