@@ -33,6 +33,12 @@ use bob::config::{Config, Pkgsrc};
 use bob::db::Database;
 use bob::sandbox::SandboxScope;
 
+struct BuildablePackage {
+    id: i64,
+    pkgname: String,
+    pkg_location: String,
+}
+
 /**
  * Check in advance whether packages are up-to-date, or a reason why they
  * need to be built, and store results.
@@ -59,7 +65,7 @@ pub fn check_up_to_date(config: &Config, pkgsrc: &Pkgsrc, db: &Database) -> Resu
 
     let mut up_to_date_count = 0usize;
 
-    db.clear_build_reasons()?;
+    db.clear_selected_build_reasons()?;
 
     bob::print_status("Calculating package build status");
     let start = std::time::Instant::now();
@@ -73,28 +79,41 @@ pub fn check_up_to_date(config: &Config, pkgsrc: &Pkgsrc, db: &Database) -> Resu
     /*
      * Dependency graph over buildable package ids, loaded from the
      * resolution results stored in the database. Forward deps determine
-     * wave ordering, reverse deps enable propagation.  `order` ranks
-     * the most depended-upon packages first so processing, and with it
-     * rebuild-reason attribution, follows that priority.
+     * wave ordering, reverse deps enable propagation.
      */
-    let rows = db.get_buildable_rows()?;
-    let order: Vec<i64> = rows.iter().map(|&(id, ..)| id).collect();
-    let packages: HashMap<i64, (String, String)> = rows
+    /*
+     * Packages built earlier in this run keep the result they have, so
+     * an interrupted build carries on from where it stopped.  'bob
+     * rebuild' drops the result of anything it wants built again.
+     */
+    let attempted = db.attempted_packages()?;
+    let packages: Vec<BuildablePackage> = db
+        .get_buildable_rows()?
         .into_iter()
-        .map(|(id, pkgname, pkg_location)| (id, (pkgname, pkg_location)))
+        .map(|(id, pkgname, pkg_location)| BuildablePackage {
+            id,
+            pkgname,
+            pkg_location,
+        })
         .collect();
-    let mut forward_deps: HashMap<i64, Vec<i64>> =
-        packages.keys().map(|&id| (id, Vec::new())).collect();
-    let mut reverse_deps: HashMap<i64, Vec<i64>> = HashMap::new();
-    for (pkg, dep) in db.get_buildable_depends()? {
-        forward_deps.entry(pkg).or_default().push(dep);
-        reverse_deps.entry(dep).or_default().push(pkg);
+    let mut forward_deps: HashMap<i64, Vec<(i64, String)>> = HashMap::new();
+    let mut reverse_deps: HashMap<i64, Vec<(i64, String)>> = HashMap::new();
+    for (pkg, pkgname, dep, depname) in db.get_buildable_depends()? {
+        forward_deps.entry(pkg).or_default().push((dep, depname));
+        if !attempted.contains(&pkg) {
+            reverse_deps.entry(dep).or_default().push((pkg, pkgname));
+        }
     }
 
-    let mut remaining: HashSet<i64> = packages.keys().copied().collect();
+    let mut remaining: HashSet<i64> = packages
+        .iter()
+        .filter(|package| !attempted.contains(&package.id))
+        .map(|package| package.id)
+        .collect();
     let mut needs_rebuild: HashSet<i64> = HashSet::new();
-    let mut propagated_from: HashMap<i64, i64> = HashMap::new();
-    let mut checked_results: Vec<(i64, anyhow::Result<Option<bob::BuildReason>>)> = Vec::new();
+    let mut propagated_from: HashMap<i64, String> = HashMap::new();
+    let mut checked_results: Vec<(&BuildablePackage, anyhow::Result<Option<bob::BuildReason>>)> =
+        Vec::new();
 
     /*
      * Mark packages with missing binaries. Not propagated - dependents
@@ -102,11 +121,14 @@ pub fn check_up_to_date(config: &Config, pkgsrc: &Pkgsrc, db: &Database) -> Resu
      */
     {
         let tx = db.transaction()?;
-        for (&id, (pkgname, _)) in &packages {
-            let pkgfile = packages_dir.join(format!("{}.tgz", pkgname));
+        for package in &packages {
+            if !remaining.contains(&package.id) {
+                continue;
+            }
+            let pkgfile = packages_dir.join(format!("{}.tgz", package.pkgname));
             if !pkgfile.exists() {
-                needs_rebuild.insert(id);
-                db.mark_for_rebuild(id, &bob::BuildReason::PackageNotFound.to_string())?;
+                needs_rebuild.insert(package.id);
+                db.mark_for_rebuild(package.id, &bob::BuildReason::PackageNotFound.to_string())?;
             }
         }
         tx.commit()?;
@@ -119,64 +141,69 @@ pub fn check_up_to_date(config: &Config, pkgsrc: &Pkgsrc, db: &Database) -> Resu
      * dependents are marked with DependencyRefresh via propagation.
      */
     while !remaining.is_empty() {
-        let ready: Vec<i64> = order
+        let ready: Vec<&BuildablePackage> = packages
             .iter()
-            .filter(|id| {
-                remaining.contains(id)
-                    && forward_deps[*id].iter().all(|dep| !remaining.contains(dep))
+            .filter(|package| {
+                remaining.contains(&package.id)
+                    && forward_deps.get(&package.id).is_none_or(|depends| {
+                        depends
+                            .iter()
+                            .all(|(dependency, _)| !remaining.contains(dependency))
+                    })
             })
-            .copied()
             .collect();
 
         if ready.is_empty() {
             break;
         }
 
-        let to_check: Vec<i64> = ready
+        let to_check: Vec<&BuildablePackage> = ready
             .iter()
-            .filter(|id| !needs_rebuild.contains(id))
+            .filter(|package| !needs_rebuild.contains(&package.id))
             .copied()
             .collect();
 
         let wave_results: Vec<_> = pool.install(|| {
             to_check
                 .par_iter()
-                .map(|&id| {
-                    let depends: Vec<&str> = forward_deps[&id]
-                        .iter()
-                        .map(|dep| packages[dep].0.as_str())
+                .map(|&package| {
+                    let depends: Vec<&str> = forward_deps
+                        .get(&package.id)
+                        .into_iter()
+                        .flatten()
+                        .map(|(_, dependency)| dependency.as_str())
                         .collect();
                     let result = bob::pkg_up_to_date(
-                        &packages[&id].0,
+                        &package.pkgname,
                         &depends,
                         &packages_dir,
                         &pkgsrc.basedir,
                     );
-                    (id, result)
+                    (package, result)
                 })
                 .collect()
         });
 
-        for (id, result) in wave_results {
+        for (package, result) in wave_results {
             if matches!(&result, Ok(Some(_)) | Err(_)) {
-                needs_rebuild.insert(id);
-                let mut worklist = vec![id];
-                while let Some(dep) = worklist.pop() {
-                    if let Some(dependents) = reverse_deps.get(&dep) {
-                        for &dependent in dependents {
-                            if needs_rebuild.insert(dependent) {
-                                propagated_from.insert(dependent, dep);
-                                worklist.push(dependent);
+                needs_rebuild.insert(package.id);
+                let mut worklist = vec![(package.id, package.pkgname.clone())];
+                while let Some((dependency, dependency_name)) = worklist.pop() {
+                    if let Some(dependents) = reverse_deps.get(&dependency) {
+                        for (dependent, dependent_name) in dependents {
+                            if needs_rebuild.insert(*dependent) {
+                                propagated_from.insert(*dependent, dependency_name.clone());
+                                worklist.push((*dependent, dependent_name.clone()));
                             }
                         }
                     }
                 }
             }
-            checked_results.push((id, result));
+            checked_results.push((package, result));
         }
 
-        for id in ready {
-            remaining.remove(&id);
+        for package in ready {
+            remaining.remove(&package.id);
         }
     }
 
@@ -189,21 +216,20 @@ pub fn check_up_to_date(config: &Config, pkgsrc: &Pkgsrc, db: &Database) -> Resu
     let mut history_inputs = Vec::new();
     {
         let tx = db.transaction()?;
-        for (id, result) in checked_results {
-            let (pkgname, pkg_location) = &packages[&id];
+        for (package, result) in checked_results {
             match result {
                 Ok(None) => {
-                    if db.is_successful(id)? {
+                    if db.is_successful(package.id)? {
                         continue;
                     }
                     let build_result = bob::BuildResult {
-                        pkgname: pkgsrc::PkgName::new(pkgname),
-                        pkgpath: pkgsrc::PkgPath::new(pkg_location).ok(),
+                        pkgname: pkgsrc::PkgName::new(&package.pkgname),
+                        pkgpath: pkgsrc::PkgPath::new(&package.pkg_location).ok(),
                         state: bob::PackageState::UpToDate,
                         log_dir: None,
                         build_stats: bob::PkgBuildStats::default(),
                     };
-                    db.store_build_result(id, &build_result)?;
+                    db.store_build_result(package.id, &build_result)?;
                     if let Some(mut input) = build_result.history_input() {
                         input.build_id = Some(build_id.clone());
                         history_inputs.push(input);
@@ -211,21 +237,21 @@ pub fn check_up_to_date(config: &Config, pkgsrc: &Pkgsrc, db: &Database) -> Resu
                     up_to_date_count += 1;
                 }
                 Ok(Some(reason)) => {
-                    db.mark_for_rebuild(id, &reason.to_string())?;
+                    db.mark_for_rebuild(package.id, &reason.to_string())?;
                 }
                 Err(e) => {
                     tracing::debug!(
-                        pkgname,
+                        pkgname = %package.pkgname,
                         error = format!("{e:#}"),
                         "Error checking up-to-date status"
                     );
-                    db.mark_for_rebuild(id, &format!("check failed: {}", e))?;
+                    db.mark_for_rebuild(package.id, &format!("check failed: {}", e))?;
                 }
             }
         }
 
-        for (id, dep) in propagated_from {
-            let reason = bob::BuildReason::DependencyRefresh(packages[&dep].0.clone());
+        for (id, dependency) in propagated_from {
+            let reason = bob::BuildReason::DependencyRefresh(dependency);
             db.mark_for_rebuild(id, &reason.to_string())?;
         }
         tx.commit()?;

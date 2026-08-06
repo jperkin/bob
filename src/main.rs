@@ -511,7 +511,9 @@ fn run() -> Result<()> {
             let mut scope = SandboxScope::new(sandbox, runner.state.clone());
             runner.run_scan_phase(&mut scan, &mut scope)?;
             scan.resolve_with_report(&runner.db, runner.config.strict_scan())?;
-            cmd::build::check_up_to_date(&runner.config, &runner.pkgsrc, &runner.db)?;
+            if !runner.db.all_selected_packages_have_status()? {
+                cmd::build::check_up_to_date(&runner.config, &runner.pkgsrc, &runner.db)?;
+            }
             cmd::build::run_build_with(
                 &runner.config,
                 &runner.pkgsrc,

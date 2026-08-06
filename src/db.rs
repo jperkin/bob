@@ -935,11 +935,13 @@ impl Database {
     }
 
     /**
-     * Clear all build reasons (called before re-checking up-to-date status).
+     * Clear build reasons for selected packages.
      */
-    pub fn clear_build_reasons(&self) -> Result<()> {
-        self.conn
-            .execute("UPDATE package_state SET build_reason = NULL", [])?;
+    pub fn clear_selected_build_reasons(&self) -> Result<()> {
+        self.conn.execute(
+            "UPDATE package_state SET build_reason = NULL WHERE selected = 1",
+            [],
+        )?;
         Ok(())
     }
 
@@ -1193,6 +1195,17 @@ impl Database {
     }
 
     /**
+     * Package ids with a stored build result.
+     */
+    pub fn attempted_packages(&self) -> Result<HashSet<i64>> {
+        let mut stmt = self.conn.prepare("SELECT package_id FROM builds")?;
+        let ids = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<HashSet<i64>>>()?;
+        Ok(ids)
+    }
+
+    /**
      * Buildable packages as `(id, pkgname, pkg_location)` rows, most
      * depended-upon first.
      */
@@ -1207,13 +1220,13 @@ impl Database {
     }
 
     /**
-     * Resolved dependency edges between buildable packages as
-     * `(package_id, depends_on_id)` pairs.  Each package's edges order
-     * its most depended-upon dependencies first.
+     * Resolved dependency edges as `(package_id, package_name, dependency_id,
+     * dependency_name)` rows, with each package's dependencies ordered by
+     * dependent count and name.
      */
-    pub fn get_buildable_depends(&self) -> Result<Vec<(i64, i64)>> {
+    pub fn get_buildable_depends(&self) -> Result<Vec<(i64, String, i64, String)>> {
         self.query_rows(
-            "SELECT rd.package_id, rd.depends_on_id
+            "SELECT rd.package_id, p.pkgname, rd.depends_on_id, d.pkgname
              FROM resolved_depends rd
              JOIN buildable p ON p.id = rd.package_id
              JOIN buildable d ON d.id = rd.depends_on_id
@@ -1638,6 +1651,18 @@ impl Database {
                 |row| row.get(0),
             )
             .context("Failed to check whether the build is complete")
+    }
+
+    /**
+     * Whether every selected package has a scan outcome, build outcome, or
+     * rebuild reason.
+     */
+    pub fn all_selected_packages_have_status(&self) -> Result<bool> {
+        Ok(self.get_all_package_status()?.into_iter().all(|package| {
+            package.scan_outcome.is_some()
+                || package.build_outcome.is_some()
+                || package.build_reason.is_some()
+        }))
     }
 
     /**
