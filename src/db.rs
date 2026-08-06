@@ -1970,7 +1970,7 @@ impl Database {
      * Query build history for all packages.
      *
      * For each [`PkgKey`] returns the outcome, MAKE_JOBS, WRKOBJDIR,
-     * and disk usage from the most recent matching row.  When
+     * and disk usage from the most recent Success or Failed row.  When
      * `build_id` is `Some`, only rows from that build session are
      * considered; when `None`, all history is searched.  Returns an
      * empty map on error.
@@ -1996,17 +1996,19 @@ impl Database {
         let wo: &str = HistoryKind::Wrkobjdir.into();
         let pkgbase_col: &str = HistoryKind::Pkgbase.into();
         let pkgpath_col: &str = HistoryKind::Pkgpath.into();
-        let up_to_date = PackageState::UpToDate.id();
+        let success = PackageState::Success.id();
+        let failed = PackageState::Failed.id();
 
         /*
-         * UpToDate rows are markers; they carry no disk_usage,
-         * make_jobs, or wrkobjdir.  Exclude them so the latest row per
-         * package is the most recent real build measurement.
+         * Only Success and Failed rows are real build attempts with
+         * measurements; every other outcome is a marker carrying no
+         * disk_usage, make_jobs, or wrkobjdir.  Restrict to them so
+         * the latest row per package is the most recent real build.
          */
         let where_clause = if build_id.is_some() {
-            format!("WHERE h.build_id = ?1 AND h.{out} != {up_to_date}")
+            format!("WHERE h.build_id = ?1 AND h.{out} IN ({success}, {failed})")
         } else {
-            format!("WHERE h.{out} != {up_to_date}")
+            format!("WHERE h.{out} IN ({success}, {failed})")
         };
 
         let sql = format!(
