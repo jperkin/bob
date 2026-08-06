@@ -90,6 +90,7 @@ use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
 use std::fs;
 use std::io::{BufReader, Read, Write};
+use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Component, Path, PathBuf};
@@ -301,6 +302,17 @@ where
     });
 
     wait_channel_with_shutdown(pid, rx, state)
+}
+
+/*
+ * fs::create_dir_all with an explicit mode.  A permissive umask must
+ * not leave sandbox directories group or world writable.
+ */
+fn create_dir_all(path: &Path) -> std::io::Result<()> {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o755)
+        .create(path)
 }
 
 /**
@@ -853,7 +865,7 @@ impl Sandbox {
      */
     pub(crate) fn create(&self, id: usize) -> Result<bool> {
         let sandbox = self.path(id);
-        fs::create_dir_all(&sandbox)
+        create_dir_all(&sandbox)
             .with_context(|| format!("Failed to create {}", sandbox.display()))?;
         let marker = self.bobmarker(id);
         match fs::create_dir(&marker) {
@@ -1496,7 +1508,7 @@ impl Sandbox {
                      * /dev/fd inside a read-only lofs /dev).
                      */
                     if !dest.exists() {
-                        fs::create_dir_all(&dest)
+                        create_dir_all(&dest)
                             .with_context(|| format!("Failed to create {}", dest.display()))?;
                     }
                     match fs_type {
@@ -1520,7 +1532,7 @@ impl Sandbox {
                         "Copying"
                     );
                     if let Some(parent) = dest.parent() {
-                        fs::create_dir_all(parent)
+                        create_dir_all(parent)
                             .with_context(|| format!("Failed to create {}", parent.display()))?;
                     }
                     cp_r::CopyOptions::new()
@@ -1598,7 +1610,7 @@ impl Sandbox {
                     if let Some(parent) = dest_path.parent()
                         && !parent.exists()
                     {
-                        fs::create_dir_all(parent)
+                        create_dir_all(parent)
                             .with_context(|| format!("Failed to create {}", parent.display()))?;
                     }
                     std::os::unix::fs::symlink(src, &dest_path).with_context(|| {
