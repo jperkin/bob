@@ -1196,6 +1196,17 @@ impl Database {
      * Buildable packages as `(id, pkgname, pkg_location)` rows, most
      * depended-upon first.
      */
+    /**
+     * Package ids that have been built in this run.
+     */
+    pub fn attempted_packages(&self) -> Result<HashSet<i64>> {
+        let mut stmt = self.conn.prepare("SELECT package_id FROM builds")?;
+        let ids = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<HashSet<i64>>>()?;
+        Ok(ids)
+    }
+
     pub fn get_buildable_rows(&self) -> Result<Vec<(i64, String, String)>> {
         self.query_rows(
             "SELECT p.id, p.pkgname, p.pkg_location

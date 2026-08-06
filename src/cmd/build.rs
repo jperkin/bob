@@ -77,7 +77,17 @@ pub fn check_up_to_date(config: &Config, pkgsrc: &Pkgsrc, db: &Database) -> Resu
      * the most depended-upon packages first so processing, and with it
      * rebuild-reason attribution, follows that priority.
      */
-    let rows = db.get_buildable_rows()?;
+    /*
+     * Packages built earlier in this run keep the result they have, so
+     * an interrupted build carries on from where it stopped.  'bob
+     * rebuild' drops the result of anything it wants built again.
+     */
+    let attempted = db.attempted_packages()?;
+    let rows: Vec<(i64, String, String)> = db
+        .get_buildable_rows()?
+        .into_iter()
+        .filter(|(id, ..)| !attempted.contains(id))
+        .collect();
     let order: Vec<i64> = rows.iter().map(|&(id, ..)| id).collect();
     let packages: HashMap<i64, (String, String)> = rows
         .into_iter()
