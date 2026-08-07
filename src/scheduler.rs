@@ -578,7 +578,7 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
      * is holding up.
      */
     fn assign_jobs(&self, alloc: &makejobs::Allocator, pkg: &K, cpu_time: Option<usize>) -> usize {
-        let base = alloc.assign(cpu_time);
+        let base = alloc.assign(cpu_time, self.dep_count(pkg));
 
         let committed: usize = self
             .running
@@ -674,7 +674,7 @@ impl<K: Eq + Hash + Clone + Ord + fmt::Display> Scheduler<K> {
     fn expected_jobs(&self, alloc: &makejobs::Allocator, pkg: &K) -> usize {
         match self.pkg_make_jobs.get(pkg) {
             Some(mj) if !mj.safe() => 1,
-            _ => alloc.assign(self.pkg_cpu_history.get(pkg).copied()),
+            _ => alloc.assign(self.pkg_cpu_history.get(pkg).copied(), self.dep_count(pkg)),
         }
     }
 

@@ -562,7 +562,7 @@ fn print_build_status(
             if !pkg.make_jobs_safe.unwrap_or(true) {
                 return None;
             }
-            Some(alloc.assign(cpu.map(|c| c as usize)) as u32)
+            Some(alloc.assign(cpu.map(|c| c as usize), pkg.dep_count as usize) as u32)
         });
 
         let row: Vec<String> = cols
