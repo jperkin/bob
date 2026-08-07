@@ -23,9 +23,12 @@
  *
  * The allocator maps each package's CPU time onto a log scale covering
  * the full range of observed values, then linearly interpolates
- * between min_jobs and max_jobs.  Packages with no history get a
- * fair share (jobs / workers).  When only one package can run
- * (sole builder), it gets the entire budget.
+ * between min_jobs and a per-package ceiling.  The ceiling is one job
+ * per doubling of the packages that transitively depend on the
+ * package, clamped between max_jobs and the total budget, so the
+ * packages holding up most of the build finish soonest.  Packages
+ * with no history get a fair share (jobs / workers).  When only one
+ * package can run (sole builder), it gets the entire budget.
  *
  * [`PkgMakeJobs`] tracks the full lifecycle for a single package:
  *
@@ -62,7 +65,7 @@ pub struct Allocator {
     fair: usize,
     /// Fewest jobs any package gets, clamped to total jobs.
     min_jobs: usize,
-    /// Most jobs a non-sole package gets, clamped to total jobs.
+    /// Floor of the per-package job ceiling, clamped to total jobs.
     max_jobs: usize,
     /// Natural log of the smallest CPU time in the calibration set.
     log_min: f64,
@@ -137,19 +140,25 @@ impl Allocator {
      * Compute the job count for a package under normal concurrency.
      *
      * Maps `cpu_time` onto the calibrated log scale and interpolates
-     * between min_jobs and max_jobs.  Packages with no history
-     * (`None`) get a fair share (jobs / workers).
+     * between min_jobs and a per-package ceiling: one job per doubling
+     * of `dep_count`, the number of packages that transitively depend
+     * on this one, clamped between max_jobs and the total budget.
+     * Expensive packages with many dependents therefore get the most
+     * jobs.  Packages with no history (`None`) get a fair share
+     * (jobs / workers).
      */
-    pub fn assign(&self, cpu_time: Option<usize>) -> usize {
+    pub fn assign(&self, cpu_time: Option<usize>, dep_count: usize) -> usize {
         if self.log_range == 0.0 {
             return self.fair;
         }
         match cpu_time {
             Some(v) if v > 0 => {
+                let max =
+                    (((dep_count + 1) as f64).log2() as usize).clamp(self.max_jobs, self.jobs);
                 let t = ((v as f64).ln() - self.log_min) / self.log_range;
                 let t = t.clamp(0.0, 1.0);
-                let j = self.min_jobs as f64 + t * (self.max_jobs - self.min_jobs) as f64;
-                (j.round() as usize).clamp(self.min_jobs, self.max_jobs)
+                let j = self.min_jobs as f64 + t * (max - self.min_jobs) as f64;
+                (j.round() as usize).clamp(self.min_jobs, max)
             }
             _ => self.fair,
         }
@@ -267,7 +276,7 @@ mod tests {
         for &(w, c, fair) in &[(4, 16, 4), (7, 10, 2), (24, 32, 2)] {
             let alloc = Allocator::new(w, c);
             for i in 0..w {
-                assert_eq!(alloc.assign(None), fair, "w={w} c={c} worker {i}");
+                assert_eq!(alloc.assign(None, 0), fair, "w={w} c={c} worker {i}");
             }
         }
     }
@@ -277,19 +286,19 @@ mod tests {
         /* w=4 c=16: min=2, max=6 */
         let times = [100, 1_000, 10_000, 100_000];
         let alloc = calibrated(4, 16, &times);
-        let assigned: Vec<usize> = times.iter().map(|&v| alloc.assign(Some(v))).collect();
+        let assigned: Vec<usize> = times.iter().map(|&v| alloc.assign(Some(v), 0)).collect();
         assert_eq!(assigned, [2, 3, 5, 6], "w=4 c=16");
 
         /* w=7 c=10: min=2, max=4 (narrow range) */
         let times = [100, 300, 1_000, 3_000, 10_000, 30_000, 100_000];
         let alloc = calibrated(7, 10, &times);
-        let assigned: Vec<usize> = times.iter().map(|&v| alloc.assign(Some(v))).collect();
+        let assigned: Vec<usize> = times.iter().map(|&v| alloc.assign(Some(v), 0)).collect();
         assert_eq!(assigned, [2, 2, 3, 3, 3, 4, 4], "w=7 c=10");
 
         /* w=24 c=32: min=2, max=4 (wide range, doubling times) */
         let times: Vec<usize> = (0..24).map(|i| 100 * (1 << i)).collect();
         let alloc = calibrated(24, 32, &times);
-        let assigned: Vec<usize> = times.iter().map(|&v| alloc.assign(Some(v))).collect();
+        let assigned: Vec<usize> = times.iter().map(|&v| alloc.assign(Some(v), 0)).collect();
         assert_eq!(
             assigned,
             [
@@ -311,13 +320,13 @@ mod tests {
     #[test]
     fn empty_calibration_returns_fair() {
         let alloc = calibrated(4, 16, &[]);
-        assert_eq!(alloc.assign(Some(5000)), 4);
+        assert_eq!(alloc.assign(Some(5000), 0), 4);
     }
 
     #[test]
     fn no_history_after_calibration_returns_fair() {
         let alloc = calibrated(4, 16, &[100, 10_000]);
-        assert_eq!(alloc.assign(None), 4);
+        assert_eq!(alloc.assign(None, 0), 4);
     }
 
     #[test]
@@ -353,13 +362,37 @@ mod tests {
     #[test]
     fn jobs_less_than_workers() {
         let alloc = Allocator::new(4, 1);
-        assert_eq!(alloc.assign(None), 1, "fair clamped to 1");
-        assert_eq!(alloc.assign(Some(1000)), 1, "clamped to total");
+        assert_eq!(alloc.assign(None, 0), 1, "fair clamped to 1");
+        assert_eq!(alloc.assign(Some(1000), 0), 1, "clamped to total");
     }
 
     #[test]
     fn max_jobs_clamped_to_total() {
         let alloc = calibrated(1, 3, &[100, 100_000]);
-        assert_eq!(alloc.assign(Some(100_000)), 3, "max clamped to total");
+        assert_eq!(alloc.assign(Some(100_000), 0), 3, "max clamped to total");
+    }
+
+    #[test]
+    fn dependents_raise_ceiling() {
+        /* w=24 c=72: min=2, max=5 */
+        let times = [100, 1_000_000_000];
+        let alloc = calibrated(24, 72, &times);
+        let top = 1_000_000_000;
+        assert_eq!(alloc.assign(Some(top), 0), 5, "leaf capped at max_jobs");
+        assert_eq!(alloc.assign(Some(top), 63), 6, "63 dependents");
+        assert_eq!(alloc.assign(Some(top), 5447), 12, "llvm-sized");
+        assert_eq!(
+            alloc.assign(Some(100), 5447),
+            2,
+            "cheap package stays cheap"
+        );
+
+        /* w=2 c=4: ceiling clamped to total jobs */
+        let alloc = calibrated(2, 4, &times);
+        assert_eq!(
+            alloc.assign(Some(top), 5447),
+            4,
+            "small host capped at total"
+        );
     }
 }

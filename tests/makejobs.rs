@@ -231,7 +231,7 @@ fn running_jobs(case: &Runnable) -> Vec<(usize, usize)> {
             Poll::Ready(Some(sp)) => Some(match sp.make_jobs.allocated() {
                 Some(jobs) => {
                     let cpu = (sp.cpu_time > 0).then_some(sp.cpu_time as usize);
-                    (sched.allocator()?.assign(cpu), jobs)
+                    (sched.allocator()?.assign(cpu, sp.dep_count), jobs)
                 }
                 None => (1, 1),
             }),
@@ -285,7 +285,7 @@ fn make_jobs_early_gcc_builds() {
             workers: 18,
             jobs: 32,
             packages: &[p!(20000, 100_000_000), p!(0, 10_000_000), p!(0, 1_000_000)],
-            expect: &[(4, 27), (3, 3), (2, 2)],
+            expect: &[(14, 27), (3, 3), (2, 2)],
         },
         Runnable {
             workers: 18,
