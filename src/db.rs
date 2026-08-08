@@ -3088,35 +3088,44 @@ pub(crate) struct BuildStageTiming {
 }
 
 /**
- * Query build-stage wall time and CPU time for all packages.
+ * Query build-stage CPU time for all packages.
  *
- * Returns the most recent successful build's timing data for the
- * build stage, keyed by [`PkgKey`].
+ * Returns the most recent attempt's build-stage timing, keyed by
+ * [`PkgKey`].  The most recent success is preferred; a package with
+ * no recorded success falls back to its most recent failed attempt,
+ * whose partial timing still sizes the package for scheduling.
  */
 pub(crate) fn query_build_stage_timings(conn: &Connection) -> HashMap<PkgKey, BuildStageTiming> {
     let out: &str = HistoryKind::Outcome.into();
     let pkgbase_col: &str = HistoryKind::Pkgbase.into();
     let pkgpath_col: &str = HistoryKind::Pkgpath.into();
     let success_outcome = PackageState::Success.id();
+    let failed_outcome = PackageState::Failed.id();
     let build_stage = Stage::Build as i32;
 
     /*
-     * The latest successful build per package is the row with the
-     * greatest id in its (pkgpath, pkgbase) group.  A grouped MAX(id)
-     * streams over idx_history_outcome_pkg; a ROW_NUMBER() window would
-     * number every row into a temporary b-tree for the same result.
+     * Candidates are the attempts that recorded build-stage CPU time.
+     * Each (pkgpath, pkgbase) group takes its latest success, else its
+     * latest failure.
      */
     let sql = format!(
-        "WITH latest AS ( \
-             SELECT {pkgpath_col}, {pkgbase_col}, MAX(id) AS id \
-             FROM build_history \
-             WHERE {out} = {success_outcome} \
+        "WITH timed AS ( \
+             SELECT h.{pkgpath_col}, h.{pkgbase_col}, h.id, \
+                    h.{out} AS outcome, ct.duration \
+             FROM build_history h \
+             JOIN cpu_times ct ON ct.history_id = h.id \
+                  AND ct.stage = {build_stage} \
+             WHERE h.{out} IN ({success_outcome}, {failed_outcome}) \
+         ), latest AS ( \
+             SELECT {pkgpath_col}, {pkgbase_col}, \
+                    COALESCE(MAX(CASE WHEN outcome = {success_outcome} \
+                                      THEN id END), MAX(id)) AS id \
+             FROM timed \
              GROUP BY {pkgpath_col}, {pkgbase_col} \
          ) \
-         SELECT l.{pkgpath_col}, l.{pkgbase_col}, ct.duration \
+         SELECT t.{pkgpath_col}, t.{pkgbase_col}, t.duration \
          FROM latest l \
-         JOIN cpu_times ct ON ct.history_id = l.id \
-              AND ct.stage = {build_stage}",
+         JOIN timed t ON t.id = l.id",
     );
 
     let mut stmt = match conn.prepare(&sql) {
@@ -3170,26 +3179,49 @@ mod tests {
         conn
     }
 
-    fn insert_build(conn: &Connection, pkgpath: &str, pkgname: &str, wall_ms: u64, cpu_ms: u64) {
-        use crate::{History, PackageState};
+    fn insert_attempt(
+        conn: &Connection,
+        pkgpath: &str,
+        pkgname: &str,
+        outcome: crate::PackageState,
+        wall_ms: u64,
+        cpu_ms: u64,
+    ) {
+        use crate::History;
         use std::time::Duration;
 
+        let stage_cpu_times = if cpu_ms > 0 {
+            vec![(Stage::Build, Duration::from_millis(cpu_ms))]
+        } else {
+            Vec::new()
+        };
         let rec = History {
             timestamp: 0,
             pkgpath: pkgpath.to_string(),
             pkgname: pkgname.to_string(),
             pkgbase: PkgName::new(pkgname).pkgbase().to_string(),
-            outcome: PackageState::Success,
+            outcome,
             stage: None,
             make_jobs: Some(1),
             duration: Duration::ZERO,
             disk_usage: None,
             wrkobjdir: None,
             stage_durations: vec![(Stage::Build, Duration::from_millis(wall_ms))],
-            stage_cpu_times: vec![(Stage::Build, Duration::from_millis(cpu_ms))],
+            stage_cpu_times,
             build_id: None,
         };
         record_history_to(conn, &rec).expect("failed to insert build");
+    }
+
+    fn insert_build(conn: &Connection, pkgpath: &str, pkgname: &str, wall_ms: u64, cpu_ms: u64) {
+        insert_attempt(
+            conn,
+            pkgpath,
+            pkgname,
+            crate::PackageState::Success,
+            wall_ms,
+            cpu_ms,
+        );
     }
 
     fn key(pkgpath: &str, pkgbase: &str) -> (String, String) {
@@ -3251,5 +3283,69 @@ mod tests {
         let conn = test_history_db();
         let timings = query_build_stage_timings(&conn);
         assert!(timings.is_empty());
+    }
+
+    /**
+     * A package with no success uses its latest failed attempt that
+     * recorded build-stage CPU time.  A later attempt with no timing
+     * (killed before the build stage) does not shadow it.
+     */
+    #[test]
+    fn build_stage_timings_failed_fallback() {
+        use crate::PackageState;
+        let conn = test_history_db();
+        insert_attempt(
+            &conn,
+            "lang/gambc",
+            "gambc-4.9.7",
+            PackageState::Failed,
+            1000,
+            20000,
+        );
+        insert_attempt(
+            &conn,
+            "lang/gambc",
+            "gambc-4.9.7",
+            PackageState::Failed,
+            1000,
+            16000,
+        );
+        insert_attempt(
+            &conn,
+            "lang/gambc",
+            "gambc-4.9.7",
+            PackageState::Failed,
+            1000,
+            0,
+        );
+        let timings = query_build_stage_timings(&conn);
+        assert_eq!(timings.len(), 1);
+        assert_eq!(timings[&key("lang/gambc", "gambc")].cpu_ms, 16000);
+    }
+
+    /** A success is preferred over a later failed attempt. */
+    #[test]
+    fn build_stage_timings_success_preferred() {
+        use crate::PackageState;
+        let conn = test_history_db();
+        insert_attempt(
+            &conn,
+            "devel/cmake",
+            "cmake-3.28.0",
+            PackageState::Success,
+            5000,
+            15000,
+        );
+        insert_attempt(
+            &conn,
+            "devel/cmake",
+            "cmake-3.28.1",
+            PackageState::Failed,
+            1000,
+            2000,
+        );
+        let timings = query_build_stage_timings(&conn);
+        assert_eq!(timings.len(), 1);
+        assert_eq!(timings[&key("devel/cmake", "cmake")].cpu_ms, 15000);
     }
 }
