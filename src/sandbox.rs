@@ -410,10 +410,7 @@ impl Sandbox {
         )];
         if let Some(pkgsrc) = &self.pkgsrc {
             envs.push(("bob_make".to_string(), format!("{}", pkgsrc.make.display())));
-            envs.push((
-                "bob_pkgsrc".to_string(),
-                format!("{}", pkgsrc.basedir.display()),
-            ));
+            envs.push(("bob_pkgsrc".to_string(), pkgsrc.basedir.clone()));
             if let Some(build_user) = &pkgsrc.build_user {
                 envs.push(("bob_build_user".to_string(), build_user.clone()));
             }

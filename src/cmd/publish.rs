@@ -1878,7 +1878,7 @@ fn compute_diff_commits(
         old_rev = %old_rev,
         new_rev = %new_rev,
         pkgpath_count = pkgpaths.len(),
-        repo = %pkgsrc.basedir.display(),
+        repo = %pkgsrc.basedir,
         "Computing per-pkgpath commit list"
     );
     match bob::vcs::commits_for_pkgpaths(&pkgsrc.basedir, &old_rev, new_rev, &pkgpaths) {

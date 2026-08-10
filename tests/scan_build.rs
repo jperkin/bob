@@ -133,7 +133,7 @@ impl TestHarness {
             root,
             make,
             pkgsrc: Pkgsrc {
-                basedir: PathBuf::new(),
+                basedir: String::new(),
                 make: PathBuf::new(),
                 bootstrap: None,
                 build_user: None,
@@ -1629,7 +1629,7 @@ fn test_pkg_up_to_date_not_found() -> Result<()> {
         "nonexistent-1.0",
         &[],
         &h.packages_dir().join("All"),
-        &h.pkgsrc_dir(),
+        h.pkgsrc_dir(),
     )?;
     assert!(
         matches!(result, Some(bob::BuildReason::PackageNotFound)),
