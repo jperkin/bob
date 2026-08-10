@@ -61,7 +61,8 @@ impl VcsInfo {
      * Tries git first, then CVS.  Returns a default (empty) `VcsInfo`
      * if no VCS is detected.
      */
-    pub(crate) fn from_path(path: &Path) -> Self {
+    pub(crate) fn from_path(path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref();
         if let Some(info) = Self::try_git(path) {
             debug!(
                 vcs = "git",
@@ -244,7 +245,7 @@ pub struct CommitInfo {
  * topological/reverse-chronological -- newest first.
  */
 pub fn commits_for_pkgpaths(
-    repo_path: &Path,
+    repo_path: impl AsRef<Path>,
     old_rev: &str,
     new_rev: &str,
     pkgpaths: &HashSet<String>,
@@ -254,6 +255,7 @@ pub fn commits_for_pkgpaths(
         return Ok(result);
     }
 
+    let repo_path = repo_path.as_ref();
     let repo = gix::discover(repo_path)
         .with_context(|| format!("Failed to open git repository at {}", repo_path.display()))?;
 

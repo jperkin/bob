@@ -270,11 +270,8 @@ impl PkgsrcEnv {
     /// since bmake may only exist inside the sandbox.
     pub fn fetch(pkgsrc: &Pkgsrc, sandbox: &Sandbox, id: Option<usize>) -> Result<Self> {
         if !sandbox.enabled() {
-            if !pkgsrc.basedir.exists() {
-                bail!(
-                    "pkgsrc basedir does not exist: {}",
-                    pkgsrc.basedir.display()
-                );
+            if !Path::new(&pkgsrc.basedir).exists() {
+                bail!("pkgsrc basedir does not exist: {}", pkgsrc.basedir);
             }
             if !pkgsrc.make.exists() {
                 bail!("make binary does not exist: {}", pkgsrc.make.display());
@@ -324,7 +321,7 @@ impl PkgsrcEnv {
         let varnames_arg = all_varnames.join(" ");
         let script = format!(
             "cd {}/pkgtools/pkg_install && {} show-vars VARNAMES=\"{}\"\n",
-            pkgsrc.basedir.display(),
+            pkgsrc.basedir,
             pkgsrc.make.display(),
             varnames_arg
         );
@@ -667,8 +664,9 @@ pub struct PublishReport {
 /// - `save_wrkdir_patterns`: Glob patterns for files to save on build failure
 #[derive(Clone, Debug)]
 pub struct Pkgsrc {
-    /// Path to pkgsrc source tree.
-    pub basedir: PathBuf,
+    /// Path to pkgsrc source tree.  Kept as a `String` so package make
+    /// arguments can be derived from it infallibly.
+    pub basedir: String,
     /// Path to bootstrap tarball (required on non-NetBSD).
     pub bootstrap: Option<PathBuf>,
     /// Unprivileged user for builds.
@@ -1799,7 +1797,7 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Option<Pkgsrc>> {
     let cachevars = get_string_list(pkgsrc, "cachevars", "pkgsrc")?;
 
     Ok(Some(Pkgsrc {
-        basedir: PathBuf::from(basedir),
+        basedir,
         bootstrap,
         build_user,
         build_user_home,

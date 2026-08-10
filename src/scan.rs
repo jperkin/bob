@@ -454,7 +454,7 @@ impl Scan {
         pkgsrc: &Pkgsrc,
     ) -> anyhow::Result<()> {
         println!("Discovering packages...");
-        let basedir = pkgsrc.basedir.display().to_string();
+        let basedir = pkgsrc.basedir.clone();
 
         // Get top-level SUBDIR (categories + USER_ADDITIONAL_PKGS)
         let child = self.sandbox.execute_command(
@@ -977,7 +977,7 @@ impl Scan {
         let _guard = span.enter();
         debug!("Scanning package");
 
-        let pkgsrcdir = pkgsrc.basedir.display().to_string();
+        let pkgsrcdir = &pkgsrc.basedir;
         let workdir = format!("{}/{}", pkgsrcdir, pkgpath_str);
 
         trace!(%workdir, ?scan_env, "Executing pkg-scan");

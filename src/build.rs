@@ -218,13 +218,23 @@ fn dir_disk_usage(path: &Path) -> Option<u64> {
 }
 
 /**
- * Convert a pkgdir path to a &str for passing to bmake's `-C` flag.
- * Errors cleanly if the path is not valid UTF-8 rather than panicking.
+ * Construct arguments for a per-package make invocation.
+ *
+ * pbulk doesn't append the variables to 'make clean' invocations, but that
+ * appears to be oversight rather than deliberate.  It happens to work because
+ * WRKDIR uses PKGPATH and not PKGBASE.  We pass the flags anyway, to ensure
+ * consistency and simplicity.
  */
-fn pkgdir_as_str(pkgdir: &Path) -> anyhow::Result<&str> {
-    pkgdir
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("pkgdir path is not valid UTF-8: {}", pkgdir.display()))
+fn pkg_make_args(basedir: &str, pkg: &ResolvedPackage, targets: &[&str]) -> Vec<String> {
+    let mut args = vec![
+        "-C".to_string(),
+        format!("{}/{}", basedir, pkg.pkgpath.as_str()),
+    ];
+    args.extend(targets.iter().map(|s| s.to_string()));
+    args.extend(pkg.multi_version().unwrap_or_default().iter().cloned());
+    args.push("BATCH=1".to_string());
+    args.push("DEPENDS_TARGET=/nonexistent".to_string());
+    args
 }
 
 /**
@@ -246,8 +256,9 @@ pub fn pkg_up_to_date(
     pkgname: &str,
     depends: &[&str],
     packages_dir: &Path,
-    pkgsrc_dir: &Path,
+    pkgsrc_dir: impl AsRef<Path>,
 ) -> anyhow::Result<Option<BuildReason>> {
+    let pkgsrc_dir = pkgsrc_dir.as_ref();
     let pkgfile = packages_dir.join(format!("{}.tgz", pkgname));
 
     let pkgfile_mtime = match pkgfile.metadata().and_then(|m| m.modified()) {
@@ -623,16 +634,12 @@ impl<'a> PkgBuilder<'a> {
         callback: &ChannelCallback,
     ) -> anyhow::Result<PkgBuildResult> {
         let pkgname_str = self.pkginfo.pkgname().pkgname();
-        let pkgpath = &self.pkginfo.pkgpath;
-
-        let pkgdir = self.session.pkgsrc.basedir.join(pkgpath.as_path());
 
         // Pre-clean
         let stage_start = Instant::now();
         stats.stage = Some(Stage::PreClean);
         callback.stage(Stage::PreClean.into_str());
-        let (_, cpu_time) =
-            self.run_make_stage(Stage::PreClean, &pkgdir, &["clean"], RunAs::Root, false)?;
+        let (_, cpu_time) = self.run_make_stage(Stage::PreClean, &["clean"], RunAs::Root)?;
         stats
             .stage_durations
             .push((Stage::PreClean, stage_start.elapsed()));
@@ -658,8 +665,7 @@ impl<'a> PkgBuilder<'a> {
         let stage_start = Instant::now();
         stats.stage = Some(Stage::Checksum);
         callback.stage(Stage::Checksum.into_str());
-        let (ok, cpu_time) =
-            self.run_make_stage(Stage::Checksum, &pkgdir, &["checksum"], RunAs::Root, true)?;
+        let (ok, cpu_time) = self.run_make_stage(Stage::Checksum, &["checksum"], RunAs::Root)?;
         stats
             .stage_durations
             .push((Stage::Checksum, stage_start.elapsed()));
@@ -679,19 +685,14 @@ impl<'a> PkgBuilder<'a> {
         stats.stage = Some(Stage::Configure);
         callback.stage(Stage::Configure.into_str());
         let configure_log = self.logdir.join("configure.log");
-        if !self.run_usergroup_if_needed(Stage::Configure, &pkgdir, &configure_log)? {
+        if !self.run_usergroup_if_needed(Stage::Configure, &configure_log)? {
             stats
                 .stage_durations
                 .push((Stage::Configure, stage_start.elapsed()));
             return Ok(PkgBuildResult::Failed(std::mem::take(stats)));
         }
-        let (ok, cpu_time) = self.run_make_stage(
-            Stage::Configure,
-            &pkgdir,
-            &["configure"],
-            self.build_run_as(),
-            true,
-        )?;
+        let (ok, cpu_time) =
+            self.run_make_stage(Stage::Configure, &["configure"], self.build_run_as())?;
         stats
             .stage_durations
             .push((Stage::Configure, stage_start.elapsed()));
@@ -704,14 +705,14 @@ impl<'a> PkgBuilder<'a> {
         stats.stage = Some(Stage::Build);
         callback.stage(&format!("{}{}", Stage::Build.into_str(), jobs_suffix));
         let build_log = self.logdir.join("build.log");
-        if !self.run_usergroup_if_needed(Stage::Build, &pkgdir, &build_log)? {
+        if !self.run_usergroup_if_needed(Stage::Build, &build_log)? {
             stats
                 .stage_durations
                 .push((Stage::Build, build_phase_start.elapsed()));
             return Ok(PkgBuildResult::Failed(std::mem::take(stats)));
         }
         let (build_ok, cpu_time) =
-            self.run_make_stage(Stage::Build, &pkgdir, &["all"], self.build_run_as(), true)?;
+            self.run_make_stage(Stage::Build, &["all"], self.build_run_as())?;
         stats
             .stage_durations
             .push((Stage::Build, build_phase_start.elapsed()));
@@ -725,19 +726,14 @@ impl<'a> PkgBuilder<'a> {
         stats.stage = Some(Stage::Install);
         callback.stage(Stage::Install.into_str());
         let install_log = self.logdir.join("install.log");
-        if !self.run_usergroup_if_needed(Stage::Install, &pkgdir, &install_log)? {
+        if !self.run_usergroup_if_needed(Stage::Install, &install_log)? {
             stats
                 .stage_durations
                 .push((Stage::Install, stage_start.elapsed()));
             return Ok(PkgBuildResult::Failed(std::mem::take(stats)));
         }
-        let (ok, cpu_time) = self.run_make_stage(
-            Stage::Install,
-            &pkgdir,
-            &["stage-install"],
-            self.build_run_as(),
-            true,
-        )?;
+        let (ok, cpu_time) =
+            self.run_make_stage(Stage::Install, &["stage-install"], self.build_run_as())?;
         stats
             .stage_durations
             .push((Stage::Install, stage_start.elapsed()));
@@ -750,13 +746,8 @@ impl<'a> PkgBuilder<'a> {
         let stage_start = Instant::now();
         stats.stage = Some(Stage::Package);
         callback.stage(Stage::Package.into_str());
-        let (ok, cpu_time) = self.run_make_stage(
-            Stage::Package,
-            &pkgdir,
-            &["stage-package-create"],
-            RunAs::Root,
-            true,
-        )?;
+        let (ok, cpu_time) =
+            self.run_make_stage(Stage::Package, &["stage-package-create"], RunAs::Root)?;
         stats
             .stage_durations
             .push((Stage::Package, stage_start.elapsed()));
@@ -766,7 +757,7 @@ impl<'a> PkgBuilder<'a> {
         }
 
         // Get the package file path
-        let pkgfile = self.get_make_var(&pkgdir, "STAGE_PKGFILE")?;
+        let pkgfile = self.get_make_var("STAGE_PKGFILE")?;
 
         // Test package install (unless bootstrap package)
         let is_bootstrap = self.pkginfo.bootstrap_pkg();
@@ -827,8 +818,7 @@ impl<'a> PkgBuilder<'a> {
         let stage_start = Instant::now();
         stats.stage = Some(Stage::Clean);
         callback.stage(Stage::Clean.into_str());
-        let (_, cpu_time) =
-            self.run_make_stage(Stage::Clean, &pkgdir, &["clean"], RunAs::Root, false)?;
+        let (_, cpu_time) = self.run_make_stage(Stage::Clean, &["clean"], RunAs::Root)?;
         stats
             .stage_durations
             .push((Stage::Clean, stage_start.elapsed()));
@@ -853,25 +843,11 @@ impl<'a> PkgBuilder<'a> {
     fn run_make_stage(
         &self,
         stage: Stage,
-        pkgdir: &Path,
         targets: &[&str],
         run_as: RunAs,
-        include_make_flags: bool,
-    ) -> anyhow::Result<(bool, Duration)> {
-        self.run_make_stage_with_flags(stage, pkgdir, targets, run_as, include_make_flags, &[])
-    }
-
-    fn run_make_stage_with_flags(
-        &self,
-        stage: Stage,
-        pkgdir: &Path,
-        targets: &[&str],
-        run_as: RunAs,
-        include_make_flags: bool,
-        extra_flags: &[&str],
     ) -> anyhow::Result<(bool, Duration)> {
         let logfile = self.logdir.join(format!("{}.log", stage.into_str()));
-        let owned_args = self.make_args(pkgdir, targets, include_make_flags, extra_flags)?;
+        let owned_args = pkg_make_args(&self.session.pkgsrc.basedir, self.pkginfo, targets);
 
         let args: Vec<&str> = owned_args.iter().map(|s| s.as_str()).collect();
 
@@ -975,7 +951,7 @@ impl<'a> PkgBuilder<'a> {
     }
 
     /// Get a make variable value.
-    fn get_make_var(&self, pkgdir: &Path, varname: &str) -> anyhow::Result<String> {
+    fn get_make_var(&self, varname: &str) -> anyhow::Result<String> {
         let mut cmd = self
             .session
             .sandbox
@@ -983,12 +959,11 @@ impl<'a> PkgBuilder<'a> {
         cmd.new_session();
         self.apply_envs(&mut cmd, &[]);
 
-        let make_args = self.make_args(
-            pkgdir,
+        let make_args = pkg_make_args(
+            &self.session.pkgsrc.basedir,
+            self.pkginfo,
             &["show-var", &format!("VARNAME={}", varname)],
-            true,
-            &[],
-        )?;
+        );
 
         let output = cmd.args(&make_args).stderr(Stdio::piped()).output()?;
 
@@ -1067,12 +1042,7 @@ impl<'a> PkgBuilder<'a> {
     }
 
     /// Run create-usergroup if needed based on usergroup_phase.
-    fn run_usergroup_if_needed(
-        &self,
-        stage: Stage,
-        pkgdir: &Path,
-        logfile: &Path,
-    ) -> anyhow::Result<bool> {
+    fn run_usergroup_if_needed(&self, stage: Stage, logfile: &Path) -> anyhow::Result<bool> {
         let usergroup_phase = self.pkginfo.usergroup_phase().unwrap_or("");
 
         let should_run = match stage {
@@ -1086,42 +1056,26 @@ impl<'a> PkgBuilder<'a> {
             return Ok(true);
         }
 
-        let pkgdir_str = pkgdir_as_str(pkgdir)?;
-        let mut args = vec!["-C", pkgdir_str, "create-usergroup"];
+        let mut targets = vec!["create-usergroup"];
+        /*
+         * This may appear to be odd.  Why would we be running clean after
+         * create-usergroup during the configure stage?  However, it matches
+         * pbulk behaviour which was apparently added to work around a qmail
+         * permissions issue, see -r1.6 of pbulk/scripts/pkg-build.
+         *
+         * Note that this enforces(?) the current behaviour, again identical
+         * to pbulk, where the configure stage is responsible for extract and
+         * patch, rather than them being their own stages.
+         */
         if stage == Stage::Configure {
-            args.push("clean");
+            targets.push("clean");
         }
+        let owned_args = pkg_make_args(&self.session.pkgsrc.basedir, self.pkginfo, &targets);
+        let args: Vec<&str> = owned_args.iter().map(String::as_str).collect();
 
         let (status, _) =
             self.run_command_logged(&self.session.pkgsrc.make, &args, RunAs::Root, logfile)?;
         Ok(status.success())
-    }
-
-    fn make_args(
-        &self,
-        pkgdir: &Path,
-        targets: &[&str],
-        include_make_flags: bool,
-        extra_flags: &[&str],
-    ) -> anyhow::Result<Vec<String>> {
-        let mut owned_args: Vec<String> =
-            vec!["-C".to_string(), pkgdir_as_str(pkgdir)?.to_string()];
-        owned_args.extend(targets.iter().map(|s| s.to_string()));
-
-        if include_make_flags {
-            owned_args.push("BATCH=1".to_string());
-            owned_args.push("DEPENDS_TARGET=/nonexistent".to_string());
-
-            if let Some(multi_version) = self.pkginfo.multi_version() {
-                for flag in multi_version {
-                    owned_args.push(flag.clone());
-                }
-            }
-        }
-
-        owned_args.extend(extra_flags.iter().map(|s| s.to_string()));
-
-        Ok(owned_args)
     }
 
     fn apply_envs(&self, cmd: &mut Command, extra_envs: &[(&str, &str)]) {
@@ -1341,7 +1295,7 @@ struct PackageBuild {
 struct MakeQuery<'a> {
     session: &'a BuildSession,
     sandbox_id: Option<usize>,
-    pkgpath: &'a PkgPath,
+    pkginfo: &'a ResolvedPackage,
     env: &'a HashMap<String, String>,
 }
 
@@ -1349,31 +1303,32 @@ impl<'a> MakeQuery<'a> {
     fn new(
         session: &'a BuildSession,
         sandbox_id: Option<usize>,
-        pkgpath: &'a PkgPath,
+        pkginfo: &'a ResolvedPackage,
         env: &'a HashMap<String, String>,
     ) -> Self {
         Self {
             session,
             sandbox_id,
-            pkgpath,
+            pkginfo,
             env,
         }
     }
 
     /// Query multiple bmake variables in a single invocation.
     fn vars(&self, names: &[&str]) -> HashMap<String, String> {
-        let pkgdir = self.session.pkgsrc.basedir.join(self.pkgpath.as_path());
-        let varnames_arg = names.join(" ");
+        let varnames = format!("VARNAMES={}", names.join(" "));
+        let args = pkg_make_args(
+            &self.session.pkgsrc.basedir,
+            self.pkginfo,
+            &["show-vars", &varnames],
+        );
 
         let mut cmd = self
             .session
             .sandbox
             .command(self.sandbox_id, &self.session.pkgsrc.make);
         cmd.new_session();
-        cmd.arg("-C")
-            .arg(&pkgdir)
-            .arg("show-vars")
-            .arg(format!("VARNAMES={}", varnames_arg));
+        cmd.args(args);
 
         for (key, value) in self.env {
             cmd.env(key, value);
@@ -1444,8 +1399,6 @@ impl PackageBuild {
 
         info!("Starting package build");
 
-        let pkgpath = &self.pkginfo.pkgpath;
-
         let mut envs = self.session.sandbox.script_env();
 
         // Inject scheduler-computed WRKOBJDIR for this package.
@@ -1481,7 +1434,7 @@ impl PackageBuild {
         }
 
         let env_map: HashMap<String, String> = envs.iter().cloned().collect();
-        let make = MakeQuery::new(&self.session, self.sandbox_id, pkgpath, &env_map);
+        let make = MakeQuery::new(&self.session, self.sandbox_id, &self.pkginfo, &env_map);
         let vars = make.vars(&["_MAKE_JOBS_N", "WRKDIR"]);
 
         let wrkdir = Some(
@@ -1539,7 +1492,6 @@ impl PackageBuild {
                 self.cleanup_after_failure(
                     status_tx,
                     pkgname,
-                    pkgpath,
                     logdir,
                     patterns,
                     &envs,
@@ -1557,7 +1509,6 @@ impl PackageBuild {
                 self.cleanup_after_failure(
                     status_tx,
                     pkgname,
-                    pkgpath,
                     logdir,
                     patterns,
                     &envs,
@@ -1580,12 +1531,10 @@ impl PackageBuild {
      * will perform its own cleanup, while this one handles saving useful
      * logs from the build, etc.
      */
-    #[allow(clippy::too_many_arguments)]
     fn cleanup_after_failure(
         &self,
         status_tx: &Sender<ChannelCommand>,
         pkgname: &str,
-        pkgpath: &PkgPath,
         logdir: &Path,
         patterns: &[String],
         envs: &[(String, String)],
@@ -1626,7 +1575,7 @@ impl PackageBuild {
          * Run the standard cleanup.
          */
         let clean_start = Instant::now();
-        self.run_clean(pkgpath, envs);
+        self.run_clean(envs);
         trace!(
             elapsed_ms = clean_start.elapsed().as_millis(),
             "run_clean completed"
@@ -1685,15 +1634,15 @@ impl PackageBuild {
     }
 
     /// Run bmake clean for a package.
-    fn run_clean(&self, pkgpath: &PkgPath, envs: &[(String, String)]) {
-        let pkgdir = self.session.pkgsrc.basedir.join(pkgpath.as_path());
+    fn run_clean(&self, envs: &[(String, String)]) {
+        let args = pkg_make_args(&self.session.pkgsrc.basedir, &self.pkginfo, &["clean"]);
 
         let mut cmd = self
             .session
             .sandbox
             .command(self.sandbox_id, &self.session.pkgsrc.make);
         cmd.new_session();
-        cmd.arg("-C").arg(&pkgdir).arg("clean");
+        cmd.args(args);
         for (key, value) in envs {
             cmd.env(key, value);
         }
