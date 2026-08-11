@@ -484,6 +484,7 @@ fn validate_pre_publish(
         let re = PkgMatch::new(pattern_str)
             .with_context(|| format!("In publish.packages.required: {}", pattern_str))?;
         let mut matched = false;
+        let mut successful_match = false;
         let mut failed: Vec<String> = Vec::new();
 
         for pkg in &status {
@@ -494,7 +495,9 @@ fn validate_pre_publish(
             let state = pkg
                 .build_outcome
                 .and_then(|o| PackageState::try_from(o).ok());
-            if !state.is_some_and(PackageState::is_success) {
+            if state.is_some_and(PackageState::is_success) {
+                successful_match = true;
+            } else {
                 failed.push(format!(
                     "{} ({})",
                     pkg.pkgname,
@@ -512,7 +515,7 @@ fn validate_pre_publish(
 
         if !matched {
             errors.push(format!("{}: no package match found", pattern_str));
-        } else if !failed.is_empty() {
+        } else if !successful_match && !failed.is_empty() {
             errors.push(format!("{}: {}", pattern_str, failed.join(", ")));
         }
     }
