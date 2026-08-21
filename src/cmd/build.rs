@@ -83,12 +83,12 @@ pub fn check_up_to_date(config: &Config, pkgsrc: &Pkgsrc, db: &Database) -> Resu
      * rebuild' drops the result of anything it wants built again.
      */
     let attempted = db.attempted_packages()?;
-    let rows: Vec<(i64, String, String)> = db
-        .get_buildable_rows()?
-        .into_iter()
-        .filter(|(id, ..)| !attempted.contains(id))
+    let rows = db.get_buildable_rows()?;
+    let order: Vec<i64> = rows
+        .iter()
+        .map(|&(id, ..)| id)
+        .filter(|id| !attempted.contains(id))
         .collect();
-    let order: Vec<i64> = rows.iter().map(|&(id, ..)| id).collect();
     let packages: HashMap<i64, (String, String)> = rows
         .into_iter()
         .map(|(id, pkgname, pkg_location)| (id, (pkgname, pkg_location)))
@@ -98,10 +98,12 @@ pub fn check_up_to_date(config: &Config, pkgsrc: &Pkgsrc, db: &Database) -> Resu
     let mut reverse_deps: HashMap<i64, Vec<i64>> = HashMap::new();
     for (pkg, dep) in db.get_buildable_depends()? {
         forward_deps.entry(pkg).or_default().push(dep);
-        reverse_deps.entry(dep).or_default().push(pkg);
+        if !attempted.contains(&pkg) {
+            reverse_deps.entry(dep).or_default().push(pkg);
+        }
     }
 
-    let mut remaining: HashSet<i64> = packages.keys().copied().collect();
+    let mut remaining: HashSet<i64> = order.iter().copied().collect();
     let mut needs_rebuild: HashSet<i64> = HashSet::new();
     let mut propagated_from: HashMap<i64, i64> = HashMap::new();
     let mut checked_results: Vec<(i64, anyhow::Result<Option<bob::BuildReason>>)> = Vec::new();
@@ -112,7 +114,8 @@ pub fn check_up_to_date(config: &Config, pkgsrc: &Pkgsrc, db: &Database) -> Resu
      */
     {
         let tx = db.transaction()?;
-        for (&id, (pkgname, _)) in &packages {
+        for &id in &order {
+            let (pkgname, _) = &packages[&id];
             let pkgfile = packages_dir.join(format!("{}.tgz", pkgname));
             if !pkgfile.exists() {
                 needs_rebuild.insert(id);
