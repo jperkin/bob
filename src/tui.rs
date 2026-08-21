@@ -1447,7 +1447,7 @@ impl MultiProgress {
         self.resync()?;
 
         // Print any messages that were buffered while in fullscreen mode
-        let pending: Vec<Line<'static>> = self.pending_messages.drain(..).collect();
+        let pending: Vec<Line<'static>> = std::mem::take(&mut self.pending_messages);
         for line in pending {
             self.scroll_line(line)?;
         }
