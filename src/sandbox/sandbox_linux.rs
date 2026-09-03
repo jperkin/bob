@@ -18,7 +18,7 @@ use crate::sandbox::Sandbox;
 use anyhow::Context;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, ExitStatus};
+use std::process::{Command, Output};
 
 pub(crate) fn init() {}
 
@@ -28,7 +28,7 @@ impl Sandbox {
         src: &Path,
         dest: &Path,
         opts: &[&str],
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    ) -> anyhow::Result<Option<Output>> {
         let cmd = "/bin/mount";
         // Build mount options: start with "bind", add any user-specified opts
         let mut mount_opts = vec!["bind"];
@@ -41,7 +41,7 @@ impl Sandbox {
                 .arg(src)
                 .arg(dest)
                 .process_group(0)
-                .status()
+                .output()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
     }
@@ -51,7 +51,7 @@ impl Sandbox {
         _src: &Path,
         dest: &Path,
         opts: &[&str],
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    ) -> anyhow::Result<Option<Output>> {
         let cmd = "/bin/mount";
         Ok(Some(
             Command::new(cmd)
@@ -61,7 +61,7 @@ impl Sandbox {
                 .arg("devtmpfs")
                 .arg(dest)
                 .process_group(0)
-                .status()
+                .output()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
     }
@@ -71,7 +71,7 @@ impl Sandbox {
         _src: &Path,
         dest: &Path,
         opts: &[&str],
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    ) -> anyhow::Result<Option<Output>> {
         let cmd = "/bin/mount";
         // Build mount options: start with "bind", add any user-specified opts
         let mut mount_opts = vec!["bind"];
@@ -84,7 +84,7 @@ impl Sandbox {
                 .arg("/dev/fd")
                 .arg(dest)
                 .process_group(0)
-                .status()
+                .output()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
     }
@@ -94,7 +94,7 @@ impl Sandbox {
         src: &Path,
         dest: &Path,
         opts: &[&str],
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    ) -> anyhow::Result<Option<Output>> {
         let cmd = "/bin/mount";
         Ok(Some(
             Command::new(cmd)
@@ -104,7 +104,7 @@ impl Sandbox {
                 .arg(src)
                 .arg(dest)
                 .process_group(0)
-                .status()
+                .output()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
     }
@@ -114,7 +114,7 @@ impl Sandbox {
         _src: &Path,
         dest: &Path,
         opts: &[&str],
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    ) -> anyhow::Result<Option<Output>> {
         let cmd = "/bin/mount";
         Ok(Some(
             Command::new(cmd)
@@ -124,7 +124,7 @@ impl Sandbox {
                 .arg("proc")
                 .arg(dest)
                 .process_group(0)
-                .status()
+                .output()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
     }
@@ -134,7 +134,7 @@ impl Sandbox {
         _src: &Path,
         dest: &Path,
         opts: &[&str],
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    ) -> anyhow::Result<Option<Output>> {
         let cmd = "/bin/mount";
         let mut c = Command::new(cmd);
         c.args(["-t", "tmpfs"]);
@@ -148,7 +148,7 @@ impl Sandbox {
         }
         c.arg("tmpfs").arg(dest).process_group(0);
         Ok(Some(
-            c.status().context(format!("Unable to execute {}", cmd))?,
+            c.output().context(format!("Unable to execute {}", cmd))?,
         ))
     }
 

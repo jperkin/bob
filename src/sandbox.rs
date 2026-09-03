@@ -1646,12 +1646,27 @@ impl Sandbox {
                     }
                 }
             };
-            if let Some(s) = status
-                && !s.success()
+            if let Some(output) = status
+                && !output.status.success()
             {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stderr = stderr.trim();
+                if stderr.is_empty() {
+                    bail!(
+                        "Action failed (exit code {:?})",
+                        output
+                            .status
+                            .code()
+                            .map_or("signal".to_string(), |c| c.to_string()),
+                    );
+                }
                 bail!(
-                    "Action failed (exit code {:?})",
-                    s.code().map_or("signal".to_string(), |c| c.to_string()),
+                    "Action failed (exit code {:?}):\n{}",
+                    output
+                        .status
+                        .code()
+                        .map_or("signal".to_string(), |c| c.to_string()),
+                    stderr,
                 );
             }
         }

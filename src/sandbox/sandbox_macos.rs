@@ -19,7 +19,7 @@ use anyhow::{Context, bail};
 use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, Output, Stdio};
 use tracing::{debug, warn};
 
 /**
@@ -50,7 +50,7 @@ impl Sandbox {
         src: &Path,
         dest: &Path,
         opts: &[&str],
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    ) -> anyhow::Result<Option<Output>> {
         let cmd = self.config.bindfs();
         Ok(Some(
             Command::new(cmd)
@@ -58,7 +58,7 @@ impl Sandbox {
                 .arg(src)
                 .arg(dest)
                 .process_group(0)
-                .status()
+                .output()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
     }
@@ -68,7 +68,7 @@ impl Sandbox {
         _src: &Path,
         dest: &Path,
         opts: &[&str],
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    ) -> anyhow::Result<Option<Output>> {
         let cmd = "/sbin/mount_devfs";
         Ok(Some(
             Command::new(cmd)
@@ -76,7 +76,7 @@ impl Sandbox {
                 .args(opts)
                 .arg(dest)
                 .process_group(0)
-                .status()
+                .output()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
     }
@@ -86,7 +86,7 @@ impl Sandbox {
         _src: &Path,
         _dest: &Path,
         _opts: &[&str],
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    ) -> anyhow::Result<Option<Output>> {
         bail!("fd mounts are not supported on macOS");
     }
 
@@ -95,7 +95,7 @@ impl Sandbox {
         src: &Path,
         dest: &Path,
         opts: &[&str],
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    ) -> anyhow::Result<Option<Output>> {
         let cmd = "/sbin/mount_nfs";
         Ok(Some(
             Command::new(cmd)
@@ -103,7 +103,7 @@ impl Sandbox {
                 .arg(src)
                 .arg(dest)
                 .process_group(0)
-                .status()
+                .output()
                 .context(format!("Unable to execute {}", cmd))?,
         ))
     }
@@ -113,7 +113,7 @@ impl Sandbox {
         _src: &Path,
         _dest: &Path,
         _opts: &[&str],
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    ) -> anyhow::Result<Option<Output>> {
         bail!("procfs mounts are not supported on macOS");
     }
 
@@ -122,16 +122,16 @@ impl Sandbox {
         _src: &Path,
         dest: &Path,
         opts: &[&str],
-    ) -> anyhow::Result<Option<ExitStatus>> {
+    ) -> anyhow::Result<Option<Output>> {
         let cmd = "/sbin/mount_tmpfs";
         let status = Command::new(cmd)
             .args(opts)
             .args(["-o", "nobrowse"])
             .arg(dest)
             .process_group(0)
-            .status()
+            .output()
             .context(format!("Unable to execute {}", cmd))?;
-        if status.success() {
+        if status.status.success() {
             let _ = fs::File::create(dest.join(".metadata_never_index"));
             let fseventsd = dest.join(".fseventsd");
             let _ = fs::create_dir_all(&fseventsd);
