@@ -857,13 +857,18 @@ impl Sandbox {
 
     /**
      * Atomically claims the ID via the `.bob` marker directory, then
-     * runs configured actions and marks complete.  Returns `Ok(false)`
-     * if the ID is already taken by another process.
+     * runs configured actions and marks complete.  If setup fails after
+     * claiming the ID, the incomplete sandbox is destroyed before returning
+     * the error.  Returns `Ok(false)` if the ID is already taken by another
+     * process.
      */
     pub(crate) fn create(&self, id: usize) -> Result<bool> {
-        let sandbox = self.path(id);
-        create_dir_all(&sandbox)
-            .with_context(|| format!("Failed to create {}", sandbox.display()))?;
+        let Some(sandbox_config) = &self.config.sandboxes() else {
+            bail!("Internal error: trying to create sandbox when sandboxes disabled.");
+        };
+        let sandbox_path = self.path(id);
+        create_dir_all(&sandbox_path)
+            .with_context(|| format!("Failed to create {}", sandbox_path.display()))?;
         let marker = self.bobmarker(id);
         match fs::create_dir(&marker) {
             Ok(()) => {}
@@ -872,12 +877,19 @@ impl Sandbox {
                 return Err(e).with_context(|| format!("Failed to create {}", marker.display()));
             }
         }
-        let Some(sandbox) = &self.config.sandboxes() else {
-            bail!("Internal error: trying to create sandbox when sandboxes disabled.");
-        };
         let envs = self.script_env();
-        self.perform_actions(id, &sandbox.setup, &envs)?;
-        self.mark_complete(id)?;
+        let result = self
+            .perform_actions(id, &sandbox_config.setup, &envs)
+            .and_then(|()| self.mark_complete(id));
+        if let Err(error) = result {
+            return match self.destroy(id) {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(error.context(format!(
+                    "Failed to roll back sandbox {}: {rollback:#}",
+                    sandbox_path.display()
+                ))),
+            };
+        }
         Ok(true)
     }
 
