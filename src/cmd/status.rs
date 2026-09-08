@@ -30,8 +30,9 @@ use bob::db::{Database, PackageStatusRow};
 use bob::{Config, PackageState, PkgMatch, WrkObjKind};
 
 use super::{
-    Cell, Col, Column, Formatter, OutputFormat, OutputOptions, SortKey, parse_sort_specs,
-    parse_status_filter, select_columns, sort_indexed_rows, status_filter_aliases,
+    Cell, Col, Column, Formatter, OutputFormat, OutputOptions, SortKey, package_status,
+    parse_sort_specs, parse_status_filter, select_columns, sort_indexed_rows,
+    status_filter_aliases,
 };
 
 /**
@@ -257,7 +258,7 @@ fn columns_long_help() -> String {
  *
  * Trailing newline trimmed; clap adds its own paragraph break.
  */
-fn status_long_help() -> String {
+pub(crate) fn status_long_help() -> String {
     format!(
         "Filter by status (repeatable or comma-separated)\n\n{}",
         status_section().trim_end()
@@ -470,37 +471,26 @@ fn print_build_status(
 
     let get_status = |pkg: &PackageStatusRow| -> (PackageState, String) {
         use PackageState::*;
-        if let Some(kind) = pkg
-            .build_outcome
-            .and_then(|o| PackageState::try_from(o).ok())
-        {
-            let reason = match kind {
-                Failed => failed_reason(pkg.build_stage, logdir, &pkg.pkgname),
-                IndirectFailed => blocked_by(&pkg.pkgname),
-                _ => String::new(),
-            };
-            (kind, reason)
-        } else if let Some(reason) = &pkg.pkg_fail_reason {
-            (PreFailed, format!("PKG_FAIL_REASON: {reason}"))
-        } else if let Some(reason) = &pkg.pkg_skip_reason {
-            (PreSkipped, format!("PKG_SKIP_REASON: {reason}"))
-        } else if let Some(kind) = pkg
-            .scan_outcome
-            .and_then(|o| PackageState::try_from(o).ok())
-        {
-            let reason = match kind {
-                Unresolved => match &pkg.scan_outcome_detail {
-                    Some(detail) => detail.replace('\n', "; "),
-                    None => String::new(),
-                },
-                _ => blocked_by(&pkg.pkgname),
-            };
-            (kind, reason)
-        } else if let Some(reason) = &pkg.build_reason {
-            (Pending, reason.clone())
-        } else {
-            (Pending, String::new())
-        }
+        let kind = package_status(pkg);
+        let reason = match kind {
+            Failed => failed_reason(pkg.build_stage, logdir, &pkg.pkgname),
+            IndirectFailed => blocked_by(&pkg.pkgname),
+            PreFailed => pkg
+                .pkg_fail_reason
+                .as_ref()
+                .map_or_else(String::new, |reason| format!("PKG_FAIL_REASON: {reason}")),
+            PreSkipped => pkg
+                .pkg_skip_reason
+                .as_ref()
+                .map_or_else(String::new, |reason| format!("PKG_SKIP_REASON: {reason}")),
+            Unresolved => match &pkg.scan_outcome_detail {
+                Some(detail) => detail.replace('\n', "; "),
+                None => String::new(),
+            },
+            _ if pkg.scan_outcome.is_some() => blocked_by(&pkg.pkgname),
+            _ => String::new(),
+        };
+        (kind, reason)
     };
 
     let matches_status = |kind: PackageState| -> bool {

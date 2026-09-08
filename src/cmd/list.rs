@@ -27,7 +27,8 @@ use bob::try_println;
 use bob::{PackageState, PkgMatch};
 
 use super::{
-    Cell, Column, ColumnSource, OutputFormat, OutputOptions, Writer, cols_help, select_columns,
+    Cell, Column, ColumnSource, OutputFormat, OutputOptions, Writer, cols_help, package_status,
+    parse_status_filter, select_columns,
 };
 
 fn use_color() -> bool {
@@ -67,9 +68,18 @@ pub enum ListCmd {
     Builds(BuildsArgs),
     /// Show dependency tree of packages to build
     Tree {
-        /// Include up-to-date packages
-        #[arg(short, long)]
-        all: bool,
+        /// Show reverse dependencies (packages that depend on the selected package)
+        #[arg(short = 'r', long)]
+        reverse: bool,
+        /// Filter packages by status (repeatable or comma-separated)
+        #[arg(
+            short = 's',
+            long = "status",
+            long_help = super::status::status_long_help(),
+            value_delimiter = ',',
+            value_parser = parse_status_filter
+        )]
+        statuses: Vec<Vec<PackageState>>,
         /// Output format (default: utf8 on terminal, none otherwise)
         #[arg(short = 'f', long, value_enum)]
         format: Option<TreeOutput>,
@@ -109,7 +119,8 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
     match cmd {
         ListCmd::Builds(args) => list_builds(db, args)?,
         ListCmd::Tree {
-            all,
+            reverse,
+            statuses,
             format,
             path,
             package,
@@ -119,7 +130,7 @@ pub fn run(db: &Database, cmd: ListCmd) -> Result<()> {
             } else {
                 TreeOutput::None
             });
-            print_build_tree(db, path, all, format, package.as_deref())?;
+            print_build_tree(db, path, reverse, &statuses, format, package.as_deref())?;
         }
         ListCmd::Blockers { package, path } => {
             let matches = match_packages(db, &package)?;
@@ -254,54 +265,56 @@ fn collect_transitive_deps<'a>(
 }
 
 /**
- * Print the build tree showing packages in build order (dependencies first).
+ * Print the dependency tree for packages to build.
  *
  * When a package pattern is provided, shows a proper dependency tree for
  * matching packages. Otherwise, uses topological levels to show build order.
+ * Reverse mode shows the selected package followed by its reverse
+ * dependencies.
  */
 fn print_build_tree(
     db: &Database,
     use_path: bool,
-    include_all: bool,
+    reverse: bool,
+    status_filters: &[Vec<PackageState>],
     format: TreeOutput,
     package: Option<&str>,
 ) -> Result<()> {
-    // pkgname -> pkgpath for every buildable package
-    let pkgname_to_pkgpath = db.get_buildable_pkgpaths()?;
+    // pkgname -> pkgpath for every scanned package
+    let pkgname_to_pkgpath: HashMap<PkgName, String> = db
+        .get_all_packages()?
+        .into_iter()
+        .map(|p| (PkgName::new(&p.pkgname), p.pkg_location))
+        .collect();
 
     // Get resolved dependencies from database
-    let pkgname_to_deps = db.get_all_resolved_deps()?;
+    let mut pkgname_to_deps = db.get_all_resolved_deps()?;
 
-    // Build set of packages in the resolved dependency graph
-    let mut resolved: HashSet<PkgName> = HashSet::new();
-    for (pkg, deps) in &pkgname_to_deps {
-        resolved.insert(pkg.clone());
-        resolved.extend(deps.iter().cloned());
+    if reverse {
+        let mut reverse_deps: HashMap<PkgName, Vec<PkgName>> = HashMap::new();
+        for (pkg, deps) in pkgname_to_deps {
+            for dep in deps {
+                reverse_deps.entry(dep).or_default().push(pkg.clone());
+            }
+        }
+        pkgname_to_deps = reverse_deps;
     }
 
     // Get build results for filtering
-    let results = db.get_all_build_results()?;
-    let excluded: HashSet<PkgName> = results
-        .iter()
-        .filter(|r| r.state == PackageState::UpToDate || r.state.is_masked())
-        .map(|r| r.pkgname.clone())
+    let statuses: HashSet<PackageState> = status_filters.iter().flatten().copied().collect();
+    let package_status: HashMap<PkgName, PackageState> = db
+        .get_all_package_status()?
+        .into_iter()
+        .map(|p| (PkgName::new(&p.pkgname), package_status(&p)))
         .collect();
-    let up_to_date: HashSet<PkgName> = results
-        .iter()
-        .filter(|r| r.state == PackageState::UpToDate)
-        .map(|r| r.pkgname.clone())
-        .collect();
-
     // Determine package set
+    let mut roots = Vec::new();
     let candidates: HashSet<PkgName> = if let Some(pattern) = package {
         let re = PkgMatch::new(pattern)?;
 
         let matches: Vec<&PkgName> = pkgname_to_pkgpath
             .iter()
-            .filter(|(name, path)| {
-                resolved.contains(*name)
-                    && (re.is_match(name.as_ref()) || re.is_match(path.as_str()))
-            })
+            .filter(|(name, path)| re.is_match(name.as_ref()) || re.is_match(path.as_str()))
             .map(|(name, _)| name)
             .collect();
 
@@ -311,32 +324,31 @@ fn print_build_tree(
 
         let mut required: HashSet<&PkgName> = HashSet::new();
         for &pkg in &matches {
+            roots.push(pkg);
             required.insert(pkg);
             collect_transitive_deps(pkg, &pkgname_to_deps, &mut required);
         }
 
         required.into_iter().cloned().collect()
     } else {
-        pkgname_to_pkgpath
-            .keys()
-            .filter(|name| resolved.contains(*name))
-            .cloned()
-            .collect()
+        pkgname_to_pkgpath.keys().cloned().collect()
     };
 
-    let packages: HashSet<PkgName> = if include_all {
+    let packages: HashSet<PkgName> = if statuses.is_empty() {
         candidates
     } else {
         candidates
             .into_iter()
-            .filter(|p| !excluded.contains(p))
+            .filter(|pkg| {
+                package_status
+                    .get(pkg)
+                    .is_some_and(|state| statuses.contains(state))
+            })
             .collect()
     };
 
-    let up_to_date_label: &str = PackageState::UpToDate.as_str();
-
     if packages.is_empty() {
-        println!("All packages are {up_to_date_label}");
+        println!("No packages to display");
         return Ok(());
     }
 
@@ -356,28 +368,57 @@ fn print_build_tree(
     for pkg in &packages {
         filtered_deps.entry(pkg.clone()).or_default();
     }
+    roots.retain(|root| packages.contains(*root));
+    if reverse && roots.is_empty() {
+        roots.extend(
+            filtered_deps
+                .iter()
+                .filter(|(_, deps)| deps.is_empty())
+                .map(|(pkg, _)| pkg),
+        );
+    }
 
-    let mut levels: HashMap<PkgName, usize> = HashMap::new();
+    let mut levels: HashMap<&PkgName, usize> = if reverse {
+        roots.into_iter().map(|pkg| (pkg, 0)).collect()
+    } else {
+        HashMap::new()
+    };
     loop {
         let before = levels.len();
-        for (pkg, deps) in &filtered_deps {
-            if !levels.contains_key(pkg) && deps.iter().all(|d| levels.contains_key(d)) {
-                let level = deps
-                    .iter()
-                    .filter_map(|d| levels.get(d))
-                    .max()
-                    .map_or(0, |m| m + 1);
-                levels.insert(pkg.clone(), level);
+        if !reverse {
+            for (pkg, deps) in &filtered_deps {
+                if !levels.contains_key(pkg) && deps.iter().all(|d| levels.contains_key(d)) {
+                    let level = deps
+                        .iter()
+                        .filter_map(|d| levels.get(d))
+                        .max()
+                        .map_or(0, |m| m + 1);
+                    levels.insert(pkg, level);
+                }
+            }
+        }
+        if reverse {
+            for (pkg, deps) in &filtered_deps {
+                if let Some(&level) = levels.get(pkg) {
+                    for dep in deps {
+                        levels.entry(dep).or_insert(level + 1);
+                    }
+                }
             }
         }
         if levels.len() == before {
             break;
         }
     }
+    for pkg in filtered_deps.keys() {
+        if !levels.contains_key(pkg) {
+            levels.insert(pkg, 0);
+        }
+    }
     let max_level = levels.values().max().copied().unwrap_or(0);
-    let mut by_level: Vec<Vec<PkgName>> = vec![Vec::new(); max_level + 1];
+    let mut by_level: Vec<Vec<&PkgName>> = vec![Vec::new(); max_level + 1];
     for (pkg, &level) in &levels {
-        by_level[level].push(pkg.clone());
+        by_level[level].push(pkg);
     }
     for level_pkgs in &mut by_level {
         level_pkgs.sort();
@@ -394,21 +435,15 @@ fn print_build_tree(
         }
     };
 
-    let up_to_date_suffix = format!(" ({up_to_date_label})");
     let term_width = terminal::size().map(|(w, _)| w as usize).unwrap_or(80);
-    let suffix_len = if include_all {
-        up_to_date_suffix.len()
-    } else {
-        0
-    };
 
     let mut indent_width = 1;
     for try_indent in [3, 2, 1] {
         let fits = by_level.iter().enumerate().all(|(level, pkgs)| {
             level == 0
-                || pkgs.iter().all(|pkg| {
-                    level * try_indent + display_name(pkg).len() + suffix_len <= term_width
-                })
+                || pkgs
+                    .iter()
+                    .all(|pkg| level * try_indent + display_name(pkg).len() <= term_width)
         });
         if fits {
             indent_width = try_indent;
@@ -451,19 +486,13 @@ fn print_build_tree(
 
         for (i, pkg) in pkgs.iter().enumerate() {
             let name = display_name(pkg);
-            let suffix = if include_all && up_to_date.contains(pkg) {
-                up_to_date_suffix.as_str()
-            } else {
-                ""
-            };
-
             let is_first = i == 0;
             let is_last = i == pkg_count - 1;
 
             let line = if level == 0 {
-                format!("{}{}", name, suffix)
+                name
             } else if format == TreeOutput::None {
-                format!("{}{}{}", " ".repeat(indent_width * level), name, suffix)
+                format!("{}{}", " ".repeat(indent_width * level), name)
             } else if is_first && level > 1 {
                 // First item at level 2+ - use spanning connector from previous level
                 let prefix = " ".repeat(indent_width * (level - 2));
@@ -472,7 +501,7 @@ fn print_build_tree(
                 } else {
                     span_mid
                 };
-                format!("{}{}{}{}{}{}", dim, prefix, span, reset, name, suffix)
+                format!("{}{}{}{}{}", dim, prefix, span, reset, name)
             } else {
                 // Level 1 items, or subsequent items at any level
                 let indent = " ".repeat(indent_width * (level - 1));
@@ -481,7 +510,7 @@ fn print_build_tree(
                 } else {
                     mid_conn
                 };
-                format!("{}{}{}{}{}{}", dim, indent, conn, reset, name, suffix)
+                format!("{}{}{}{}{}", dim, indent, conn, reset, name)
             };
             if !try_println(&line) {
                 break 'outer;

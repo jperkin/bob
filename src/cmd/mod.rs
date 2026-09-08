@@ -13,6 +13,7 @@ pub mod status;
 pub mod util;
 
 use bob::PackageState;
+use bob::db::PackageStatusRow;
 use strum::VariantArray;
 
 /**
@@ -708,6 +709,32 @@ const FILTER_ALIASES: &[FilterAlias] = &[
  */
 pub fn status_filter_aliases() -> impl Iterator<Item = (&'static str, &'static str)> {
     FILTER_ALIASES.iter().map(|a| (a.name, a.desc))
+}
+
+/**
+ * Determine a package's effective status using the same precedence as
+ * [`status`](crate::cmd::status).
+ */
+pub fn package_status(pkg: &PackageStatusRow) -> PackageState {
+    if let Some(state) = pkg
+        .build_outcome
+        .and_then(|outcome| PackageState::try_from(outcome).ok())
+    {
+        return state;
+    }
+    if pkg.pkg_fail_reason.is_some() {
+        return PackageState::PreFailed;
+    }
+    if pkg.pkg_skip_reason.is_some() {
+        return PackageState::PreSkipped;
+    }
+    if let Some(state) = pkg
+        .scan_outcome
+        .and_then(|outcome| PackageState::try_from(outcome).ok())
+    {
+        return state;
+    }
+    PackageState::Pending
 }
 
 /**
