@@ -53,13 +53,13 @@ impl Sandbox {
     ) -> anyhow::Result<Option<Output>> {
         let cmd = self.config.bindfs();
         Ok(Some(
-            Command::new(cmd)
-                .args(opts)
-                .arg(src)
-                .arg(dest)
-                .process_group(0)
-                .output()
-                .context(format!("Unable to execute {}", cmd))?,
+            self.run_logged_command(
+                Command::new(cmd)
+                    .args(opts)
+                    .arg(src)
+                    .arg(dest)
+                    .process_group(0),
+            )?,
         ))
     }
 
@@ -71,13 +71,13 @@ impl Sandbox {
     ) -> anyhow::Result<Option<Output>> {
         let cmd = "/sbin/mount_devfs";
         Ok(Some(
-            Command::new(cmd)
-                .arg("devfs")
-                .args(opts)
-                .arg(dest)
-                .process_group(0)
-                .output()
-                .context(format!("Unable to execute {}", cmd))?,
+            self.run_logged_command(
+                Command::new(cmd)
+                    .arg("devfs")
+                    .args(opts)
+                    .arg(dest)
+                    .process_group(0),
+            )?,
         ))
     }
 
@@ -98,13 +98,13 @@ impl Sandbox {
     ) -> anyhow::Result<Option<Output>> {
         let cmd = "/sbin/mount_nfs";
         Ok(Some(
-            Command::new(cmd)
-                .args(opts)
-                .arg(src)
-                .arg(dest)
-                .process_group(0)
-                .output()
-                .context(format!("Unable to execute {}", cmd))?,
+            self.run_logged_command(
+                Command::new(cmd)
+                    .args(opts)
+                    .arg(src)
+                    .arg(dest)
+                    .process_group(0),
+            )?,
         ))
     }
 
@@ -124,13 +124,13 @@ impl Sandbox {
         opts: &[&str],
     ) -> anyhow::Result<Option<Output>> {
         let cmd = "/sbin/mount_tmpfs";
-        let status = Command::new(cmd)
-            .args(opts)
-            .args(["-o", "nobrowse"])
-            .arg(dest)
-            .process_group(0)
-            .output()
-            .context(format!("Unable to execute {}", cmd))?;
+        let status = self.run_logged_command(
+            Command::new(cmd)
+                .args(opts)
+                .args(["-o", "nobrowse"])
+                .arg(dest)
+                .process_group(0),
+        )?;
         if status.status.success() {
             let _ = fs::File::create(dest.join(".metadata_never_index"));
             let fseventsd = dest.join(".fseventsd");

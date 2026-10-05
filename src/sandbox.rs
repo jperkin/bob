@@ -98,7 +98,7 @@ use std::process::{Child, ChildStdout, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Once, OnceLock};
 use std::time::{Duration, Instant};
-use tracing::{debug, info, info_span, warn};
+use tracing::{debug, info, info_span, trace, warn};
 
 /**
  * Extension trait to place a child process in its own session.
@@ -882,12 +882,16 @@ impl Sandbox {
             .perform_actions(id, &sandbox_config.setup, &envs)
             .and_then(|()| self.mark_complete(id));
         if let Err(error) = result {
+            warn!(sandbox = id, error = %format!("{error:#}"), "Sandbox creation failed; rolling back");
             return match self.destroy(id) {
                 Ok(()) => Err(error),
-                Err(rollback) => Err(error.context(format!(
-                    "Failed to roll back sandbox {}: {rollback:#}",
-                    sandbox_path.display()
-                ))),
+                Err(rollback) => {
+                    warn!(sandbox = id, error = %format!("{rollback:#}"), "Sandbox rollback failed");
+                    Err(error.context(format!(
+                        "Failed to roll back sandbox {}: {rollback:#}",
+                        sandbox_path.display()
+                    )))
+                }
             };
         }
         Ok(true)
@@ -1155,7 +1159,7 @@ impl Sandbox {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .process_group(0);
-            c.output()?
+            self.run_logged_command(&mut c)?
         } else {
             let mut c = Command::new("/bin/sh");
             for (key, val) in envs {
@@ -1169,9 +1173,27 @@ impl Sandbox {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .process_group(0);
-            c.output()?
+            self.run_logged_command(&mut c)?
         };
         Ok(Some(output))
+    }
+
+    /* Log subprocess arguments and captured output, including successful helpers. */
+    fn run_logged_command(&self, cmd: &mut Command) -> Result<Output> {
+        trace!(command = ?cmd, "Executing sandbox command");
+        let start = Instant::now();
+        let output = cmd
+            .output()
+            .with_context(|| format!("Unable to execute sandbox command {cmd:?}"))?;
+        trace!(
+            command = ?cmd,
+            status = %output.status,
+            elapsed = ?start.elapsed(),
+            stdout = %String::from_utf8_lossy(&output.stdout),
+            stderr = %String::from_utf8_lossy(&output.stderr),
+            "Sandbox command completed"
+        );
+        Ok(output)
     }
 
     /**
@@ -1283,7 +1305,7 @@ impl Sandbox {
      * Failures are retried with exponential backoff, defined per-platform.
      */
     fn run_umount(&self, cmd: &mut Command, dest: &Path) -> Result<()> {
-        let mut out = cmd.output().context("Unable to execute unmount")?;
+        let mut out = self.run_logged_command(cmd)?;
         for retry in 0..UNMOUNT_MAX_RETRIES {
             if out.status.success() {
                 if retry > 0 {
@@ -1298,23 +1320,27 @@ impl Sandbox {
             /* Clamp the shift so the delay cannot overflow over many retries. */
             let delay = (UNMOUNT_INITIAL_DELAY_MS << retry.min(10)).min(UNMOUNT_MAX_DELAY_MS);
             std::thread::sleep(Duration::from_millis(delay));
-            out = cmd.output().context("Unable to execute unmount")?;
+            debug!(dest = %dest.display(), retry, delay_ms = delay, status = %out.status, "Retrying unmount");
+            out = self.run_logged_command(cmd)?;
         }
         if out.status.success() {
             return Ok(());
         }
-        let reason = String::from_utf8_lossy(&out.stderr);
-        let reason = reason.trim();
         warn!(
             dest = %dest.display(),
             retries = UNMOUNT_MAX_RETRIES,
-            reason,
+            status = %out.status,
+            stdout = %String::from_utf8_lossy(&out.stdout),
+            stderr = %String::from_utf8_lossy(&out.stderr),
             "Failed to unmount"
         );
-        if reason.is_empty() {
-            bail!("Failed to unmount {}", dest.display());
-        }
-        bail!("{reason}");
+        bail!(
+            "Failed to unmount {} ({}):\n{}{}",
+            dest.display(),
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
     }
 
     fn destroy_set(&self, sandboxes: Vec<usize>) -> Result<()> {
@@ -1779,7 +1805,19 @@ impl Sandbox {
                      * to unmount it, but do try to clean up any empty
                      * parent directories up to the sandbox root.
                      */
-                    if !dest.exists() {
+                    let exists = dest.try_exists();
+                    debug!(
+                        sandbox = sandbox_id,
+                        fs = ?fs_type,
+                        dest = %dest.display(),
+                        result = ?exists,
+                        "Checking mount point before unmount"
+                    );
+                    /*
+                     * Preserve exists()'s skip behaviour on lookup errors for
+                     * diagnostics; final cleanup still reports remaining contents.
+                     */
+                    if !matches!(exists, Ok(true)) {
                         self.remove_empty_dirs(sandbox_id, &dest);
                         continue;
                     }
@@ -1788,8 +1826,17 @@ impl Sandbox {
                      * Try removing the directory first, in case it was
                      * never mounted.  Avoids errors trying to unmount a
                      * filesystem that is not mounted.
+                     * A removal error is handled by attempting the unmount.
                      */
-                    if fs::remove_dir(&dest).is_ok() {
+                    let removed = fs::remove_dir(&dest);
+                    debug!(
+                        sandbox = sandbox_id,
+                        fs = ?fs_type,
+                        dest = %dest.display(),
+                        result = ?removed,
+                        "Removing mount point before unmount"
+                    );
+                    if removed.is_ok() {
                         continue;
                     }
 
