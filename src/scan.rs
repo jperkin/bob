@@ -802,7 +802,7 @@ impl Scan {
                     let scanpkgs = match result {
                         Ok(pkgs) => pkgs,
                         Err(e) => {
-                            self.scan_failures.push((pkgpath.clone(), e.to_string()));
+                            self.scan_failures.push((pkgpath.clone(), format!("{e:#}")));
                             self.done.insert(pkgpath);
                             continue;
                         }
@@ -1030,7 +1030,7 @@ impl Scan {
             bail!(msg);
         }
 
-        let index = index?;
+        let index = index.with_context(|| format!("Failed to parse pbulk-index for {pkgpath}"))?;
         debug!(packages_found = index.len(), "Scan complete");
 
         Ok(index)
@@ -1097,6 +1097,7 @@ impl Scan {
                     let depend = match depend {
                         Ok(d) => d,
                         Err(e) => {
+                            /* Other dependencies can still be discovered for this package. */
                             warn!(
                                 pkg = %pkg.pkgname.pkgname(),
                                 error = format!("{e:#}"),
@@ -1465,6 +1466,7 @@ impl Scan {
                     let dep = match dep {
                         Ok(d) => d,
                         Err(e) => {
+                            /* Other dependencies can still be resolved for this package. */
                             warn!(
                                 pkg = %pkg.pkgname.pkgname(),
                                 error = format!("{e:#}"),
@@ -1477,16 +1479,9 @@ impl Scan {
                     let pattern = match patterns.compile(dep.pattern()) {
                         Ok(p) => p,
                         Err(e) => {
-                            let reason = format!(
-                                "{}: pattern error for {}: {}",
-                                pkg.pkgname.pkgname(),
-                                dep.pattern(),
-                                e
-                            );
                             if skip_reasons[id].is_none() {
-                                if pkg.pkg_fail_reason.is_none() {
-                                    pkg.pkg_fail_reason = Some(reason);
-                                }
+                                pkg.pkg_fail_reason
+                                    .get_or_insert_with(|| format!("{}: {e}", pkg.pkgname));
                                 skip_reasons[id] = Some(PackageState::PreFailed);
                             }
                             continue;
@@ -1516,16 +1511,10 @@ impl Scan {
 
                     match Self::find_best_match(pattern, &pkgbase_map, names_ref) {
                         Err(e) => {
-                            let reason = format!(
-                                "{}: version comparison error for {}: {}",
-                                pkg.pkgname.pkgname(),
-                                dep.pattern(),
-                                e
-                            );
                             if skip_reasons[id].is_none() {
-                                if pkg.pkg_fail_reason.is_none() {
-                                    pkg.pkg_fail_reason = Some(reason);
-                                }
+                                pkg.pkg_fail_reason.get_or_insert_with(|| {
+                                    format!("{}: dependency {}: {e}", pkg.pkgname, dep.pattern())
+                                });
                                 skip_reasons[id] = Some(PackageState::PreFailed);
                             }
                         }

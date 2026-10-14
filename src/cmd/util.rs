@@ -38,10 +38,11 @@ pub fn presolve(file: &PathBuf, output: Option<&PathBuf>, strict: bool, verbose:
 
     let mut scan_data = Vec::new();
     let mut errors: Vec<String> = Vec::new();
-    for result in ScanIndex::from_reader(reader) {
+    for (record, result) in ScanIndex::from_reader(reader).enumerate() {
         match result {
             Ok(index) => scan_data.push(index),
-            Err(e) => errors.push(e.to_string()),
+            /* Collect errors so valid records can still be resolved. */
+            Err(e) => errors.push(format!("{}: record {}: {e}", file.display(), record + 1)),
         }
     }
 
@@ -94,7 +95,7 @@ pub fn import_scan(config: &Config, file: &PathBuf, no_resolve: bool) -> Result<
 
     let tx = db.transaction()?;
     db.clear_scan()?;
-    for result in ScanIndex::from_reader(reader) {
+    for (record, result) in ScanIndex::from_reader(reader).enumerate() {
         match result {
             Ok(index) => {
                 let pkgpath = index
@@ -107,7 +108,8 @@ pub fn import_scan(config: &Config, file: &PathBuf, no_resolve: bool) -> Result<
                 })?;
             }
             Err(e) => {
-                eprintln!("{}", e);
+                /* Non-strict imports retain valid records; strict mode rolls back below. */
+                eprintln!("{}: record {}: {e}", file.display(), record + 1);
                 error_count += 1;
             }
         }

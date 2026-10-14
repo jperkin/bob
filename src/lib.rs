@@ -178,16 +178,11 @@ impl PkgMatch {
      * it could not be parsed.
      */
     pub fn new(pattern: &str) -> anyhow::Result<Self> {
-        let compiled = if pattern.contains(['<', '>']) {
-            pkgsrc::Pattern::new(pattern)
-                .map(Self::Pkgsrc)
-                .map_err(|e| e.to_string())
+        if pattern.contains(['<', '>']) {
+            Ok(Self::Pkgsrc(pkgsrc::Pattern::new(pattern)?))
         } else {
-            regex::Regex::new(&format!("(?i){}", pattern))
-                .map(Self::Regex)
-                .map_err(|e| e.to_string())
-        };
-        compiled.map_err(|e| anyhow::anyhow!("Invalid pattern '{}': {}", pattern, e))
+            Ok(Self::Regex(regex::Regex::new(&format!("(?i){}", pattern))?))
+        }
     }
 
     /**

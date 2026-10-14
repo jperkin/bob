@@ -1776,17 +1776,9 @@ fn parse_pkgsrc(globals: &Table) -> LuaResult<Option<Pkgsrc>> {
                 let s = s.to_str().map_err(|e| {
                     mlua::Error::runtime(format!("pkgsrc.pkgpaths[{}]: {}", i + 1, e))
                 })?;
-                match PkgPath::new(&s) {
-                    Ok(p) => paths.push(p),
-                    Err(e) => {
-                        return Err(mlua::Error::runtime(format!(
-                            "pkgsrc.pkgpaths[{}]: invalid pkgpath '{}': {}",
-                            i + 1,
-                            s,
-                            e
-                        )));
-                    }
-                }
+                paths.push(PkgPath::new(&s).map_err(|e| {
+                    mlua::Error::runtime(format!("pkgsrc.pkgpaths[{}]: {}", i + 1, e))
+                })?);
             }
             if paths.is_empty() { None } else { Some(paths) }
         }

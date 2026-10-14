@@ -277,13 +277,19 @@ pub fn pkg_up_to_date(
     let mut build_depends: Vec<String> = Vec::new();
     let mut reader = MetadataReader::open(&pkgfile)
         .with_context(|| format!("Failed to open package {}", pkgfile.display()))?;
-    for member in reader.members()? {
-        let member = member?;
+    for member in reader
+        .members()
+        .with_context(|| format!("Failed to read metadata from {}", pkgfile.display()))?
+    {
+        let member = member
+            .with_context(|| format!("Failed to read metadata from {}", pkgfile.display()))?;
         match member.entry {
             Entry::BuildVersion => build_version = member.content,
             Entry::Contents => {
                 for entry in parse(member.content.as_bytes()) {
-                    if let PlistEntry::BldDep(dep) = entry? {
+                    if let PlistEntry::BldDep(dep) = entry.with_context(|| {
+                        format!("Failed to parse +CONTENTS in {}", pkgfile.display())
+                    })? {
                         build_depends.push(dep.into_owned());
                     }
                 }

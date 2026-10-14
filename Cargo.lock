@@ -2990,9 +2990,9 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "pkgsrc"
-version = "0.14.1"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e727bbd1fd3bf645675c8839c3f32da33b98719674f79f03d3746c0919a1235b"
+checksum = "a65193010e13dcec6b9db5f911c0c1d28ada1dca279781b63538ffecacd8067e"
 dependencies = [
  "ar",
  "blake2",
@@ -3016,9 +3016,9 @@ dependencies = [
 
 [[package]]
 name = "pkgsrc-kv"
-version = "0.3.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbb803a1021d615d62a715eadcf0a8e13cf50051b719c01bc5680340cdfd5e95"
+checksum = "344d0bab7113b05210cc4f2ffc761b0f54f9494cf9c4df6ade49f2b59719616f"
 dependencies = [
  "pkgsrc-kv-derive",
  "serde",
@@ -3027,9 +3027,9 @@ dependencies = [
 
 [[package]]
 name = "pkgsrc-kv-derive"
-version = "0.5.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bb5c302b9966c7681dc967c835af6bb25c62765354c05fce9660154bed62bca"
+checksum = "316008c7d1a26363b136eb9319b06117f2851fb354fa1beb3b54d5c39f6f6c25"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
