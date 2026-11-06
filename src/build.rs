@@ -46,7 +46,8 @@
 
 use crate::config::{Pkgsrc, PkgsrcEnv, WrkObjKind};
 use crate::makejobs::PkgMakeJobs;
-use crate::sandbox::{CommandSetsid, SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
+use crate::process::Process;
+use crate::sandbox::{SHUTDOWN_POLL_INTERVAL, SandboxScope, wait_with_shutdown};
 use crate::scan::ResolvedPackage;
 use crate::scheduler::{PackageId, PackageTable, Scheduler};
 use crate::tui::OutputBuffers;
@@ -64,7 +65,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, mpsc, mpsc::Sender};
 use std::task::Poll;
 use std::time::{Duration, Instant, SystemTime};
@@ -204,11 +205,7 @@ impl std::fmt::Display for BuildReason {
  * per-inode.  du handles all of these correctly.
  */
 fn dir_disk_usage(path: &Path) -> Option<u64> {
-    let output = std::process::Command::new("du")
-        .arg("-sk")
-        .arg(path)
-        .output()
-        .ok()?;
+    let output = Process::new("du").arg("-sk").arg(path).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1084,7 +1081,7 @@ impl<'a> PkgBuilder<'a> {
         Ok(status.success())
     }
 
-    fn apply_envs(&self, cmd: &mut Command, extra_envs: &[(&str, &str)]) {
+    fn apply_envs(&self, cmd: &mut Process, extra_envs: &[(&str, &str)]) {
         for (key, value) in &self.envs {
             cmd.env(key, value);
         }

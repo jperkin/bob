@@ -14,11 +14,11 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+use crate::process::Process;
 use crate::sandbox::Sandbox;
 use anyhow::Context;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 pub(crate) fn init() {}
 
@@ -35,7 +35,7 @@ impl Sandbox {
         mount_opts.extend(opts.iter().copied());
         let opts_str = mount_opts.join(",");
         Ok(Some(
-            Command::new(cmd)
+            Process::new(cmd)
                 .arg("-o")
                 .arg(&opts_str)
                 .arg(src)
@@ -54,7 +54,7 @@ impl Sandbox {
     ) -> anyhow::Result<Option<Output>> {
         let cmd = "/bin/mount";
         Ok(Some(
-            Command::new(cmd)
+            Process::new(cmd)
                 .arg("-t")
                 .arg("devtmpfs")
                 .args(opts)
@@ -78,7 +78,7 @@ impl Sandbox {
         mount_opts.extend(opts.iter().copied());
         let opts_str = mount_opts.join(",");
         Ok(Some(
-            Command::new(cmd)
+            Process::new(cmd)
                 .arg("-o")
                 .arg(&opts_str)
                 .arg("/dev/fd")
@@ -97,7 +97,7 @@ impl Sandbox {
     ) -> anyhow::Result<Option<Output>> {
         let cmd = "/bin/mount";
         Ok(Some(
-            Command::new(cmd)
+            Process::new(cmd)
                 .arg("-t")
                 .arg("nfs")
                 .args(opts)
@@ -117,7 +117,7 @@ impl Sandbox {
     ) -> anyhow::Result<Option<Output>> {
         let cmd = "/bin/mount";
         Ok(Some(
-            Command::new(cmd)
+            Process::new(cmd)
                 .arg("-t")
                 .arg("proc")
                 .args(opts)
@@ -136,7 +136,7 @@ impl Sandbox {
         opts: &[&str],
     ) -> anyhow::Result<Option<Output>> {
         let cmd = "/bin/mount";
-        let mut c = Command::new(cmd);
+        let mut c = Process::new(cmd);
         c.args(["-t", "tmpfs"]);
         let mount_opts: Vec<&str> = opts
             .iter()
@@ -156,7 +156,7 @@ impl Sandbox {
         // Use process_group(0) to put umount in its own process group.
         // This prevents it from receiving SIGINT when the user presses Ctrl+C,
         // ensuring cleanup can complete even during repeated interrupts.
-        let mut cmd = Command::new("/bin/umount");
+        let mut cmd = Process::new("/bin/umount");
         cmd.arg(dest).process_group(0);
         self.run_umount(&mut cmd, dest)
     }

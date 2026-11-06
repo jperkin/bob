@@ -14,11 +14,11 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+use crate::process::Process;
 use crate::sandbox::Sandbox;
 use anyhow::{Context, bail};
-use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 pub(crate) fn init() {}
 
@@ -31,7 +31,7 @@ impl Sandbox {
     ) -> anyhow::Result<Option<Output>> {
         let cmd = "/sbin/mount";
         Ok(Some(
-            Command::new(cmd)
+            Process::new(cmd)
                 .arg("-F")
                 .arg("lofs")
                 .args(opts)
@@ -60,7 +60,7 @@ impl Sandbox {
     ) -> anyhow::Result<Option<Output>> {
         let cmd = "/sbin/mount";
         Ok(Some(
-            Command::new(cmd)
+            Process::new(cmd)
                 .arg("-F")
                 .arg("fd")
                 .args(opts)
@@ -80,7 +80,7 @@ impl Sandbox {
     ) -> anyhow::Result<Option<Output>> {
         let cmd = "/sbin/mount";
         Ok(Some(
-            Command::new(cmd)
+            Process::new(cmd)
                 .arg("-F")
                 .arg("nfs")
                 .args(opts)
@@ -100,7 +100,7 @@ impl Sandbox {
     ) -> anyhow::Result<Option<Output>> {
         let cmd = "/sbin/mount";
         Ok(Some(
-            Command::new(cmd)
+            Process::new(cmd)
                 .arg("-F")
                 .arg("proc")
                 .args(opts)
@@ -120,7 +120,7 @@ impl Sandbox {
     ) -> anyhow::Result<Option<Output>> {
         let cmd = "/sbin/mount";
         Ok(Some(
-            Command::new(cmd)
+            Process::new(cmd)
                 .arg("-F")
                 .arg("tmpfs")
                 .args(opts)
@@ -141,7 +141,7 @@ impl Sandbox {
      * ensuring cleanup can complete even during repeated interrupts.
      */
     fn unmount_common(&self, dest: &Path) -> anyhow::Result<()> {
-        let mut cmd = Command::new("/sbin/umount");
+        let mut cmd = Process::new("/sbin/umount");
         cmd.arg(dest).process_group(0);
         self.run_umount(&mut cmd, dest)
     }
@@ -178,7 +178,7 @@ impl Sandbox {
     pub(super) fn format_process_info(&self, pids: &[String]) -> Option<String> {
         let mut info = Vec::new();
         for pid in pids {
-            let pargs_output = Command::new("pargs").arg(pid).process_group(0).output();
+            let pargs_output = Process::new("pargs").arg(pid).process_group(0).output();
             match pargs_output {
                 Ok(out) => {
                     let stdout = String::from_utf8_lossy(&out.stdout);

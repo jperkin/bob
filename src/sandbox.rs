@@ -84,6 +84,7 @@ use sandbox_sunos as platform;
 
 use crate::action::{Action, ActionContext, ActionType, FSType};
 use crate::config::{Config, Pkgsrc, PkgsrcEnv};
+use crate::process::Process;
 use crate::try_println;
 use crate::{Interrupted, RunState};
 use anyhow::{Context, Result, bail};
@@ -91,40 +92,13 @@ use rayon::prelude::*;
 use std::fs;
 use std::io::{BufReader, Read, Write};
 use std::os::unix::fs::DirBuilderExt;
-use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, ExitStatus, Output, Stdio};
+use std::process::{Child, ChildStdout, ExitStatus, Output, Stdio};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Once, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, info_span, trace, warn};
-
-/**
- * Extension trait to place a child process in its own session.
- *
- * Calling `.setsid()` detaches the child from the controlling terminal,
- * preventing build tools (e.g. pax) from writing to `/dev/tty`.  This
- * registers a `pre_exec` hook, which forces Rust to use `fork+exec`
- * instead of `posix_spawn`.  On illumos `fork()` suspends all threads,
- * so only use this when terminal isolation is required (builds, not
- * scans).
- */
-pub(crate) trait CommandSetsid {
-    fn new_session(&mut self) -> &mut Self;
-}
-
-impl CommandSetsid for Command {
-    fn new_session(&mut self) -> &mut Self {
-        unsafe {
-            self.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-        self
-    }
-}
 
 /*
  * The libc crate does not expose wait4() on illumos, but it is available
@@ -482,11 +456,11 @@ impl Sandbox {
      * or directly if sandboxes are disabled.
      *
      * The returned command uses `posix_spawn` where available.  Call
-     * [`.new_session()`](CommandSetsid::new_session) on the result to place the
+     * [`.new_session()`](Process::new_session) on the result to place the
      * child in a new session (prevents `/dev/tty` access by build tools,
      * but forces `fork+exec` which is expensive on illumos).
      */
-    pub(crate) fn command(&self, id: Option<usize>, cmd: &Path) -> Command {
+    pub(crate) fn command(&self, id: Option<usize>, cmd: &Path) -> Process {
         let build_vars = matches!(self.context, ActionContext::Build)
             .then(|| self.config.environment().and_then(|e| e.build.as_ref()))
             .flatten()
@@ -494,7 +468,7 @@ impl Sandbox {
 
         let mut c = match id {
             Some(id) => {
-                let mut c = Command::new("/usr/sbin/chroot");
+                let mut c = Process::new("/usr/sbin/chroot");
                 c.arg(self.path(id));
                 if let Some(vars) = build_vars
                     && !vars.is_empty()
@@ -508,7 +482,7 @@ impl Sandbox {
                 c
             }
             None => {
-                let mut c = Command::new(cmd);
+                let mut c = Process::new(cmd);
                 if let Some(vars) = build_vars {
                     for (name, value) in vars {
                         c.env(name, value);
@@ -527,7 +501,7 @@ impl Sandbox {
     /**
      * Apply the build-time `clear` / `inherit` policy to a Command.
      */
-    pub(crate) fn apply_build_environment(&self, cmd: &mut Command) {
+    pub(crate) fn apply_build_environment(&self, cmd: &mut Process) {
         let Some(ctx) = self.config.environment().and_then(|e| e.build.as_ref()) else {
             return;
         };
@@ -542,14 +516,14 @@ impl Sandbox {
      * `environment.dev.vars` are written to a wrapper init script and
      * exported by the shell itself rather than via `cmd.env()`.
      */
-    pub fn apply_dev_environment(&self, cmd: &mut Command) {
+    pub fn apply_dev_environment(&self, cmd: &mut Process) {
         let Some(ctx) = self.config.environment().and_then(|e| e.dev.as_ref()) else {
             return;
         };
         Self::apply_env_context(cmd, ctx);
     }
 
-    fn apply_env_context(cmd: &mut Command, ctx: &crate::config::EnvContext) {
+    fn apply_env_context(cmd: &mut Process, ctx: &crate::config::EnvContext) {
         if ctx.clear {
             cmd.env_clear();
             for name in &ctx.inherit {
@@ -591,7 +565,7 @@ impl Sandbox {
 
             info!(pids = %pids.join(" "), "Killed processes using sandbox");
 
-            let _ = Command::new("kill")
+            let _ = Process::new("kill")
                 .arg("-9")
                 .args(&pids)
                 .stderr(Stdio::null())
@@ -623,7 +597,7 @@ impl Sandbox {
      */
     #[cfg(not(any(target_os = "macos", target_os = "netbsd")))]
     fn find_pids(&self, sandbox: &Path) -> Vec<String> {
-        let output = Command::new("fuser")
+        let output = Process::new("fuser")
             .arg(sandbox)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -657,7 +631,7 @@ impl Sandbox {
         if pids.is_empty() {
             return None;
         }
-        let out = Command::new("ps")
+        let out = Process::new("ps")
             .arg("-ww")
             .arg("-o")
             .arg("pid,args")
@@ -1116,7 +1090,7 @@ impl Sandbox {
         if paths.is_empty() {
             return;
         }
-        let mut cmd = Command::new("/bin/rm");
+        let mut cmd = Process::new("/bin/rm");
         cmd.arg("-rf")
             .arg("--")
             .args(paths)
@@ -1147,7 +1121,7 @@ impl Sandbox {
     ) -> Result<Option<Output>> {
         let sandbox_path = self.path(sandbox_id);
         let output = if chroot {
-            let mut c = Command::new("/usr/sbin/chroot");
+            let mut c = Process::new("/usr/sbin/chroot");
             for (key, val) in envs {
                 c.env(key, val);
             }
@@ -1161,7 +1135,7 @@ impl Sandbox {
                 .process_group(0);
             self.run_logged_command(&mut c)?
         } else {
-            let mut c = Command::new("/bin/sh");
+            let mut c = Process::new("/bin/sh");
             for (key, val) in envs {
                 c.env(key, val);
             }
@@ -1179,7 +1153,7 @@ impl Sandbox {
     }
 
     /* Log subprocess arguments and captured output, including successful helpers. */
-    fn run_logged_command(&self, cmd: &mut Command) -> Result<Output> {
+    fn run_logged_command(&self, cmd: &mut Process) -> Result<Output> {
         trace!(command = ?cmd, "Executing sandbox command");
         let start = Instant::now();
         let output = cmd
@@ -1304,7 +1278,7 @@ impl Sandbox {
      *
      * Failures are retried with exponential backoff, defined per-platform.
      */
-    fn run_umount(&self, cmd: &mut Command, dest: &Path) -> Result<()> {
+    fn run_umount(&self, cmd: &mut Process, dest: &Path) -> Result<()> {
         let mut out = self.run_logged_command(cmd)?;
         for retry in 0..UNMOUNT_MAX_RETRIES {
             if out.status.success() {

@@ -24,6 +24,7 @@ pub mod fmt;
 pub mod logging;
 pub mod makejobs;
 pub mod pkgstate;
+pub mod process;
 pub mod sandbox;
 pub mod scan;
 pub mod scheduler;

@@ -14,12 +14,12 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+use crate::process::Process;
 use crate::sandbox::Sandbox;
 use anyhow::{Context, bail};
 use std::fs;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 use tracing::{debug, warn};
 
 /**
@@ -54,7 +54,7 @@ impl Sandbox {
         let cmd = self.config.bindfs();
         Ok(Some(
             self.run_logged_command(
-                Command::new(cmd)
+                Process::new(cmd)
                     .args(opts)
                     .arg(src)
                     .arg(dest)
@@ -72,7 +72,7 @@ impl Sandbox {
         let cmd = "/sbin/mount_devfs";
         Ok(Some(
             self.run_logged_command(
-                Command::new(cmd)
+                Process::new(cmd)
                     .arg("devfs")
                     .args(opts)
                     .arg(dest)
@@ -99,7 +99,7 @@ impl Sandbox {
         let cmd = "/sbin/mount_nfs";
         Ok(Some(
             self.run_logged_command(
-                Command::new(cmd)
+                Process::new(cmd)
                     .args(opts)
                     .arg(src)
                     .arg(dest)
@@ -125,7 +125,7 @@ impl Sandbox {
     ) -> anyhow::Result<Option<Output>> {
         let cmd = "/sbin/mount_tmpfs";
         let status = self.run_logged_command(
-            Command::new(cmd)
+            Process::new(cmd)
                 .args(opts)
                 .args(["-o", "nobrowse"])
                 .arg(dest)
@@ -148,7 +148,7 @@ impl Sandbox {
      * preventing it from receiving SIGINT when the user presses Ctrl+C.
      */
     fn unmount_common(&self, dest: &Path) -> anyhow::Result<()> {
-        let mut cmd = Command::new("/usr/sbin/diskutil");
+        let mut cmd = Process::new("/usr/sbin/diskutil");
         cmd.arg("unmount").arg(dest).process_group(0);
         self.run_umount(&mut cmd, dest)
     }
@@ -158,7 +158,7 @@ impl Sandbox {
     }
 
     pub(crate) fn unmount_devfs(&self, dest: &Path) -> anyhow::Result<()> {
-        let mut cmd = Command::new("/sbin/umount");
+        let mut cmd = Process::new("/sbin/umount");
         cmd.arg(dest).process_group(0);
         self.run_umount(&mut cmd, dest)
     }
@@ -234,7 +234,7 @@ impl Sandbox {
             })?;
 
             let import_plist = sandbox_path.join("var/run/import.plist");
-            let output = Command::new(pb)
+            let output = Process::new(pb)
                 .args([
                     "-x",
                     "-c",
@@ -256,7 +256,7 @@ impl Sandbox {
 
             let plist_str = plist.display().to_string();
             let import_str = import_plist.display().to_string();
-            let status = Command::new(pb)
+            let status = Process::new(pb)
                 .args([
                     "-c",
                     &format!("Delete {entry}"),
@@ -280,13 +280,13 @@ impl Sandbox {
             }
             let _ = fs::remove_file(&import_plist);
 
-            let _ = Command::new("/bin/launchctl")
+            let _ = Process::new("/bin/launchctl")
                 .args(["unload", &plist_system.display().to_string()])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .process_group(0)
                 .status();
-            let status = Command::new("/bin/launchctl")
+            let status = Process::new("/bin/launchctl")
                 .args(["load", "-w", &plist_str])
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
@@ -299,7 +299,7 @@ impl Sandbox {
         }
 
         let plist_str = plist.display().to_string();
-        let status = Command::new(pb)
+        let status = Process::new(pb)
             .args([
                 "-c",
                 &format!("Merge {} {entry}", add_plist.display()),
@@ -336,7 +336,7 @@ impl Sandbox {
         let lock = Path::new("/tmp/updatemdns.lock");
         let _guard = MdnsLock::acquire(lock)?;
 
-        let output = Command::new(pb)
+        let output = Process::new(pb)
             .args([
                 "-c",
                 &format!("Print {entry}"),
@@ -357,7 +357,7 @@ impl Sandbox {
         let plist_str = plist.display().to_string();
 
         for i in 0..entries.len() {
-            let output = Command::new(pb)
+            let output = Process::new(pb)
                 .args(["-c", &format!("Print {entry}:{i}:SockPathName"), &plist_str])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -365,7 +365,7 @@ impl Sandbox {
                 .output()?;
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if path == sock_str {
-                let status = Command::new(pb)
+                let status = Process::new(pb)
                     .args(["-c", &format!("Delete {entry}:{i}"), &plist_str])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
@@ -387,13 +387,13 @@ impl Sandbox {
      */
     fn reload_mdns(plist: &Path) -> anyhow::Result<()> {
         let plist_str = plist.display().to_string();
-        let _ = Command::new("/bin/launchctl")
+        let _ = Process::new("/bin/launchctl")
             .args(["unload", &plist_str])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .process_group(0)
             .status();
-        let status = Command::new("/bin/launchctl")
+        let status = Process::new("/bin/launchctl")
             .args(["load", "-w", &plist_str])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -423,7 +423,7 @@ impl Sandbox {
             "notifyd",
         ];
 
-        let output = Command::new("fuser")
+        let output = Process::new("fuser")
             .arg(sandbox)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -441,7 +441,7 @@ impl Sandbox {
             return vec![];
         }
 
-        let ps_output = Command::new("ps")
+        let ps_output = Process::new("ps")
             .arg("-o")
             .arg("pid=,comm=")
             .arg("-p")

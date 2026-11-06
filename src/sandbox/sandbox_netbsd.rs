@@ -14,11 +14,11 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+use crate::process::Process;
 use crate::sandbox::Sandbox;
 use anyhow::{Context, bail};
-use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 pub(crate) fn init() {}
 
@@ -31,7 +31,7 @@ impl Sandbox {
     ) -> anyhow::Result<Option<Output>> {
         let cmd = "/sbin/mount_null";
         Ok(Some(
-            Command::new(cmd)
+            Process::new(cmd)
                 .args(opts)
                 .arg(src)
                 .arg(dest)
@@ -61,7 +61,7 @@ impl Sandbox {
     ) -> anyhow::Result<Option<Output>> {
         let cmd = "/sbin/mount_fdesc";
         Ok(Some(
-            Command::new(cmd)
+            Process::new(cmd)
                 .args(opts)
                 .arg("fdesc")
                 .arg(dest)
@@ -79,7 +79,7 @@ impl Sandbox {
     ) -> anyhow::Result<Option<Output>> {
         let cmd = "/sbin/mount_nfs";
         Ok(Some(
-            Command::new(cmd)
+            Process::new(cmd)
                 .args(opts)
                 .arg(src)
                 .arg(dest)
@@ -97,7 +97,7 @@ impl Sandbox {
     ) -> anyhow::Result<Option<Output>> {
         let cmd = "/sbin/mount_procfs";
         Ok(Some(
-            Command::new(cmd)
+            Process::new(cmd)
                 .args(opts)
                 .arg("/proc")
                 .arg(dest)
@@ -115,7 +115,7 @@ impl Sandbox {
     ) -> anyhow::Result<Option<Output>> {
         let cmd = "/sbin/mount_tmpfs";
         Ok(Some(
-            Command::new(cmd)
+            Process::new(cmd)
                 .args(opts)
                 .arg("tmpfs")
                 .arg(dest)
@@ -134,7 +134,7 @@ impl Sandbox {
      * ensuring cleanup can complete even during repeated interrupts.
      */
     fn unmount_common(&self, dest: &Path) -> anyhow::Result<()> {
-        let mut cmd = Command::new("/sbin/umount");
+        let mut cmd = Process::new("/sbin/umount");
         cmd.arg(dest).process_group(0);
         self.run_umount(&mut cmd, dest)
     }
@@ -170,7 +170,7 @@ impl Sandbox {
      * Uses `fstat` which lists processes with open files in the directory.
      */
     pub(super) fn find_pids(&self, sandbox: &Path) -> Vec<String> {
-        let output = Command::new("fstat").arg(sandbox).process_group(0).output();
+        let output = Process::new("fstat").arg(sandbox).process_group(0).output();
         let Ok(out) = output else { return vec![] };
         // fstat output: USER CMD PID FD MOUNT ...
         // Extract PIDs from column 3, skipping header.

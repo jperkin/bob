@@ -43,10 +43,11 @@
  * appended to the remote path so each run gets its own directory.
  */
 
+use bob::process::Process;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -329,7 +330,7 @@ fn publish_report(config: &Config, build_id: &str, dry_run: bool) -> Result<()> 
         "Publishing report"
     );
 
-    let mut cmd = Command::new(&publish.rsync);
+    let mut cmd = Process::new(&publish.rsync);
     for arg in rsync_args.split_whitespace() {
         cmd.arg(arg);
     }
@@ -447,8 +448,7 @@ fn send_email(config: &Config, db: &Database, build_id: &str, dry_run: bool) -> 
     info!(from = %from, to = %recipients, subject = %subject, "Sending email");
 
     let mailer = SendmailTransport::new();
-    mailer
-        .send(&message)
+    bob::process::with_spawn_lock(|| mailer.send(&message))
         .context("Failed to send email via sendmail")?;
     Ok(())
 }
@@ -575,7 +575,7 @@ fn run_rsync(
     let remote = format_remote(&packages.host, packages.user.as_deref());
     let dest = packages.tmppath.as_ref().unwrap_or(&packages.path);
 
-    let mut cmd = Command::new(&publish.rsync);
+    let mut cmd = Process::new(&publish.rsync);
     cmd.arg("--exclude-from").arg(filter_path);
     for arg in rsync_args.split_whitespace() {
         cmd.arg(arg);
@@ -638,7 +638,7 @@ fn build_remote_script(sv: &ScriptValue) -> Result<String> {
  * proceeding.
  */
 fn run_remote_script(remote: &str, script: &str) -> Result<()> {
-    let mut child = Command::new("ssh")
+    let mut child = Process::new("ssh")
         .arg(remote)
         .arg("sh")
         .arg("-eu")

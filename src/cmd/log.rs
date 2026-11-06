@@ -14,9 +14,9 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+use bob::process::Process;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Result, bail};
 use clap::Args;
@@ -145,7 +145,7 @@ fn page_file(path: &Path) -> Result<()> {
 
     let pager = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
     let file = std::fs::File::open(path)?;
-    Command::new("sh")
+    Process::new("sh")
         .args(["-c", &pager])
         .stdin(file)
         .status()?;

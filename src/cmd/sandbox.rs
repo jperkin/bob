@@ -14,9 +14,10 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+use bob::process::Process;
 use std::fmt::Write as _;
 use std::fs;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -138,7 +139,7 @@ fn exec(config: &Config, pkgsrc: Option<&Pkgsrc>) -> Result<()> {
         }
         let init_path = write_shell_init(config, &sandbox, id)?;
         println!("Entering sandbox {}...", sandbox.path(id).display());
-        let mut cmd = Command::new("/usr/sbin/chroot");
+        let mut cmd = Process::new("/usr/sbin/chroot");
         cmd.arg(sandbox.path(id)).arg("/bin/sh").arg(&init_path);
         sandbox.apply_dev_environment(&mut cmd);
         cmd.stdin(Stdio::inherit())
